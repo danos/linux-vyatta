@@ -1,0 +1,89 @@
+--- ixp4xx-beeper.c	2006-02-04 21:32:26.000000000 +0000
++++ linux-2.6.git/drivers/input/misc/ixp4xx-beeper.c	2006-02-03 03:06:54.000000000 +0000
+@@ -27,11 +27,31 @@
+ 
+ static DEFINE_SPINLOCK(beep_lock);
+ 
++static void ixp4xx_spkr_control(unsigned int pin, unsigned int count)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&beep_lock, flags);
++
++	 if (count) {
++		gpio_line_config(pin, IXP4XX_GPIO_OUT);
++		gpio_line_set(pin, IXP4XX_GPIO_LOW);
++
++		*IXP4XX_OSRT2 = (count & ~IXP4XX_OST_RELOAD_MASK) | IXP4XX_OST_ENABLE;
++	} else {
++		gpio_line_config(pin, IXP4XX_GPIO_IN);
++		gpio_line_set(pin, IXP4XX_GPIO_HIGH);
++
++		*IXP4XX_OSRT2 = 0;
++	}
++
++	spin_unlock_irqrestore(&beep_lock, flags);
++}
++
+ static int ixp4xx_spkr_event(struct input_dev *dev, unsigned int type, unsigned int code, int value)
+ {
+ 	unsigned int pin = (unsigned int) dev->private;
+ 	unsigned int count = 0;
+-	unsigned long flags;
+ 
+ 	if (type != EV_SND)
+ 		return -1;
+@@ -52,21 +72,8 @@
+ #else
+ 		count = (FREQ / (value * 4)) - 1;
+ #endif
+-	spin_lock_irqsave(&beep_lock, flags);
+-
+-	 if (count) {
+-		gpio_line_config(pin, IXP4XX_GPIO_OUT);
+-		gpio_line_set(pin, IXP4XX_GPIO_LOW);
+-
+-		*IXP4XX_OSRT2 = (count & ~IXP4XX_OST_RELOAD_MASK) | IXP4XX_OST_ENABLE;
+-	} else {
+-		gpio_line_config(pin, IXP4XX_GPIO_IN);
+-		gpio_line_set(pin, IXP4XX_GPIO_HIGH);
+ 
+-		*IXP4XX_OSRT2 = 0;
+-	}
+-
+-	spin_unlock_irqrestore(&beep_lock, flags);
++	ixp4xx_spkr_control(pin, count);
+ 
+ 	return 0;
+ }
+@@ -128,13 +135,14 @@
+ static int __devexit ixp4xx_spkr_remove(struct platform_device *dev)
+ {
+ 	struct input_dev *input_dev = platform_get_drvdata(dev);
++	unsigned int pin = (unsigned int) input_dev->private;
+ 
+ 	input_unregister_device(input_dev);
+ 	platform_set_drvdata(dev, NULL);
+ 
+ 	/* turn the speaker off */
+ 	disable_irq(IRQ_IXP4XX_TIMER2);
+-	ixp4xx_spkr_event(NULL, EV_SND, SND_BELL, 0);
++	ixp4xx_spkr_control(pin, 0);
+ 
+ 	free_irq(IRQ_IXP4XX_TIMER2, dev);
+ 
+@@ -143,9 +151,12 @@
+ 
+ static void ixp4xx_spkr_shutdown(struct platform_device *dev)
+ {
++	struct input_dev *input_dev = platform_get_drvdata(dev);
++	unsigned int pin = (unsigned int) input_dev->private;
++
+ 	/* turn off the speaker */
+ 	disable_irq(IRQ_IXP4XX_TIMER2);
+-	ixp4xx_spkr_event(NULL, EV_SND, SND_BELL, 0);
++	ixp4xx_spkr_control(pin, 0);
+ }
+ 
+ static struct platform_driver ixp4xx_spkr_platform_driver = {
+
