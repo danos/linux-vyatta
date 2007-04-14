@@ -1,0 +1,157 @@
+diff --git a/drivers/net/ifb.c b/drivers/net/ifb.c
+index 07b4c0d..ca2b21f 100644
+--- a/drivers/net/ifb.c
++++ b/drivers/net/ifb.c
+@@ -96,24 +96,17 @@ static void ri_tasklet(unsigned long dev)
+ 		skb->tc_verd = SET_TC_NCLS(skb->tc_verd);
+ 		stats->tx_packets++;
+ 		stats->tx_bytes +=skb->len;
+-
+-		skb->dev = __dev_get_by_index(skb->iif);
+-		if (!skb->dev) {
+-			dev_kfree_skb(skb);
+-			stats->tx_dropped++;
+-			break;
+-		}
+-		skb->iif = _dev->ifindex;
+-
+ 		if (from & AT_EGRESS) {
+ 			dp->st_rx_frm_egr++;
+ 			dev_queue_xmit(skb);
+ 		} else if (from & AT_INGRESS) {
++
+ 			dp->st_rx_frm_ing++;
+-			skb_pull(skb, skb->dev->hard_header_len);
+ 			netif_rx(skb);
+-		} else
+-			BUG();
++		} else {
++			dev_kfree_skb(skb);
++			stats->tx_dropped++;
++		}
+ 	}
+ 
+ 	if (netif_tx_trylock(_dev)) {
+@@ -164,10 +157,26 @@ static int ifb_xmit(struct sk_buff *skb, struct net_device *dev)
+ 	stats->rx_packets++;
+ 	stats->rx_bytes+=skb->len;
+ 
+-	if (!(from & (AT_INGRESS|AT_EGRESS)) || !skb->iif) {
++	if (!from || !skb->input_dev) {
++dropped:
+ 		dev_kfree_skb(skb);
+ 		stats->rx_dropped++;
+ 		return ret;
++	} else {
++		/*
++		 * note we could be going
++		 * ingress -> egress or
++		 * egress -> ingress
++		*/
++		skb->dev = skb->input_dev;
++		skb->input_dev = dev;
++		if (from & AT_INGRESS) {
++			skb_pull(skb, skb->dev->hard_header_len);
++		} else {
++			if (!(from & AT_EGRESS)) {
++				goto dropped;
++			}
++		}
+ 	}
+ 
+ 	if (skb_queue_len(&dp->rq) >= dev->tx_queue_len) {
+diff --git a/include/linux/skbuff.h b/include/linux/skbuff.h
+index 82f43ad..4ff3940 100644
+--- a/include/linux/skbuff.h
++++ b/include/linux/skbuff.h
+@@ -188,7 +188,7 @@ enum {
+  *	@sk: Socket we are owned by
+  *	@tstamp: Time we arrived
+  *	@dev: Device we arrived on/are leaving by
+- *	@iif: ifindex of device we arrived on
++ *	@input_dev: Device we arrived on
+  *	@h: Transport layer header
+  *	@nh: Network layer header
+  *	@mac: Link layer header
+@@ -235,8 +235,7 @@ struct sk_buff {
+ 	struct sock		*sk;
+ 	struct skb_timeval	tstamp;
+ 	struct net_device	*dev;
+-	int			iif;
+-	/* 4 byte hole on 64 bit*/
++	struct net_device	*input_dev;
+ 
+ 	union {
+ 		struct tcphdr	*th;
+diff --git a/include/net/pkt_cls.h b/include/net/pkt_cls.h
+index 02647fe..b902d24 100644
+--- a/include/net/pkt_cls.h
++++ b/include/net/pkt_cls.h
+@@ -352,13 +352,10 @@ tcf_change_indev(struct tcf_proto *tp, char *indev, struct rtattr *indev_tlv)
+ static inline int
+ tcf_match_indev(struct sk_buff *skb, char *indev)
+ {
+-	struct net_device *dev;
+-
+ 	if (indev[0]) {
+-		if  (!skb->iif)
++		if  (!skb->input_dev)
+ 			return 0;
+-		dev = __dev_get_by_index(skb->iif);
+-		if (!dev || strcmp(indev, dev->name))
++		if (strcmp(indev, skb->input_dev->name))
+ 			return 0;
+ 	}
+ 
+diff --git a/net/core/dev.c b/net/core/dev.c
+index 2a587b8..295f8f9 100644
+--- a/net/core/dev.c
++++ b/net/core/dev.c
+@@ -1741,8 +1741,8 @@ static int ing_filter(struct sk_buff *skb)
+ 	if (dev->qdisc_ingress) {
+ 		__u32 ttl = (__u32) G_TC_RTTL(skb->tc_verd);
+ 		if (MAX_RED_LOOP < ttl++) {
+-			printk(KERN_WARNING "Redir loop detected Dropping packet (%d->%d)\n",
+-				skb->iif, skb->dev->ifindex);
++			printk(KERN_WARNING "Redir loop detected Dropping packet (%s->%s)\n",
++				skb->input_dev->name, skb->dev->name);
+ 			return TC_ACT_SHOT;
+ 		}
+ 
+@@ -1775,8 +1775,8 @@ int netif_receive_skb(struct sk_buff *skb)
+ 	if (!skb->tstamp.off_sec)
+ 		net_timestamp(skb);
+ 
+-	if (!skb->iif)
+-		skb->iif = skb->dev->ifindex;
++	if (!skb->input_dev)
++		skb->input_dev = skb->dev;
+ 
+ 	orig_dev = skb_bond(skb);
+ 
+diff --git a/net/core/skbuff.c b/net/core/skbuff.c
+index ba94969..5299083 100644
+--- a/net/core/skbuff.c
++++ b/net/core/skbuff.c
+@@ -497,7 +497,7 @@ struct sk_buff *skb_clone(struct sk_buff *skb, gfp_t gfp_mask)
+ 	n->tc_verd = SET_TC_VERD(skb->tc_verd,0);
+ 	n->tc_verd = CLR_TC_OK2MUNGE(n->tc_verd);
+ 	n->tc_verd = CLR_TC_MUNGED(n->tc_verd);
+-	C(iif);
++	C(input_dev);
+ #endif
+ 	skb_copy_secmark(n, skb);
+ #endif
+diff --git a/net/sched/act_mirred.c b/net/sched/act_mirred.c
+index 7263a2e..4838972 100644
+--- a/net/sched/act_mirred.c
++++ b/net/sched/act_mirred.c
+@@ -199,7 +199,7 @@ bad_mirred:
+ 		skb2->tc_verd = SET_TC_FROM(skb2->tc_verd, at);
+ 
+ 	skb2->dev = dev;
+-	skb2->iif = skb->dev->ifindex;
++	skb2->input_dev = skb->dev;
+ 	dev_queue_xmit(skb2);
+ 	spin_unlock(&m->tcf_lock);
+ 	return m->tcf_action;

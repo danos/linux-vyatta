@@ -1,0 +1,80 @@
+diff --git a/drivers/ide/ide-io.c b/drivers/ide/ide-io.c
+index d6ff4f2..99d1c43 100644
+--- a/drivers/ide/ide-io.c
++++ b/drivers/ide/ide-io.c
+@@ -519,24 +519,21 @@ static ide_startstop_t ide_ata_error(ide_drive_t *drive, struct request *rq, u8
+ 	if ((stat & DRQ_STAT) && rq_data_dir(rq) == READ && hwif->err_stops_fifo == 0)
+ 		try_to_flush_leftover_data(drive);
+ 
+-	if (rq->errors >= ERROR_MAX || blk_noretry_request(rq)) {
+-		ide_kill_rq(drive, rq);
+-		return ide_stopped;
+-	}
+-
+ 	if (hwif->INB(IDE_STATUS_REG) & (BUSY_STAT|DRQ_STAT))
+-		rq->errors |= ERROR_RESET;
++		/* force an abort */
++		hwif->OUTB(WIN_IDLEIMMEDIATE, IDE_COMMAND_REG);
+ 
+-	if ((rq->errors & ERROR_RESET) == ERROR_RESET) {
++	if (rq->errors >= ERROR_MAX || blk_noretry_request(rq))
++		ide_kill_rq(drive, rq);
++	else {
++		if ((rq->errors & ERROR_RESET) == ERROR_RESET) {
++			++rq->errors;
++			return ide_do_reset(drive);
++		}
++		if ((rq->errors & ERROR_RECAL) == ERROR_RECAL)
++			drive->special.b.recalibrate = 1;
+ 		++rq->errors;
+-		return ide_do_reset(drive);
+ 	}
+-
+-	if ((rq->errors & ERROR_RECAL) == ERROR_RECAL)
+-		drive->special.b.recalibrate = 1;
+-
+-	++rq->errors;
+-
+ 	return ide_stopped;
+ }
+ 
+@@ -1028,13 +1025,6 @@ static ide_startstop_t start_request (ide_drive_t *drive, struct request *rq)
+ 	if (!drive->special.all) {
+ 		ide_driver_t *drv;
+ 
+-		/*
+-		 * We reset the drive so we need to issue a SETFEATURES.
+-		 * Do it _after_ do_special() restored device parameters.
+-		 */
+-		if (drive->current_speed == 0xff)
+-			ide_config_drive_speed(drive, drive->desired_speed);
+-
+ 		if (rq->cmd_type == REQ_TYPE_ATA_CMD ||
+ 		    rq->cmd_type == REQ_TYPE_ATA_TASK ||
+ 		    rq->cmd_type == REQ_TYPE_ATA_TASKFILE)
+diff --git a/drivers/ide/ide-iops.c b/drivers/ide/ide-iops.c
+index 133d9cd..59b10a0 100644
+--- a/drivers/ide/ide-iops.c
++++ b/drivers/ide/ide-iops.c
+@@ -1123,9 +1123,6 @@ static void pre_reset(ide_drive_t *drive)
+ 	if (HWIF(drive)->pre_reset != NULL)
+ 		HWIF(drive)->pre_reset(drive);
+ 
+-	if (drive->current_speed != 0xff)
+-		drive->desired_speed = drive->current_speed;
+-	drive->current_speed = 0xff;
+ }
+ 
+ /*
+diff --git a/include/linux/ide.h b/include/linux/ide.h
+index 63e111e..3808698 100644
+--- a/include/linux/ide.h
++++ b/include/linux/ide.h
+@@ -607,7 +607,6 @@ typedef struct ide_drive_s {
+         u8	init_speed;	/* transfer rate set at boot */
+         u8	pio_speed;      /* unused by core, used by some drivers for fallback from DMA */
+         u8	current_speed;	/* current transfer rate set */
+-	u8	desired_speed;	/* desired transfer rate set */
+         u8	dn;		/* now wide spread use */
+         u8	wcache;		/* status of write cache */
+ 	u8	acoustic;	/* acoustic management */
