@@ -1,0 +1,167 @@
+From: David Howells <dhowells@redhat.com>
+Date: Thu, 31 Aug 2006 10:50:04 +0000 (+0200)
+Subject: [PATCH] BLOCK: Move the msdos device ioctl compat stuff to the msdos driver [try #6]
+X-Git-Tag: v2.6.19~1581^2~9
+X-Git-Url: http://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Ftorvalds%2Flinux-2.6.git;a=commitdiff_plain;h=188f83dfe0eeecd1427d0d255cc97dbf7ef6b4b7
+
+[PATCH] BLOCK: Move the msdos device ioctl compat stuff to the msdos driver [try #6]
+
+Move the msdos device ioctl compat stuff from fs/compat_ioctl.c to the msdos
+driver so that the msdos header file doesn't need to be included.
+
+Signed-Off-By: David Howells <dhowells@redhat.com>
+Signed-off-by: Jens Axboe <axboe@kernel.dk>
+---
+
+Backported to Debian's 2.6.18 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.18.orig/fs/compat_ioctl.c linux-source-2.6.18/fs/compat_ioctl.c
+--- linux-source-2.6.18.orig/fs/compat_ioctl.c	2006-09-20 04:42:06.000000000 +0100
++++ linux-source-2.6.18/fs/compat_ioctl.c	2007-06-22 15:57:42.000000000 +0100
+@@ -113,7 +113,6 @@
+ #include <linux/nbd.h>
+ #include <linux/random.h>
+ #include <linux/filter.h>
+-#include <linux/msdos_fs.h>
+ #include <linux/pktcdvd.h>
+ 
+ #include <linux/hiddev.h>
+@@ -2052,51 +2051,6 @@ static int mtd_rw_oob(unsigned int fd, u
+ 	return err;
+ }	
+ 
+-#define	VFAT_IOCTL_READDIR_BOTH32	_IOR('r', 1, struct compat_dirent[2])
+-#define	VFAT_IOCTL_READDIR_SHORT32	_IOR('r', 2, struct compat_dirent[2])
+-
+-static long
+-put_dirent32 (struct dirent *d, struct compat_dirent __user *d32)
+-{
+-        if (!access_ok(VERIFY_WRITE, d32, sizeof(struct compat_dirent)))
+-                return -EFAULT;
+-
+-        __put_user(d->d_ino, &d32->d_ino);
+-        __put_user(d->d_off, &d32->d_off);
+-        __put_user(d->d_reclen, &d32->d_reclen);
+-        if (__copy_to_user(d32->d_name, d->d_name, d->d_reclen))
+-		return -EFAULT;
+-
+-        return 0;
+-}
+-
+-static int vfat_ioctl32(unsigned fd, unsigned cmd, unsigned long arg)
+-{
+-	struct compat_dirent __user *p = compat_ptr(arg);
+-	int ret;
+-	mm_segment_t oldfs = get_fs();
+-	struct dirent d[2];
+-
+-	switch(cmd)
+-	{
+-        	case VFAT_IOCTL_READDIR_BOTH32:
+-                	cmd = VFAT_IOCTL_READDIR_BOTH;
+-                	break;
+-        	case VFAT_IOCTL_READDIR_SHORT32:
+-                	cmd = VFAT_IOCTL_READDIR_SHORT;
+-                	break;
+-	}
+-
+-	set_fs(KERNEL_DS);
+-	ret = sys_ioctl(fd,cmd,(unsigned long)&d);
+-	set_fs(oldfs);
+-	if (ret >= 0) {
+-		ret |= put_dirent32(&d[0], p);
+-		ret |= put_dirent32(&d[1], p + 1);
+-	}
+-	return ret;
+-}
+-
+ #define REISERFS_IOC_UNPACK32               _IOW(0xCD,1,int)
+ 
+ static int reiserfs_ioctl32(unsigned fd, unsigned cmd, unsigned long ptr)
+@@ -2866,9 +2820,6 @@ HANDLE_IOCTL(SONET_GETFRSENSE, do_atm_io
+ HANDLE_IOCTL(BLKBSZGET_32, do_blkbszget)
+ HANDLE_IOCTL(BLKBSZSET_32, do_blkbszset)
+ HANDLE_IOCTL(BLKGETSIZE64_32, do_blkgetsize64)
+-/* vfat */
+-HANDLE_IOCTL(VFAT_IOCTL_READDIR_BOTH32, vfat_ioctl32)
+-HANDLE_IOCTL(VFAT_IOCTL_READDIR_SHORT32, vfat_ioctl32)
+ HANDLE_IOCTL(REISERFS_IOC_UNPACK32, reiserfs_ioctl32)
+ /* Raw devices */
+ HANDLE_IOCTL(RAW_SETBIND, raw_ioctl)
+diff -urpN linux-source-2.6.18.orig/fs/fat/dir.c linux-source-2.6.18/fs/fat/dir.c
+--- linux-source-2.6.18.orig/fs/fat/dir.c	2006-09-20 04:42:06.000000000 +0100
++++ linux-source-2.6.18/fs/fat/dir.c	2007-06-22 15:55:53.000000000 +0100
+@@ -20,6 +20,7 @@
+ #include <linux/dirent.h>
+ #include <linux/smp_lock.h>
+ #include <linux/buffer_head.h>
++#include <linux/compat.h>
+ #include <asm/uaccess.h>
+ 
+ static inline loff_t fat_make_i_pos(struct super_block *sb,
+@@ -741,10 +742,65 @@ static int fat_dir_ioctl(struct inode * 
+ 	return ret;
+ }
+ 
++#ifdef CONFIG_COMPAT
++#define	VFAT_IOCTL_READDIR_BOTH32	_IOR('r', 1, struct compat_dirent[2])
++#define	VFAT_IOCTL_READDIR_SHORT32	_IOR('r', 2, struct compat_dirent[2])
++
++static long fat_compat_put_dirent32(struct dirent *d,
++				    struct compat_dirent __user *d32)
++{
++        if (!access_ok(VERIFY_WRITE, d32, sizeof(struct compat_dirent)))
++                return -EFAULT;
++
++        __put_user(d->d_ino, &d32->d_ino);
++        __put_user(d->d_off, &d32->d_off);
++        __put_user(d->d_reclen, &d32->d_reclen);
++        if (__copy_to_user(d32->d_name, d->d_name, d->d_reclen))
++		return -EFAULT;
++
++        return 0;
++}
++
++static long fat_compat_dir_ioctl(struct file *file, unsigned cmd,
++				 unsigned long arg)
++{
++	struct compat_dirent __user *p = compat_ptr(arg);
++	int ret;
++	mm_segment_t oldfs = get_fs();
++	struct dirent d[2];
++
++	switch (cmd) {
++	case VFAT_IOCTL_READDIR_BOTH32:
++		cmd = VFAT_IOCTL_READDIR_BOTH;
++		break;
++	case VFAT_IOCTL_READDIR_SHORT32:
++		cmd = VFAT_IOCTL_READDIR_SHORT;
++		break;
++	default:
++		return -ENOIOCTLCMD;
++	}
++
++	set_fs(KERNEL_DS);
++	lock_kernel();
++	ret = fat_dir_ioctl(file->f_dentry->d_inode, file,
++			    cmd, (unsigned long) &d);
++	unlock_kernel();
++	set_fs(oldfs);
++	if (ret >= 0) {
++		ret |= fat_compat_put_dirent32(&d[0], p);
++		ret |= fat_compat_put_dirent32(&d[1], p + 1);
++	}
++	return ret;
++}
++#endif /* CONFIG_COMPAT */
++
+ const struct file_operations fat_dir_operations = {
+ 	.read		= generic_read_dir,
+ 	.readdir	= fat_readdir,
+ 	.ioctl		= fat_dir_ioctl,
++#ifdef CONFIG_COMPAT
++	.compat_ioctl	= fat_compat_dir_ioctl,
++#endif
+ 	.fsync		= file_fsync,
+ };
+ 
