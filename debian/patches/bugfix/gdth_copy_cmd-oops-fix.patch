@@ -1,0 +1,46 @@
+From: Joerg Dorchain <joerg@dorchain.net>
+Date: Tue, 6 Mar 2007 10:46:54 +0000 (-0800)
+Subject: [SCSI] gdth: fix oops in gdth_copy_cmd()
+X-Git-Tag: v2.6.21~211^2
+X-Git-Url: http://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Ftorvalds%2Flinux-2.6.git;a=commitdiff_plain;h=bb9ba31ca3b88fd396e38950d1caedf2f83521c6
+
+[SCSI] gdth: fix oops in gdth_copy_cmd()
+
+Recent alterations to the gdth_fill_raw_cmd() path no longer set the
+sg_ranz field for zero transfer commands. However, this field is used
+lower down in the function to initialise ha->cmd_len to the size of
+the firmware packet.  If this uninitialised field contains a bogus
+value, ha->cmd_len can become much larger than the actual firmware
+packet and end up oopsing in gdth_copy_cmd() as it tries to copy this
+huge packet to the device (usually because it runs into an unallocated
+page).
+
+The fix is to initialise the sg_ranz field to zero at the start of
+gdth_fill_raw_cmd().
+
+Signed-off-by: Joerg Dorchain <joerg@dorchain.net>
+Acked-by: "Leubner, Achim" <Achim_Leubner@adaptec.com>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: James Bottomley <James.Bottomley@SteelEye.com>
+---
+
+diff --git a/drivers/scsi/gdth.c b/drivers/scsi/gdth.c
+index 8c81cec..60446b8 100644
+--- a/drivers/scsi/gdth.c
++++ b/drivers/scsi/gdth.c
+@@ -3091,6 +3091,7 @@ static int gdth_fill_raw_cmd(int hanum,Scsi_Cmnd *scp,unchar b)
+             cmdp->u.raw64.direction  = 
+                 gdth_direction_tab[scp->cmnd[0]]==DOU ? GDTH_DATA_OUT:GDTH_DATA_IN;
+             memcpy(cmdp->u.raw64.cmd,scp->cmnd,16);
++            cmdp->u.raw64.sg_ranz    = 0;
+         } else {
+             cmdp->u.raw.reserved   = 0;
+             cmdp->u.raw.mdisc_time = 0;
+@@ -3107,6 +3108,7 @@ static int gdth_fill_raw_cmd(int hanum,Scsi_Cmnd *scp,unchar b)
+             cmdp->u.raw.direction  = 
+                 gdth_direction_tab[scp->cmnd[0]]==DOU ? GDTH_DATA_OUT:GDTH_DATA_IN;
+             memcpy(cmdp->u.raw.cmd,scp->cmnd,12);
++            cmdp->u.raw.sg_ranz    = 0;
+         }
+ 
+         if (scp->use_sg) {

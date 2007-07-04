@@ -1,0 +1,80 @@
+commit b428b51ed9a4ff8445ea50769961f948480c1d36
+Author: Paolo 'Blaisorblade' Giarrusso <blaisorblade@yahoo.it>
+Date:   Sun Oct 29 22:46:41 2006 -0800
+
+    [PATCH] Fix "Remove the use of _syscallX macros in UML"
+    
+    Fix commit 5f4c6bc1f369f20807a8e753c2308d1629478c61: it spits out warnings
+    about missing syscall prototype (it is in <unistd.h>) and it does not
+    recognize that two uses of _syscallX are to be resolved against kernel
+    headers in the source tree, not against _syscallX; they in fact do not
+    compile and would not work anyway.
+    
+    If _syscallX macros will be removed from the kernel tree altogether, the
+    only reasonable solution for that piece of code is switching to open-coded
+    inline assembly (it's remapping the whole executable from memory, except
+    the page containing this code).
+    
+    Signed-off-by: Paolo 'Blaisorblade' Giarrusso <blaisorblade@yahoo.it>
+    Cc: Jeff Dike <jdike@addtoit.com>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+diff --git a/arch/um/sys-i386/unmap.c b/arch/um/sys-i386/unmap.c
+index 8e55cd5..1b0ad0e 100644
+--- a/arch/um/sys-i386/unmap.c
++++ b/arch/um/sys-i386/unmap.c
+@@ -5,17 +5,20 @@
+ 
+ #include <linux/mman.h>
+ #include <asm/unistd.h>
+-#include <sys/syscall.h>
+ 
++static int errno;
++
++static inline _syscall2(int,munmap,void *,start,size_t,len)
++static inline _syscall6(void *,mmap2,void *,addr,size_t,len,int,prot,int,flags,int,fd,off_t,offset)
+ int switcheroo(int fd, int prot, void *from, void *to, int size)
+ {
+-	if (syscall(__NR_munmap, to, size) < 0){
++	if(munmap(to, size) < 0){
+ 		return(-1);
+ 	}
+-	if (syscall(__NR_mmap2, to, size, prot, MAP_SHARED | MAP_FIXED, fd, 0) == (void*) -1 ){
++	if(mmap2(to, size, prot, MAP_SHARED | MAP_FIXED, fd, 0) == (void*) -1 ){
+ 		return(-1);
+ 	}
+-	if (syscall(__NR_munmap, from, size) < 0){
++	if(munmap(from, size) < 0){
+ 		return(-1);
+ 	}
+ 	return(0);
+diff --git a/arch/um/sys-x86_64/unmap.c b/arch/um/sys-x86_64/unmap.c
+index 57c9286..f4a4bff 100644
+--- a/arch/um/sys-x86_64/unmap.c
++++ b/arch/um/sys-x86_64/unmap.c
+@@ -5,17 +5,20 @@
+ 
+ #include <linux/mman.h>
+ #include <asm/unistd.h>
+-#include <sys/syscall.h>
+ 
++static int errno;
++
++static inline _syscall2(int,munmap,void *,start,size_t,len)
++static inline _syscall6(void *,mmap,void *,addr,size_t,len,int,prot,int,flags,int,fd,off_t,offset)
+ int switcheroo(int fd, int prot, void *from, void *to, int size)
+ {
+-	if (syscall(__NR_munmap, to, size) < 0){
++	if(munmap(to, size) < 0){
+ 		return(-1);
+ 	}
+-	if (syscall(__NR_mmap, to, size, prot, MAP_SHARED | MAP_FIXED, fd, 0) == (void*) -1){
++	if(mmap(to, size, prot, MAP_SHARED | MAP_FIXED, fd, 0) == (void*) -1){
+ 		return(-1);
+ 	}
+-	if (syscall(__NR_munmap, from, size) < 0){
++	if(munmap(from, size) < 0){
+ 		return(-1);
+ 	}
+ 	return(0);

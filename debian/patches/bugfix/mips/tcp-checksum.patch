@@ -1,0 +1,57 @@
+Author: Dave Johnson <djohnson+linux-mips@sw.starentnetworks.com> Wed Apr 18 10:39:41 2007 -0400
+Comitter: Ralf Baechle <ralf@linux-mips.org> Wed Apr 18 17:13:29 2007 +0100
+Commit: d3b6f8214113e8bad8a0ce3ab1d37b6be1e5a22e
+Gitweb: http://www.linux-mips.org/g/linux/d3b6f821
+Branch: linux-2.6.18-stable
+
+I've traced down an off-by-one TCP checksum calculation error under
+the following conditions:
+
+1) The TCP code needs to split a full-sized packet due to a reduced
+   MSS (typically due to the addition of TCP options mid-stream like
+   SACK).
+   _AND_
+2) The checksum of the 2nd fragment is larger than the checksum of the
+   original packet.  After subtraction this results in a checksum for
+   the 1st fragment with bits 16..31 set to 1. (this is ok)
+   _AND_
+3) The checksum of the 1st fragment's TCP header plus the previously
+   32bit checksum of the 1st fragment DOES NOT cause a 32bit overflow
+   when added together.  This results in a checksum of the TCP header
+   plus TCP data that still has the upper 16 bits as 1's.
+   _THEN_
+4) The TCP+data checksum is added to the checksum of the pseudo IP
+   header with csum_tcpudp_nofold() incorrectly (the bug).
+
+The problem is the checksum of the TCP+data is passed to
+csum_tcpudp_nofold() as an 32bit unsigned value, however the assembly
+code acts on it as if it is a 64bit unsigned value.
+
+This causes an incorrect 32->64bit extension if the sum has bit 31
+set.  The resulting checksum is off by one.
+
+This problems is data and TCP header dependent due to #2 and #3
+above so it doesn't occur on every TCP packet split.
+
+Signed-off-by: Dave Johnson <djohnson+linux-mips@sw.starentnetworks.com>
+Signed-off-by: Ralf Baechle <ralf@linux-mips.org>
+(cherry picked from commit 3be5b819ac5c9395b60556ae3434ff62d7ded2e7)
+
+---
+
+ include/asm-mips/checksum.h |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/include/asm-mips/checksum.h b/include/asm-mips/checksum.h
+index a5e6050..5f71650 100644
+--- a/include/asm-mips/checksum.h
++++ b/include/asm-mips/checksum.h
+@@ -159,7 +159,7 @@ static inline unsigned int csum_tcpudp_nofold(unsigned long saddr,
+ #else
+ 	  "r" (((unsigned long)(proto)<<16) + len),
+ #endif
+-	  "r" (sum));
++	  "r" ((__force unsigned long)sum));
+ 
+ 	return sum;
+ }
