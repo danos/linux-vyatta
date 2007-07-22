@@ -47,7 +47,7 @@ class main(object):
         self.version = changelog.version.linux_version
         self.version_source = changelog.version.complete
 
-        local_config = config_reader_arch(["debian/arch"])
+        local_config = ConfigReaderCore(["debian/arch"])
 
         self.abiname = local_config['abi',]['abiname']
         self.version_abi = self.version + '-' + self.abiname
@@ -90,7 +90,7 @@ class main(object):
         f = self.retrieve_package(self.url_config, filename)
         d = self.extract_package(f, "linux-support")
         dir = d + "/usr/src/linux-support-" + self.version_abi + "/arch"
-        config = config_reader_arch([dir])
+        config = ConfigReaderCore([dir])
         shutil.rmtree(d)
         return config
 
