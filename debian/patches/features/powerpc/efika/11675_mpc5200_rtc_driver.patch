@@ -1,0 +1,386 @@
+Driver for internal rtc on mpc5200.
+It isn't very useful, since its contents don't remain on
+power off.
+Can be used to set alarm for wake-up from deep-sleep or
+one second periodic interrupt ;-)
+
+
+Signed-off-by: Domen Puncer <domen.puncer@telargo.com>
+
+---
+ drivers/rtc/Kconfig               |   10 +
+ drivers/rtc/Makefile              |    1 
+ drivers/rtc/rtc-mpc5200.c         |  282 ++++++++++++++++++++++++++++++++++++++
+ include/asm-powerpc/mpc5200_rtc.h |   49 ++++++
+ 4 files changed, 342 insertions(+)
+
+Index: work-powerpc.git/drivers/rtc/Kconfig
+===================================================================
+--- work-powerpc.git.orig/drivers/rtc/Kconfig
++++ work-powerpc.git/drivers/rtc/Kconfig
+@@ -401,4 +401,14 @@ config RTC_DRV_RS5C313
+ 	help
+ 	  If you say yes here you get support for the Ricoh RS5C313 RTC chips.
+ 
++config RTC_DRV_MPC5200
++	tristate "MPC5200 RTC"
++	depends on RTC_CLASS
++	help
++	  If you say yes here you will get support for the
++	  RTC built in MPC5200(b) CPU.
++
++	  This driver can also be built as a module. If so, the module
++	  will be called rtc-mpc5200.
++
+ endmenu
+Index: work-powerpc.git/drivers/rtc/Makefile
+===================================================================
+--- work-powerpc.git.orig/drivers/rtc/Makefile
++++ work-powerpc.git/drivers/rtc/Makefile
+@@ -41,3 +41,4 @@ obj-$(CONFIG_RTC_DRV_V3020)	+= rtc-v3020
+ obj-$(CONFIG_RTC_DRV_AT91RM9200)+= rtc-at91rm9200.o
+ obj-$(CONFIG_RTC_DRV_SH)	+= rtc-sh.o
+ obj-$(CONFIG_RTC_DRV_BFIN)	+= rtc-bfin.o
++obj-$(CONFIG_RTC_DRV_MPC5200)	+= rtc-mpc5200.o
+Index: work-powerpc.git/drivers/rtc/rtc-mpc5200.c
+===================================================================
+--- /dev/null
++++ work-powerpc.git/drivers/rtc/rtc-mpc5200.c
+@@ -0,0 +1,282 @@
++#include <linux/module.h>
++#include <linux/rtc.h>
++#include <asm/of_device.h>
++#include <asm/of_platform.h>
++#include <asm/io.h>
++#include <asm/mpc52xx.h>
++#include <asm/mpc5200_rtc.h>
++
++
++struct mpc5200_rtc_data {
++	unsigned irq;
++	unsigned irq_periodic;
++	struct mpc52xx_rtc __iomem *regs;
++	struct rtc_device *rtc;
++};
++
++static int mpc5200_rtc_read_time(struct device *dev, struct rtc_time *tm)
++{
++	struct mpc5200_rtc_data *rtc = dev_get_drvdata(dev);
++	struct mpc52xx_rtc __iomem *regs = rtc->regs;
++	int tmp;
++
++	tm->tm_sec = in_8(&regs->second);
++	tm->tm_min = in_8(&regs->minute);
++
++	/* 12 hour format? */
++	if (in_8(&regs->hour) & 0x20)
++		tm->tm_hour = (in_8(&regs->hour) >> 1) + (in_8(&regs->hour) & 1 ? 12 : 0);
++	else
++		tm->tm_hour = in_8(&regs->hour);
++
++	tmp = in_8(&regs->wday_mday);
++	tm->tm_mday = tmp & 0x1f;
++	tm->tm_mon = in_8(&regs->month) - 1;
++	tm->tm_year = in_be16(&regs->year) - 1900;
++	tm->tm_wday = (tmp >> 5) % 7;
++	tm->tm_yday = rtc_year_days(tm->tm_mday, tm->tm_mon, tm->tm_year);
++	tm->tm_isdst = 0;
++
++	return 0;
++}
++
++static int mpc5200_rtc_set_time(struct device *dev, struct rtc_time *tm)
++{
++	struct mpc5200_rtc_data *rtc = dev_get_drvdata(dev);
++	struct mpc52xx_rtc __iomem *regs = rtc->regs;
++
++	/* time */
++	out_8(&regs->second_set, tm->tm_sec);
++	out_8(&regs->minute_set, tm->tm_min);
++	out_8(&regs->hour_set, tm->tm_hour);
++
++	/* set time sequence */
++	out_8(&regs->set_time, 0x1);
++	out_8(&regs->set_time, 0x3);
++	out_8(&regs->set_time, 0x1);
++	out_8(&regs->set_time, 0x0);
++
++	/* date */
++	out_8(&regs->month_set, tm->tm_mon + 1);
++	out_8(&regs->weekday_set, tm->tm_wday ? tm->tm_wday : 7);
++	out_8(&regs->date_set, tm->tm_mday);
++	out_be16(&regs->year_set, tm->tm_year + 1900);
++
++	/* set date sequence */
++	out_8(&regs->set_date, 0x1);
++	out_8(&regs->set_date, 0x3);
++	out_8(&regs->set_date, 0x1);
++	out_8(&regs->set_date, 0x0);
++
++	return 0;
++}
++
++static int mpc5200_rtc_read_alarm(struct device *dev, struct rtc_wkalrm *alrm)
++{
++	struct mpc5200_rtc_data *rtc = dev_get_drvdata(dev);
++	struct mpc52xx_rtc __iomem *regs = rtc->regs;
++
++	alrm->time.tm_sec = -1;
++	alrm->time.tm_min = in_8(&regs->alm_min_set);
++	alrm->time.tm_hour = in_8(&regs->alm_hour_set);
++
++	alrm->time.tm_mday = -1;
++	alrm->time.tm_mon = -1;
++	alrm->time.tm_year = -1;
++
++	alrm->enabled = in_8(&regs->alm_enable);
++	alrm->pending = in_8(&regs->alm_status);
++
++	return 0;
++}
++
++static int mpc5200_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *alrm)
++{
++	struct mpc5200_rtc_data *rtc = dev_get_drvdata(dev);
++	struct mpc52xx_rtc __iomem *regs = rtc->regs;
++
++	out_8(&regs->alm_min_set, alrm->time.tm_min);
++	out_8(&regs->alm_hour_set, alrm->time.tm_hour);
++
++	out_8(&regs->alm_enable, alrm->enabled);
++
++	return 0;
++}
++
++static irqreturn_t rtc_handler(int irq, void *dev)
++{
++	struct mpc5200_rtc_data *rtc = dev_get_drvdata((struct device *)dev);
++	struct mpc52xx_rtc __iomem *regs = rtc->regs;
++
++	if (in_8(&regs->int_alm)) {
++		/* acknowledge */
++		out_8(&regs->int_alm, 1);
++
++		rtc_update_irq(rtc->rtc, 1, RTC_IRQF | RTC_AF);
++		return IRQ_HANDLED;
++	}
++
++	return IRQ_NONE;
++}
++
++static irqreturn_t rtc_handler_upd(int irq, void *dev)
++{
++	struct mpc5200_rtc_data *rtc = dev_get_drvdata((struct device *)dev);
++	struct mpc52xx_rtc __iomem *regs = rtc->regs;
++
++	if (in_8(&regs->int_sec) && (in_8(&regs->int_enable) & 0x1)) {
++		/* acknowledge */
++		out_8(&regs->int_sec, 1);
++
++		rtc_update_irq(rtc->rtc, 1, RTC_IRQF | RTC_UF);
++		return IRQ_HANDLED;
++	}
++
++	return IRQ_NONE;
++}
++
++static int mpc5200_rtc_ioctl(struct device *dev, unsigned int cmd, unsigned long arg)
++{
++	struct mpc5200_rtc_data *rtc = dev_get_drvdata(dev);
++	struct mpc52xx_rtc __iomem *regs = rtc->regs;
++
++	switch (cmd) {
++	/* alarm interrupt */
++	case RTC_AIE_ON:
++		out_8(&regs->alm_enable, 1);
++		break;
++	case RTC_AIE_OFF:
++		out_8(&regs->alm_enable, 0);
++		break;
++
++	/* update interrupt (periodic second in mpc5200 words) */
++	case RTC_UIE_ON:
++		out_8(&regs->int_enable, (in_8(&regs->int_enable) & ~0x8) | 0x1);
++		break;
++	case RTC_UIE_OFF:
++		out_8(&regs->int_enable, in_8(&regs->int_enable) & ~0x1);
++		break;
++
++	/* no periodic interrupts */
++	case RTC_IRQP_READ:
++	case RTC_IRQP_SET:
++		return -ENOTTY;
++
++	default:
++		return -ENOIOCTLCMD;
++	}
++	return 0;
++}
++
++static const struct rtc_class_ops mpc5200_rtc_ops = {
++	.read_time	= mpc5200_rtc_read_time,
++	.set_time	= mpc5200_rtc_set_time,
++	.read_alarm	= mpc5200_rtc_read_alarm,
++	.set_alarm	= mpc5200_rtc_set_alarm,
++	.ioctl		= mpc5200_rtc_ioctl,
++};
++
++static int __devinit mpc5200_rtc_probe(struct of_device *op, const struct of_device_id *match)
++{
++	struct mpc5200_rtc_data *rtc;
++	int err = 0;
++
++	rtc = kzalloc(sizeof(*rtc), GFP_KERNEL);
++	if (!rtc) {
++		err = -ENOMEM;
++		goto out;
++	}
++
++	rtc->regs = mpc52xx_find_and_map("mpc5200-rtc");
++	if (!rtc->regs) {
++		printk(KERN_ERR "%s: couldn't map io space\n", __func__);
++		err = -ENOSYS;
++		goto out_free;
++	}
++
++	rtc->rtc = rtc_device_register("mpc5200-rtc", &op->dev,
++			&mpc5200_rtc_ops, THIS_MODULE);
++	if (IS_ERR(rtc->rtc)) {
++		err = PTR_ERR(rtc->rtc);
++		goto out_unmap;
++	}
++
++	dev_set_drvdata(&op->dev, rtc);
++
++	rtc->irq = irq_of_parse_and_map(op->node, 1);
++	if ((err = request_irq(rtc->irq, rtc_handler, IRQF_DISABLED, "mpc5200-rtc", &op->dev))) {
++		printk(KERN_ERR "%s: could not request irq: %i\n", __func__, rtc->irq);
++		goto out_dispose;
++	}
++
++	rtc->irq_periodic = irq_of_parse_and_map(op->node, 0);
++	if ((err = request_irq(rtc->irq_periodic, rtc_handler_upd, IRQF_DISABLED,
++					"mpc5200-rtc_upd", &op->dev))) {
++		printk(KERN_ERR "%s: could not request irq: %i\n", __func__, rtc->irq_periodic);
++		goto out_dispose2;
++	}
++
++	goto out;
++
++ out_dispose2:
++	irq_dispose_mapping(rtc->irq_periodic);
++	free_irq(rtc->irq, &op->dev);
++ out_dispose:
++	irq_dispose_mapping(rtc->irq);
++ out_unmap:
++	iounmap(rtc->regs);
++ out_free:
++	kfree(rtc);
++ out:
++	return err;
++}
++
++static int __devexit mpc5200_rtc_remove(struct of_device *op)
++{
++	struct mpc5200_rtc_data *rtc = dev_get_drvdata(&op->dev);
++	struct mpc52xx_rtc __iomem *regs = rtc->regs;
++
++	/* disable interrupt, so there are no nasty surprises */
++	out_8(&regs->alm_enable, 0);
++	out_8(&regs->int_enable, in_8(&regs->int_enable) & ~0x1);
++
++	rtc_device_unregister(rtc->rtc);
++	iounmap(rtc->regs);
++	free_irq(rtc->irq, &op->dev);
++	free_irq(rtc->irq_periodic, &op->dev);
++	irq_dispose_mapping(rtc->irq);
++	irq_dispose_mapping(rtc->irq_periodic);
++	kfree(rtc);
++	dev_set_drvdata(&op->dev, NULL);
++
++	return 0;
++}
++
++static struct of_device_id mpc5200_rtc_match[] = {
++	{ .type = "rtc", .compatible = "mpc5200-rtc", },
++	{},
++};
++
++static struct of_platform_driver mpc5200_rtc_driver = {
++	.owner		= THIS_MODULE,
++	.name		= "mpc5200-rtc",
++	.match_table	= mpc5200_rtc_match,
++	.probe		= mpc5200_rtc_probe,
++	.remove		= mpc5200_rtc_remove,
++};
++
++static int __init mpc5200_rtc_init(void)
++{
++	return of_register_platform_driver(&mpc5200_rtc_driver);
++}
++
++static void __exit mpc5200_rtc_exit(void)
++{
++	of_unregister_platform_driver(&mpc5200_rtc_driver);
++}
++
++MODULE_LICENSE("Dual BSD/GPL");
++MODULE_AUTHOR("Domen Puncer <domen.puncer@telargo.com>");
++
++module_init(mpc5200_rtc_init);
++module_exit(mpc5200_rtc_exit);
+Index: work-powerpc.git/include/asm-powerpc/mpc5200_rtc.h
+===================================================================
+--- /dev/null
++++ work-powerpc.git/include/asm-powerpc/mpc5200_rtc.h
+@@ -0,0 +1,49 @@
++#ifndef _MPC5200_RTC_H_
++#define _MPC5200_RTC_H_
++
++/* RTC */
++struct mpc52xx_rtc {
++	u8	set_time;	/* RTC + 0x00 */
++	u8	hour_set;	/* RTC + 0x01 */
++	u8	minute_set;	/* RTC + 0x02 */
++	u8	second_set;	/* RTC + 0x03 */
++
++	u8	set_date;	/* RTC + 0x04 */
++	u8	month_set;	/* RTC + 0x05 */
++	u8	weekday_set;	/* RTC + 0x06 */
++	u8	date_set;	/* RTC + 0x07 */
++
++	u8	write_sw;	/* RTC + 0x08 */
++	u8	sw_set;		/* RTC + 0x09 */
++	u16	year_set;	/* RTC + 0x0a */
++
++	u8	alm_enable;	/* RTC + 0x0c */
++	u8	alm_hour_set;	/* RTC + 0x0d */
++	u8	alm_min_set;	/* RTC + 0x0e */
++	u8 	int_enable;	/* RTC + 0x0f */
++
++	u8	reserved1;
++	u8	hour;		/* RTC + 0x11 */
++	u8	minute;		/* RTC + 0x12 */
++	u8	second;		/* RTC + 0x13 */
++
++	u8	month;		/* RTC + 0x14 */
++	u8	wday_mday;	/* RTC + 0x15 */
++	u16	year;		/* RTC + 0x16 */
++
++	u8	int_alm;	/* RTC + 0x18 */
++	u8	int_sw;		/* RTC + 0x19 */
++	u8	alm_status;	/* RTC + 0x1a */
++	u8	sw_minute;	/* RTC + 0x1b */
++
++	u8	bus_error_1;	/* RTC + 0x1c */
++	u8	int_day;	/* RTC + 0x1d */
++	u8	int_min;	/* RTC + 0x1e */
++	u8	int_sec;	/* RTC + 0x1f */
++
++	u8	pterm;		/* RTC + 0x20 */
++	u8	eterm;		/* RTC + 0x21 */
++	u16	reserved2;
++};
++
++#endif /* _MPC5200_RTC_H_ */
+_______________________________________________

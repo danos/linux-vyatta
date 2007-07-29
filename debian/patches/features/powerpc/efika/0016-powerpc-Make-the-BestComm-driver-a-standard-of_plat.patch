@@ -1,0 +1,158 @@
+From 9277eb3bf88cc33e772be1505d6cb6af8fa87a9c Mon Sep 17 00:00:00 2001
+From: Sylvain Munaut <tnt@246tNt.com>
+Date: Sun, 13 May 2007 15:55:53 +0200
+Subject: [PATCH 16/21] powerpc: Make the BestComm driver a standard of_platform_driver
+
+Signed-off-by: Sylvain Munaut <tnt@246tNt.com>
+---
+ arch/powerpc/sysdev/bestcomm/bestcomm.c |   97 +++++++++++++++++++++++++------
+ 1 files changed, 78 insertions(+), 19 deletions(-)
+
+diff --git a/arch/powerpc/sysdev/bestcomm/bestcomm.c b/arch/powerpc/sysdev/bestcomm/bestcomm.c
+index 22684e7..68c8e39 100644
+--- a/arch/powerpc/sysdev/bestcomm/bestcomm.c
++++ b/arch/powerpc/sysdev/bestcomm/bestcomm.c
+@@ -21,6 +21,8 @@
+ #include <asm/irq.h>
+ #include <asm/prom.h>
+ #include <asm/mpc52xx.h>
++#include <asm/of_device.h>
++#include <asm/of_platform.h>
+ 
+ #include "sram.h"
+ #include "bestcomm_priv.h"
+@@ -456,27 +458,24 @@ bcom_engine_cleanup(void)
+ 
+ 
+ /* ======================================================================== */
+-/* System/Module init & cleanup                                             */
++/* OF platform driver                                                       */
+ /* ======================================================================== */
+ 
+-static int __init
+-mpc52xx_bcom_init(void)
++static int __devinit
++mpc52xx_bcom_probe(struct of_device *op, const struct of_device_id *match)
+ {
+ 	struct device_node *ofn_bcom, *ofn_sram;
+ 	struct resource res_bcom;
+ 
+ 	int rv;
+ 
+-	/* Find the bestcomm node. If none, fails 'silently' since
+-	 * we may just be on another platform */
+-	ofn_bcom = of_find_compatible_node(
+-			NULL, "dma-controller", "mpc5200-bestcomm");
+-	if (!ofn_bcom)
+-		return -ENODEV;
+-
+ 	/* Inform user we're ok so far */
+ 	printk(KERN_INFO "DMA: MPC52xx BestComm driver\n");
+ 
++	/* Get the bestcomm node */
++	ofn_bcom = op->node;
++	of_node_get(ofn_bcom);
++
+ 	/* Prepare SRAM */
+ 	ofn_sram = of_find_compatible_node(NULL, "sram", "mpc5200-sram");
+ 	if (!ofn_sram) {
+@@ -559,8 +558,9 @@ error_ofput:
+ 	return rv;
+ }
+ 
+-static void __exit
+-mpc52xx_bcom_exit(void)
++
++static int
++mpc52xx_bcom_remove(struct of_device *op)
+ {
+ 	/* Clean up the engine */
+ 	bcom_engine_cleanup();
+@@ -577,18 +577,77 @@ mpc52xx_bcom_exit(void)
+ 
+ 	/* Release memory */
+ 	kfree(bcom_eng);
++	bcom_eng = NULL;
++
++	return 0;
++}
++
++
++#ifdef CONFIG_PM
++
++static int
++mpc52xx_bcom_suspend(struct of_device *op, pm_message_t state)
++{
++	return 0;	/* FIXME : What to do here ? */
++}
++
++static int
++mpc52xx_bcom_resume(struct of_device *op)
++{
++	return 0;
+ }
+ 
+-#ifdef MODULE
+-module_init(mpc52xx_bcom_init);
+-module_exit(mpc52xx_bcom_exit);
+ #endif
+ 
+-/* If we're not a module, we must make sure everything is setup before anyone */
+-/* tries to use us ... */
+-#ifndef MODULE
+-subsys_initcall(mpc52xx_bcom_init);
++static struct of_device_id mpc52xx_bcom_of_match[] = {
++	{
++		.type		= "dma-controller",
++		.compatible	= "mpc5200-bestcomm",
++	},
++	{},
++};
++
++MODULE_DEVICE_TABLE(of, mpc52xx_bcom_of_match);
++
++
++static struct of_platform_driver mpc52xx_bcom_of_platform_driver = {
++	.owner		= THIS_MODULE,
++	.name		= DRIVER_NAME,
++	.match_table	= mpc52xx_bcom_of_match,
++	.probe		= mpc52xx_bcom_probe,
++	.remove		= mpc52xx_bcom_remove,
++#ifdef CONFIG_PM
++	.suspend	= mpc52xx_bcom_suspend,
++	.resume		= mpc52xx_bcom_resume,
+ #endif
++	.driver		= {
++		.name	= DRIVER_NAME,
++		.owner	= THIS_MODULE,
++	},
++};
++
++
++/* ======================================================================== */
++/* Module                                                                   */
++/* ======================================================================== */
++
++static int __init
++mpc52xx_bcom_init(void)
++{
++	return of_register_platform_driver(&mpc52xx_bcom_of_platform_driver);
++}
++
++static void __exit
++mpc52xx_bcom_exit(void)
++{
++	of_unregister_platform_driver(&mpc52xx_bcom_of_platform_driver);
++}
++
++/* If we're not a module, we must make sure everything is setup before  */
++/* anyone tries to use us ... that's why we use subsys_initcall instead */
++/* of module_init. */
++subsys_initcall(mpc52xx_bcom_init);
++module_exit(mpc52xx_bcom_exit);
+ 
+ MODULE_DESCRIPTION("Freescale MPC52xx BestComm DMA");
+ MODULE_AUTHOR("Sylvain Munaut <tnt@246tNt.com>");
+-- 
+1.5.1.2
+
