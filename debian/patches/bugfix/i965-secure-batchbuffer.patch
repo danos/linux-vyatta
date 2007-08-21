@@ -1,0 +1,67 @@
+From: Dave Airlie <airlied@redhat.com>
+Date: Mon, 6 Aug 2007 23:09:51 +0000 (+1000)
+Subject: drm/i915: Fix i965 secured batchbuffer usage
+X-Git-Url: http://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Ftorvalds%2Flinux-2.6.git;a=commitdiff_plain;h=21f16289270447673a7263ccc0b22d562fb01ecb
+
+drm/i915: Fix i965 secured batchbuffer usage
+
+This 965G and above chipsets moved the batch buffer non-secure bits to
+another place. This means that previous drm's allowed in-secure batchbuffers
+to be submitted to the hardware from non-privileged users who are logged
+into X and and have access to direct rendering.
+
+Signed-off-by: Dave Airlie <airlied@redhat.com>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+---
+
+diff --git a/drivers/char/drm/i915_dma.c b/drivers/char/drm/i915_dma.c
+index 3359cc2..8e7d713 100644
+--- a/drivers/char/drm/i915_dma.c
++++ b/drivers/char/drm/i915_dma.c
+@@ -184,6 +184,8 @@ static int i915_initialize(struct drm_device * dev,
+ 	 * private backbuffer/depthbuffer usage.
+ 	 */
+ 	dev_priv->use_mi_batchbuffer_start = 0;
++	if (IS_I965G(dev)) /* 965 doesn't support older method */
++		dev_priv->use_mi_batchbuffer_start = 1;
+ 
+ 	/* Allow hardware batchbuffers unless told otherwise.
+ 	 */
+@@ -517,8 +519,13 @@ static int i915_dispatch_batchbuffer(struct drm_device * dev,
+ 
+ 		if (dev_priv->use_mi_batchbuffer_start) {
+ 			BEGIN_LP_RING(2);
+-			OUT_RING(MI_BATCH_BUFFER_START | (2 << 6));
+-			OUT_RING(batch->start | MI_BATCH_NON_SECURE);
++			if (IS_I965G(dev)) {
++				OUT_RING(MI_BATCH_BUFFER_START | (2 << 6) | MI_BATCH_NON_SECURE_I965);
++				OUT_RING(batch->start);
++			} else {
++				OUT_RING(MI_BATCH_BUFFER_START | (2 << 6));
++				OUT_RING(batch->start | MI_BATCH_NON_SECURE);
++			}
+ 			ADVANCE_LP_RING();
+ 		} else {
+ 			BEGIN_LP_RING(4);
+@@ -735,7 +742,8 @@ static int i915_setparam(DRM_IOCTL_ARGS)
+ 
+ 	switch (param.param) {
+ 	case I915_SETPARAM_USE_MI_BATCHBUFFER_START:
+-		dev_priv->use_mi_batchbuffer_start = param.value;
++		if (!IS_I965G(dev))
++			dev_priv->use_mi_batchbuffer_start = param.value;
+ 		break;
+ 	case I915_SETPARAM_TEX_LRU_LOG_GRANULARITY:
+ 		dev_priv->tex_lru_log_granularity = param.value;
+diff --git a/drivers/char/drm/i915_drv.h b/drivers/char/drm/i915_drv.h
+index fd91856..737088b 100644
+--- a/drivers/char/drm/i915_drv.h
++++ b/drivers/char/drm/i915_drv.h
+@@ -282,6 +282,7 @@ extern int i915_wait_ring(struct drm_device * dev, int n, const char *caller);
+ #define MI_BATCH_BUFFER_START 	(0x31<<23)
+ #define MI_BATCH_BUFFER_END 	(0xA<<23)
+ #define MI_BATCH_NON_SECURE	(1)
++#define MI_BATCH_NON_SECURE_I965 (1<<8)
+ 
+ #define MI_WAIT_FOR_EVENT       ((0x3<<23))
+ #define MI_WAIT_FOR_PLANE_A_FLIP      (1<<2)
