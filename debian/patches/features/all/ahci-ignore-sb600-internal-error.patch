@@ -1,0 +1,115 @@
+From: Conke Hu <conke.hu@gmail.com>
+Date: Tue, 27 Mar 2007 10:33:05 +0000 (+0800)
+Subject: ahci.c: walkaround for SB600 SATA internal error issue
+X-Git-Tag: v2.6.21~206^2~3
+X-Git-Url: http://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Ftorvalds%2Flinux-2.6.git;a=commitdiff_plain;h=55a61604cd1354e1783364e1c901034f2f474b7d
+
+ahci.c: walkaround for SB600 SATA internal error issue
+
+   There is a HW issue in ATI SB600 SATA that PxSERR.E should not be
+set on some conditions, for example, when there is no media in SATA
+CD/DVD drive or media is not ready, AHCI controller fails to execute
+ATAPI commands and reports PORT_IRQ_TF_ERR, but ATI SB600 SATA
+controller sets PxSERR.E at the
+same time, which is not necessary.
+    This patch is just to ignore the INTERNAL ERROR in such case.
+Without this patch, ahci error handler will report many errors as
+below:
+    ----------- cut from dmesg -----------
+ata9: soft resetting port
+ata9: SATA link up 1.5 Gbps (SStatus 113 SControl 300)
+ata9.00: configured for UDMA/33
+ata9: EH complete
+ata9.00: exception Emask 0x40 SAct 0x0 SErr 0x800 action 0x2
+ata9.00: (irq_stat 0x40000001)
+ata9.00: cmd a0/00:00:00:00:20/00:00:00:00:00/a0 tag 0 cdb 0x0 data 0
+        res 51/24:03:00:00:20/00:00:00:00:00/a0 Emask 0x40 (internal error)
+ata9: soft resetting port
+ata9: SATA link up 1.5 Gbps (SStatus 113 SControl 300)
+ata9.00: configured for UDMA/33
+ata9: EH complete
+ata9.00: exception Emask 0x40 SAct 0x0 SErr 0x800 action 0x2
+ata9.00: (irq_stat 0x40000001)
+ata9.00: cmd a0/01:00:00:00:00/00:00:00:00:00/a0 tag 0 cdb 0x43 data 12 in
+        res 51/24:03:00:00:00/00:00:00:00:00/a0 Emask 0x40 (internal error)
+    -------- end cut ---------
+
+Signed-off-by: Conke Hu <conke.hu@amd.com>
+Signed-off-by: Jeff Garzik <jeff@garzik.org>
+---
+
+Backported to Debian's 2.6.18 by dann frazier <dannf@debian.org>
+
+--- linux-source-2.6.18/drivers/scsi/ahci.c.orig	2007-08-21 12:50:10.000000000 -0600
++++ linux-source-2.6.18/drivers/scsi/ahci.c	2007-08-21 18:39:09.000000000 -0600
+@@ -78,6 +78,7 @@ enum {
+ 
+ 	board_ahci		= 0,
+ 	board_ahci_vt8251	= 1,
++	board_ahci_sb600	= 2,
+ 
+ 	/* global controller registers */
+ 	HOST_CAP		= 0x00, /* host capabilities */
+@@ -168,6 +169,7 @@ enum {
+ 	/* ap->flags bits */
+ 	AHCI_FLAG_RESET_NEEDS_CLO	= (1 << 24),
+ 	AHCI_FLAG_NO_NCQ		= (1 << 25),
++	AHCI_FLAG_IGN_SERR_INTERNAL	= (1 << 27), /* ignore SERR_INTERNAL */
+ };
+ 
+ struct ahci_cmd_hdr {
+@@ -295,6 +297,18 @@ static const struct ata_port_info ahci_p
+ 		.udma_mask	= 0x7f, /* udma0-6 ; FIXME */
+ 		.port_ops	= &ahci_ops,
+ 	},
++	/* board_ahci_sb600 */
++	{
++		.sht		= &ahci_sht,
++		.flags		= ATA_FLAG_SATA | ATA_FLAG_NO_LEGACY |
++				  ATA_FLAG_MMIO | ATA_FLAG_PIO_DMA |
++				  ATA_FLAG_SKIP_D2H_BSY |
++				  AHCI_FLAG_IGN_SERR_INTERNAL,
++		.pio_mask	= 0x1f, /* pio0-4 */
++		.udma_mask	= 0x7f, /* udma0-6 ; FIXME */
++		.port_ops	= &ahci_ops,
++	},
++
+ };
+ 
+ static const struct pci_device_id ahci_pci_tbl[] = {
+@@ -344,17 +358,17 @@ static const struct pci_device_id ahci_p
+ 
+ 	/* ATI */
+ 	{ PCI_VENDOR_ID_ATI, 0x4380, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+-	  board_ahci }, /* ATI SB600 non-raid */
++	  board_ahci_sb600 }, /* ATI SB600 non-raid */
+ 	{ PCI_VENDOR_ID_ATI, 0x4381, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+ 	  board_ahci }, /* ATI SB600 raid */
+ 	{ PCI_VENDOR_ID_ATI, 0x4390, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+-	  board_ahci }, /* ATI SB700 IDE */
++	  board_ahci_sb600 }, /* ATI SB700 IDE */
+ 	{ PCI_VENDOR_ID_ATI, 0x4391, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+-	  board_ahci }, /* ATI SB700 AHCI */
++	  board_ahci_sb600 }, /* ATI SB700 AHCI */
+ 	{ PCI_VENDOR_ID_ATI, 0x4392, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+-	  board_ahci }, /* ATI SB700 nraid5 */
++	  board_ahci_sb600 }, /* ATI SB700 nraid5 */
+ 	{ PCI_VENDOR_ID_ATI, 0x4393, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+-	  board_ahci }, /* ATI SB700 raid5 */
++	  board_ahci_sb600 }, /* ATI SB700 raid5 */
+ 
+ 	/* VIA */
+ 	{ PCI_VENDOR_ID_VIA, 0x3349, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+@@ -993,8 +1007,11 @@ static void ahci_error_intr(struct ata_p
+ 	/* analyze @irq_stat */
+ 	ata_ehi_push_desc(ehi, "irq_stat 0x%08x", irq_stat);
+ 
+-	if (irq_stat & PORT_IRQ_TF_ERR)
++	if (irq_stat & PORT_IRQ_TF_ERR) {
+ 		err_mask |= AC_ERR_DEV;
++		if (ap->flags & AHCI_FLAG_IGN_SERR_INTERNAL)
++			serror &= ~SERR_INTERNAL;
++	}
+ 
+ 	if (irq_stat & (PORT_IRQ_HBUS_ERR | PORT_IRQ_HBUS_DATA_ERR)) {
+ 		err_mask |= AC_ERR_HOST_BUS;
