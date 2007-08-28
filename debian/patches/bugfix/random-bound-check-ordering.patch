@@ -1,0 +1,42 @@
+From: Matt Mackall <mpm@selenic.com>
+Date: Thu, 19 Jul 2007 18:30:14 +0000 (-0700)
+Subject: random: fix bound check ordering (CVE-2007-3105)
+X-Git-Tag: v2.6.23-rc1~259
+X-Git-Url: http://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Ftorvalds%2Flinux-2.6.git;a=commitdiff_plain;h=5a021e9ffd56c22700133ebc37d607f95be8f7bd
+
+random: fix bound check ordering (CVE-2007-3105)
+
+If root raised the default wakeup threshold over the size of the
+output pool, the pool transfer function could overflow the stack with
+RNG bytes, causing a DoS or potential privilege escalation.
+
+(Bug reported by the PaX Team <pageexec@freemail.hu>)
+
+Cc: Theodore Tso <tytso@mit.edu>
+Cc: Willy Tarreau <w@1wt.eu>
+Signed-off-by: Matt Mackall <mpm@selenic.com>
+Signed-off-by: Chris Wright <chrisw@sous-sol.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+---
+
+diff --git a/drivers/char/random.c b/drivers/char/random.c
+index 7f52712..397c714 100644
+--- a/drivers/char/random.c
++++ b/drivers/char/random.c
+@@ -693,9 +693,14 @@ static void xfer_secondary_pool(struct entropy_store *r, size_t nbytes)
+ 
+ 	if (r->pull && r->entropy_count < nbytes * 8 &&
+ 	    r->entropy_count < r->poolinfo->POOLBITS) {
+-		int bytes = max_t(int, random_read_wakeup_thresh / 8,
+-				min_t(int, nbytes, sizeof(tmp)));
++		/* If we're limited, always leave two wakeup worth's BITS */
+ 		int rsvd = r->limit ? 0 : random_read_wakeup_thresh/4;
++		int bytes = nbytes;
++
++		/* pull at least as many as BYTES as wakeup BITS */
++		bytes = max_t(int, bytes, random_read_wakeup_thresh / 8);
++		/* but never more than the buffer size */
++		bytes = min_t(int, bytes, sizeof(tmp));
+ 
+ 		DEBUG_ENT("going to reseed %s with %d bits "
+ 			  "(%d of %d requested)\n",
