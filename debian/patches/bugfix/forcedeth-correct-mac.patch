@@ -1,0 +1,113 @@
+From: Ayaz Abdulla <aabdulla@nvidia.com>
+Date: Mon, 31 Jul 2006 16:05:01 +0000 (-0400)
+Subject: [PATCH] forcedeth: mac address corrected
+X-Git-Tag: v2.6.19~2204^2~100
+X-Git-Url: http://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Ftorvalds%2Flinux-2.6.git;a=commitdiff_plain;h=5070d3408405ae1941f259acac7a9882045c3be4
+
+[PATCH] forcedeth: mac address corrected
+
+This patch will correct the mac address and set a flag to indicate that
+it is already corrected in case nv_probe is called again. For example,
+when you use kexec to restart the kernel.
+
+Signed-Off-By: Ayaz Abdulla <aabdulla@nvidia.com>
+
+Signed-off-by: Jeff Garzik <jeff@garzik.org>
+---
+
+Adjusted to apply to Debian's 2.6.18 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.18.orig/drivers/net/forcedeth.c linux-source-2.6.18/drivers/net/forcedeth.c
+--- linux-source-2.6.18.orig/drivers/net/forcedeth.c	2007-08-11 08:55:04.000000000 -0600
++++ linux-source-2.6.18/drivers/net/forcedeth.c	2007-08-29 01:42:57.592759533 -0600
+@@ -109,6 +109,7 @@
+  *	0.54: 21 Mar 2006: Fix spin locks for multi irqs and cleanup.
+  *	0.55: 22 Mar 2006: Add flow control (pause frame).
+  *	0.56: 22 Mar 2006: Additional ethtool config and moduleparam support.
++ *	0.57: 14 May 2006: Mac address set in probe/remove and order corrections.
+  *
+  * Known bugs:
+  * We suspect that on some hardware no TX done interrupts are generated.
+@@ -120,7 +121,7 @@
+  * DEV_NEED_TIMERIRQ will not harm you on sane hardware, only generating a few
+  * superfluous timer interrupts from the nic.
+  */
+-#define FORCEDETH_VERSION		"0.56"
++#define FORCEDETH_VERSION		"0.57"
+ #define DRV_NAME			"forcedeth"
+ 
+ #include <linux/module.h>
+@@ -262,7 +263,8 @@ enum {
+ 	NvRegRingSizes = 0x108,
+ #define NVREG_RINGSZ_TXSHIFT 0
+ #define NVREG_RINGSZ_RXSHIFT 16
+-	NvRegUnknownTransmitterReg = 0x10c,
++	NvRegTransmitPoll = 0x10c,
++#define NVREG_TRANSMITPOLL_MAC_ADDR_REV	0x00008000
+ 	NvRegLinkSpeed = 0x110,
+ #define NVREG_LINKSPEED_FORCE 0x10000
+ #define NVREG_LINKSPEED_10	1000
+@@ -1178,7 +1180,7 @@ static void nv_stop_tx(struct net_device
+ 			KERN_INFO "nv_stop_tx: TransmitterStatus remained busy");
+ 
+ 	udelay(NV_TXSTOP_DELAY2);
+-	writel(0, base + NvRegUnknownTransmitterReg);
++	writel(readl(base + NvRegTransmitPoll) & NVREG_TRANSMITPOLL_MAC_ADDR_REV, base + NvRegTransmitPoll);
+ }
+ 
+ static void nv_txrx_reset(struct net_device *dev)
+@@ -3921,7 +3923,7 @@ static int nv_open(struct net_device *de
+ 	oom = nv_init_ring(dev);
+ 
+ 	writel(0, base + NvRegLinkSpeed);
+-	writel(0, base + NvRegUnknownTransmitterReg);
++	writel(readl(base + NvRegTransmitPoll) & NVREG_TRANSMITPOLL_MAC_ADDR_REV, base + NvRegTransmitPoll);
+ 	nv_txrx_reset(dev);
+ 	writel(0, base + NvRegUnknownSetupReg6);
+ 
+@@ -4097,7 +4099,7 @@ static int __devinit nv_probe(struct pci
+ 	unsigned long addr;
+ 	u8 __iomem *base;
+ 	int err, i;
+-	u32 powerstate;
++	u32 powerstate, txreg;
+ 
+ 	dev = alloc_etherdev(sizeof(struct fe_priv));
+ 	err = -ENOMEM;
+@@ -4284,12 +4286,30 @@ static int __devinit nv_probe(struct pci
+ 	np->orig_mac[0] = readl(base + NvRegMacAddrA);
+ 	np->orig_mac[1] = readl(base + NvRegMacAddrB);
+ 
+-	dev->dev_addr[0] = (np->orig_mac[1] >>  8) & 0xff;
+-	dev->dev_addr[1] = (np->orig_mac[1] >>  0) & 0xff;
+-	dev->dev_addr[2] = (np->orig_mac[0] >> 24) & 0xff;
+-	dev->dev_addr[3] = (np->orig_mac[0] >> 16) & 0xff;
+-	dev->dev_addr[4] = (np->orig_mac[0] >>  8) & 0xff;
+-	dev->dev_addr[5] = (np->orig_mac[0] >>  0) & 0xff;
++	/* check the workaround bit for correct mac address order */
++	txreg = readl(base + NvRegTransmitPoll);
++	if (txreg & NVREG_TRANSMITPOLL_MAC_ADDR_REV) {
++		/* mac address is already in correct order */
++		dev->dev_addr[0] = (np->orig_mac[0] >>  0) & 0xff;
++		dev->dev_addr[1] = (np->orig_mac[0] >>  8) & 0xff;
++		dev->dev_addr[2] = (np->orig_mac[0] >> 16) & 0xff;
++		dev->dev_addr[3] = (np->orig_mac[0] >> 24) & 0xff;
++		dev->dev_addr[4] = (np->orig_mac[1] >>  0) & 0xff;
++		dev->dev_addr[5] = (np->orig_mac[1] >>  8) & 0xff;
++	} else {
++		/* need to reverse mac address to correct order */
++		dev->dev_addr[0] = (np->orig_mac[1] >>  8) & 0xff;
++		dev->dev_addr[1] = (np->orig_mac[1] >>  0) & 0xff;
++		dev->dev_addr[2] = (np->orig_mac[0] >> 24) & 0xff;
++		dev->dev_addr[3] = (np->orig_mac[0] >> 16) & 0xff;
++		dev->dev_addr[4] = (np->orig_mac[0] >>  8) & 0xff;
++		dev->dev_addr[5] = (np->orig_mac[0] >>  0) & 0xff;
++		/* set permanent address to be correct aswell */
++		np->orig_mac[0] = (dev->dev_addr[0] << 0) + (dev->dev_addr[1] << 8) +
++			(dev->dev_addr[2] << 16) + (dev->dev_addr[3] << 24);
++		np->orig_mac[1] = (dev->dev_addr[4] << 0) + (dev->dev_addr[5] << 8);
++		writel(txreg|NVREG_TRANSMITPOLL_MAC_ADDR_REV, base + NvRegTransmitPoll);
++	}
+ 	memcpy(dev->perm_addr, dev->dev_addr, dev->addr_len);
+ 
+ 	if (!is_valid_ether_addr(dev->perm_addr)) {
