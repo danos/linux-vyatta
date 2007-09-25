@@ -1,0 +1,88 @@
+From: Andi Kleen <ak@suse.de>
+Date: Fri, 21 Sep 2007 14:16:18 +0000 (+0200)
+Subject: x86_64: Zero extend all registers after ptrace in 32bit entry path.
+X-Git-Url: http://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Ftorvalds%2Flinux-2.6.git;a=commitdiff_plain;h=176df2457ef6207156ca1a40991c54ca01fef567
+
+x86_64: Zero extend all registers after ptrace in 32bit entry path.
+
+Strictly it's only needed for eax.
+
+It actually does a little more than strictly needed -- the other registers
+are already zero extended.
+
+Also remove the now unnecessary and non functional compat task check
+in ptrace.
+
+This is CVE-2007-4573
+
+Found by Wojciech Purczynski
+
+Signed-off-by: Andi Kleen <ak@suse.de>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+---
+
+Adjusted to apply to Debian's 2.6.18 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.18.orig/arch/x86_64/ia32/ia32entry.S linux-source-2.6.18/arch/x86_64/ia32/ia32entry.S
+--- linux-source-2.6.18.orig/arch/x86_64/ia32/ia32entry.S	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/arch/x86_64/ia32/ia32entry.S	2007-09-25 00:10:16.089100799 -0600
+@@ -38,6 +38,18 @@
+ 	movq	%rax,R8(%rsp)
+ 	.endm
+ 
++	.macro LOAD_ARGS32 offset
++	movl \offset(%rsp),%r11d
++	movl \offset+8(%rsp),%r10d
++	movl \offset+16(%rsp),%r9d
++	movl \offset+24(%rsp),%r8d
++	movl \offset+40(%rsp),%ecx
++	movl \offset+48(%rsp),%edx
++	movl \offset+56(%rsp),%esi
++	movl \offset+64(%rsp),%edi
++	movl \offset+72(%rsp),%eax
++	.endm
++	
+ 	.macro CFI_STARTPROC32 simple
+ 	CFI_STARTPROC	\simple
+ 	CFI_UNDEFINED	r8
+@@ -151,7 +163,7 @@ sysenter_tracesys:
+ 	movq	$-ENOSYS,RAX(%rsp)	/* really needed? */
+ 	movq	%rsp,%rdi        /* &pt_regs -> arg1 */
+ 	call	syscall_trace_enter
+-	LOAD_ARGS ARGOFFSET  /* reload args from stack in case ptrace changed it */
++	LOAD_ARGS32 ARGOFFSET  /* reload args from stack in case ptrace changed it */
+ 	RESTORE_REST
+ 	movl	%ebp, %ebp
+ 	/* no need to do an access_ok check here because rbp has been
+@@ -253,7 +265,7 @@ cstar_tracesys:	
+ 	movq $-ENOSYS,RAX(%rsp)	/* really needed? */
+ 	movq %rsp,%rdi        /* &pt_regs -> arg1 */
+ 	call syscall_trace_enter
+-	LOAD_ARGS ARGOFFSET  /* reload args from stack in case ptrace changed it */
++	LOAD_ARGS32 ARGOFFSET  /* reload args from stack in case ptrace changed it */
+ 	RESTORE_REST
+ 	movl RSP-ARGOFFSET(%rsp), %r8d
+ 	/* no need to do an access_ok check here because r8 has been
+@@ -330,7 +342,7 @@ ia32_tracesys:			 
+ 	movq $-ENOSYS,RAX(%rsp)	/* really needed? */
+ 	movq %rsp,%rdi        /* &pt_regs -> arg1 */
+ 	call syscall_trace_enter
+-	LOAD_ARGS ARGOFFSET  /* reload args from stack in case ptrace changed it */
++	LOAD_ARGS32 ARGOFFSET  /* reload args from stack in case ptrace changed it */
+ 	RESTORE_REST
+ 	jmp ia32_do_syscall
+ END(ia32_syscall)
+diff -urpN linux-source-2.6.18.orig/arch/x86_64/kernel/ptrace.c linux-source-2.6.18/arch/x86_64/kernel/ptrace.c
+--- linux-source-2.6.18.orig/arch/x86_64/kernel/ptrace.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/arch/x86_64/kernel/ptrace.c	2007-09-25 00:10:16.089100799 -0600
+@@ -223,10 +223,6 @@ static int putreg(struct task_struct *ch
+ {
+ 	unsigned long tmp; 
+ 	
+-	/* Some code in the 64bit emulation may not be 64bit clean.
+-	   Don't take any chances. */
+-	if (test_tsk_thread_flag(child, TIF_IA32))
+-		value &= 0xffffffff;
+ 	switch (regno) {
+ 		case offsetof(struct user_regs_struct,fs):
+ 			if (value && (value & 3) != 3)
