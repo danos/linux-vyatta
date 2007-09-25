@@ -1,0 +1,47 @@
+From: Adam Litke <agl@us.ibm.com>
+Date: Tue, 30 Jan 2007 22:35:39 +0000 (-0800)
+Subject: [PATCH] Don't allow the stack to grow into hugetlb reserved regions
+X-Git-Tag: v2.6.20-rc7~10
+X-Git-Url: http://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Ftorvalds%2Flinux-2.6.git;a=commitdiff_plain;h=0d59a01bc461bbab4017ff449b8401151ef44cf6
+
+[PATCH] Don't allow the stack to grow into hugetlb reserved regions
+
+When expanding the stack, we don't currently check if the VMA will cross
+into an area of the address space that is reserved for hugetlb pages.
+Subsequent faults on the expanded portion of such a VMA will confuse the
+low-level MMU code, resulting in an OOPS.  Check for this.
+
+Signed-off-by: Adam Litke <agl@us.ibm.com>
+Cc: David Gibson <david@gibson.dropbear.id.au>
+Cc: William Lee Irwin III <wli@holomorphy.com>
+Cc: Hugh Dickins <hugh@veritas.com>
+Cc: <stable@kernel.org>
+Signed-off-by: Andrew Morton <akpm@osdl.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+---
+
+diff --git a/mm/mmap.c b/mm/mmap.c
+index 9717337..cc3a208 100644
+--- a/mm/mmap.c
++++ b/mm/mmap.c
+@@ -1477,6 +1477,7 @@ static int acct_stack_growth(struct vm_area_struct * vma, unsigned long size, un
+ {
+ 	struct mm_struct *mm = vma->vm_mm;
+ 	struct rlimit *rlim = current->signal->rlim;
++	unsigned long new_start;
+ 
+ 	/* address space limit tests */
+ 	if (!may_expand_vm(mm, grow))
+@@ -1496,6 +1497,12 @@ static int acct_stack_growth(struct vm_area_struct * vma, unsigned long size, un
+ 			return -ENOMEM;
+ 	}
+ 
++	/* Check to ensure the stack will not grow into a hugetlb-only region */
++	new_start = (vma->vm_flags & VM_GROWSUP) ? vma->vm_start :
++			vma->vm_end - size;
++	if (is_hugepage_only_range(vma->vm_mm, new_start, size))
++		return -EFAULT;
++
+ 	/*
+ 	 * Overcommit..  This must be the final test, as it will
+ 	 * update security statistics.
