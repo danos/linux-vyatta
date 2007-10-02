@@ -1,0 +1,124 @@
+From: Oliver Neukum <oneukum@suse.de>
+Date: Tue, 21 Aug 2007 05:10:42 +0000 (+0200)
+Subject: USB: fix DoS in pwc USB video driver
+X-Git-Tag: v2.6.23-rc4~29^2~8
+X-Git-Url: http://git.kernel.org/gitweb.cgi?p=linux%2Fkernel%2Fgit%2Ftorvalds%2Flinux-2.6.git;a=commitdiff_plain;h=85237f202d46d55c1bffe0c5b1aa3ddc0f1dce4d
+
+USB: fix DoS in pwc USB video driver
+
+the pwc driver has a disconnect method that waits for user space to
+close the device. This opens up an opportunity for a DoS attack,
+blocking the USB subsystem and making khubd's task busy wait in
+kernel space. This patch shifts freeing resources to close if an opened
+device is disconnected.
+
+Signed-off-by: Oliver Neukum <oneukum@suse.de>
+CC: stable <stable@kernel.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+---
+
+Backported to Debian's 2.6.18 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.18.orig/drivers/media/video/pwc/pwc-if.c linux-source-2.6.18/drivers/media/video/pwc/pwc-if.c
+--- linux-source-2.6.18.orig/drivers/media/video/pwc/pwc-if.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/drivers/media/video/pwc/pwc-if.c	2007-10-02 10:23:54.471131296 -0600
+@@ -1186,12 +1186,19 @@ static int pwc_video_open(struct inode *
+ 	return 0;
+ }
+ 
++
++static void pwc_cleanup(struct pwc_device *pdev)
++{
++	pwc_remove_sysfs_files(pdev->vdev);
++	video_unregister_device(pdev->vdev);
++}
++
+ /* Note that all cleanup is done in the reverse order as in _open */
+ static int pwc_video_close(struct inode *inode, struct file *file)
+ {
+ 	struct video_device *vdev = file->private_data;
+ 	struct pwc_device *pdev;
+-	int i;
++	int i, hint;
+ 
+ 	PWC_DEBUG_OPEN(">> video_close called(vdev = 0x%p).\n", vdev);
+ 
+@@ -1214,8 +1221,9 @@ static int pwc_video_close(struct inode 
+ 	pwc_isoc_cleanup(pdev);
+ 	pwc_free_buffers(pdev);
+ 
++	lock_kernel();
+ 	/* Turn off LEDS and power down camera, but only when not unplugged */
+-	if (pdev->error_status != EPIPE) {
++	if (!pdev->unplugged) {
+ 		/* Turn LEDs off */
+ 		if (pwc_set_leds(pdev, 0, 0) < 0)
+ 			PWC_DEBUG_MODULE("Failed to set LED on/off time.\n");
+@@ -1224,9 +1232,19 @@ static int pwc_video_close(struct inode 
+ 			if (i < 0)
+ 				PWC_ERROR("Failed to power down camera (%d)\n", i);
+ 		}
++		pdev->vopen--;
++		PWC_DEBUG_OPEN("<< video_close() vopen=%d\n", i);
++	} else {
++		pwc_cleanup(pdev);
++		/* Free memory (don't set pdev to 0 just yet) */
++		kfree(pdev);
++		/* search device_hint[] table if we occupy a slot, by any chance */
++		for (hint = 0; hint < MAX_DEV_HINTS; hint++)
++			if (device_hint[hint].pdev == pdev)
++				device_hint[hint].pdev = NULL;
+ 	}
+-	pdev->vopen--;
+-	PWC_DEBUG_OPEN("<< video_close() vopen=%d\n", pdev->vopen);
++	unlock_kernel();
++
+ 	return 0;
+ }
+ 
+@@ -1763,21 +1781,21 @@ static void usb_pwc_disconnect(struct us
+ 	/* Alert waiting processes */
+ 	wake_up_interruptible(&pdev->frameq);
+ 	/* Wait until device is closed */
+-	while (pdev->vopen)
+-		schedule();
+-	/* Device is now closed, so we can safely unregister it */
+-	PWC_DEBUG_PROBE("Unregistering video device in disconnect().\n");
+-	pwc_remove_sysfs_files(pdev->vdev);
+-	video_unregister_device(pdev->vdev);
+-
+-	/* Free memory (don't set pdev to 0 just yet) */
+-	kfree(pdev);
++	if(pdev->vopen) {
++		pdev->unplugged = 1;
++	} else {
++		/* Device is closed, so we can safely unregister it */
++		PWC_DEBUG_PROBE("Unregistering video device in disconnect().\n");
++		pwc_cleanup(pdev);
++		/* Free memory (don't set pdev to 0 just yet) */
++		kfree(pdev);
+ 
+ disconnect_out:
+-	/* search device_hint[] table if we occupy a slot, by any chance */
+-	for (hint = 0; hint < MAX_DEV_HINTS; hint++)
+-		if (device_hint[hint].pdev == pdev)
+-			device_hint[hint].pdev = NULL;
++		/* search device_hint[] table if we occupy a slot, by any chance */
++		for (hint = 0; hint < MAX_DEV_HINTS; hint++)
++			if (device_hint[hint].pdev == pdev)
++				device_hint[hint].pdev = NULL;
++	}
+ 
+ 	unlock_kernel();
+ }
+diff -urpN linux-source-2.6.18.orig/drivers/media/video/pwc/pwc.h linux-source-2.6.18/drivers/media/video/pwc/pwc.h
+--- linux-source-2.6.18.orig/drivers/media/video/pwc/pwc.h	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/drivers/media/video/pwc/pwc.h	2007-10-02 10:23:54.471131296 -0600
+@@ -198,6 +198,7 @@ struct pwc_device
+    char vsnapshot;		/* snapshot mode */
+    char vsync;			/* used by isoc handler */
+    char vmirror;		/* for ToUCaM series */
++	char unplugged;
+ 
+    int cmd_len;
+    unsigned char cmd_buf[13];
