@@ -1,0 +1,85 @@
+From: Hugh Dickins <hugh@veritas.com>
+Date: Sat, 28 Oct 2006 17:38:43 +0000 (-0700)
+Subject: [PATCH] hugetlb: fix prio_tree unit
+X-Git-Tag: v2.6.19-rc4~50
+X-Git-Url: http://git.kernel.org/gitweb.cgi?p=linux%2Fkernel%2Fgit%2Ftorvalds%2Flinux-2.6.git;a=commitdiff_plain;h=856fc29505556cf263f3dcda2533cf3766c14ab6
+
+[PATCH] hugetlb: fix prio_tree unit
+
+hugetlb_vmtruncate_list was misconverted to prio_tree: its prio_tree is in
+units of PAGE_SIZE (PAGE_CACHE_SIZE) like any other, not HPAGE_SIZE (whereas
+its radix_tree is kept in units of HPAGE_SIZE, otherwise slots would be
+absurdly sparse).
+
+At first I thought the error benign, just calling __unmap_hugepage_range on
+more vmas than necessary; but on 32-bit machines, when the prio_tree is
+searched correctly, it happens to ensure the v_offset calculation won't
+overflow.  As it stood, when truncating at or beyond 4GB, it was liable to
+discard pages COWed from lower offsets; or even to clear pmd entries of
+preceding vmas, triggering exit_mmap's BUG_ON(nr_ptes).
+
+Signed-off-by: Hugh Dickins <hugh@veritas.com>
+Cc: Adam Litke <agl@us.ibm.com>
+Cc: David Gibson <david@gibson.dropbear.id.au>
+Cc: "Chen, Kenneth W" <kenneth.w.chen@intel.com>
+Signed-off-by: Andrew Morton <akpm@osdl.org>
+Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+---
+
+diff --git a/fs/hugetlbfs/inode.c b/fs/hugetlbfs/inode.c
+index 0b23b96..0bea6a6 100644
+--- a/fs/hugetlbfs/inode.c
++++ b/fs/hugetlbfs/inode.c
+@@ -271,26 +271,24 @@ static void hugetlbfs_drop_inode(struct inode *inode)
+ 		hugetlbfs_forget_inode(inode);
+ }
+ 
+-/*
+- * h_pgoff is in HPAGE_SIZE units.
+- * vma->vm_pgoff is in PAGE_SIZE units.
+- */
+ static inline void
+-hugetlb_vmtruncate_list(struct prio_tree_root *root, unsigned long h_pgoff)
++hugetlb_vmtruncate_list(struct prio_tree_root *root, pgoff_t pgoff)
+ {
+ 	struct vm_area_struct *vma;
+ 	struct prio_tree_iter iter;
+ 
+-	vma_prio_tree_foreach(vma, &iter, root, h_pgoff, ULONG_MAX) {
+-		unsigned long h_vm_pgoff;
++	vma_prio_tree_foreach(vma, &iter, root, pgoff, ULONG_MAX) {
+ 		unsigned long v_offset;
+ 
+-		h_vm_pgoff = vma->vm_pgoff >> (HPAGE_SHIFT - PAGE_SHIFT);
+-		v_offset = (h_pgoff - h_vm_pgoff) << HPAGE_SHIFT;
+ 		/*
+-		 * Is this VMA fully outside the truncation point?
++		 * Can the expression below overflow on 32-bit arches?
++		 * No, because the prio_tree returns us only those vmas
++		 * which overlap the truncated area starting at pgoff,
++		 * and no vma on a 32-bit arch can span beyond the 4GB.
+ 		 */
+-		if (h_vm_pgoff >= h_pgoff)
++		if (vma->vm_pgoff < pgoff)
++			v_offset = (pgoff - vma->vm_pgoff) << PAGE_SHIFT;
++		else
+ 			v_offset = 0;
+ 
+ 		__unmap_hugepage_range(vma,
+@@ -303,14 +301,14 @@ hugetlb_vmtruncate_list(struct prio_tree_root *root, unsigned long h_pgoff)
+  */
+ static int hugetlb_vmtruncate(struct inode *inode, loff_t offset)
+ {
+-	unsigned long pgoff;
++	pgoff_t pgoff;
+ 	struct address_space *mapping = inode->i_mapping;
+ 
+ 	if (offset > inode->i_size)
+ 		return -EINVAL;
+ 
+ 	BUG_ON(offset & ~HPAGE_MASK);
+-	pgoff = offset >> HPAGE_SHIFT;
++	pgoff = offset >> PAGE_SHIFT;
+ 
+ 	inode->i_size = offset;
+ 	spin_lock(&mapping->i_mmap_lock);
