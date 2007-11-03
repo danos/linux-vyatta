@@ -1,0 +1,357 @@
+diff --git a/arch/i386/kernel/io_apic.c b/arch/i386/kernel/io_apic.c
+index 7f8b7af..97ba305 100644
+--- a/arch/i386/kernel/io_apic.c
++++ b/arch/i386/kernel/io_apic.c
+@@ -1275,12 +1275,15 @@ static struct irq_chip ioapic_chip;
+ static void ioapic_register_intr(int irq, int vector, unsigned long trigger)
+ {
+ 	if ((trigger == IOAPIC_AUTO && IO_APIC_irq_trigger(irq)) ||
+-			trigger == IOAPIC_LEVEL)
++	    trigger == IOAPIC_LEVEL) {
++		irq_desc[irq].status |= IRQ_LEVEL;
+ 		set_irq_chip_and_handler_name(irq, &ioapic_chip,
+ 					 handle_fasteoi_irq, "fasteoi");
+-	else
++	} else {
++		irq_desc[irq].status &= ~IRQ_LEVEL;
+ 		set_irq_chip_and_handler_name(irq, &ioapic_chip,
+ 					 handle_edge_irq, "edge");
++	}
+ 	set_intr_gate(vector, interrupt[irq]);
+ }
+ 
+diff --git a/arch/x86_64/kernel/io_apic.c b/arch/x86_64/kernel/io_apic.c
+index 1c6c6f7..34d7cde 100644
+--- a/arch/x86_64/kernel/io_apic.c
++++ b/arch/x86_64/kernel/io_apic.c
+@@ -774,12 +774,15 @@ static struct irq_chip ioapic_chip;
+ 
+ static void ioapic_register_intr(int irq, unsigned long trigger)
+ {
+-	if (trigger)
++	if (trigger) {
++		irq_desc[irq].status |= IRQ_LEVEL;
+ 		set_irq_chip_and_handler_name(irq, &ioapic_chip,
+ 					      handle_fasteoi_irq, "fasteoi");
+-	else
++	} else {
++		irq_desc[irq].status &= ~IRQ_LEVEL;
+ 		set_irq_chip_and_handler_name(irq, &ioapic_chip,
+ 					      handle_edge_irq, "edge");
++	}
+ }
+ 
+ static void setup_IO_APIC_irq(int apic, int pin, unsigned int irq,
+diff --git a/arch/x86_64/mm/init.c b/arch/x86_64/mm/init.c
+index 9a0e98a..b7e514e 100644
+--- a/arch/x86_64/mm/init.c
++++ b/arch/x86_64/mm/init.c
+@@ -769,8 +769,3 @@ int in_gate_area_no_task(unsigned long addr)
+ 	return (addr >= VSYSCALL_START) && (addr < VSYSCALL_END);
+ }
+ 
+-void *alloc_bootmem_high_node(pg_data_t *pgdat, unsigned long size)
+-{
+-	return __alloc_bootmem_core(pgdat->bdata, size,
+-			SMP_CACHE_BYTES, (4UL*1024*1024*1024), 0);
+-}
+diff --git a/arch/x86_64/mm/pageattr.c b/arch/x86_64/mm/pageattr.c
+index 9148f4a..7cd5254 100644
+--- a/arch/x86_64/mm/pageattr.c
++++ b/arch/x86_64/mm/pageattr.c
+@@ -227,9 +227,14 @@ void global_flush_tlb(void)
+ 	struct page *pg, *next;
+ 	struct list_head l;
+ 
+-	down_read(&init_mm.mmap_sem);
++	/*
++	 * Write-protect the semaphore, to exclude two contexts
++	 * doing a list_replace_init() call in parallel and to
++	 * exclude new additions to the deferred_pages list:
++	 */
++	down_write(&init_mm.mmap_sem);
+ 	list_replace_init(&deferred_pages, &l);
+-	up_read(&init_mm.mmap_sem);
++	up_write(&init_mm.mmap_sem);
+ 
+ 	flush_map(&l);
+ 
+diff --git a/drivers/infiniband/core/uverbs_cmd.c b/drivers/infiniband/core/uverbs_cmd.c
+index 01d7008..495c803 100644
+--- a/drivers/infiniband/core/uverbs_cmd.c
++++ b/drivers/infiniband/core/uverbs_cmd.c
+@@ -147,8 +147,12 @@ static struct ib_uobject *__idr_get_uobj(struct idr *idr, int id,
+ 
+ 	spin_lock(&ib_uverbs_idr_lock);
+ 	uobj = idr_find(idr, id);
+-	if (uobj)
+-		kref_get(&uobj->ref);
++	if (uobj) {
++		if (uobj->context == context)
++			kref_get(&uobj->ref);
++		else
++			uobj = NULL;
++	}
+ 	spin_unlock(&ib_uverbs_idr_lock);
+ 
+ 	return uobj;
+diff --git a/drivers/md/dm-exception-store.c b/drivers/md/dm-exception-store.c
+index 4264f69..5c7569c 100644
+--- a/drivers/md/dm-exception-store.c
++++ b/drivers/md/dm-exception-store.c
+@@ -125,6 +125,8 @@ struct pstore {
+ 	uint32_t callback_count;
+ 	struct commit_callback *callbacks;
+ 	struct dm_io_client *io_client;
++
++	struct workqueue_struct *metadata_wq;
+ };
+ 
+ static inline unsigned int sectors_to_pages(unsigned int sectors)
+@@ -156,10 +158,24 @@ static void free_area(struct pstore *ps)
+ 	ps->area = NULL;
+ }
+ 
++struct mdata_req {
++	struct io_region *where;
++	struct dm_io_request *io_req;
++	struct work_struct work;
++	int result;
++};
++
++static void do_metadata(struct work_struct *work)
++{
++	struct mdata_req *req = container_of(work, struct mdata_req, work);
++
++	req->result = dm_io(req->io_req, 1, req->where, NULL);
++}
++
+ /*
+  * Read or write a chunk aligned and sized block of data from a device.
+  */
+-static int chunk_io(struct pstore *ps, uint32_t chunk, int rw)
++static int chunk_io(struct pstore *ps, uint32_t chunk, int rw, int metadata)
+ {
+ 	struct io_region where = {
+ 		.bdev = ps->snap->cow->bdev,
+@@ -173,8 +189,23 @@ static int chunk_io(struct pstore *ps, uint32_t chunk, int rw)
+ 		.client = ps->io_client,
+ 		.notify.fn = NULL,
+ 	};
++	struct mdata_req req;
++
++	if (!metadata)
++		return dm_io(&io_req, 1, &where, NULL);
+ 
+-	return dm_io(&io_req, 1, &where, NULL);
++	req.where = &where;
++	req.io_req = &io_req;
++
++	/*
++	 * Issue the synchronous I/O from a different thread
++	 * to avoid generic_make_request recursion.
++	 */
++	INIT_WORK(&req.work, do_metadata);
++	queue_work(ps->metadata_wq, &req.work);
++	flush_workqueue(ps->metadata_wq);
++
++	return req.result;
+ }
+ 
+ /*
+@@ -189,7 +220,7 @@ static int area_io(struct pstore *ps, uint32_t area, int rw)
+ 	/* convert a metadata area index to a chunk index */
+ 	chunk = 1 + ((ps->exceptions_per_area + 1) * area);
+ 
+-	r = chunk_io(ps, chunk, rw);
++	r = chunk_io(ps, chunk, rw, 0);
+ 	if (r)
+ 		return r;
+ 
+@@ -230,7 +261,7 @@ static int read_header(struct pstore *ps, int *new_snapshot)
+ 	if (r)
+ 		return r;
+ 
+-	r = chunk_io(ps, 0, READ);
++	r = chunk_io(ps, 0, READ, 1);
+ 	if (r)
+ 		goto bad;
+ 
+@@ -292,7 +323,7 @@ static int write_header(struct pstore *ps)
+ 	dh->version = cpu_to_le32(ps->version);
+ 	dh->chunk_size = cpu_to_le32(ps->snap->chunk_size);
+ 
+-	return chunk_io(ps, 0, WRITE);
++	return chunk_io(ps, 0, WRITE, 1);
+ }
+ 
+ /*
+@@ -409,6 +440,7 @@ static void persistent_destroy(struct exception_store *store)
+ {
+ 	struct pstore *ps = get_info(store);
+ 
++	destroy_workqueue(ps->metadata_wq);
+ 	dm_io_client_destroy(ps->io_client);
+ 	vfree(ps->callbacks);
+ 	free_area(ps);
+@@ -589,6 +621,12 @@ int dm_create_persistent(struct exception_store *store)
+ 	atomic_set(&ps->pending_count, 0);
+ 	ps->callbacks = NULL;
+ 
++	ps->metadata_wq = create_singlethread_workqueue("ksnaphd");
++	if (!ps->metadata_wq) {
++		DMERR("couldn't start header metadata update thread");
++		return -ENOMEM;
++	}
++
+ 	store->destroy = persistent_destroy;
+ 	store->read_metadata = persistent_read_metadata;
+ 	store->prepare_exception = persistent_prepare;
+diff --git a/fs/minix/itree_v1.c b/fs/minix/itree_v1.c
+index 1a5f3bf..82d6554 100644
+--- a/fs/minix/itree_v1.c
++++ b/fs/minix/itree_v1.c
+@@ -23,11 +23,16 @@ static inline block_t *i_data(struct inode *inode)
+ static int block_to_path(struct inode * inode, long block, int offsets[DEPTH])
+ {
+ 	int n = 0;
++	char b[BDEVNAME_SIZE];
+ 
+ 	if (block < 0) {
+-		printk("minix_bmap: block<0\n");
++		printk("MINIX-fs: block_to_path: block %ld < 0 on dev %s\n",
++			block, bdevname(inode->i_sb->s_bdev, b));
+ 	} else if (block >= (minix_sb(inode->i_sb)->s_max_size/BLOCK_SIZE)) {
+-		printk("minix_bmap: block>big\n");
++		if (printk_ratelimit())
++			printk("MINIX-fs: block_to_path: "
++			       "block %ld too big on dev %s\n",
++				block, bdevname(inode->i_sb->s_bdev, b));
+ 	} else if (block < 7) {
+ 		offsets[n++] = block;
+ 	} else if ((block -= 7) < 512) {
+diff --git a/fs/minix/itree_v2.c b/fs/minix/itree_v2.c
+index ad8f0de..f230109 100644
+--- a/fs/minix/itree_v2.c
++++ b/fs/minix/itree_v2.c
+@@ -23,12 +23,17 @@ static inline block_t *i_data(struct inode *inode)
+ static int block_to_path(struct inode * inode, long block, int offsets[DEPTH])
+ {
+ 	int n = 0;
++	char b[BDEVNAME_SIZE];
+ 	struct super_block *sb = inode->i_sb;
+ 
+ 	if (block < 0) {
+-		printk("minix_bmap: block<0\n");
++		printk("MINIX-fs: block_to_path: block %ld < 0 on dev %s\n",
++			block, bdevname(sb->s_bdev, b));
+ 	} else if (block >= (minix_sb(inode->i_sb)->s_max_size/sb->s_blocksize)) {
+-		printk("minix_bmap: block>big\n");
++		if (printk_ratelimit())
++			printk("MINIX-fs: block_to_path: "
++			       "block %ld too big on dev %s\n",
++				block, bdevname(sb->s_bdev, b));
+ 	} else if (block < 7) {
+ 		offsets[n++] = block;
+ 	} else if ((block -= 7) < 256) {
+diff --git a/include/linux/bootmem.h b/include/linux/bootmem.h
+index c83534e..0365ec9 100644
+--- a/include/linux/bootmem.h
++++ b/include/linux/bootmem.h
+@@ -59,7 +59,6 @@ extern void *__alloc_bootmem_core(struct bootmem_data *bdata,
+ 				  unsigned long align,
+ 				  unsigned long goal,
+ 				  unsigned long limit);
+-extern void *alloc_bootmem_high_node(pg_data_t *pgdat, unsigned long size);
+ 
+ #ifndef CONFIG_HAVE_ARCH_BOOTMEM_NODE
+ extern void reserve_bootmem(unsigned long addr, unsigned long size);
+diff --git a/kernel/irq/chip.c b/kernel/irq/chip.c
+index 615ce97..f1a73f0 100644
+--- a/kernel/irq/chip.c
++++ b/kernel/irq/chip.c
+@@ -352,13 +352,10 @@ handle_level_irq(unsigned int irq, struct irq_desc *desc)
+ 	 * keep it masked and get out of here
+ 	 */
+ 	action = desc->action;
+-	if (unlikely(!action || (desc->status & IRQ_DISABLED))) {
+-		desc->status |= IRQ_PENDING;
++	if (unlikely(!action || (desc->status & IRQ_DISABLED)))
+ 		goto out_unlock;
+-	}
+ 
+ 	desc->status |= IRQ_INPROGRESS;
+-	desc->status &= ~IRQ_PENDING;
+ 	spin_unlock(&desc->lock);
+ 
+ 	action_ret = handle_IRQ_event(irq, action);
+diff --git a/kernel/irq/resend.c b/kernel/irq/resend.c
+index 5bfeaed..a804679 100644
+--- a/kernel/irq/resend.c
++++ b/kernel/irq/resend.c
+@@ -62,7 +62,12 @@ void check_irq_resend(struct irq_desc *desc, unsigned int irq)
+ 	 */
+ 	desc->chip->enable(irq);
+ 
+-	if ((status & (IRQ_PENDING | IRQ_REPLAY)) == IRQ_PENDING) {
++	/*
++	 * We do not resend level type interrupts. Level type
++	 * interrupts are resent by hardware when they are still
++	 * active.
++	 */
++	if ((status & (IRQ_LEVEL | IRQ_PENDING | IRQ_REPLAY)) == IRQ_PENDING) {
+ 		desc->status = (status & ~IRQ_PENDING) | IRQ_REPLAY;
+ 
+ 		if (!desc->chip || !desc->chip->retrigger ||
+diff --git a/kernel/params.c b/kernel/params.c
+index e61c46c..8e8ca8f 100644
+--- a/kernel/params.c
++++ b/kernel/params.c
+@@ -591,11 +591,17 @@ static void __init param_sysfs_builtin(void)
+ 
+ 	for (i=0; i < __stop___param - __start___param; i++) {
+ 		char *dot;
++		size_t kplen;
+ 
+ 		kp = &__start___param[i];
++		kplen = strlen(kp->name);
+ 
+ 		/* We do not handle args without periods. */
+-		dot = memchr(kp->name, '.', MAX_KBUILD_MODNAME);
++		if (kplen > MAX_KBUILD_MODNAME) {
++			DEBUGP("kernel parameter name is too long: %s\n", kp->name);
++			continue;
++		}
++		dot = memchr(kp->name, '.', kplen);
+ 		if (!dot) {
+ 			DEBUGP("couldn't find period in %s\n", kp->name);
+ 			continue;
+diff --git a/mm/sparse.c b/mm/sparse.c
+index e03b39f..fdc1454 100644
+--- a/mm/sparse.c
++++ b/mm/sparse.c
+@@ -209,12 +209,6 @@ static int __meminit sparse_init_one_section(struct mem_section *ms,
+ 	return 1;
+ }
+ 
+-__attribute__((weak))
+-void *alloc_bootmem_high_node(pg_data_t *pgdat, unsigned long size)
+-{
+-	return NULL;
+-}
+-
+ static struct page __init *sparse_early_mem_map_alloc(unsigned long pnum)
+ {
+ 	struct page *map;
+@@ -225,11 +219,6 @@ static struct page __init *sparse_early_mem_map_alloc(unsigned long pnum)
+ 	if (map)
+ 		return map;
+ 
+-  	map = alloc_bootmem_high_node(NODE_DATA(nid),
+-                       sizeof(struct page) * PAGES_PER_SECTION);
+-	if (map)
+-		return map;
+-
+ 	map = alloc_bootmem_node(NODE_DATA(nid),
+ 			sizeof(struct page) * PAGES_PER_SECTION);
+ 	if (map)
