@@ -1,0 +1,77 @@
+From stable-bounces@linux.kernel.org Wed Oct 10 03:16:42 2007
+From: Mitsuru Chinen <mitch@linux.vnet.ibm.com>
+Date: Wed, 10 Oct 2007 03:16:26 -0700 (PDT)
+Subject: Fix some cases of missed IPV6 DAD
+To: stable@kernel.org
+Cc: bunk@kernel.org
+Message-ID: <20071010.031626.52166762.davem@davemloft.net>
+
+From: Mitsuru Chinen <mitch@linux.vnet.ibm.com>
+
+changeset 0fcace22d38ce9216f5ba52f929a99d284aa7e49 from mainline
+
+To judge the timing for DAD, netif_carrier_ok() is used. However,
+there is a possibility that dev->qdisc stays noop_qdisc even if
+netif_carrier_ok() returns true. In that case, DAD NS is not sent out.
+We need to defer the IPv6 device initialization until a valid qdisc
+is specified.
+
+Signed-off-by: Mitsuru Chinen <mitch@linux.vnet.ibm.com>
+Signed-off-by: YOSHIFUJI Hideaki <yoshfuji@linux-ipv6.org>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+
+---
+ net/ipv6/addrconf.c |   13 ++++++++++---
+ 1 file changed, 10 insertions(+), 3 deletions(-)
+
+--- a/net/ipv6/addrconf.c
++++ b/net/ipv6/addrconf.c
+@@ -73,6 +73,7 @@
+ #include <net/tcp.h>
+ #include <net/ip.h>
+ #include <net/netlink.h>
++#include <net/pkt_sched.h>
+ #include <linux/if_tunnel.h>
+ #include <linux/rtnetlink.h>
+ 
+@@ -212,6 +213,12 @@ static struct ipv6_devconf ipv6_devconf_
+ const struct in6_addr in6addr_any = IN6ADDR_ANY_INIT;
+ const struct in6_addr in6addr_loopback = IN6ADDR_LOOPBACK_INIT;
+ 
++/* Check if a valid qdisc is available */
++static inline int addrconf_qdisc_ok(struct net_device *dev)
++{
++	return (dev->qdisc != &noop_qdisc);
++}
++
+ static void addrconf_del_timer(struct inet6_ifaddr *ifp)
+ {
+ 	if (del_timer(&ifp->timer))
+@@ -376,7 +383,7 @@ static struct inet6_dev * ipv6_add_dev(s
+ 	}
+ #endif
+ 
+-	if (netif_running(dev) && netif_carrier_ok(dev))
++	if (netif_running(dev) && addrconf_qdisc_ok(dev))
+ 		ndev->if_flags |= IF_READY;
+ 
+ 	ipv6_mc_init_dev(ndev);
+@@ -2269,7 +2276,7 @@ static int addrconf_notify(struct notifi
+ 	case NETDEV_UP:
+ 	case NETDEV_CHANGE:
+ 		if (event == NETDEV_UP) {
+-			if (!netif_carrier_ok(dev)) {
++			if (!addrconf_qdisc_ok(dev)) {
+ 				/* device is not ready yet. */
+ 				printk(KERN_INFO
+ 					"ADDRCONF(NETDEV_UP): %s: "
+@@ -2281,7 +2288,7 @@ static int addrconf_notify(struct notifi
+ 			if (idev)
+ 				idev->if_flags |= IF_READY;
+ 		} else {
+-			if (!netif_carrier_ok(dev)) {
++			if (!addrconf_qdisc_ok(dev)) {
+ 				/* device is still not ready. */
+ 				break;
+ 			}
