@@ -6,6 +6,7 @@ from debian_linux.config import *
 
 class checker(object):
     def __init__(self, dir, arch, subarch, flavour):
+        self.arch, self.subarch, self.flavour = arch, subarch, flavour
         self.config = ConfigReaderCore(["debian/arch"])
         self.filename_new = "%s/Module.symvers" % dir
         abiname = self.config['abi',]['abiname']
@@ -28,11 +29,11 @@ class checker(object):
         add = set(add_info.keys())
         change = set(change_info.keys())
         remove = set(remove_info.keys())
-        add_ignore, change_ignore, remove_ignore = self._ignore(add_info, change_info, remove_info)
+        ignore = self._ignore(add_info, change_info, remove_info)
 
-        add_effective = add - add_ignore
-        change_effective = change - change_ignore
-        remove_effective = remove - remove_ignore
+        add_effective = add - ignore
+        change_effective = change - ignore
+        remove_effective = remove - ignore
 
         if change_effective or remove_effective:
             out.write("ABI has changed!  Refusing to continue.\n")
@@ -51,7 +52,7 @@ class checker(object):
             t.sort()
             for symbol in t:
                 info = []
-                if symbol in add_ignore:
+                if symbol in ignore:
                     info.append("ignored")
                 for i in ('module', 'version', 'export'):
                     info.append("%s: %s" % (i, add_info[symbol][i]))
@@ -62,7 +63,7 @@ class checker(object):
             t.sort()
             for symbol in t:
                 info = []
-                if symbol in change_ignore:
+                if symbol in ignore:
                     info.append("ignored")
                 s = change_info[symbol]
                 changes = s['changes']
@@ -78,16 +79,20 @@ class checker(object):
             t.sort()
             for symbol in t:
                 info = []
-                if symbol in remove_ignore:
+                if symbol in ignore:
                     info.append("ignored")
                 for i in ('module', 'version', 'export'):
-                    info.append("%s: %s" % (i, add_info[symbol][i]))
+                    info.append("%s: %s" % (i, remove_info[symbol][i]))
                 out.write("%-48s %s\n" % (symbol, ", ".join(info)))
 
         return ret
 
     def _ignore(self, add, change, remove):
-        return set(), set(), set()
+        config = self.config.merge('abi', self.arch, self.subarch, self.flavour)
+        ignores = config.get('ignore-changes', None)
+        if ignores is None:
+            return set()
+        return set(ignores.split())
 
 if __name__ == '__main__':
     sys.exit(checker(*sys.argv[1:])(sys.stdout))
