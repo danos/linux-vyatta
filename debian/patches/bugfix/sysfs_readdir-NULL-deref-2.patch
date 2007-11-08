@@ -1,0 +1,128 @@
+From: Tejun Heo <htejun@gmail.com>
+Date: Mon, 11 Jun 2007 05:04:01 +0000 (+0900)
+Subject: sysfs: fix race condition around sd->s_dentry, take#2
+X-Git-Tag: v2.6.22-rc5~45
+X-Git-Url: http://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Fstable%2Flinux-2.6.22.y.git;a=commitdiff_plain;h=dd14cbc994709a1c5a64ed3621f583c49a27e521
+
+sysfs: fix race condition around sd->s_dentry, take#2
+
+Allowing attribute and symlink dentries to be reclaimed means
+sd->s_dentry can change dynamically.  However, updates to the field
+are unsynchronized leading to race conditions.  This patch adds
+sysfs_lock and use it to synchronize updates to sd->s_dentry.
+
+Due to the locking around ->d_iput, the check in sysfs_drop_dentry()
+is complex.  sysfs_lock only protect sd->s_dentry pointer itself.  The
+validity of the dentry is protected by dcache_lock, so whether dentry
+is alive or not can only be tested while holding both locks.
+
+This is minimal backport of sysfs_drop_dentry() rewrite in devel
+branch.
+
+Signed-off-by: Tejun Heo <htejun@gmail.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+---
+
+Backported to Debian's 2.6.18 by dann frazier <dannf@hp.com>
+
+diff -urpN linux-source-2.6.18.orig/fs/sysfs/dir.c linux-source-2.6.18/fs/sysfs/dir.c
+--- linux-source-2.6.18.orig/fs/sysfs/dir.c	2007-11-07 15:44:57.000000000 -0700
++++ linux-source-2.6.18/fs/sysfs/dir.c	2007-11-07 15:38:57.000000000 -0700
+@@ -12,14 +12,26 @@
+ #include "sysfs.h"
+ 
+ DECLARE_RWSEM(sysfs_rename_sem);
++spinlock_t sysfs_lock = SPIN_LOCK_UNLOCKED;
+ 
+ static void sysfs_d_iput(struct dentry * dentry, struct inode * inode)
+ {
+ 	struct sysfs_dirent * sd = dentry->d_fsdata;
+ 
+ 	if (sd) {
+-		BUG_ON(sd->s_dentry != dentry);
+-		sd->s_dentry = NULL;
++		/* sd->s_dentry is protected with sysfs_lock.  This
++		 * allows sysfs_drop_dentry() to dereference it.
++		 */
++		spin_lock(&sysfs_lock);
++
++		/* The dentry might have been deleted or another
++		 * lookup could have happened updating sd->s_dentry to
++		 * point the new dentry.  Ignore if it isn't pointing
++		 * to this dentry.
++		 */
++		if (sd->s_dentry == dentry)
++			sd->s_dentry = NULL;
++		spin_unlock(&sysfs_lock);
+ 		sysfs_put(sd);
+ 	}
+ 	iput(inode);
+@@ -218,7 +230,10 @@ static int sysfs_attach_attr(struct sysf
+         }
+ 
+ 	dentry->d_fsdata = sysfs_get(sd);
++	/* protect sd->s_dentry against sysfs_d_iput */
++	spin_lock(&sysfs_lock);
+ 	sd->s_dentry = dentry;
++	spin_unlock(&sysfs_lock);
+ 	error = sysfs_create(dentry, (attr->mode & S_IALLUGO) | S_IFREG, init);
+ 	if (error) {
+ 		sysfs_put(sd);
+@@ -240,7 +255,10 @@ static int sysfs_attach_link(struct sysf
+ 	int err = 0;
+ 
+ 	dentry->d_fsdata = sysfs_get(sd);
++	/* protect sd->s_dentry against sysfs_d_iput */
++	spin_lock(&sysfs_lock);
+ 	sd->s_dentry = dentry;
++	spin_unlock(&sysfs_lock);
+ 	err = sysfs_create(dentry, S_IFLNK|S_IRWXUGO, init_symlink);
+ 	if (!err) {
+ 		dentry->d_op = &sysfs_dentry_ops;
+diff -urpN linux-source-2.6.18.orig/fs/sysfs/inode.c linux-source-2.6.18/fs/sysfs/inode.c
+--- linux-source-2.6.18.orig/fs/sysfs/inode.c	2007-11-07 15:44:57.000000000 -0700
++++ linux-source-2.6.18/fs/sysfs/inode.c	2007-11-07 15:40:19.000000000 -0700
+@@ -217,8 +217,22 @@ const unsigned char * sysfs_get_name(str
+  */
+ void sysfs_drop_dentry(struct sysfs_dirent * sd, struct dentry * parent)
+ {
+-	struct dentry * dentry = sd->s_dentry;
++	struct dentry *dentry = NULL;
+ 
++	/* We're not holding a reference to ->s_dentry dentry but the
++	 * field will stay valid as long as sysfs_lock is held.
++	 */
++	spin_lock(&sysfs_lock);
++	spin_lock(&dcache_lock);
++
++	/* dget dentry if it's still alive */
++	if (sd->s_dentry && sd->s_dentry->d_inode)
++		dentry = dget_locked(sd->s_dentry);
++
++	spin_unlock(&dcache_lock);
++	spin_unlock(&sysfs_lock);
++
++	/* drop dentry */
+ 	if (dentry) {
+ 		spin_lock(&dcache_lock);
+ 		spin_lock(&dentry->d_lock);
+@@ -232,6 +246,8 @@ void sysfs_drop_dentry(struct sysfs_dire
+ 			spin_unlock(&dentry->d_lock);
+ 			spin_unlock(&dcache_lock);
+ 		}
++
++		dput(dentry);
+ 	}
+ }
+ 
+diff -urpN linux-source-2.6.18.orig/fs/sysfs/sysfs.h linux-source-2.6.18/fs/sysfs/sysfs.h
+--- linux-source-2.6.18.orig/fs/sysfs/sysfs.h	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/fs/sysfs/sysfs.h	2007-11-07 15:38:57.000000000 -0700
+@@ -20,6 +20,7 @@ extern const unsigned char * sysfs_get_n
+ extern void sysfs_drop_dentry(struct sysfs_dirent *sd, struct dentry *parent);
+ extern int sysfs_setattr(struct dentry *dentry, struct iattr *iattr);
+ 
++extern spinlock_t sysfs_lock;
+ extern struct rw_semaphore sysfs_rename_sem;
+ extern struct super_block * sysfs_sb;
+ extern const struct file_operations sysfs_dir_operations;
