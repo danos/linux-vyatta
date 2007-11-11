@@ -1,0 +1,54 @@
+From: John W. Linville <linville@tuxdriver.com>
+Date: Tue, 2 Oct 2007 04:03:54 +0000 (-0700)
+Subject: [IEEE80211]: avoid integer underflow for runt rx frames
+X-Git-Tag: kvm-47~34^2~42^2
+X-Git-Url: http://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Favi%2Fkvm.git;a=commitdiff_plain;h=04045f98e0457aba7d4e6736f37eed189c48a5f7
+
+[IEEE80211]: avoid integer underflow for runt rx frames
+
+Reported by Chris Evans <scarybeasts@gmail.com>:
+
+> The summary is that an evil 80211 frame can crash out a victim's
+> machine. It only applies to drivers using the 80211 wireless code, and
+> only then to certain drivers (and even then depends on a card's
+> firmware not dropping a dubious packet). I must confess I'm not
+> keeping track of Linux wireless support, and the different protocol
+> stacks etc.
+>
+> Details are as follows:
+>
+> ieee80211_rx() does not explicitly check that "skb->len >= hdrlen".
+> There are other skb->len checks, but not enough to prevent a subtle
+> off-by-two error if the frame has the IEEE80211_STYPE_QOS_DATA flag
+> set.
+>
+> This leads to integer underflow and crash here:
+>
+> if (frag != 0)
+>    flen -= hdrlen;
+>
+> (flen is subsequently used as a memcpy length parameter).
+
+How about this?
+
+Signed-off-by: John W. Linville <linville@tuxdriver.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+
+diff --git a/net/ieee80211/ieee80211_rx.c b/net/ieee80211/ieee80211_rx.c
+index f2de2e4..6284c99 100644
+--- a/net/ieee80211/ieee80211_rx.c
++++ b/net/ieee80211/ieee80211_rx.c
+@@ -366,6 +366,12 @@ int ieee80211_rx(struct ieee80211_device *ieee, struct sk_buff *skb,
+ 	frag = WLAN_GET_SEQ_FRAG(sc);
+ 	hdrlen = ieee80211_get_hdrlen(fc);
+ 
++	if (skb->len < hdrlen) {
++		printk(KERN_INFO "%s: invalid SKB length %d\n",
++			dev->name, skb->len);
++		goto rx_dropped;
++	}
++
+ 	/* Put this code here so that we avoid duplicating it in all
+ 	 * Rx paths. - Jean II */
+ #ifdef CONFIG_WIRELESS_EXT
