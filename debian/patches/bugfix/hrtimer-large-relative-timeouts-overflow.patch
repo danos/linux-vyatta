@@ -1,0 +1,45 @@
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Fri, 7 Dec 2007 18:16:17 +0000 (+0100)
+Subject: hrtimers: avoid overflow for large relative timeouts
+X-Git-Tag: v2.6.24-rc5~49^2~2
+X-Git-Url: http://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Ftorvalds%2Flinux-2.6.git;a=commitdiff_plain;h=62f0f61e6673e67151a7c8c0f9a09c7ea43fe2b5;hp=f194d132e4971111f85c18c96067acffb13cee6d
+
+hrtimers: avoid overflow for large relative timeouts
+
+Relative hrtimers with a large timeout value might end up as negative
+timer values, when the current time is added in hrtimer_start().
+
+This in turn is causing the clockevents_set_next() function to set an
+huge timeout and sleep for quite a long time when we have a clock
+source which is capable of long sleeps like HPET. With PIT this almost
+goes unnoticed as the maximum delta is ~27ms. The non-hrt/nohz code
+sorts this out in the next timer interrupt, so we never noticed that
+problem which has been there since the first day of hrtimers.
+
+This bug became more apparent in 2.6.24 which activates HPET on more
+hardware.
+
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Signed-off-by: Ingo Molnar <mingo@elte.hu>
+---
+
+Adjusted to apply to Debian's 2.6.18 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.18.orig/kernel/hrtimer.c linux-source-2.6.18/kernel/hrtimer.c
+--- linux-source-2.6.18.orig/kernel/hrtimer.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/kernel/hrtimer.c	2007-12-16 18:43:03.000000000 -0700
+@@ -443,6 +443,14 @@ hrtimer_start(struct hrtimer *timer, kti
+ #ifdef CONFIG_TIME_LOW_RES
+ 		tim = ktime_add(tim, base->resolution);
+ #endif
++		/*
++		 * Careful here: User space might have asked for a
++		 * very long sleep, so the add above might result in a
++		 * negative number, which enqueues the timer in front
++		 * of the queue.
++		 */
++		if (tim.tv64 < 0)
++			tim.tv64 = KTIME_MAX;
+ 	}
+ 	timer->expires = tim;
+ 
