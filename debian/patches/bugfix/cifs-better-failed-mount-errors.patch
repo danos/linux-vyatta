@@ -1,0 +1,234 @@
+From: Steve French <sfrench@us.ibm.com>
+Date: Thu, 18 Oct 2007 21:45:27 +0000 (+0000)
+Subject: [CIFS] log better errors on failed mounts
+X-Git-Tag: v2.6.24-rc1~138^2
+X-Git-Url: http://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Ftorvalds%2Flinux-2.6.git;a=commitdiff_plain;h=a761ac579b89bc1f00212a42401398108deba65c
+
+[CIFS] log better errors on failed mounts
+
+Also returns more accurate errors to mount for the cases of
+account expired and password expired
+
+Acked-by: Jeff Layton <jlayton@redhat.com>
+Signed-off-by: Steve French <sfrench@us.ibm.com>
+---
+
+Backported to Debian's 2.6.18 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.18.orig/fs/cifs/cifsproto.h linux-source-2.6.18/fs/cifs/cifsproto.h
+--- linux-source-2.6.18.orig/fs/cifs/cifsproto.h	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/fs/cifs/cifsproto.h	2007-11-25 14:13:04.000000000 -0700
+@@ -49,7 +49,8 @@ extern int SendReceive(const unsigned in
+ 			int * /* bytes returned */ , const int long_op);
+ extern int SendReceive2(const unsigned int /* xid */ , struct cifsSesInfo *,
+ 			struct kvec *, int /* nvec to send */, 
+-			int * /* type of buf returned */ , const int long_op);
++			int * /* type of buf returned */ , const int long_op,
++			const int logError /* whether to log status code*/ );
+ extern int SendReceiveBlockingLock(const unsigned int /* xid */ , struct cifsTconInfo *,
+ 				struct smb_hdr * /* input */ ,
+ 				struct smb_hdr * /* out */ ,
+@@ -64,7 +65,7 @@ extern unsigned int smbCalcSize_LE(struc
+ extern int decode_negTokenInit(unsigned char *security_blob, int length,
+ 			enum securityEnum *secType);
+ extern int cifs_inet_pton(int, char * source, void *dst);
+-extern int map_smb_to_linux_error(struct smb_hdr *smb);
++extern int map_smb_to_linux_error(struct smb_hdr *smb, int logErr);
+ extern void header_assemble(struct smb_hdr *, char /* command */ ,
+ 			    const struct cifsTconInfo *, int /* length of
+ 			    fixed section (word count) in two byte units */);
+diff -urpN linux-source-2.6.18.orig/fs/cifs/cifssmb.c linux-source-2.6.18/fs/cifs/cifssmb.c
+--- linux-source-2.6.18.orig/fs/cifs/cifssmb.c	2007-10-03 12:38:14.000000000 -0600
++++ linux-source-2.6.18/fs/cifs/cifssmb.c	2007-11-25 14:14:07.000000000 -0700
+@@ -1170,9 +1170,8 @@ CIFSSMBRead(const int xid, struct cifsTc
+ 
+ 	iov[0].iov_base = (char *)pSMB;
+ 	iov[0].iov_len = pSMB->hdr.smb_buf_length + 4;
+-	rc = SendReceive2(xid, tcon->ses, iov, 
+-			  1 /* num iovecs */,
+-			  &resp_buf_type, 0); 
++	rc = SendReceive2(xid, tcon->ses, iov, 1 /* num iovecs */,
++			 &resp_buf_type, 0 /* not long op */, 1 /* log err */ );
+ 	cifs_stats_inc(&tcon->num_reads);
+ 	pSMBr = (READ_RSP *)iov[0].iov_base;
+ 	if (rc) {
+@@ -1389,7 +1388,7 @@ CIFSSMBWrite2(const int xid, struct cifs
+ 	
+ 
+ 	rc = SendReceive2(xid, tcon->ses, iov, n_vec + 1, &resp_buf_type,
+-			  long_op);
++			  long_op, 0 /* do not log STATUS code */ );
+ 	cifs_stats_inc(&tcon->num_writes);
+ 	if (rc) {
+ 		cFYI(1, ("Send error Write2 = %d", rc));
+@@ -2822,7 +2821,8 @@ CIFSSMBGetCIFSACL(const int xid, struct 
+ 	iov[0].iov_base = (char *)pSMB;
+ 	iov[0].iov_len = pSMB->hdr.smb_buf_length + 4;
+ 
+-	rc = SendReceive2(xid, tcon->ses, iov, 1 /* num iovec */, &buf_type, 0);
++	rc = SendReceive2(xid, tcon->ses, iov, 1 /* num iovec */, &buf_type,
++			 0 /* not long op */, 0 /* do not log STATUS codes */ );
+ 	cifs_stats_inc(&tcon->num_acl_get);
+ 	if (rc) {
+ 		cFYI(1, ("Send error in QuerySecDesc = %d", rc));
+diff -urpN linux-source-2.6.18.orig/fs/cifs/netmisc.c linux-source-2.6.18/fs/cifs/netmisc.c
+--- linux-source-2.6.18.orig/fs/cifs/netmisc.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/fs/cifs/netmisc.c	2007-11-25 14:16:03.000000000 -0700
+@@ -114,10 +114,16 @@ static const struct smb_to_posix_error m
+ 	{ERRusempx, -EIO},
+ 	{ERRusestd, -EIO},
+ 	{ERR_NOTIFY_ENUM_DIR, -ENOBUFS},
+-	{ERRaccountexpired, -EACCES},
++	{ERRnoSuchUser, -EACCES},
++/*	{ERRaccountexpired, -EACCES},
+ 	{ERRbadclient, -EACCES},
+ 	{ERRbadLogonTime, -EACCES},
+-	{ERRpasswordExpired, -EACCES},
++	{ERRpasswordExpired, -EACCES},*/
++	{ERRaccountexpired, -EKEYEXPIRED},
++	{ERRbadclient, -EACCES},
++	{ERRbadLogonTime, -EACCES},
++	{ERRpasswordExpired, -EKEYEXPIRED},
++
+ 	{ERRnosupport, -EINVAL},
+ 	{0, 0}
+ };
+@@ -314,7 +320,7 @@ static const struct {
+ 	 from NT_STATUS_NO_SUCH_USER to NT_STATUS_LOGON_FAILURE 
+ 	 during the session setup } */
+ 	{
+-	ERRDOS, ERRnoaccess, NT_STATUS_NO_SUCH_USER}, {
++	ERRDOS, ERRnoaccess, NT_STATUS_NO_SUCH_USER}, { /* could map to 2238 */
+ 	ERRHRD, ERRgeneral, NT_STATUS_GROUP_EXISTS}, {
+ 	ERRHRD, ERRgeneral, NT_STATUS_NO_SUCH_GROUP}, {
+ 	ERRHRD, ERRgeneral, NT_STATUS_MEMBER_IN_GROUP}, {
+@@ -329,10 +335,10 @@ static const struct {
+ 	ERRHRD, ERRgeneral, NT_STATUS_PASSWORD_RESTRICTION}, {
+ 	ERRDOS, ERRnoaccess, NT_STATUS_LOGON_FAILURE}, {
+ 	ERRHRD, ERRgeneral, NT_STATUS_ACCOUNT_RESTRICTION}, {
+-	ERRSRV, 2241, NT_STATUS_INVALID_LOGON_HOURS}, {
+-	ERRSRV, 2240, NT_STATUS_INVALID_WORKSTATION}, {
++	ERRSRV, ERRbadLogonTime, NT_STATUS_INVALID_LOGON_HOURS}, {
++	ERRSRV, ERRbadclient, NT_STATUS_INVALID_WORKSTATION}, {
+ 	ERRSRV, ERRpasswordExpired, NT_STATUS_PASSWORD_EXPIRED}, {
+-	ERRSRV, 2239, NT_STATUS_ACCOUNT_DISABLED}, {
++	ERRSRV, ERRaccountexpired, NT_STATUS_ACCOUNT_DISABLED}, {
+ 	ERRHRD, ERRgeneral, NT_STATUS_NONE_MAPPED}, {
+ 	ERRHRD, ERRgeneral, NT_STATUS_TOO_MANY_LUIDS_REQUESTED}, {
+ 	ERRHRD, ERRgeneral, NT_STATUS_LUIDS_EXHAUSTED}, {
+@@ -629,7 +635,7 @@ static const struct {
+ 	ERRDOS, ERRnoaccess, NT_STATUS_TRUST_FAILURE}, {
+ 	ERRHRD, ERRgeneral, NT_STATUS_MUTANT_LIMIT_EXCEEDED}, {
+ 	ERRDOS, ERRnetlogonNotStarted, NT_STATUS_NETLOGON_NOT_STARTED}, {
+-	ERRSRV, 2239, NT_STATUS_ACCOUNT_EXPIRED}, {
++	ERRSRV, ERRaccountexpired, NT_STATUS_ACCOUNT_EXPIRED}, {
+ 	ERRHRD, ERRgeneral, NT_STATUS_POSSIBLE_DEADLOCK}, {
+ 	ERRHRD, ERRgeneral, NT_STATUS_NETWORK_CREDENTIAL_CONFLICT}, {
+ 	ERRHRD, ERRgeneral, NT_STATUS_REMOTE_SESSION_LIMIT}, {
+@@ -798,7 +804,7 @@ ntstatus_to_dos(__u32 ntstatus, __u8 * e
+ }
+ 
+ int
+-map_smb_to_linux_error(struct smb_hdr *smb)
++map_smb_to_linux_error(struct smb_hdr *smb, int logErr)
+ {
+ 	unsigned int i;
+ 	int rc = -EIO;		/* if transport error smb error may not be set */
+@@ -814,7 +820,9 @@ map_smb_to_linux_error(struct smb_hdr *s
+ 	if (smb->Flags2 & SMBFLG2_ERR_STATUS) {
+ 		/* translate the newer STATUS codes to old style errors and then to POSIX errors */
+ 		__u32 err = le32_to_cpu(smb->Status.CifsError);
+-		if(cifsFYI & CIFS_RC)
++		if (logErr && (err != (NT_STATUS_MORE_PROCESSING_REQUIRED)))
++			cifs_print_status(err);
++		else if (cifsFYI & CIFS_RC)
+ 			cifs_print_status(err);
+ 		ntstatus_to_dos(err, &smberrclass, &smberrcode);
+ 	} else {
+@@ -854,7 +862,8 @@ map_smb_to_linux_error(struct smb_hdr *s
+ 	}
+ 	/* else ERRHRD class errors or junk  - return EIO */
+ 
+-	cFYI(1, (" !!Mapping smb error code %d to POSIX err %d !!", smberrcode,rc));
++	cFYI(1, ("Mapping smb error code %d to POSIX err %d",
++		 smberrcode, rc));
+ 
+ 	/* generic corrective action e.g. reconnect SMB session on ERRbaduid could be added */
+ 
+diff -urpN linux-source-2.6.18.orig/fs/cifs/sess.c linux-source-2.6.18/fs/cifs/sess.c
+--- linux-source-2.6.18.orig/fs/cifs/sess.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/fs/cifs/sess.c	2007-11-25 14:17:16.000000000 -0700
+@@ -482,7 +482,8 @@ CIFS_SessSetup(unsigned int xid, struct 
+ 
+ 	iov[1].iov_base = str_area;
+ 	iov[1].iov_len = count; 
+-	rc = SendReceive2(xid, ses, iov, 2 /* num_iovecs */, &resp_buf_type, 0);
++	rc = SendReceive2(xid, ses, iov, 2 /* num_iovecs */, &resp_buf_type,
++			  0 /* not long op */, 1 /* log NT STATUS if any */ );
+ 	/* SMB request buf freed in SendReceive2 */
+ 
+ 	cFYI(1,("ssetup rc from sendrecv2 is %d",rc));
+diff -urpN linux-source-2.6.18.orig/fs/cifs/smberr.h linux-source-2.6.18/fs/cifs/smberr.h
+--- linux-source-2.6.18.orig/fs/cifs/smberr.h	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/fs/cifs/smberr.h	2007-11-25 14:12:02.000000000 -0700
+@@ -173,9 +173,10 @@
+ #define ERRusestd		251	/* temporarily unable to use either raw
+ 					   or mpx */
+ #define ERR_NOTIFY_ENUM_DIR	1024
++#define ERRnoSuchUser		2238	/* user account does not exist */
+ #define ERRaccountexpired	2239
+-#define ERRbadclient		2240
+-#define ERRbadLogonTime		2241
++#define ERRbadclient		2240	/* can not logon from this client */
++#define ERRbadLogonTime		2241	/* logon hours do not allow this */
+ #define ERRpasswordExpired	2242
+ #define ERRnetlogonNotStarted	2455
+ #define ERRnosupport		0xFFFF
+diff -urpN linux-source-2.6.18.orig/fs/cifs/transport.c linux-source-2.6.18/fs/cifs/transport.c
+--- linux-source-2.6.18.orig/fs/cifs/transport.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/fs/cifs/transport.c	2007-11-25 14:18:15.000000000 -0700
+@@ -419,7 +419,7 @@ static int wait_for_response(struct cifs
+ int
+ SendReceive2(const unsigned int xid, struct cifsSesInfo *ses, 
+ 	     struct kvec *iov, int n_vec, int * pRespBufType /* ret */, 
+-	     const int long_op)
++	     const int long_op, const int logError)
+ {
+ 	int rc = 0;
+ 	unsigned int receive_len;
+@@ -465,7 +465,6 @@ SendReceive2(const unsigned int xid, str
+ 		wake_up(&ses->server->request_q);
+ 		return rc;
+ 	}
+-
+  	rc = cifs_sign_smb2(iov, n_vec, ses->server, &midQ->sequence_number);
+ 
+ 	midQ->midState = MID_REQUEST_SUBMITTED;
+@@ -568,8 +567,7 @@ SendReceive2(const unsigned int xid, str
+ 			}
+ 
+ 			/* BB special case reconnect tid and uid here? */
+-			/* BB special case Errbadpassword and pwdexpired here */
+-			rc = map_smb_to_linux_error(midQ->resp_buf);
++			rc = map_smb_to_linux_error(midQ->resp_buf, logError);
+ 
+ 			/* convert ByteCount if necessary */
+ 			if (receive_len >=
+@@ -750,7 +748,7 @@ SendReceive(const unsigned int xid, stru
+ 			*pbytes_returned = out_buf->smb_buf_length;
+ 
+ 			/* BB special case reconnect tid and uid here? */
+-			rc = map_smb_to_linux_error(out_buf);
++			rc = map_smb_to_linux_error(out_buf, 0 /* no log */ );
+ 
+ 			/* convert ByteCount if necessary */
+ 			if (receive_len >=
+@@ -995,7 +993,7 @@ SendReceiveBlockingLock(const unsigned i
+ 			*pbytes_returned = out_buf->smb_buf_length;
+ 
+ 			/* BB special case reconnect tid and uid here? */
+-			rc = map_smb_to_linux_error(out_buf);
++			rc = map_smb_to_linux_error(out_buf, 0 /* no log */ );
+ 
+ 			/* convert ByteCount if necessary */
+ 			if (receive_len >=
