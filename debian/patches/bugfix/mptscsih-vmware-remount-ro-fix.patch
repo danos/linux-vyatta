@@ -1,0 +1,38 @@
+From: Eric Moore <eric.moore@lsi.com>
+Date: Mon, 19 Mar 2007 16:31:51 +0000 (-0600)
+Subject: [SCSI] fusion: remove VMWare guest OS remounted as read only work around
+X-Git-Tag: v2.6.22-rc1~1015^2~46
+X-Git-Url: http://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Ftorvalds%2Flinux-2.6.git;a=commitdiff_plain;h=ad8c31bb69d60c0c6bc6431bccdf67e5a96c0d31
+
+[SCSI] fusion: remove VMWare guest OS remounted as read only work around
+
+This address the issue of VMWare guest OS being remounted as read-only
+becuase the underlying device was held busy too long and at the
+same time address Engenio MPP driver concerns over infinite retries.
+This patch removes the code that snoops the SAM STATUS on busy, which
+would be returning DID_BUS_BUSY, instead we return the status as is.
+Retry hanlding seems to be properly handled in scsi_softirq_done,
+where a busy sam status would only occurr for the time specified by
+(cmd->allowed +1) * cmd->timeout_per_command.
+
+Signed-off-by: Eric Moore <Eric.Moore@lsi.com>
+Signed-off-by: James Bottomley <James.Bottomley@SteelEye.com>
+---
+
+Adjusted to apply to Debian's 2.6.18 by dann frazier <dannf@hp.com>
+
+diff -urpN linux-source-2.6.18.orig/drivers/message/fusion/mptscsih.c linux-source-2.6.18/drivers/message/fusion/mptscsih.c
+--- linux-source-2.6.18.orig/drivers/message/fusion/mptscsih.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/drivers/message/fusion/mptscsih.c	2007-12-20 17:57:16.000000000 -0700
+@@ -768,10 +768,7 @@ mptscsih_io_done(MPT_ADAPTER *ioc, MPT_F
+ 			sc->resid=0;
+ 		case MPI_IOCSTATUS_SCSI_RECOVERED_ERROR:	/* 0x0040 */
+ 		case MPI_IOCSTATUS_SUCCESS:			/* 0x0000 */
+-			if (scsi_status == MPI_SCSI_STATUS_BUSY)
+-				sc->result = (DID_BUS_BUSY << 16) | scsi_status;
+-			else
+-				sc->result = (DID_OK << 16) | scsi_status;
++			sc->result = (DID_OK << 16) | scsi_status;
+ 			if (scsi_state == 0) {
+ 				;
+ 			} else if (scsi_state & MPI_SCSI_STATE_AUTOSENSE_VALID) {
