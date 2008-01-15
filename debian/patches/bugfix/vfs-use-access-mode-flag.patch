@@ -1,0 +1,52 @@
+From: Linus Torvalds <torvalds@woody.linux-foundation.org>
+Date: Sat, 12 Jan 2008 22:06:34 +0000 (-0800)
+Subject: Use access mode instead of open flags to determine needed permissions
+X-Git-Url: http://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Ftorvalds%2Flinux-2.6.git;a=commitdiff_plain;h=974a9f0b47da74e28f68b9c8645c3786aa5ace1a
+
+Use access mode instead of open flags to determine needed permissions
+
+Way back when (in commit 834f2a4a1554dc5b2598038b3fe8703defcbe467, aka
+"VFS: Allow the filesystem to return a full file pointer on open intent"
+to be exact), Trond changed the open logic to keep track of the original
+flags to a file open, in order to pass down the the intent of a dentry
+lookup to the low-level filesystem.
+
+However, when doing that reorganization, it changed the meaning of
+namei_flags, and thus inadvertently changed the test of access mode for
+directories (and RO filesystem) to use the wrong flag.  So fix those
+test back to use access mode ("acc_mode") rather than the open flag
+("flag").
+
+Issue noticed by Bill Roman at Datalight.
+
+Reported-and-tested-by: Bill Roman <bill.roman@datalight.com>
+Acked-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+Acked-by: Al Viro <viro@ZenIV.linux.org.uk>
+Cc: Christoph Hellwig <hch@lst.de>
+Cc: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+---
+
+Adjusted to apply to Debian's 2.6.18 by dann frazier <dannf@hp.com>
+
+diff -urpN linux-source-2.6.18.orig/fs/namei.c linux-source-2.6.18/fs/namei.c
+--- linux-source-2.6.18.orig/fs/namei.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/fs/namei.c	2008-01-15 16:42:10.000000000 -0700
+@@ -1500,7 +1500,7 @@ int may_open(struct nameidata *nd, int a
+ 	if (S_ISLNK(inode->i_mode))
+ 		return -ELOOP;
+ 	
+-	if (S_ISDIR(inode->i_mode) && (flag & FMODE_WRITE))
++	if (S_ISDIR(inode->i_mode) && (acc_mode & MAY_WRITE))
+ 		return -EISDIR;
+ 
+ 	error = vfs_permission(nd, acc_mode);
+@@ -1519,7 +1519,7 @@ int may_open(struct nameidata *nd, int a
+ 			return -EACCES;
+ 
+ 		flag &= ~O_TRUNC;
+-	} else if (IS_RDONLY(inode) && (flag & FMODE_WRITE))
++	} else if (IS_RDONLY(inode) && (acc_mode & MAY_WRITE))
+ 		return -EROFS;
+ 	/*
+ 	 * An append-only file must be opened in append mode for writing.
