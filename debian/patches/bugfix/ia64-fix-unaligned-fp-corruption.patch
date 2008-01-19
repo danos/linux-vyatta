@@ -1,0 +1,57 @@
+From: Luck, Tony <tony.luck@intel.com>
+Date: Mon, 14 Jan 2008 17:59:24 +0000 (-0800)
+Subject: [IA64] Fix unaligned handler for floating point instructions with base update
+X-Git-Tag: v2.6.24-rc8~1
+X-Git-Url: http://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Ftorvalds%2Flinux-2.6.git;a=commitdiff_plain;h=1a499150e4ec1299232e24389f648d059ce5617a
+
+[IA64] Fix unaligned handler for floating point instructions with base update
+
+The compiler team did the hard work for this distilling a problem in
+large fortran application which showed up when applied to a 290MB input
+data set down to this instruction:
+
+	ldfd f34=[r17],-8
+
+Which they noticed incremented r17 by 0x10 rather than decrementing it
+by 8 when the value in r17 caused an unaligned data fault.  I tracked
+it down to some bad instruction decoding in unaligned.c. The code
+assumes that the 'x' bit can determine whether the instruction is
+an "ldf" or "ldfp" ... which it is for opcode=6 (see table 4-29 on
+page 3:302 of the SDM).  But for opcode=7 the 'x' bit is irrelevent,
+all variants are "ldf" instructions (see table 4-36 on page 3:306).
+
+Note also that interpreting the instruction as "ldfp" means that the
+"paired" floating point register (f35 in the example here) will also
+be corrupted.
+
+Signed-off-by: Tony Luck <tony.luck@intel.com>
+---
+
+diff --git a/arch/ia64/kernel/unaligned.c b/arch/ia64/kernel/unaligned.c
+index 2173de9..f6a1aeb 100644
+--- a/arch/ia64/kernel/unaligned.c
++++ b/arch/ia64/kernel/unaligned.c
+@@ -1488,16 +1488,19 @@ ia64_handle_unaligned (unsigned long ifa, struct pt_regs *regs)
+ 	      case LDFA_OP:
+ 	      case LDFCCLR_OP:
+ 	      case LDFCNC_OP:
+-	      case LDF_IMM_OP:
+-	      case LDFA_IMM_OP:
+-	      case LDFCCLR_IMM_OP:
+-	      case LDFCNC_IMM_OP:
+ 		if (u.insn.x)
+ 			ret = emulate_load_floatpair(ifa, u.insn, regs);
+ 		else
+ 			ret = emulate_load_float(ifa, u.insn, regs);
+ 		break;
+ 
++	      case LDF_IMM_OP:
++	      case LDFA_IMM_OP:
++	      case LDFCCLR_IMM_OP:
++	      case LDFCNC_IMM_OP:
++		ret = emulate_load_float(ifa, u.insn, regs);
++		break;
++
+ 	      case STF_OP:
+ 	      case STF_IMM_OP:
+ 		ret = emulate_store_float(ifa, u.insn, regs);
