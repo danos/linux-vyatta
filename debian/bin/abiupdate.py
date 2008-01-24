@@ -113,6 +113,7 @@ class main(object):
         import urllib2
         u = url(self.source, filename)
         filename_out = self.dir + "/" + filename
+        print u
         f_in = urllib2.urlopen(u)
         f_out = file(filename_out, 'w')
         while 1:
