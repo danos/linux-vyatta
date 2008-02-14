@@ -1,0 +1,120 @@
+From: Nick Piggin <npiggin@suse.de>
+Date: Sat, 2 Feb 2008 02:08:53 +0000 (+0100)
+Subject: vm audit: add VM_DONTEXPAND to mmap for drivers that need it (CVE-2008-0007)
+X-Git-Tag: v2.6.22.17~1
+X-Git-Url: http://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Fstable%2Flinux-2.6.22.y.git;a=commitdiff_plain;h=83af8eda68a3f0c227d0eb05348e58ae27a62e7e
+
+vm audit: add VM_DONTEXPAND to mmap for drivers that need it (CVE-2008-0007)
+
+Drivers that register a ->fault handler, but do not range-check the
+offset argument, must set VM_DONTEXPAND in the vm_flags in order to
+prevent an expanding mremap from overflowing the resource.
+
+I've audited the tree and attempted to fix these problems (usually by
+adding VM_DONTEXPAND where it is not obvious).
+
+Signed-off-by: Nick Piggin <npiggin@suse.de>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+---
+
+Backported to Debian's 2.6.18 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.18.orig/drivers/char/drm/drm_vm.c linux-source-2.6.18/drivers/char/drm/drm_vm.c
+--- linux-source-2.6.18.orig/drivers/char/drm/drm_vm.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/drivers/char/drm/drm_vm.c	2008-02-13 22:17:32.000000000 -0700
+@@ -479,6 +479,7 @@ static int drm_mmap_dma(struct file *fil
+ 	vma->vm_ops = &drm_vm_dma_ops;
+ 
+ 	vma->vm_flags |= VM_RESERVED;	/* Don't swap */
++	vma->vm_flags |= VM_DONTEXPAND;
+ 
+ 	vma->vm_file = filp;	/* Needed for drm_vm_open() */
+ 	drm_vm_open(vma);
+@@ -656,6 +657,7 @@ int drm_mmap(struct file *filp, struct v
+ 		return -EINVAL;	/* This should never happen. */
+ 	}
+ 	vma->vm_flags |= VM_RESERVED;	/* Don't swap */
++	vma->vm_flags |= VM_DONTEXPAND;
+ 
+ 	vma->vm_file = filp;	/* Needed for drm_vm_open() */
+ 	drm_vm_open(vma);
+diff -urpN linux-source-2.6.18.orig/fs/ncpfs/mmap.c linux-source-2.6.18/fs/ncpfs/mmap.c
+--- linux-source-2.6.18.orig/fs/ncpfs/mmap.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/fs/ncpfs/mmap.c	2008-02-13 22:17:35.000000000 -0700
+@@ -47,9 +47,6 @@ static struct page* ncp_file_mmap_nopage
+ 	pos = address - area->vm_start + (area->vm_pgoff << PAGE_SHIFT);
+ 
+ 	count = PAGE_SIZE;
+-	if (address + PAGE_SIZE > area->vm_end) {
+-		count = area->vm_end - address;
+-	}
+ 	/* what we can read in one go */
+ 	bufsize = NCP_SERVER(inode)->buffer_size;
+ 
+diff -urpN linux-source-2.6.18.orig/kernel/relay.c linux-source-2.6.18/kernel/relay.c
+--- linux-source-2.6.18.orig/kernel/relay.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/kernel/relay.c	2008-02-13 22:17:35.000000000 -0700
+@@ -84,6 +84,7 @@ int relay_mmap_buf(struct rchan_buf *buf
+ 		return -EINVAL;
+ 
+ 	vma->vm_ops = &relay_file_mmap_ops;
++	vma->vm_flags |= VM_DONTEXPAND;
+ 	vma->vm_private_data = buf;
+ 	buf->chan->cb->buf_mapped(buf, filp);
+ 
+diff -urpN linux-source-2.6.18.orig/sound/oss/via82cxxx_audio.c linux-source-2.6.18/sound/oss/via82cxxx_audio.c
+--- linux-source-2.6.18.orig/sound/oss/via82cxxx_audio.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/sound/oss/via82cxxx_audio.c	2008-02-13 22:17:35.000000000 -0700
+@@ -2104,6 +2104,7 @@ static struct page * via_mm_nopage (stru
+ {
+ 	struct via_info *card = vma->vm_private_data;
+ 	struct via_channel *chan = &card->ch_out;
++	unsigned long max_bufs;
+ 	struct page *dmapage;
+ 	unsigned long pgoff;
+ 	int rd, wr;
+@@ -2127,14 +2128,11 @@ static struct page * via_mm_nopage (stru
+ 	rd = card->ch_in.is_mapped;
+ 	wr = card->ch_out.is_mapped;
+ 
+-#ifndef VIA_NDEBUG
+-	{
+-	unsigned long max_bufs = chan->frag_number;
+-	if (rd && wr) max_bufs *= 2;
+-	/* via_dsp_mmap() should ensure this */
+-	assert (pgoff < max_bufs);
+-	}
+-#endif
++	max_bufs = chan->frag_number;
++	if (rd && wr)
++		max_bufs *= 2;
++	if (pgoff >= max_bufs)
++		return NOPAGE_SIGBUS;
+ 
+ 	/* if full-duplex (read+write) and we have two sets of bufs,
+ 	 * then the playback buffers come first, sez soundcard.c */
+diff -urpN linux-source-2.6.18.orig/sound/usb/usx2y/usX2Yhwdep.c linux-source-2.6.18/sound/usb/usx2y/usX2Yhwdep.c
+--- linux-source-2.6.18.orig/sound/usb/usx2y/usX2Yhwdep.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/sound/usb/usx2y/usX2Yhwdep.c	2008-02-13 22:17:35.000000000 -0700
+@@ -88,7 +88,7 @@ static int snd_us428ctls_mmap(struct snd
+ 		us428->us428ctls_sharedmem->CtlSnapShotLast = -2;
+ 	}
+ 	area->vm_ops = &us428ctls_vm_ops;
+-	area->vm_flags |= VM_RESERVED;
++	area->vm_flags |= VM_RESERVED | VM_DONTEXPAND;
+ 	area->vm_private_data = hw->private_data;
+ 	return 0;
+ }
+diff -urpN linux-source-2.6.18.orig/sound/usb/usx2y/usx2yhwdeppcm.c linux-source-2.6.18/sound/usb/usx2y/usx2yhwdeppcm.c
+--- linux-source-2.6.18.orig/sound/usb/usx2y/usx2yhwdeppcm.c	2008-02-10 10:48:45.000000000 -0700
++++ linux-source-2.6.18/sound/usb/usx2y/usx2yhwdeppcm.c	2008-02-13 22:17:35.000000000 -0700
+@@ -728,7 +728,7 @@ static int snd_usX2Y_hwdep_pcm_mmap(stru
+ 		return -ENODEV;
+ 	}
+ 	area->vm_ops = &snd_usX2Y_hwdep_pcm_vm_ops;
+-	area->vm_flags |= VM_RESERVED;
++	area->vm_flags |= VM_RESERVED | VM_DONTEXPAND;
+ 	area->vm_private_data = hw->private_data;
+ 	return 0;
+ }
