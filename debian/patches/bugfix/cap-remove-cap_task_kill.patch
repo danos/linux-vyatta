@@ -1,0 +1,119 @@
+Backported to Debian's 2.6.24 by dann frazier <dannf@debian.org>
+
+commit aedb60a67c10a0861af179725d060765262ba0fb
+Author: Serge Hallyn <serge@hallyn.com>
+Date:   Fri Feb 29 15:14:57 2008 +0000
+
+    file capabilities: remove cap_task_kill()
+    
+    The original justification for cap_task_kill() was as follows:
+    
+    	check_kill_permission() does appropriate uid equivalence checks.
+    	However with file capabilities it becomes possible for an
+    	unprivileged user to execute a file with file capabilities
+    	resulting in a more privileged task with the same uid.
+    
+    However now that cap_task_kill() always returns 0 (permission
+    granted) when p->uid==current->uid, the whole hook is worthless,
+    and only likely to create more subtle problems in the corner cases
+    where it might still be called but return -EPERM.  Those cases
+    are basically when uids are different but euid/suid is equivalent
+    as per the check in check_kill_permission().
+    
+    One example of a still-broken application is 'at' for non-root users.
+    
+    This patch removes cap_task_kill().
+    
+    Signed-off-by: Serge Hallyn <serge@hallyn.com>
+    Acked-by: Andrew G. Morgan <morgan@kernel.org>
+    Earlier-version-tested-by: Luiz Fernando N. Capitulino <lcapitulino@mandriva.com.br>
+    Acked-by: Casey Schaufler <casey@schaufler-ca.com>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff -urpN linux-source-2.6.24.orig/include/linux/security.h linux-source-2.6.24/include/linux/security.h
+--- linux-source-2.6.24.orig/include/linux/security.h	2008-01-24 15:58:37.000000000 -0700
++++ linux-source-2.6.24/include/linux/security.h	2008-03-25 00:12:19.000000000 -0600
+@@ -62,7 +62,6 @@ extern int cap_inode_need_killpriv(struc
+ extern int cap_inode_killpriv(struct dentry *dentry);
+ extern int cap_task_post_setuid (uid_t old_ruid, uid_t old_euid, uid_t old_suid, int flags);
+ extern void cap_task_reparent_to_init (struct task_struct *p);
+-extern int cap_task_kill(struct task_struct *p, struct siginfo *info, int sig, u32 secid);
+ extern int cap_task_setscheduler (struct task_struct *p, int policy, struct sched_param *lp);
+ extern int cap_task_setioprio (struct task_struct *p, int ioprio);
+ extern int cap_task_setnice (struct task_struct *p, int nice);
+@@ -2112,7 +2111,7 @@ static inline int security_task_kill (st
+ 				      struct siginfo *info, int sig,
+ 				      u32 secid)
+ {
+-	return cap_task_kill(p, info, sig, secid);
++	return 0;
+ }
+ 
+ static inline int security_task_wait (struct task_struct *p)
+diff -urpN linux-source-2.6.24.orig/security/capability.c linux-source-2.6.24/security/capability.c
+--- linux-source-2.6.24.orig/security/capability.c	2008-01-24 15:58:37.000000000 -0700
++++ linux-source-2.6.24/security/capability.c	2008-03-25 00:12:19.000000000 -0600
+@@ -40,7 +40,6 @@ static struct security_operations capabi
+ 	.inode_need_killpriv =		cap_inode_need_killpriv,
+ 	.inode_killpriv =		cap_inode_killpriv,
+ 
+-	.task_kill =			cap_task_kill,
+ 	.task_setscheduler =		cap_task_setscheduler,
+ 	.task_setioprio =		cap_task_setioprio,
+ 	.task_setnice =			cap_task_setnice,
+diff -urpN linux-source-2.6.24.orig/security/commoncap.c linux-source-2.6.24/security/commoncap.c
+--- linux-source-2.6.24.orig/security/commoncap.c	2008-03-24 17:45:05.000000000 -0600
++++ linux-source-2.6.24/security/commoncap.c	2008-03-25 00:37:27.000000000 -0600
+@@ -527,40 +527,6 @@ int cap_task_setnice (struct task_struct
+ 	return cap_safe_nice(p);
+ }
+ 
+-int cap_task_kill(struct task_struct *p, struct siginfo *info,
+-				int sig, u32 secid)
+-{
+-	if (info != SEND_SIG_NOINFO && (is_si_special(info) || SI_FROMKERNEL(info)))
+-		return 0;
+-
+-	/*
+-	 * Running a setuid root program raises your capabilities.
+-	 * Killing your own setuid root processes was previously
+-	 * allowed.
+-	 * We must preserve legacy signal behavior in this case.
+-	 */
+-	if (p->uid == current->uid)
+-		return 0;
+-
+-	/* sigcont is permitted within same session */
+-	if (sig == SIGCONT && (task_session_nr(current) == task_session_nr(p)))
+-		return 0;
+-
+-	if (secid)
+-		/*
+-		 * Signal sent as a particular user.
+-		 * Capabilities are ignored.  May be wrong, but it's the
+-		 * only thing we can do at the moment.
+-		 * Used only by usb drivers?
+-		 */
+-		return 0;
+-	if (cap_issubset(p->cap_permitted, current->cap_permitted))
+-		return 0;
+-	if (capable(CAP_KILL))
+-		return 0;
+-
+-	return -EPERM;
+-}
+ #else
+ int cap_task_setscheduler (struct task_struct *p, int policy,
+ 			   struct sched_param *lp)
+@@ -575,11 +541,6 @@ int cap_task_setnice (struct task_struct
+ {
+ 	return 0;
+ }
+-int cap_task_kill(struct task_struct *p, struct siginfo *info,
+-				int sig, u32 secid)
+-{
+-	return 0;
+-}
+ #endif
+ 
+ void cap_task_reparent_to_init (struct task_struct *p)
