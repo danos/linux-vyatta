@@ -78,7 +78,15 @@ class Gencontrol(Base):
         makefile.add('source_%s_%s_real' % (arch, featureset), cmds = cmds_source)
 
     def do_flavour_setup(self, vars, makeflags, arch, featureset, flavour, extra):
-        vars.update(self.config.merge('image', arch, featureset, flavour))
+        config_image = self.config.merge('image', arch, featureset, flavour)
+
+        vars.update(config_image)
+
+        vars['localversion-image'] = vars['localversion']
+        override_localversion = config_image.get('override-localversion', None)
+        if override_localversion is not None:
+            vars['localversion-image'] = vars['localversion_headers'] + '-' + override_localversion
+
         for i in (
             ('cflags', 'CFLAGS'),
             ('compiler', 'COMPILER'),
@@ -87,6 +95,7 @@ class Gencontrol(Base):
             ('kpkg-arch', 'KPKG_ARCH'),
             ('kpkg-subarch', 'KPKG_SUBARCH'),
             ('localversion', 'LOCALVERSION'),
+            ('localversion-image', 'LOCALVERSION_IMAGE'),
             ('override-host-type', 'OVERRIDE_HOST_TYPE'),
             ('type', 'TYPE'),
         ):
