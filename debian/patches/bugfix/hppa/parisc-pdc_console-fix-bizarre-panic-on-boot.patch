@@ -1,0 +1,156 @@
+-stable review patch.  If anyone has any objections, please let us know.
+---------------------
+
+From: Kyle McMartin <kyle@shortfin.cabal.ca>
+
+upstream commit ef1afd4d79f0479960ff36bb5fe6ec6eba1ebff2
+
+commit 721fdf34167580ff98263c74cead8871d76936e6
+Author: Kyle McMartin <kyle@shortfin.cabal.ca>
+Date:   Thu Dec 6 09:32:15 2007 -0800
+
+    [PARISC] print more than one character at a time for pdc console
+
+introduced a subtle bug by accidentally removing the "static" from
+iodc_dbuf. This resulted in, what appeared to be, a trap without
+*current set to a task. Probably the result of a trap in real mode
+while calling firmware.
+
+Also do other misc clean ups. Since the only input from firmware is non
+blocking, share iodc_dbuf between input and output, and spinlock the
+only callers.
+
+[jejb: fixed up rejections against the stable tree]
+
+Signed-off-by: Kyle McMartin <kyle@parisc-linux.org>
+Signed-off-by: James Bottomley <James.Bottomley@HansenPartnership.com>
+Signed-off-by: Chris Wright <chrisw@sous-sol.org>
+---
+ arch/parisc/kernel/firmware.c |   27 +++++++++++++++++----------
+ arch/parisc/kernel/pdc_cons.c |   19 +++++++++++++++++--
+ include/asm-parisc/pdc.h      |    3 +--
+ 3 files changed, 35 insertions(+), 14 deletions(-)
+
+--- a/arch/parisc/kernel/firmware.c
++++ b/arch/parisc/kernel/firmware.c
+@@ -1080,6 +1080,9 @@ void pdc_io_reset_devices(void)
+ 	spin_unlock_irqrestore(&pdc_lock, flags);
+ }
+ 
++/* locked by pdc_console_lock */
++static int __attribute__((aligned(8)))   iodc_retbuf[32];
++static char __attribute__((aligned(64))) iodc_dbuf[4096];
+ 
+ /**
+  * pdc_iodc_print - Console print using IODC.
+@@ -1091,24 +1094,20 @@ void pdc_io_reset_devices(void)
+  * Since the HP console requires CR+LF to perform a 'newline', we translate
+  * "\n" to "\r\n".
+  */
+-int pdc_iodc_print(unsigned char *str, unsigned count)
++int pdc_iodc_print(const unsigned char *str, unsigned count)
+ {
+-	/* XXX Should we spinlock posx usage */
+ 	static int posx;        /* for simple TAB-Simulation... */
+-	int __attribute__((aligned(8)))   iodc_retbuf[32];
+-	char __attribute__((aligned(64))) iodc_dbuf[4096];
+ 	unsigned int i;
+ 	unsigned long flags;
+ 
+-	memset(iodc_dbuf, 0, 4096);
+-	for (i = 0; i < count && i < 2048;) {
++	for (i = 0; i < count && i < 79;) {
+ 		switch(str[i]) {
+ 		case '\n':
+ 			iodc_dbuf[i+0] = '\r';
+ 			iodc_dbuf[i+1] = '\n';
+ 			i += 2;
+ 			posx = 0;
+-			break;
++			goto print;
+ 		case '\t':
+ 			while (posx & 7) {
+ 				iodc_dbuf[i] = ' ';
+@@ -1124,6 +1123,16 @@ int pdc_iodc_print(unsigned char *str, u
+ 		}
+ 	}
+ 
++	/* if we're at the end of line, and not already inserting a newline,
++	 * insert one anyway. iodc console doesn't claim to support >79 char
++	 * lines. don't account for this in the return value.
++	 */
++	if (i == 79 && iodc_dbuf[i-1] != '\n') {
++		iodc_dbuf[i+0] = '\r';
++		iodc_dbuf[i+1] = '\n';
++	}
++
++print:
+         spin_lock_irqsave(&pdc_lock, flags);
+         real32_call(PAGE0->mem_cons.iodc_io,
+                     (unsigned long)PAGE0->mem_cons.hpa, ENTRY_IO_COUT,
+@@ -1142,11 +1151,9 @@ int pdc_iodc_print(unsigned char *str, u
+  */
+ int pdc_iodc_getc(void)
+ {
+-	unsigned long flags;
+-        static int __attribute__((aligned(8)))   iodc_retbuf[32];
+-        static char __attribute__((aligned(64))) iodc_dbuf[4096];
+ 	int ch;
+ 	int status;
++	unsigned long flags;
+ 
+ 	/* Bail if no console input device. */
+ 	if (!PAGE0->mem_kbd.iodc_io)
+--- a/arch/parisc/kernel/pdc_cons.c
++++ b/arch/parisc/kernel/pdc_cons.c
+@@ -52,10 +52,18 @@
+ #include <linux/tty.h>
+ #include <asm/pdc.h>		/* for iodc_call() proto and friends */
+ 
++static spinlock_t pdc_console_lock = SPIN_LOCK_UNLOCKED;
+ 
+ static void pdc_console_write(struct console *co, const char *s, unsigned count)
+ {
+-	pdc_iodc_print(s, count);
++	int i = 0;
++	unsigned long flags;
++
++	spin_lock_irqsave(&pdc_console_lock, flags);
++	do {
++		i += pdc_iodc_print(s + i, count - i);
++	} while (i < count);
++	spin_unlock_irqrestore(&pdc_console_lock, flags);
+ }
+ 
+ void pdc_printf(const char *fmt, ...)
+@@ -73,7 +81,14 @@ void pdc_printf(const char *fmt, ...)
+ 
+ int pdc_console_poll_key(struct console *co)
+ {
+-	return pdc_iodc_getc();
++	int c;
++	unsigned long flags;
++
++	spin_lock_irqsave(&pdc_console_lock, flags);
++	c = pdc_iodc_getc();
++	spin_unlock_irqrestore(&pdc_console_lock, flags);
++
++	return c;
+ }
+ 
+ static int pdc_console_setup(struct console *co, char *options)
+--- a/include/asm-parisc/pdc.h
++++ b/include/asm-parisc/pdc.h
+@@ -645,8 +645,7 @@ int pdc_soft_power_button(int sw_control
+ void pdc_io_reset(void);
+ void pdc_io_reset_devices(void);
+ int pdc_iodc_getc(void);
+-int pdc_iodc_print(unsigned char *str, unsigned count);
+-void pdc_printf(const char *fmt, ...);
++int pdc_iodc_print(const unsigned char *str, unsigned count);
+ 
+ void pdc_emergency_unlock(void);
+ int pdc_sti_call(unsigned long func, unsigned long flags,
+
+-- 
+
