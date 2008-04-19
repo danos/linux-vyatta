@@ -1,0 +1,61 @@
+-stable review patch.  If anyone has any objections, please let us know.
+---------------------
+
+From: Kyle McMartin <kyle@shortfin.cabal.ca>
+
+upstream commit: c20a84c91048c76c1379011c96b1a5cee5c7d9a0
+
+commit f9e77acd4060fefbb60a351cdb8d30fca27fe194
+Author: Thomas Gleixner <tglx@linutronix.de>
+Date:   Sun Feb 24 02:10:05 2008 +0000
+
+    futex: runtime enable pi and robust functionality
+ 
+
+which was backported to stable based on mainline Commit
+a0c1e9073ef7428a14309cba010633a6cd6719ea added code to futex.c
+to detect whether futex_atomic_cmpxchg_inatomic was implemented at run
+time:
+
++       curval = cmpxchg_futex_value_locked(NULL, 0, 0);
++       if (curval == -EFAULT)
++               futex_cmpxchg_enabled = 1;
+
+This is bogus on parisc, since page zero in kernel virtual space is the
+gateway page for syscall entry, and should not be read from the kernel.
+(That, and we really don't like the kernel faulting on its own address
+ space...)
+
+Signed-off-by: Kyle McMartin <kyle@mcmartin.ca>
+Signed-off-by: James Bottomley <James.Bottomley@HansenPartnership.com>
+Signed-off-by: Chris Wright <chrisw@sous-sol.org>
+---
+ include/asm-parisc/futex.h |   10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+--- a/include/asm-parisc/futex.h
++++ b/include/asm-parisc/futex.h
+@@ -56,6 +56,12 @@ futex_atomic_cmpxchg_inatomic(int __user
+ 	int err = 0;
+ 	int uval;
+ 
++	/* futex.c wants to do a cmpxchg_inatomic on kernel NULL, which is
++	 * our gateway page, and causes no end of trouble...
++	 */
++	if (segment_eq(KERNEL_DS, get_fs()) && !uaddr)
++		return -EFAULT;
++
+ 	if (!access_ok(VERIFY_WRITE, uaddr, sizeof(int)))
+ 		return -EFAULT;
+ 
+@@ -67,5 +73,5 @@ futex_atomic_cmpxchg_inatomic(int __user
+ 	return uval;
+ }
+ 
+-#endif
+-#endif
++#endif /*__KERNEL__*/
++#endif /*_ASM_PARISC_FUTEX_H*/
+
+-- 
+
