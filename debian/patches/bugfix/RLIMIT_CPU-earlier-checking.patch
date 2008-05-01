@@ -1,0 +1,80 @@
+commit 9926e4c74300c4b31dee007298c6475d33369df0
+Author: Tom Alsberg <alsbergt@cs.huji.ac.il>
+Date:   Tue May 8 00:30:31 2007 -0700
+
+    CPU time limit patch / setrlimit(RLIMIT_CPU, 0) cheat fix
+    
+    As discovered here today, the change in Kernel 2.6.17 intended to inhibit
+    users from setting RLIMIT_CPU to 0 (as that is equivalent to unlimited) by
+    "cheating" and setting it to 1 in such a case, does not make a difference,
+    as the check is done in the wrong place (too late), and only applies to the
+    profiling code.
+    
+    On all systems I checked running kernels above 2.6.17, no matter what the
+    hard and soft CPU time limits were before, a user could escape them by
+    issuing in the shell (sh/bash/zsh) "ulimit -t 0", and then the user's
+    process was not ever killed.
+    
+    Attached is a trivial patch to fix that.  Simply moving the check to a
+    slightly earlier location (specifically, before the line that actually
+    assigns the limit - *old_rlim = new_rlim), does the trick.
+    
+    Do note that at least the zsh (but not ash, dash, or bash) shell has the
+    problem of "caching" the limits set by the ulimit command, so when running
+    zsh the fix will not immediately be evident - after entering "ulimit -t 0",
+    "ulimit -a" will show "-t: cpu time (seconds) 0", even though the actual
+    limit as returned by getrlimit(...) will be 1.  It can be verified by
+    opening a subshell (which will not have the values of the parent shell in
+    cache) and checking in it, or just by running a CPU intensive command like
+    "echo '65536^1048576' | bc" and verifying that it dumps core after one
+    second.
+    
+    Regardless of whether that is a misfeature in the shell, perhaps it would
+    be better to return -EINVAL from setrlimit in such a case instead of
+    cheating and setting to 1, as that does not really reflect the actual state
+    of the process anymore.  I do not however know what the ground for that
+    decision was in the original 2.6.17 change, and whether there would be any
+    "backward" compatibility issues, so I preferred not to touch that right
+    now.
+    
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+Adjusted to apply to Debian's 2.6.18 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.18.orig/kernel/sys.c linux-source-2.6.18/kernel/sys.c
+--- linux-source-2.6.18.orig/kernel/sys.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/kernel/sys.c	2008-04-04 18:04:09.000000000 -0600
+@@ -1807,6 +1807,16 @@ asmlinkage long sys_setrlimit(unsigned i
+ 	if (retval)
+ 		return retval;
+ 
++	if (resource == RLIMIT_CPU && new_rlim.rlim_cur == 0) {
++		/*
++		 * The caller is asking for an immediate RLIMIT_CPU
++		 * expiry.  But we use the zero value to mean "it was
++		 * never set".  So let's cheat and make it one second
++		 * instead
++		 */
++		new_rlim.rlim_cur = 1;
++	}
++
+ 	task_lock(current->group_leader);
+ 	*old_rlim = new_rlim;
+ 	task_unlock(current->group_leader);
+@@ -1828,15 +1838,6 @@ asmlinkage long sys_setrlimit(unsigned i
+ 		unsigned long rlim_cur = new_rlim.rlim_cur;
+ 		cputime_t cputime;
+ 
+-		if (rlim_cur == 0) {
+-			/*
+-			 * The caller is asking for an immediate RLIMIT_CPU
+-			 * expiry.  But we use the zero value to mean "it was
+-			 * never set".  So let's cheat and make it one second
+-			 * instead
+-			 */
+-			rlim_cur = 1;
+-		}
+ 		cputime = secs_to_cputime(rlim_cur);
+ 		read_lock(&tasklist_lock);
+ 		spin_lock_irq(&current->sighand->siglock);
