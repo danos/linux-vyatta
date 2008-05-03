@@ -1,0 +1,32 @@
+Subject: [PATCH] m68k: Skip writebacks for bus errors
+
+From: Roman Zippel <zippel@linux-m68k.org>
+
+When handling bus error exceptions, skip the writeback, as the fault has to be
+first fixed by the caller.
+---
+ arch/m68k/kernel/traps.c |   13 ++++++++++---
+ 1 file changed, 10 insertions(+), 3 deletions(-)
+
+--- a/arch/m68k/kernel/traps.c
++++ b/arch/m68k/kernel/traps.c
+@@ -474,9 +474,16 @@ static inline void access_error040(struc
+ 			if (fp->un.fmt7.wb2a == fp->un.fmt7.faddr)
+ 				fp->un.fmt7.wb2s &= ~WBV_040;
+ 		}
+-	} else if (send_fault_sig(&fp->ptregs) > 0) {
+-		printk("68040 access error, ssw=%x\n", ssw);
+-		trap_c(fp);
++	} else {
++		/* In case of a bus error we either kill the process or expect
++		 * the kernel to catch the fault, which then is also
++		 * responsible for cleaning up the mess, so skip writebacks.
++		 */
++		current->thread.signo = SIGBUS;
++		current->thread.faddr = fp->un.fmt7.faddr;
++		if (send_fault_sig(&fp->ptregs) > 0)
++			printk("68040 access error, ssw=%x\n", ssw);
++		return;
+ 	}
+ 
+ 	do_040writebacks(fp);
