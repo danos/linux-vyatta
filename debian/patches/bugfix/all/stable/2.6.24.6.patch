@@ -1,0 +1,250 @@
+diff -urpN linux-source-2.6.24.orig/arch/x86/kernel/io_apic_32.c linux-source-2.6.24/arch/x86/kernel/io_apic_32.c
+--- linux-source-2.6.24.orig/arch/x86/kernel/io_apic_32.c	2008-04-24 09:47:40.000000000 -0600
++++ linux-source-2.6.24/arch/x86/kernel/io_apic_32.c	2008-05-05 23:12:09.000000000 -0600
+@@ -2478,6 +2478,7 @@ void destroy_irq(unsigned int irq)
+ 	dynamic_irq_cleanup(irq);
+ 
+ 	spin_lock_irqsave(&vector_lock, flags);
++	clear_bit(irq_vector[irq], used_vectors);
+ 	irq_vector[irq] = 0;
+ 	spin_unlock_irqrestore(&vector_lock, flags);
+ }
+diff -urpN linux-source-2.6.24.orig/drivers/isdn/capi/capidrv.c linux-source-2.6.24/drivers/isdn/capi/capidrv.c
+--- linux-source-2.6.24.orig/drivers/isdn/capi/capidrv.c	2008-01-24 15:58:37.000000000 -0700
++++ linux-source-2.6.24/drivers/isdn/capi/capidrv.c	2008-05-05 23:12:09.000000000 -0600
+@@ -2332,13 +2332,14 @@ static int __init capidrv_init(void)
+ 
+ static void __exit capidrv_exit(void)
+ {
+-	char rev[10];
++	char rev[32];
+ 	char *p;
+ 
+ 	if ((p = strchr(revision, ':')) != 0) {
+-		strcpy(rev, p + 1);
+-		p = strchr(rev, '$');
+-		*p = 0;
++		strncpy(rev, p + 1, sizeof(rev));
++		rev[sizeof(rev)-1] = 0;
++		if ((p = strchr(rev, '$')) != 0)
++			*p = 0;
+ 	} else {
+ 		strcpy(rev, " ??? ");
+ 	}
+diff -urpN linux-source-2.6.24.orig/drivers/isdn/i4l/isdn_net.c linux-source-2.6.24/drivers/isdn/i4l/isdn_net.c
+--- linux-source-2.6.24.orig/drivers/isdn/i4l/isdn_net.c	2008-01-24 15:58:37.000000000 -0700
++++ linux-source-2.6.24/drivers/isdn/i4l/isdn_net.c	2008-05-05 23:12:09.000000000 -0600
+@@ -2010,6 +2010,7 @@ isdn_net_init(struct net_device *ndev)
+ 	ndev->flags = IFF_NOARP|IFF_POINTOPOINT;
+ 	ndev->type = ARPHRD_ETHER;
+ 	ndev->addr_len = ETH_ALEN;
++	ndev->validate_addr = NULL;
+ 
+ 	/* for clients with MPPP maybe higher values better */
+ 	ndev->tx_queue_len = 30;
+diff -urpN linux-source-2.6.24.orig/drivers/media/video/cx88/cx88-cards.c linux-source-2.6.24/drivers/media/video/cx88/cx88-cards.c
+--- linux-source-2.6.24.orig/drivers/media/video/cx88/cx88-cards.c	2008-01-24 15:58:37.000000000 -0700
++++ linux-source-2.6.24/drivers/media/video/cx88/cx88-cards.c	2008-05-05 23:12:09.000000000 -0600
+@@ -1349,6 +1349,10 @@ static const struct cx88_board cx88_boar
+ 		}},
+ 		/* fixme: Add radio support */
+ 		.mpeg           = CX88_MPEG_DVB | CX88_MPEG_BLACKBIRD,
++		.radio = {
++			.type   = CX88_RADIO,
++			.gpio0	= 0xe780,
++		},
+ 	},
+ 	[CX88_BOARD_ADSTECH_PTV_390] = {
+ 		.name           = "ADS Tech Instant Video PCI",
+diff -urpN linux-source-2.6.24.orig/drivers/media/video/ivtv/ivtv-ioctl.c linux-source-2.6.24/drivers/media/video/ivtv/ivtv-ioctl.c
+--- linux-source-2.6.24.orig/drivers/media/video/ivtv/ivtv-ioctl.c	2008-01-24 15:58:37.000000000 -0700
++++ linux-source-2.6.24/drivers/media/video/ivtv/ivtv-ioctl.c	2008-05-05 23:12:09.000000000 -0600
+@@ -727,7 +727,8 @@ int ivtv_v4l2_ioctls(struct ivtv *itv, s
+ 
+ 		memset(vcap, 0, sizeof(*vcap));
+ 		strcpy(vcap->driver, IVTV_DRIVER_NAME);     /* driver name */
+-		strcpy(vcap->card, itv->card_name); 	    /* card type */
++		strncpy(vcap->card, itv->card_name,
++				sizeof(vcap->card)-1); 	    /* card type */
+ 		strcpy(vcap->bus_info, pci_name(itv->dev)); /* bus info... */
+ 		vcap->version = IVTV_DRIVER_VERSION; 	    /* version */
+ 		vcap->capabilities = itv->v4l2_cap; 	    /* capabilities */
+diff -urpN linux-source-2.6.24.orig/drivers/net/tehuti.c linux-source-2.6.24/drivers/net/tehuti.c
+--- linux-source-2.6.24.orig/drivers/net/tehuti.c	2008-01-24 15:58:37.000000000 -0700
++++ linux-source-2.6.24/drivers/net/tehuti.c	2008-05-05 23:12:09.000000000 -0600
+@@ -625,6 +625,12 @@ static void __init bdx_firmware_endianes
+ 		s_firmLoad[i] = CPU_CHIP_SWAP32(s_firmLoad[i]);
+ }
+ 
++static int bdx_range_check(struct bdx_priv *priv, u32 offset)
++{
++	return (offset > (u32) (BDX_REGS_SIZE / priv->nic->port_num)) ?
++		-EINVAL : 0;
++}
++
+ static int bdx_ioctl_priv(struct net_device *ndev, struct ifreq *ifr, int cmd)
+ {
+ 	struct bdx_priv *priv = ndev->priv;
+@@ -643,9 +649,15 @@ static int bdx_ioctl_priv(struct net_dev
+ 		DBG("%d 0x%x 0x%x\n", data[0], data[1], data[2]);
+ 	}
+ 
++	if (!capable(CAP_NET_ADMIN))
++		return -EPERM;
++
+ 	switch (data[0]) {
+ 
+ 	case BDX_OP_READ:
++		error = bdx_range_check(priv, data[1]);
++		if (error < 0)
++			return error;
+ 		data[2] = READ_REG(priv, data[1]);
+ 		DBG("read_reg(0x%x)=0x%x (dec %d)\n", data[1], data[2],
+ 		    data[2]);
+@@ -655,6 +667,9 @@ static int bdx_ioctl_priv(struct net_dev
+ 		break;
+ 
+ 	case BDX_OP_WRITE:
++		error = bdx_range_check(priv, data[1]);
++		if (error < 0)
++			return error;
+ 		WRITE_REG(priv, data[1], data[2]);
+ 		DBG("write_reg(0x%x, 0x%x)\n", data[1], data[2]);
+ 		break;
+diff -urpN linux-source-2.6.24.orig/drivers/usb/gadget/ether.c linux-source-2.6.24/drivers/usb/gadget/ether.c
+--- linux-source-2.6.24.orig/drivers/usb/gadget/ether.c	2008-01-24 15:58:37.000000000 -0700
++++ linux-source-2.6.24/drivers/usb/gadget/ether.c	2008-05-05 23:12:09.000000000 -0600
+@@ -1561,6 +1561,7 @@ done_set_intf:
+ 				memcpy(req->buf, buf, n);
+ 				req->complete = rndis_response_complete;
+ 				rndis_free_response(dev->rndis_config, buf);
++				value = n;
+ 			}
+ 			/* else stalls ... spec says to avoid that */
+ 		}
+diff -urpN linux-source-2.6.24.orig/drivers/usb/serial/usb-serial.c linux-source-2.6.24/drivers/usb/serial/usb-serial.c
+--- linux-source-2.6.24.orig/drivers/usb/serial/usb-serial.c	2008-01-24 15:58:37.000000000 -0700
++++ linux-source-2.6.24/drivers/usb/serial/usb-serial.c	2008-05-05 23:12:09.000000000 -0600
+@@ -844,6 +844,7 @@ int usb_serial_probe(struct usb_interfac
+ 	serial->num_interrupt_in = num_interrupt_in;
+ 	serial->num_interrupt_out = num_interrupt_out;
+ 
++#if 0
+ 	/* check that the device meets the driver's requirements */
+ 	if ((type->num_interrupt_in != NUM_DONT_CARE &&
+ 				type->num_interrupt_in != num_interrupt_in)
+@@ -857,6 +858,7 @@ int usb_serial_probe(struct usb_interfac
+ 		kfree(serial);
+ 		return -EIO;
+ 	}
++#endif
+ 
+ 	/* found all that we need */
+ 	dev_info(&interface->dev, "%s converter detected\n",
+diff -urpN linux-source-2.6.24.orig/fs/dnotify.c linux-source-2.6.24/fs/dnotify.c
+--- linux-source-2.6.24.orig/fs/dnotify.c	2008-01-24 15:58:37.000000000 -0700
++++ linux-source-2.6.24/fs/dnotify.c	2008-05-05 23:12:09.000000000 -0600
+@@ -20,6 +20,7 @@
+ #include <linux/init.h>
+ #include <linux/spinlock.h>
+ #include <linux/slab.h>
++#include <linux/file.h>
+ 
+ int dir_notify_enable __read_mostly = 1;
+ 
+@@ -66,6 +67,7 @@ int fcntl_dirnotify(int fd, struct file 
+ 	struct dnotify_struct **prev;
+ 	struct inode *inode;
+ 	fl_owner_t id = current->files;
++	struct file *f;
+ 	int error = 0;
+ 
+ 	if ((arg & ~DN_MULTISHOT) == 0) {
+@@ -92,6 +94,15 @@ int fcntl_dirnotify(int fd, struct file 
+ 		prev = &odn->dn_next;
+ 	}
+ 
++	rcu_read_lock();
++	f = fcheck(fd);
++	rcu_read_unlock();
++	/* we'd lost the race with close(), sod off silently */
++	/* note that inode->i_lock prevents reordering problems
++	 * between accesses to descriptor table and ->i_dnotify */
++	if (f != filp)
++		goto out_free;
++
+ 	error = __f_setown(filp, task_pid(current), PIDTYPE_PID, 0);
+ 	if (error)
+ 		goto out_free;
+diff -urpN linux-source-2.6.24.orig/fs/jffs2/erase.c linux-source-2.6.24/fs/jffs2/erase.c
+--- linux-source-2.6.24.orig/fs/jffs2/erase.c	2008-01-24 15:58:37.000000000 -0700
++++ linux-source-2.6.24/fs/jffs2/erase.c	2008-05-05 23:12:09.000000000 -0600
+@@ -419,9 +419,6 @@ static void jffs2_mark_erased_block(stru
+ 			if (jffs2_write_nand_cleanmarker(c, jeb))
+ 				goto filebad;
+ 		}
+-
+-		/* Everything else got zeroed before the erase */
+-		jeb->free_size = c->sector_size;
+ 	} else {
+ 
+ 		struct kvec vecs[1];
+@@ -449,18 +446,19 @@ static void jffs2_mark_erased_block(stru
+ 
+ 			goto filebad;
+ 		}
+-
+-		/* Everything else got zeroed before the erase */
+-		jeb->free_size = c->sector_size;
+-		/* FIXME Special case for cleanmarker in empty block */
+-		jffs2_link_node_ref(c, jeb, jeb->offset | REF_NORMAL, c->cleanmarker_size, NULL);
+ 	}
++	/* Everything else got zeroed before the erase */
++	jeb->free_size = c->sector_size;
+ 
+ 	down(&c->erase_free_sem);
+ 	spin_lock(&c->erase_completion_lock);
++
+ 	c->erasing_size -= c->sector_size;
+-	c->free_size += jeb->free_size;
+-	c->used_size += jeb->used_size;
++	c->free_size += c->sector_size;
++
++	/* Account for cleanmarker now, if it's in-band */
++	if (c->cleanmarker_size && !jffs2_cleanmarker_oob(c))
++		jffs2_link_node_ref(c, jeb, jeb->offset | REF_NORMAL, c->cleanmarker_size, NULL);
+ 
+ 	jffs2_dbg_acct_sanity_check_nolock(c,jeb);
+ 	jffs2_dbg_acct_paranoia_check_nolock(c, jeb);
+diff -urpN linux-source-2.6.24.orig/fs/splice.c linux-source-2.6.24/fs/splice.c
+--- linux-source-2.6.24.orig/fs/splice.c	2008-04-24 09:47:40.000000000 -0600
++++ linux-source-2.6.24/fs/splice.c	2008-05-05 23:12:09.000000000 -0600
+@@ -314,7 +314,7 @@ __generic_file_splice_read(struct file *
+ 				break;
+ 
+ 			error = add_to_page_cache_lru(page, mapping, index,
+-					      GFP_KERNEL);
++						mapping_gfp_mask(mapping));
+ 			if (unlikely(error)) {
+ 				page_cache_release(page);
+ 				if (error == -EEXIST)
+diff -urpN linux-source-2.6.24.orig/include/net/tcp.h linux-source-2.6.24/include/net/tcp.h
+--- linux-source-2.6.24.orig/include/net/tcp.h	2008-01-24 15:58:37.000000000 -0700
++++ linux-source-2.6.24/include/net/tcp.h	2008-05-05 23:12:09.000000000 -0600
+@@ -775,11 +775,14 @@ extern void tcp_enter_cwr(struct sock *s
+ extern __u32 tcp_init_cwnd(struct tcp_sock *tp, struct dst_entry *dst);
+ 
+ /* Slow start with delack produces 3 packets of burst, so that
+- * it is safe "de facto".
++ * it is safe "de facto".  This will be the default - same as
++ * the default reordering threshold - but if reordering increases,
++ * we must be able to allow cwnd to burst at least this much in order
++ * to not pull it back when holes are filled.
+  */
+ static __inline__ __u32 tcp_max_burst(const struct tcp_sock *tp)
+ {
+-	return 3;
++	return tp->reordering;
+ }
+ 
+ /* RFC2861 Check whether we are limited by application or congestion window
