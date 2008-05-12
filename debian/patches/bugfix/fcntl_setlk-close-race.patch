@@ -1,0 +1,76 @@
+commit 0b2bac2f1ea0d33a3621b27ca68b9ae760fca2e9
+Author: Al Viro <viro@zeniv.linux.org.uk>
+Date:   Tue May 6 13:58:34 2008 -0400
+
+    [PATCH] fix SMP ordering hole in fcntl_setlk()
+    
+    fcntl_setlk()/close() race prevention has a subtle hole - we need to
+    make sure that if we *do* have an fcntl/close race on SMP box, the
+    access to descriptor table and inode->i_flock won't get reordered.
+    
+    As it is, we get STORE inode->i_flock, LOAD descriptor table entry vs.
+    STORE descriptor table entry, LOAD inode->i_flock with not a single
+    lock in common on both sides.  We do have BKL around the first STORE,
+    but check in locks_remove_posix() is outside of BKL and for a good
+    reason - we don't want BKL on common path of close(2).
+    
+    Solution is to hold ->file_lock around fcheck() in there; that orders
+    us wrt removal from descriptor table that preceded locks_remove_posix()
+    on close path and we either come first (in which case eviction will be
+    handled by the close side) or we'll see the effect of close and do
+    eviction ourselves.  Note that even though it's read-only access,
+    we do need ->file_lock here - rcu_read_lock() won't be enough to
+    order the things.
+    
+    Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+
+Adjusted to apply to Debian's 2.6.18 by dann frazier <dannf@hp.com>
+
+diff -urpN linux-source-2.6.18.orig/fs/locks.c linux-source-2.6.18/fs/locks.c
+--- linux-source-2.6.18.orig/fs/locks.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/fs/locks.c	2008-05-06 17:02:29.000000000 -0600
+@@ -1680,6 +1680,7 @@ int fcntl_setlk(unsigned int fd, struct 
+ 	struct file_lock *file_lock = locks_alloc_lock();
+ 	struct flock flock;
+ 	struct inode *inode;
++	struct file *f;
+ 	int error;
+ 
+ 	if (file_lock == NULL)
+@@ -1754,7 +1755,15 @@ again:
+ 	 * Attempt to detect a close/fcntl race and recover by
+ 	 * releasing the lock that was just acquired.
+ 	 */
+-	if (!error && fcheck(fd) != filp && flock.l_type != F_UNLCK) {
++	/*
++	 * we need that spin_lock here - it prevents reordering between
++	 * update of inode->i_flock and check for it done in close().
++	 * rcu_read_lock() wouldn't do.
++	 */
++	spin_lock(&current->files->file_lock);
++	f = fcheck(fd);
++	spin_unlock(&current->files->file_lock);
++	if (!error && f != filp && flock.l_type != F_UNLCK) {
+ 		flock.l_type = F_UNLCK;
+ 		goto again;
+ 	}
+@@ -1823,6 +1832,7 @@ int fcntl_setlk64(unsigned int fd, struc
+ 	struct file_lock *file_lock = locks_alloc_lock();
+ 	struct flock64 flock;
+ 	struct inode *inode;
++	struct file *f;
+ 	int error;
+ 
+ 	if (file_lock == NULL)
+@@ -1897,7 +1907,10 @@ again:
+ 	 * Attempt to detect a close/fcntl race and recover by
+ 	 * releasing the lock that was just acquired.
+ 	 */
+-	if (!error && fcheck(fd) != filp && flock.l_type != F_UNLCK) {
++	spin_lock(&current->files->file_lock);
++	f = fcheck(fd);
++	spin_unlock(&current->files->file_lock);
++	if (!error && f != filp && flock.l_type != F_UNLCK) {
+ 		flock.l_type = F_UNLCK;
+ 		goto again;
+ 	}
