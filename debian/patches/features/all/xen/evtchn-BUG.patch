@@ -1,0 +1,128 @@
+# HG changeset patch
+# User kfraser@localhost.localdomain
+# Date 1169559560 0
+# Node ID 914304b3a3da6fc5bad12f742bae3893b53d20bc
+# Parent  ee7c422c5f7b79e0cc0ae5670af81b400a72357f
+linux: Fix enable_irq() crash by removing a BUG_ON() assumption in our
+event-channel retrigger() function. Also clean up bitmap usages.
+Signed-off-by: Keir Fraser <keir@xensource.com>
+
+Index: source-amd64-xen/drivers/xen/core/evtchn.c
+===================================================================
+--- source-amd64-xen.orig/drivers/xen/core/evtchn.c	2008-06-03 21:11:44.000000000 +0100
++++ source-amd64-xen/drivers/xen/core/evtchn.c	2008-06-03 21:21:24.000000000 +0100
+@@ -103,7 +103,7 @@
+ static int irq_bindcount[NR_IRQS];
+ 
+ /* Bitmap indicating which PIRQs require Xen to be notified on unmask. */
+-static unsigned long pirq_needs_eoi[NR_PIRQS/sizeof(unsigned long)];
++static DECLARE_BITMAP(pirq_needs_eoi, NR_PIRQS);
+ 
+ #ifdef CONFIG_SMP
+ 
+@@ -472,14 +472,19 @@
+ 	rebind_irq_to_cpu(irq, tcpu);
+ }
+ 
+-static int retrigger(unsigned int irq)
++static int resend_irq_on_evtchn(unsigned int i)
+ {
+-	int evtchn = evtchn_from_irq(irq);
++	int masked, evtchn = evtchn_from_irq(i);
+ 	shared_info_t *s = HYPERVISOR_shared_info;
++
+ 	if (!VALID_EVTCHN(evtchn))
+ 		return 1;
+-	BUG_ON(!synch_test_bit(evtchn, &s->evtchn_mask[0]));
+-	synch_set_bit(evtchn, &s->evtchn_pending[0]);
++
++	masked = synch_test_and_set_bit(evtchn, s->evtchn_mask);
++	synch_set_bit(evtchn, s->evtchn_pending);
++	if (!masked)
++		unmask_evtchn(evtchn);
++
+ 	return 1;
+ }
+ 
+@@ -551,13 +556,13 @@
+ #ifdef CONFIG_SMP
+ 	.set_affinity	= set_affinity_irq,
+ #endif
+-	.retrigger	= retrigger,
++	.retrigger	= resend_irq_on_evtchn,
+ };
+ 
+ static inline void pirq_unmask_notify(int pirq)
+ {
+ 	struct physdev_eoi eoi = { .irq = pirq };
+-	if (unlikely(test_bit(pirq, &pirq_needs_eoi[0])))
++	if (unlikely(test_bit(pirq, pirq_needs_eoi)))
+ 		(void)HYPERVISOR_physdev_op(PHYSDEVOP_eoi, &eoi);
+ }
+ 
+@@ -679,7 +684,7 @@
+ #ifdef CONFIG_SMP
+ 	.set_affinity	= set_affinity_irq,
+ #endif
+-	.retrigger	= retrigger,
++	.retrigger	= resend_irq_on_evtchn,
+ };
+ 
+ int irq_ignore_unhandled(unsigned int irq)
+@@ -693,16 +698,6 @@
+ 	return !!(irq_status.flags & XENIRQSTAT_shared);
+ }
+ 
+-void resend_irq_on_evtchn(unsigned int i)
+-{
+-	int evtchn = evtchn_from_irq(i);
+-	shared_info_t *s = HYPERVISOR_shared_info;
+-	if (!VALID_EVTCHN(evtchn))
+-		return;
+-	BUG_ON(!synch_test_bit(evtchn, &s->evtchn_mask[0]));
+-	synch_set_bit(evtchn, &s->evtchn_pending[0]);
+-}
+-
+ void notify_remote_via_irq(int irq)
+ {
+ 	int evtchn = evtchn_from_irq(irq);
+@@ -715,7 +710,7 @@
+ void mask_evtchn(int port)
+ {
+ 	shared_info_t *s = HYPERVISOR_shared_info;
+-	synch_set_bit(port, &s->evtchn_mask[0]);
++	synch_set_bit(port, s->evtchn_mask);
+ }
+ EXPORT_SYMBOL_GPL(mask_evtchn);
+ 
+@@ -734,14 +729,10 @@
+ 		return;
+ 	}
+ 
+-	synch_clear_bit(port, &s->evtchn_mask[0]);
++	synch_clear_bit(port, s->evtchn_mask);
+ 
+-	/*
+-	 * The following is basically the equivalent of 'hw_resend_irq'. Just
+-	 * like a real IO-APIC we 'lose the interrupt edge' if the channel is
+-	 * masked.
+-	 */
+-	if (synch_test_bit(port, &s->evtchn_pending[0]) &&
++	/* Did we miss an interrupt 'edge'? Re-fire if so. */
++	if (synch_test_bit(port, s->evtchn_pending) &&
+ 	    !synch_test_and_set_bit(port / BITS_PER_LONG,
+ 				    &vcpu_info->evtchn_pending_sel))
+ 		vcpu_info->evtchn_upcall_pending = 1;
+Index: source-amd64-xen/include/xen/evtchn.h
+===================================================================
+--- source-amd64-xen.orig/include/xen/evtchn.h	2008-06-03 21:11:48.000000000 +0100
++++ source-amd64-xen/include/xen/evtchn.h	2008-06-03 21:18:30.000000000 +0100
+@@ -95,7 +95,7 @@
+ static inline void clear_evtchn(int port)
+ {
+ 	shared_info_t *s = HYPERVISOR_shared_info;
+-	synch_clear_bit(port, &s->evtchn_pending[0]);
++	synch_clear_bit(port, s->evtchn_pending);
+ }
+ 
+ static inline void notify_remote_via_evtchn(int port)
