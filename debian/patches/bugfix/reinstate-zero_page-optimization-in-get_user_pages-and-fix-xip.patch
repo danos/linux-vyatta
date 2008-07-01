@@ -1,0 +1,134 @@
+commit 89f5b7da2a6bad2e84670422ab8192382a5aeb9f
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Fri Jun 20 11:18:25 2008 -0700
+
+    Reinstate ZERO_PAGE optimization in 'get_user_pages()' and fix XIP
+    
+    KAMEZAWA Hiroyuki and Oleg Nesterov point out that since the commit
+    557ed1fa2620dc119adb86b34c614e152a629a80 ("remove ZERO_PAGE") removed
+    the ZERO_PAGE from the VM mappings, any users of get_user_pages() will
+    generally now populate the VM with real empty pages needlessly.
+    
+    We used to get the ZERO_PAGE when we did the "handle_mm_fault()", but
+    since fault handling no longer uses ZERO_PAGE for new anonymous pages,
+    we now need to handle that special case in follow_page() instead.
+    
+    In particular, the removal of ZERO_PAGE effectively removed the core
+    file writing optimization where we would skip writing pages that had not
+    been populated at all, and increased memory pressure a lot by allocating
+    all those useless newly zeroed pages.
+    
+    This reinstates the optimization by making the unmapped PTE case the
+    same as for a non-existent page table, which already did this correctly.
+    
+    While at it, this also fixes the XIP case for follow_page(), where the
+    caller could not differentiate between the case of a page that simply
+    could not be used (because it had no "struct page" associated with it)
+    and a page that just wasn't mapped.
+    
+    We do that by simply returning an error pointer for pages that could not
+    be turned into a "struct page *".  The error is arbitrarily picked to be
+    EFAULT, since that was what get_user_pages() already used for the
+    equivalent IO-mapped page case.
+    
+    [ Also removed an impossible test for pte_offset_map_lock() failing:
+      that's not how that function works ]
+    
+    Acked-by: Oleg Nesterov <oleg@tv-sign.ru>
+    Acked-by: Nick Piggin <npiggin@suse.de>
+    Cc: KAMEZAWA Hiroyuki <kamezawa.hiroyu@jp.fujitsu.com>
+    Cc: Hugh Dickins <hugh@veritas.com>
+    Cc: Andrew Morton <akpm@linux-foundation.org>
+    Cc: Ingo Molnar <mingo@elte.hu>
+    Cc: Roland McGrath <roland@redhat.com>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+Adjusted to apply to Debian's 2.6.24 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.24.orig/arch/powerpc/kernel/vdso.c linux-source-2.6.24/arch/powerpc/kernel/vdso.c
+--- linux-source-2.6.24.orig/arch/powerpc/kernel/vdso.c	2008-01-24 15:58:37.000000000 -0700
++++ linux-source-2.6.24/arch/powerpc/kernel/vdso.c	2008-07-01 02:09:37.000000000 -0600
+@@ -141,7 +141,7 @@ static void dump_one_vdso_page(struct pa
+ 	printk("kpg: %p (c:%d,f:%08lx)", __va(page_to_pfn(pg) << PAGE_SHIFT),
+ 	       page_count(pg),
+ 	       pg->flags);
+-	if (upg/* && pg != upg*/) {
++	if (upg && !IS_ERR(upg) /* && pg != upg*/) {
+ 		printk(" upg: %p (c:%d,f:%08lx)", __va(page_to_pfn(upg)
+ 						       << PAGE_SHIFT),
+ 		       page_count(upg),
+diff -urpN linux-source-2.6.24.orig/mm/memory.c linux-source-2.6.24/mm/memory.c
+--- linux-source-2.6.24.orig/mm/memory.c	2008-05-07 16:34:46.000000000 -0600
++++ linux-source-2.6.24/mm/memory.c	2008-07-01 02:09:37.000000000 -0600
+@@ -934,17 +934,15 @@ struct page *follow_page(struct vm_area_
+ 	}
+ 
+ 	ptep = pte_offset_map_lock(mm, pmd, address, &ptl);
+-	if (!ptep)
+-		goto out;
+ 
+ 	pte = *ptep;
+ 	if (!pte_present(pte))
+-		goto unlock;
++		goto no_page;
+ 	if ((flags & FOLL_WRITE) && !pte_write(pte))
+ 		goto unlock;
+ 	page = vm_normal_page(vma, address, pte);
+ 	if (unlikely(!page))
+-		goto unlock;
++		goto bad_page;
+ 
+ 	if (flags & FOLL_GET)
+ 		get_page(page);
+@@ -959,6 +957,15 @@ unlock:
+ out:
+ 	return page;
+ 
++bad_page:
++	pte_unmap_unlock(ptep, ptl);
++	return ERR_PTR(-EFAULT);
++
++no_page:
++	pte_unmap_unlock(ptep, ptl);
++	if (!pte_none(pte))
++		return page;
++	/* Fall through to ZERO_PAGE handling */
+ no_page_table:
+ 	/*
+ 	 * When core dumping an enormous anonymous area that nobody
+@@ -1095,6 +1102,8 @@ int get_user_pages(struct task_struct *t
+ 
+ 				cond_resched();
+ 			}
++			if (IS_ERR(page))
++				return i ? i : PTR_ERR(page);
+ 			if (pages) {
+ 				pages[i] = page;
+ 
+diff -urpN linux-source-2.6.24.orig/mm/migrate.c linux-source-2.6.24/mm/migrate.c
+--- linux-source-2.6.24.orig/mm/migrate.c	2008-01-24 15:58:37.000000000 -0700
++++ linux-source-2.6.24/mm/migrate.c	2008-07-01 02:09:37.000000000 -0600
+@@ -823,6 +823,11 @@ static int do_move_pages(struct mm_struc
+ 			goto set_status;
+ 
+ 		page = follow_page(vma, pp->addr, FOLL_GET);
++
++		err = PTR_ERR(page);
++		if (IS_ERR(page))
++			goto set_status;
++
+ 		err = -ENOENT;
+ 		if (!page)
+ 			goto set_status;
+@@ -886,6 +891,11 @@ static int do_pages_stat(struct mm_struc
+ 			goto set_status;
+ 
+ 		page = follow_page(vma, pm->addr, 0);
++
++		err = PTR_ERR(page);
++		if (IS_ERR(page))
++			goto set_status;
++
+ 		err = -ENOENT;
+ 		/* Use PageReserved to check for zero page */
+ 		if (!page || PageReserved(page))
