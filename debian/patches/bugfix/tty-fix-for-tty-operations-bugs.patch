@@ -1,0 +1,183 @@
+From alan@lxorguk.ukuu.org.uk Fri Jun 27 07:39:26 2008
+From: Alan Cox <alan@lxorguk.ukuu.org.uk>
+Date: Fri, 27 Jun 2008 15:21:55 +0100
+Subject: TTY: fix for tty operations bugs
+To: greg@kroah.com
+Message-ID: <20080627152155.50f0ebae@lxorguk.ukuu.org.uk>
+
+From: Alan Cox <alan@lxorguk.ukuu.org.uk>
+
+This is fixed with the recent tty operations rewrite in mainline in a
+different way, this is a selective backport of the relevant portions to
+the -stable tree.
+
+Signed-off-by: Alan Cox <alan@redhat.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+
+---
+
+Adjusted to apply to Debian's 2.6.18 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.18.orig/drivers/net/hamradio/6pack.c linux-source-2.6.18/drivers/net/hamradio/6pack.c
+--- linux-source-2.6.18.orig/drivers/net/hamradio/6pack.c	2008-06-16 16:25:20.000000000 -0600
++++ linux-source-2.6.18/drivers/net/hamradio/6pack.c	2008-07-02 02:45:08.000000000 -0600
+@@ -601,6 +601,8 @@ static int sixpack_open(struct tty_struc
+ 
+ 	if (!capable(CAP_NET_ADMIN))
+ 		return -EPERM;
++	if (!tty->driver->write)
++		return -EOPNOTSUPP;
+ 
+ 	dev = alloc_netdev(sizeof(struct sixpack), "sp%d", sp_setup);
+ 	if (!dev) {
+diff -urpN linux-source-2.6.18.orig/drivers/net/hamradio/mkiss.c linux-source-2.6.18/drivers/net/hamradio/mkiss.c
+--- linux-source-2.6.18.orig/drivers/net/hamradio/mkiss.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/drivers/net/hamradio/mkiss.c	2008-07-02 02:45:08.000000000 -0600
+@@ -530,6 +530,7 @@ static void ax_encaps(struct net_device 
+ static int ax_xmit(struct sk_buff *skb, struct net_device *dev)
+ {
+ 	struct mkiss *ax = netdev_priv(dev);
++	int cib = 0;
+ 
+ 	if (!netif_running(dev))  {
+ 		printk(KERN_ERR "mkiss: %s: xmit call when iface is down\n", dev->name);
+@@ -545,10 +546,11 @@ static int ax_xmit(struct sk_buff *skb, 
+ 			/* 20 sec timeout not reached */
+ 			return 1;
+ 		}
++		if (ax->tty->driver->chars_in_buffer)
++			cib = ax->tty->driver->chars_in_buffer(ax->tty);
+ 
+ 		printk(KERN_ERR "mkiss: %s: transmit timed out, %s?\n", dev->name,
+-		       (ax->tty->driver->chars_in_buffer(ax->tty) || ax->xleft) ?
+-		       "bad line quality" : "driver error");
++		     cib || ax->xleft ? "bad line quality" : "driver error");
+ 
+ 		ax->xleft = 0;
+ 		clear_bit(TTY_DO_WRITE_WAKEUP, &ax->tty->flags);
+@@ -736,6 +738,8 @@ static int mkiss_open(struct tty_struct 
+ 
+ 	if (!capable(CAP_NET_ADMIN))
+ 		return -EPERM;
++	if (!tty->driver->write)
++		return -EOPNOTSUPP;
+ 
+ 	dev = alloc_netdev(sizeof(struct mkiss), "ax%d", ax_setup);
+ 	if (!dev) {
+diff -urpN linux-source-2.6.18.orig/drivers/net/irda/irtty-sir.c linux-source-2.6.18/drivers/net/irda/irtty-sir.c
+--- linux-source-2.6.18.orig/drivers/net/irda/irtty-sir.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/drivers/net/irda/irtty-sir.c	2008-07-02 02:45:08.000000000 -0600
+@@ -64,7 +64,9 @@ static int irtty_chars_in_buffer(struct 
+ 	IRDA_ASSERT(priv != NULL, return -1;);
+ 	IRDA_ASSERT(priv->magic == IRTTY_MAGIC, return -1;);
+ 
+-	return priv->tty->driver->chars_in_buffer(priv->tty);
++	if (priv->tty->driver->chars_in_buffer)
++		return priv->tty->driver->chars_in_buffer(priv->tty);
++	return 0;
+ }
+ 
+ /* Wait (sleep) until underlaying hardware finished transmission
+diff -urpN linux-source-2.6.18.orig/drivers/net/ppp_async.c linux-source-2.6.18/drivers/net/ppp_async.c
+--- linux-source-2.6.18.orig/drivers/net/ppp_async.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/drivers/net/ppp_async.c	2008-07-02 02:45:08.000000000 -0600
+@@ -158,6 +158,9 @@ ppp_asynctty_open(struct tty_struct *tty
+ 	struct asyncppp *ap;
+ 	int err;
+ 
++	if (!tty->driver->write)
++		return -EOPNOTSUPP;
++
+ 	err = -ENOMEM;
+ 	ap = kmalloc(sizeof(*ap), GFP_KERNEL);
+ 	if (ap == 0)
+diff -urpN linux-source-2.6.18.orig/drivers/net/ppp_synctty.c linux-source-2.6.18/drivers/net/ppp_synctty.c
+--- linux-source-2.6.18.orig/drivers/net/ppp_synctty.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/drivers/net/ppp_synctty.c	2008-07-02 02:49:36.000000000 -0600
+@@ -207,6 +207,9 @@ ppp_sync_open(struct tty_struct *tty)
+ 	struct syncppp *ap;
+ 	int err;
+ 
++	if (!tty->driver->write)
++		return -EOPNOTSUPP;
++
+ 	ap = kmalloc(sizeof(*ap), GFP_KERNEL);
+ 	err = -ENOMEM;
+ 	if (ap == 0)
+diff -urpN linux-source-2.6.18.orig/drivers/net/slip.c linux-source-2.6.18/drivers/net/slip.c
+--- linux-source-2.6.18.orig/drivers/net/slip.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/drivers/net/slip.c	2008-07-02 02:48:57.000000000 -0600
+@@ -463,9 +463,14 @@ static void sl_tx_timeout(struct net_dev
+ 			/* 20 sec timeout not reached */
+ 			goto out;
+ 		}
+-		printk(KERN_WARNING "%s: transmit timed out, %s?\n", dev->name,
+-		       (sl->tty->driver->chars_in_buffer(sl->tty) || sl->xleft) ?
+-		       "bad line quality" : "driver error");
++		{
++			int cib = 0;
++			if (sl->tty->driver->chars_in_buffer)
++				cib = sl->tty->driver->chars_in_buffer(sl->tty);
++			printk(KERN_WARNING "%s: transmit timed out, %s?\n",
++				dev->name, (cib || sl->xleft) ?
++				       "bad line quality" : "driver error");
++		}
+ 		sl->xleft = 0;
+ 		sl->tty->flags &= ~(1 << TTY_DO_WRITE_WAKEUP);
+ 		sl_unlock(sl);
+@@ -836,6 +841,8 @@ static int slip_open(struct tty_struct *
+ 
+ 	if(!capable(CAP_NET_ADMIN))
+ 		return -EPERM;
++	if (!tty->driver->write)
++		return -EOPNOTSUPP;
+ 		
+ 	/* RTnetlink lock is misused here to serialize concurrent
+ 	   opens of slip channels. There are better ways, but it is
+diff -urpN linux-source-2.6.18.orig/drivers/net/wan/x25_asy.c linux-source-2.6.18/drivers/net/wan/x25_asy.c
+--- linux-source-2.6.18.orig/drivers/net/wan/x25_asy.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/drivers/net/wan/x25_asy.c	2008-07-02 02:45:08.000000000 -0600
+@@ -283,6 +283,10 @@ static void x25_asy_write_wakeup(struct 
+ static void x25_asy_timeout(struct net_device *dev)
+ {
+ 	struct x25_asy *sl = (struct x25_asy*)(dev->priv);
++	int cib = 0;
++
++	if (sl->tty->driver->chars_in_buffer)
++		cib = sl->tty->driver->chars_in_buffer(sl->tty);
+ 
+ 	spin_lock(&sl->lock);
+ 	if (netif_queue_stopped(dev)) {
+@@ -290,8 +294,7 @@ static void x25_asy_timeout(struct net_d
+ 		 *      14 Oct 1994 Dmitry Gorodchanin.
+ 		 */
+ 		printk(KERN_WARNING "%s: transmit timed out, %s?\n", dev->name,
+-		       (sl->tty->driver->chars_in_buffer(sl->tty) || sl->xleft) ?
+-		       "bad line quality" : "driver error");
++		       (cib || sl->xleft) ? "bad line quality" : "driver error");
+ 		sl->xleft = 0;
+ 		sl->tty->flags &= ~(1 << TTY_DO_WRITE_WAKEUP);
+ 		x25_asy_unlock(sl);
+@@ -561,6 +564,9 @@ static int x25_asy_open_tty(struct tty_s
+ 		return -EEXIST;
+ 	}
+ 
++	if (!tty->driver->write)
++		return -EOPNOTSUPP;
++
+ 	/* OK.  Find a free X.25 channel to use. */
+ 	if ((sl = x25_asy_alloc()) == NULL) {
+ 		return -ENFILE;
+diff -urpN linux-source-2.6.18.orig/drivers/net/wireless/strip.c linux-source-2.6.18/drivers/net/wireless/strip.c
+--- linux-source-2.6.18.orig/drivers/net/wireless/strip.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/drivers/net/wireless/strip.c	2008-07-02 02:45:08.000000000 -0600
+@@ -801,7 +801,8 @@ static void set_baud(struct tty_struct *
+ 	struct termios old_termios = *(tty->termios);
+ 	tty->termios->c_cflag &= ~CBAUD;	/* Clear the old baud setting */
+ 	tty->termios->c_cflag |= baudcode;	/* Set the new baud setting */
+-	tty->driver->set_termios(tty, &old_termios);
++	if (tty->driver->set_termios)
++		tty->driver->set_termios(tty, &old_termios);
+ }
+ 
+ /*
