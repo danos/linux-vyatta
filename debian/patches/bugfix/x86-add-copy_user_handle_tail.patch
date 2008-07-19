@@ -1,0 +1,56 @@
+commit 1129585a08baf58582c0da91e572cb29e3179acf
+Author: Vitaly Mayatskikh <v.mayatskih@gmail.com>
+Date:   Wed Jul 2 15:48:21 2008 +0200
+
+    x86: introduce copy_user_handle_tail() routine
+    
+    Introduce generic C routine for handling necessary tail operations after
+    protection fault in copy_*_user on x86.
+    
+    Signed-off-by: Vitaly Mayatskikh <v.mayatskih@gmail.com>
+    Acked-by: Linus Torvalds <torvalds@linux-foundation.org>
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+Backported to Debian's 2.6.18 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.18.orig/arch/x86_64/lib/usercopy.c linux-source-2.6.18/arch/x86_64/lib/usercopy.c
+--- linux-source-2.6.18.orig/arch/x86_64/lib/usercopy.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/arch/x86_64/lib/usercopy.c	2008-07-16 02:39:08.000000000 -0600
+@@ -164,3 +164,26 @@ unsigned long copy_in_user(void __user *
+ }
+ EXPORT_SYMBOL(copy_in_user);
+ 
++/*
++ * Try to copy last bytes and clear the rest if needed.
++ * Since protection fault in copy_from/to_user is not a normal situation,
++ * it is not necessary to optimize tail handling.
++ */
++unsigned long
++copy_user_handle_tail(char *to, char *from, unsigned len, unsigned zerorest)
++{
++	char c;
++	unsigned zero_len;
++
++	for (; len; --len) {
++		if (__get_user_nocheck(c, from++, sizeof(char)))
++			break;
++		if (__put_user_nocheck(c, to++, sizeof(char)))
++			break;
++	}
++
++	for (c = 0, zero_len = len; zerorest && zero_len; --zero_len)
++		if (__put_user_nocheck(c, to++, sizeof(char)))
++			break;
++	return len;
++}
+diff -urpN linux-source-2.6.18.orig/include/asm-x86_64/uaccess.h linux-source-2.6.18/include/asm-x86_64/uaccess.h
+--- linux-source-2.6.18.orig/include/asm-x86_64/uaccess.h	2008-07-16 00:01:24.000000000 -0600
++++ linux-source-2.6.18/include/asm-x86_64/uaccess.h	2008-07-16 02:39:15.000000000 -0600
+@@ -355,4 +355,7 @@ unsigned long __clear_user(void __user *
+ extern long __copy_from_user_inatomic(void *dst, const void __user *src, unsigned size);
+ #define __copy_to_user_inatomic copy_user_generic
+ 
++unsigned long
++copy_user_handle_tail(char *to, char *from, unsigned len, unsigned zerorest);
++
+ #endif /* __X86_64_UACCESS_H */
