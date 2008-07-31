@@ -1,0 +1,149 @@
+From: Luming Yu <luyu@redhat.com>
+Subject: [RHEL 5.1 PATCH] BZ 253356: [EL5][BUG] Unexpected SIGILL on 	NFS/Montecito(ia64)
+Date: Fri, 24 Aug 2007 21:49:48 +0800
+Bugzilla: 253356
+Message-Id: <46CEE1FC.20002@redhat.com>
+Changelog: [mm] ia64: flush i-cache before set_pte
+
+
+BZ 253356
+
+Description of problem:
+>Consider multi-thread...thread A and B on cpu0 and cpu1.
+>And assume NFS's rpc client works on cpu1 and copies contents of the
+>page on cpu1.
+>
+>following is a case I can imagine.
+>==
+>   --cpu0--               --cpu1--
+>(A)page_fault                   
+>(A)do no pag              
+>(A)do NFS request/        
+>(A)wait for new page-cache
+>                          (NFS) recieve answer from server.
+>                                copy pages.  //D-cache of cpu1 is dirty
+>(A)got new page.          
+>(A)set_pte_at()           
+>                          (B) access new page. "pte is already set."
+>here.
+>                              no page fault.
+>(A)flush_icache()(slow!)  (B) exec page and SIGILL.
+>==
+
+>>>> > For understanding, you have to understand how Montecito's cache works.
+>>>> >
+>>>> > Because L2-Dcache to L3-mixed-cache is *write-back*. Thera are time
+>>>> > when a new data in L2-Dcache is not synchronized with data in 
+>>>L3-mixed-cache.
+>>>> > During this inconsistent time, L2-Icache miss will fetch wrong 
+>>>instruction > > from L3-mixed-cache.
+>>>> >
+>>>> > cpu1 does this. *new hot data* on L2-Dcache (by NFS's RPC page fill) 
+>>>and
+>>>> > L3-mixed cache has stale data. L2-Dcache and L3-mixed-cache should be 
+>>>synched
+>>>> > before L2-Icache looks up L3-mixed-cache.
+>>>> >
+>>>> > Because fc instruction makes L2-Dcache and L3-mixed-cache consistent 
+>>>(by invalidation),
+>>>> > flush cache before set_pte() fixes the problem.
+>>>> >
+>>>> >   
+>>>      
+>>> Hmmm, interesting. The NFS's RPC page is still not actually filled with 
+>>> valid data before it gets returned
+>>> from vma->vm_ops->nopage in do_no_page. 
+>>    
+>
+>Just cache is not coherent. 
+>
+>  
+>>> Do you think we need to fix this  problem too?
+>>    
+>
+>No. most of the cpus doesn't need cache flush at NFS's RPC page fill.
+>And fix in NFS is already denied. 
+>
+>  
+>>> Probably we need to make sure NFS's RPC page contains validate data 
+>>> before it can be used in page fault
+>>> handler. That would be more generic and less invasive to red hat kernel.
+>>> 
+>>    
+>For redhat kernel,
+>moving lazy_mmu_prot_update() before set_pet() is the simplest,
+>for fixing NFS problem, I think. (But I'm not sure there are more unknown 
+>case or not.)
+>
+>  
+Upstream status:
+
+Following 3 patches are in -mm kernel
+
+http://www.kernel.org/pub/linux/kernel/people/akpm/patches/2.6/2.6.23-rc3/2.6.23-rc3-mm1/broken-out/flush-icache-before-set_pte-on-ia64-flush-icache-at-set_pte.patch
+http://www.kernel.org/pub/linux/kernel/people/akpm/patches/2.6/2.6.23-rc3/2.6.23-rc3-mm1/broken-out/flush-icache-before-set_pte-on-ia64-flush-icache-at-set_pte-fix.patch
+http://www.kernel.org/pub/linux/kernel/people/akpm/patches/2.6/2.6.23-rc3/2.6.23-rc3-mm1/broken-out/flush-icache-before-set_pte-on-ia64-flush-icache-at-set_pte-fix-update.patch
+
+The following back port is prepared by the original author of the upstream 
+patch set.  I reviewed and tested the back port
+version which looks less invasive to red hat el5.1 kernel for fixing the 
+problem. The only concern of this back port is that I'm worried that some 
+cases that I don't know could be missed.  So please help review, test and 
+ACK.
+
+Thanks,
+Luming
+
+
+
+
+
+
+
+Fix Montecito's problem just by moving lazy_mmu_prot_update().
+
+* Fixes do_no_page() case.
+* Fixes page migration.
+
+-Kame
+
+==
+diff -Nru linux-2.6.18.ia64/mm/memory.c mylinux-2.6.18.ia64/mm/memory.c
+--- linux-2.6.18.ia64/mm/memory.c	2007-08-24 19:14:11.000000000 +0900
++++ mylinux-2.6.18.ia64/mm/memory.c	2007-08-24 19:46:33.000000000 +0900
+@@ -2371,6 +2371,7 @@
+ 		entry = mk_pte(new_page, vma->vm_page_prot);
+ 		if (write_access)
+ 			entry = maybe_mkwrite(pte_mkdirty(entry), vma);
++		lazy_mmu_prot_update(entry);
+ 		set_pte_at(mm, address, page_table, entry);
+ 		if (anon) {
+ 			inc_mm_counter(mm, anon_rss);
+@@ -2392,7 +2393,6 @@
+ 
+ 	/* no need to invalidate: a not-present page shouldn't be cached */
+ 	update_mmu_cache(vma, address, entry);
+-	lazy_mmu_prot_update(entry);
+ unlock:
+ 	pte_unmap_unlock(page_table, ptl);
+ 	if (dirty_page) {
+diff -Nru linux-2.6.18.ia64/mm/migrate.c mylinux-2.6.18.ia64/mm/migrate.c
+--- linux-2.6.18.ia64/mm/migrate.c	2007-08-24 19:14:03.000000000 +0900
++++ mylinux-2.6.18.ia64/mm/migrate.c	2007-08-24 19:48:27.000000000 +0900
+@@ -172,6 +172,7 @@
+ 	pte = pte_mkold(mk_pte(new, vma->vm_page_prot));
+ 	if (is_write_migration_entry(entry))
+ 		pte = pte_mkwrite(pte);
++	lazy_mmu_prot_update(pte);
+ 	set_pte_at(mm, addr, ptep, pte);
+ 
+ 	if (PageAnon(new))
+@@ -181,7 +182,6 @@
+ 
+ 	/* No need to invalidate - it was non-present before */
+ 	update_mmu_cache(vma, addr, pte);
+-	lazy_mmu_prot_update(pte);
+ 
+ out:
+ 	pte_unmap_unlock(ptep, ptl);
+

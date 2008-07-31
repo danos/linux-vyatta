@@ -1,0 +1,76 @@
+From: Trond Myklebust <Trond.Myklebust@netapp.com>
+Date: Thu, 7 Feb 2008 22:24:07 +0000 (-0500)
+Subject: NFS: Fix a potential file corruption issue when writing
+X-Git-Tag: v2.6.25-rc1~286^2~1
+X-Git-Url: http://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Ftorvalds%2Flinux-2.6.git;a=commitdiff_plain;h=5d47a35600270e7115061cb1320ee60ae9bcb6b8
+
+NFS: Fix a potential file corruption issue when writing
+
+If the inode is flagged as having an invalid mapping, then we can't rely on
+the PageUptodate() flag. Ensure that we don't use the "anti-fragmentation"
+write optimisation in nfs_updatepage(), since that will cause NFS to write
+out areas of the page that are no longer guaranteed to be up to date.
+
+A potential corruption could occur in the following scenario:
+
+client 1			client 2
+===============			===============
+				fd=open("f",O_CREAT|O_WRONLY,0644);
+				write(fd,"fubar\n",6);	// cache last page
+				close(fd);
+fd=open("f",O_WRONLY|O_APPEND);
+write(fd,"foo\n",4);
+close(fd);
+
+				fd=open("f",O_WRONLY|O_APPEND);
+				write(fd,"bar\n",4);
+				close(fd);
+-----
+The bug may lead to the file "f" reading 'fubar\n\0\0\0\nbar\n' because
+client 2 does not update the cached page after re-opening the file for
+write. Instead it keeps it marked as PageUptodate() until someone calls
+invaldate_inode_pages2() (typically by calling read()).
+
+Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+---
+
+Backported to Debian's 2.6.18 by dann frazier <danfn@debian.org>
+
+diff -urpN linux-source-2.6.18.orig/fs/nfs/write.c linux-source-2.6.18/fs/nfs/write.c
+--- linux-source-2.6.18.orig/fs/nfs/write.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/fs/nfs/write.c	2008-03-13 01:16:30.000000000 -0600
+@@ -805,6 +805,17 @@ int nfs_flush_incompatible(struct file *
+ }
+ 
+ /*
++ * If the page cache is marked as unsafe or invalid, then we can't rely on
++ * the PageUptodate() flag. In this case, we will need to turn off
++ * write optimisations that depend on the page contents being correct.
++ */
++static int nfs_write_pageuptodate(struct page *page, struct inode *inode)
++{
++	return PageUptodate(page) &&
++		!(NFS_I(inode)->cache_validity & (NFS_INO_REVAL_PAGECACHE|NFS_INO_INVALID_DATA));
++}
++
++/*
+  * Update and possibly write a cached page of an NFS file.
+  *
+  * XXX: Keep an eye on generic_file_read to make sure it doesn't do bad
+@@ -836,10 +847,13 @@ int nfs_updatepage(struct file *file, st
+ 	}
+ 
+ 	/* If we're not using byte range locks, and we know the page
+-	 * is entirely in cache, it may be more efficient to avoid
+-	 * fragmenting write requests.
++	 * is up to date, it may be more efficient to extend the write
++	 * to cover the entire page in order to avoid fragmentation
++	 * inefficiencies.
+ 	 */
+-	if (PageUptodate(page) && inode->i_flock == NULL && !(file->f_mode & O_SYNC)) {
++	if (nfs_write_pageuptodate(page, inode) &&
++			inode->i_flock == NULL &&
++			!(file->f_flags & O_SYNC)) {
+ 		loff_t end_offs = i_size_read(inode) - 1;
+ 		unsigned long end_index = end_offs >> PAGE_CACHE_SHIFT;
+ 
