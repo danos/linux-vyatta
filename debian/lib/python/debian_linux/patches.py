@@ -182,7 +182,7 @@ class PatchSeriesList(list):
             l = self
         else:
             l = self[::-1]
-        for i in self:
+        for i in l:
             if reverse:
                 print "--> Try to unapply %s." % i.name
             else:
