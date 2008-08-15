@@ -73,6 +73,9 @@ class ConfigCoreHierarchy(ConfigCore):
     config_name = "defines"
 
     schemas = {
+        'abi': {
+            'ignore-changes': SchemaItemList(),
+        },
         'base': {
             'arches': SchemaItemList(),
             'enabled': SchemaItemBoolean(),

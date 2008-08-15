@@ -93,9 +93,10 @@ class checker(object):
     def _ignore(self, add, change, remove):
         config = self.config.merge('abi', self.arch, self.featureset, self.flavour)
         ignores = config.get('ignore-changes', None)
-        if ignores is None:
-            return set()
-        return set(ignores.split())
+        ignores = set(ignores)
+        if '*' in ignores:
+            return set(add.keys() + change.keys() + remove.keys())
+        return ignores
 
 if __name__ == '__main__':
     sys.exit(checker(*sys.argv[1:])(sys.stdout))
