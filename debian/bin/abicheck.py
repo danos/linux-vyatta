@@ -92,8 +92,7 @@ class checker(object):
 
     def _ignore(self, add, change, remove):
         config = self.config.merge('abi', self.arch, self.featureset, self.flavour)
-        ignores = config.get('ignore-changes', None)
-        ignores = set(ignores)
+        ignores = set(config.get('ignore-changes', []))
         if '*' in ignores:
             return set(add.keys() + change.keys() + remove.keys())
         return ignores
