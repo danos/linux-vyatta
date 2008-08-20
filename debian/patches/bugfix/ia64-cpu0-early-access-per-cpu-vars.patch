@@ -1,0 +1,167 @@
+commit 10617bbe84628eb18ab5f723d3ba35005adde143
+Author: Tony Luck <tony.luck@intel.com>
+Date:   Tue Aug 12 10:34:20 2008 -0700
+
+    [IA64] Ensure cpu0 can access per-cpu variables in early boot code
+    
+    ia64 handles per-cpu variables a litle differently from other architectures
+    in that it maps the physical memory allocated for each cpu at a constant
+    virtual address (0xffffffffffff0000). This mapping is not enabled until
+    the architecture specific cpu_init() function is run, which causes problems
+    since some generic code is run before this point. In particular when
+    CONFIG_PRINTK_TIME is enabled, the boot cpu will trap on the access to
+    per-cpu memory at the first printk() call so the boot will fail without
+    the kernel printing anything to the console.
+    
+    Fix this by allocating percpu memory for cpu0 in the kernel data section
+    and doing all initialization to enable percpu access in head.S before
+    calling any generic code.
+    
+    Other cpus must take care not to access per-cpu variables too early, but
+    their code path from start_secondary() to cpu_init() is all in arch/ia64
+    
+    Signed-off-by: Tony Luck <tony.luck@intel.com>
+
+diff --git a/arch/ia64/kernel/head.S b/arch/ia64/kernel/head.S
+index 41c7129..8bdea8e 100644
+--- a/arch/ia64/kernel/head.S
++++ b/arch/ia64/kernel/head.S
+@@ -359,7 +359,31 @@ start_ap:
+ 	mov ar.rsc=0		// place RSE in enforced lazy mode
+ 	;;
+ 	loadrs			// clear the dirty partition
+-	mov IA64_KR(PER_CPU_DATA)=r0	// clear physical per-CPU base
++	movl r19=__phys_per_cpu_start
++	mov r18=PERCPU_PAGE_SIZE
++	;;
++#ifndef CONFIG_SMP
++	add r19=r19,r18
++	;;
++#else
++(isAP)	br.few 2f
++	mov r20=r19
++	sub r19=r19,r18
++	;;
++	shr.u r18=r18,3
++1:
++	ld8 r21=[r20],8;;
++	st8[r19]=r21,8
++	adds r18=-1,r18;;
++	cmp4.lt p7,p6=0,r18
++(p7)	br.cond.dptk.few 1b
++2:
++#endif
++	tpa r19=r19
++	;;
++	.pred.rel.mutex isBP,isAP
++(isBP)	mov IA64_KR(PER_CPU_DATA)=r19	// per-CPU base for cpu0
++(isAP)	mov IA64_KR(PER_CPU_DATA)=r0	// clear physical per-CPU base
+ 	;;
+ 	mov ar.bspstore=r2	// establish the new RSE stack
+ 	;;
+diff --git a/arch/ia64/kernel/setup.c b/arch/ia64/kernel/setup.c
+index 593279f..c27d5b2 100644
+--- a/arch/ia64/kernel/setup.c
++++ b/arch/ia64/kernel/setup.c
+@@ -927,17 +927,19 @@ cpu_init (void)
+ 	if (smp_processor_id() == 0) {
+ 		cpu_set(0, per_cpu(cpu_sibling_map, 0));
+ 		cpu_set(0, cpu_core_map[0]);
++	} else {
++		/*
++		 * Set ar.k3 so that assembly code in MCA handler can compute
++		 * physical addresses of per cpu variables with a simple:
++		 *   phys = ar.k3 + &per_cpu_var
++		 * and the alt-dtlb-miss handler can set per-cpu mapping into
++		 * the TLB when needed. head.S already did this for cpu0.
++		 */
++		ia64_set_kr(IA64_KR_PER_CPU_DATA,
++			    ia64_tpa(cpu_data) - (long) __per_cpu_start);
+ 	}
+ #endif
+ 
+-	/*
+-	 * We set ar.k3 so that assembly code in MCA handler can compute
+-	 * physical addresses of per cpu variables with a simple:
+-	 *   phys = ar.k3 + &per_cpu_var
+-	 */
+-	ia64_set_kr(IA64_KR_PER_CPU_DATA,
+-		    ia64_tpa(cpu_data) - (long) __per_cpu_start);
+-
+ 	get_max_cacheline_size();
+ 
+ 	/*
+diff --git a/arch/ia64/kernel/smpboot.c b/arch/ia64/kernel/smpboot.c
+index 03f1a99..b39853a 100644
+--- a/arch/ia64/kernel/smpboot.c
++++ b/arch/ia64/kernel/smpboot.c
+@@ -467,7 +467,9 @@ start_secondary (void *unused)
+ {
+ 	/* Early console may use I/O ports */
+ 	ia64_set_kr(IA64_KR_IO_BASE, __pa(ia64_iobase));
++#ifndef CONFIG_PRINTK_TIME
+ 	Dprintk("start_secondary: starting CPU 0x%x\n", hard_smp_processor_id());
++#endif
+ 	efi_map_pal_code();
+ 	cpu_init();
+ 	preempt_disable();
+diff --git a/arch/ia64/kernel/vmlinux.lds.S b/arch/ia64/kernel/vmlinux.lds.S
+index 5a77206..de71da8 100644
+--- a/arch/ia64/kernel/vmlinux.lds.S
++++ b/arch/ia64/kernel/vmlinux.lds.S
+@@ -215,6 +215,9 @@ SECTIONS
+   /* Per-cpu data: */
+   percpu : { } :percpu
+   . = ALIGN(PERCPU_PAGE_SIZE);
++#ifdef	CONFIG_SMP
++  . = . + PERCPU_PAGE_SIZE;	/* cpu0 per-cpu space */
++#endif
+   __phys_per_cpu_start = .;
+   .data.percpu PERCPU_ADDR : AT(__phys_per_cpu_start - LOAD_OFFSET)
+ 	{
+diff --git a/arch/ia64/mm/contig.c b/arch/ia64/mm/contig.c
+index 798bf98..e566ff4 100644
+--- a/arch/ia64/mm/contig.c
++++ b/arch/ia64/mm/contig.c
+@@ -163,8 +163,14 @@ per_cpu_init (void)
+ 	 * get_zeroed_page().
+ 	 */
+ 	if (first_time) {
++		void *cpu0_data = __phys_per_cpu_start - PERCPU_PAGE_SIZE;
++
+ 		first_time=0;
+-		for (cpu = 0; cpu < NR_CPUS; cpu++) {
++
++		__per_cpu_offset[0] = (char *) cpu0_data - __per_cpu_start;
++		per_cpu(local_per_cpu_offset, 0) = __per_cpu_offset[0];
++
++		for (cpu = 1; cpu < NR_CPUS; cpu++) {
+ 			memcpy(cpu_data, __phys_per_cpu_start, __per_cpu_end - __per_cpu_start);
+ 			__per_cpu_offset[cpu] = (char *) cpu_data - __per_cpu_start;
+ 			cpu_data += PERCPU_PAGE_SIZE;
+@@ -177,7 +183,7 @@ per_cpu_init (void)
+ static inline void
+ alloc_per_cpu_data(void)
+ {
+-	cpu_data = __alloc_bootmem(PERCPU_PAGE_SIZE * NR_CPUS,
++	cpu_data = __alloc_bootmem(PERCPU_PAGE_SIZE * NR_CPUS-1,
+ 				   PERCPU_PAGE_SIZE, __pa(MAX_DMA_ADDRESS));
+ }
+ #else
+diff --git a/arch/ia64/mm/discontig.c b/arch/ia64/mm/discontig.c
+index d83125e..78026aa 100644
+--- a/arch/ia64/mm/discontig.c
++++ b/arch/ia64/mm/discontig.c
+@@ -143,7 +143,11 @@ static void *per_cpu_node_setup(void *cpu_data, int node)
+ 	int cpu;
+ 
+ 	for_each_possible_early_cpu(cpu) {
+-		if (node == node_cpuid[cpu].nid) {
++		if (cpu == 0) {
++			void *cpu0_data = __phys_per_cpu_start - PERCPU_PAGE_SIZE;
++			__per_cpu_offset[cpu] = (char*)cpu0_data -
++				__per_cpu_start;
++		} else if (node == node_cpuid[cpu].nid) {
+ 			memcpy(__va(cpu_data), __phys_per_cpu_start,
+ 			       __per_cpu_end - __per_cpu_start);
+ 			__per_cpu_offset[cpu] = (char*)__va(cpu_data) -

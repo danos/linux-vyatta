@@ -1,0 +1,92 @@
+commit c1955a3d4762e7a9bf84035eb3c4886a900f0d15
+Author: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Date:   Mon Aug 11 08:59:03 2008 +0200
+
+    sched_clock: delay using sched_clock()
+    
+    Some arch's can't handle sched_clock() being called too early - delay
+    this until sched_clock_init() has been called.
+    
+    Reported-by: Bill Gatliff <bgat@billgatliff.com>
+    Signed-off-by: Peter Zijlstra <a.p.zijlstra@chello.nl>
+    Tested-by: Nishanth Aravamudan <nacc@us.ibm.com>
+    CC: Russell King - ARM Linux <linux@arm.linux.org.uk>
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+Adjusted to apply to Debian's 2.6.26 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.26.orig/include/linux/sched.h linux-source-2.6.26/include/linux/sched.h
+--- linux-source-2.6.26.orig/include/linux/sched.h	2008-07-13 15:51:29.000000000 -0600
++++ linux-source-2.6.26/include/linux/sched.h	2008-08-19 23:59:36.000000000 -0600
+@@ -1552,16 +1552,10 @@ static inline int set_cpus_allowed(struc
+ 
+ extern unsigned long long sched_clock(void);
+ 
+-#ifndef CONFIG_HAVE_UNSTABLE_SCHED_CLOCK
+-static inline void sched_clock_init(void)
+-{
+-}
+-
+-static inline u64 sched_clock_cpu(int cpu)
+-{
+-	return sched_clock();
+-}
++extern void sched_clock_init(void);
++extern u64 sched_clock_cpu(int cpu);
+ 
++#ifndef CONFIG_HAVE_UNSTABLE_SCHED_CLOCK
+ static inline void sched_clock_tick(void)
+ {
+ }
+@@ -1574,8 +1568,6 @@ static inline void sched_clock_idle_wake
+ {
+ }
+ #else
+-extern void sched_clock_init(void);
+-extern u64 sched_clock_cpu(int cpu);
+ extern void sched_clock_tick(void);
+ extern void sched_clock_idle_sleep_event(void);
+ extern void sched_clock_idle_wakeup_event(u64 delta_ns);
+diff -urpN linux-source-2.6.26.orig/kernel/sched_clock.c linux-source-2.6.26/kernel/sched_clock.c
+--- linux-source-2.6.26.orig/kernel/sched_clock.c	2008-07-13 15:51:29.000000000 -0600
++++ linux-source-2.6.26/kernel/sched_clock.c	2008-08-19 23:59:36.000000000 -0600
+@@ -30,6 +30,8 @@
+ #include <linux/module.h>
+ 
+ 
++static __read_mostly int sched_clock_running;
++
+ #ifdef CONFIG_HAVE_UNSTABLE_SCHED_CLOCK
+ 
+ struct sched_clock_data {
+@@ -59,8 +61,6 @@ static inline struct sched_clock_data *c
+ 	return &per_cpu(sched_clock_data, cpu);
+ }
+ 
+-static __read_mostly int sched_clock_running;
+-
+ void sched_clock_init(void)
+ {
+ 	u64 ktime_now = ktime_to_ns(ktime_get());
+@@ -233,6 +233,21 @@ void sched_clock_idle_wakeup_event(u64 d
+ }
+ EXPORT_SYMBOL_GPL(sched_clock_idle_wakeup_event);
+ 
++#else /* CONFIG_HAVE_UNSTABLE_SCHED_CLOCK */
++
++void sched_clock_init(void)
++{
++	sched_clock_running = 1;
++}
++
++u64 sched_clock_cpu(int cpu)
++{
++	if (unlikely(!sched_clock_running))
++		return 0;
++
++	return sched_clock();
++}
++
+ #endif
+ 
+ /*
