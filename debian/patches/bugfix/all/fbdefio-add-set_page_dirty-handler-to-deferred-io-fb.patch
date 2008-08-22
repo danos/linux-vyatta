@@ -1,0 +1,103 @@
+commit d847471d063663b9f36927d265c66a270c0cfaab
+Author: Ian Campbell <ijc@hellion.org.uk>
+Date:   Wed Aug 20 14:09:23 2008 -0700
+
+    fbdefio: add set_page_dirty handler to deferred IO FB
+    
+    Fixes kernel BUG at lib/radix-tree.c:473.
+    
+    Previously the handler was incidentally provided by tmpfs but this was
+    removed with:
+    
+      commit 14fcc23fdc78e9d32372553ccf21758a9bd56fa1
+      Author: Hugh Dickins <hugh@veritas.com>
+      Date:   Mon Jul 28 15:46:19 2008 -0700
+    
+        tmpfs: fix kernel BUG in shmem_delete_inode
+    
+    relying on this behaviour was incorrect in any case and the BUG also
+    appeared when the device node was on an ext3 filesystem.
+    
+    v2: override a_ops at open() time rather than mmap() time to minimise
+    races per AKPM's concerns.
+    
+    Signed-off-by: Ian Campbell <ijc@hellion.org.uk>
+    Cc: Jaya Kumar <jayakumar.lkml@gmail.com>
+    Cc: Nick Piggin <npiggin@suse.de>
+    Cc: Peter Zijlstra <a.p.zijlstra@chello.nl>
+    Cc: Hugh Dickins <hugh@veritas.com>
+    Cc: Johannes Weiner <hannes@saeurebad.de>
+    Cc: Jeremy Fitzhardinge <jeremy@goop.org>
+    Cc: Kel Modderman <kel@otaku42.de>
+    Cc: Markus Armbruster <armbru@redhat.com>
+    Cc: Krzysztof Helt <krzysztof.h1@poczta.fm>
+    Cc: <stable@kernel.org> [14fcc23fd is in 2.6.25.14 and 2.6.26.1]
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/drivers/video/fb_defio.c b/drivers/video/fb_defio.c
+index 59df132..4835bdc 100644
+--- a/drivers/video/fb_defio.c
++++ b/drivers/video/fb_defio.c
+@@ -114,6 +114,17 @@ static struct vm_operations_struct fb_deferred_io_vm_ops = {
+ 	.page_mkwrite	= fb_deferred_io_mkwrite,
+ };
+ 
++static int fb_deferred_io_set_page_dirty(struct page *page)
++{
++	if (!PageDirty(page))
++		SetPageDirty(page);
++	return 0;
++}
++
++static const struct address_space_operations fb_deferred_io_aops = {
++	.set_page_dirty = fb_deferred_io_set_page_dirty,
++};
++
+ static int fb_deferred_io_mmap(struct fb_info *info, struct vm_area_struct *vma)
+ {
+ 	vma->vm_ops = &fb_deferred_io_vm_ops;
+@@ -163,6 +174,14 @@ void fb_deferred_io_init(struct fb_info *info)
+ }
+ EXPORT_SYMBOL_GPL(fb_deferred_io_init);
+ 
++void fb_deferred_io_open(struct fb_info *info,
++			 struct inode *inode,
++			 struct file *file)
++{
++	file->f_mapping->a_ops = &fb_deferred_io_aops;
++}
++EXPORT_SYMBOL_GPL(fb_deferred_io_open);
++
+ void fb_deferred_io_cleanup(struct fb_info *info)
+ {
+ 	void *screen_base = (void __force *) info->screen_base;
+diff --git a/drivers/video/fbmem.c b/drivers/video/fbmem.c
+index 6b48780..98843c2 100644
+--- a/drivers/video/fbmem.c
++++ b/drivers/video/fbmem.c
+@@ -1340,6 +1340,10 @@ fb_open(struct inode *inode, struct file *file)
+ 		if (res)
+ 			module_put(info->fbops->owner);
+ 	}
++#ifdef CONFIG_FB_DEFERRED_IO
++	if (info->fbdefio)
++		fb_deferred_io_open(info, inode, file);
++#endif
+ 	return res;
+ }
+ 
+diff --git a/include/linux/fb.h b/include/linux/fb.h
+index 3b8870e..531ccd5 100644
+--- a/include/linux/fb.h
++++ b/include/linux/fb.h
+@@ -976,6 +976,9 @@ static inline void __fb_pad_aligned_buffer(u8 *dst, u32 d_pitch,
+ 
+ /* drivers/video/fb_defio.c */
+ extern void fb_deferred_io_init(struct fb_info *info);
++extern void fb_deferred_io_open(struct fb_info *info,
++				struct inode *inode,
++				struct file *file);
+ extern void fb_deferred_io_cleanup(struct fb_info *info);
+ extern int fb_deferred_io_fsync(struct file *file, struct dentry *dentry,
+ 				int datasync);
