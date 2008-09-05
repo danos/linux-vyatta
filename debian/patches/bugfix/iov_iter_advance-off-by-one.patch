@@ -1,0 +1,37 @@
+commit 94ad374a0751f40d25e22e036c37f7263569d24c
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Wed Jul 30 14:45:12 2008 -0700
+
+    Fix off-by-one error in iov_iter_advance()
+    
+    The iov_iter_advance() function would look at the iov->iov_len entry
+    even though it might have iterated over the whole array, and iov was
+    pointing past the end.  This would cause DEBUG_PAGEALLOC to trigger a
+    kernel page fault if the allocation was at the end of a page, and the
+    next page was unallocated.
+    
+    The quick fix is to just change the order of the tests: check that there
+    is any iovec data left before we check the iov entry itself.
+    
+    Thanks to Alexey Dobriyan for finding this case, and testing the fix.
+    
+    Reported-and-tested-by: Alexey Dobriyan <adobriyan@gmail.com>
+    Cc: Nick Piggin <npiggin@suse.de>
+    Cc: Andrew Morton <akpm@linux-foundation.org>
+    Cc: <stable@kernel.org> [2.6.25.x, 2.6.26.x]
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+Adjusted to apply to Debian's 2.6.24 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.24.orig/mm/filemap.c linux-source-2.6.24/mm/filemap.c
+--- linux-source-2.6.24.orig/mm/filemap.c	2008-05-07 16:34:46.000000000 -0600
++++ linux-source-2.6.24/mm/filemap.c	2008-09-05 11:07:57.000000000 -0600
+@@ -1740,7 +1740,7 @@ void iov_iter_advance(struct iov_iter *i
+ 		 * The !iov->iov_len check ensures we skip over unlikely
+ 		 * zero-length segments (without overruning the iovec).
+ 		 */
+-		while (bytes || unlikely(!iov->iov_len && i->count)) {
++		while (bytes || unlikely(i->count && !iov->iov_len)) {
+ 			int copy;
+ 
+ 			copy = min(bytes, iov->iov_len - base);
