@@ -1,0 +1,52 @@
+commit 14fcc23fdc78e9d32372553ccf21758a9bd56fa1
+Author: Hugh Dickins <hugh@veritas.com>
+Date:   Mon Jul 28 15:46:19 2008 -0700
+
+    tmpfs: fix kernel BUG in shmem_delete_inode
+    
+    SuSE's insserve initscript ordering program hits kernel BUG at mm/shmem.c:814
+    on 2.6.26.  It's using posix_fadvise on directories, and the shmem_readpage
+    method added in 2.6.23 is letting POSIX_FADV_WILLNEED allocate useless pages
+    to a tmpfs directory, incrementing i_blocks count but never decrementing it.
+    
+    Fix this by assigning shmem_aops (pointing to readpage and writepage and
+    set_page_dirty) only when it's needed, on a regular file or a long symlink.
+    
+    Many thanks to Kel for outstanding bugreport and steps to reproduce it.
+    
+    Reported-by: Kel Modderman <kel@otaku42.de>
+    Tested-by: Kel Modderman <kel@otaku42.de>
+    Signed-off-by: Hugh Dickins <hugh@veritas.com>
+    Cc: <stable@kernel.org>		[2.6.25.x, 2.6.26.x]
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+Backported to Debian's 2.6.24 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.24.orig/mm/shmem.c linux-source-2.6.24/mm/shmem.c
+--- linux-source-2.6.24.orig/mm/shmem.c	2008-01-24 15:58:37.000000000 -0700
++++ linux-source-2.6.24/mm/shmem.c	2008-08-18 00:57:29.000000000 -0600
+@@ -1415,7 +1415,6 @@ shmem_get_inode(struct super_block *sb, 
+ 		inode->i_uid = current->fsuid;
+ 		inode->i_gid = current->fsgid;
+ 		inode->i_blocks = 0;
+-		inode->i_mapping->a_ops = &shmem_aops;
+ 		inode->i_mapping->backing_dev_info = &shmem_backing_dev_info;
+ 		inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
+ 		inode->i_generation = get_seconds();
+@@ -1430,6 +1429,7 @@ shmem_get_inode(struct super_block *sb, 
+ 			init_special_inode(inode, mode, dev);
+ 			break;
+ 		case S_IFREG:
++			inode->i_mapping->a_ops = &shmem_aops;
+ 			inode->i_op = &shmem_inode_operations;
+ 			inode->i_fop = &shmem_file_operations;
+ 			mpol_shared_policy_init(&info->policy, sbinfo->policy,
+@@ -1924,6 +1924,7 @@ static int shmem_symlink(struct inode *d
+ 			iput(inode);
+ 			return error;
+ 		}
++		inode->i_mapping->a_ops = &shmem_aops;
+ 		inode->i_op = &shmem_symlink_inode_operations;
+ 		kaddr = kmap_atomic(page, KM_USER0);
+ 		memcpy(kaddr, symname, len);
