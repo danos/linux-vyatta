@@ -83264,3 +83264,559 @@ index ca6b5d3..ce9a9cb 100644
  					cur = req;
  					goto out;
  				}
+commit 24cebf40278cb071ff8b5671b03c763f0f74b5ec
+Author: Pavel Emelyanov <xemul@openvz.org>
+Date:   Thu Sep 4 11:31:43 2008 +0400
+
+    netns: add support for net namespace in igmp code
+    
+    This is a port of two patches from Eric W. Biederman:
+    [PATCH] netns: Only route multicast trafic in init_net
+    [PATCH] netns: Teach the igmp code to handle multiple namespaces
+    
+    Without them this code locked hard in processing incoming mc traffic
+    http://bugzilla.openvz.org/show_bug.cgi?id=992
+    
+    Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+
+diff --git a/net/ipv4/igmp.c b/net/ipv4/igmp.c
+index 03a7004..22fd1c1 100644
+--- a/net/ipv4/igmp.c
++++ b/net/ipv4/igmp.c
+@@ -292,6 +292,7 @@ static struct sk_buff *igmpv3_newpack(struct net_device *dev, int size)
+ 	struct rtable *rt;
+ 	struct iphdr *pip;
+ 	struct igmpv3_report *pig;
++	struct net *net = dev_net(dev);
+ 
+ 	skb = alloc_skb(size + LL_ALLOCATED_SPACE(dev), GFP_ATOMIC);
+ 	if (skb == NULL)
+@@ -302,7 +303,7 @@ static struct sk_buff *igmpv3_newpack(struct net_device *dev, int size)
+ 				    .nl_u = { .ip4_u = {
+ 				    .daddr = IGMPV3_ALL_MCR } },
+ 				    .proto = IPPROTO_IGMP };
+-		if (ip_route_output_key(&init_net, &rt, &fl)) {
++		if (ip_route_output_key(net, &rt, &fl)) {
+ 			kfree_skb(skb);
+ 			return NULL;
+ 		}
+@@ -632,6 +633,7 @@ static int igmp_send_report(struct in_device *in_dev, struct ip_mc_list *pmc,
+ 	struct igmphdr *ih;
+ 	struct rtable *rt;
+ 	struct net_device *dev = in_dev->dev;
++	struct net *net = dev_net(dev);
+ 	__be32	group = pmc ? pmc->multiaddr : 0;
+ 	__be32	dst;
+ 
+@@ -646,7 +648,7 @@ static int igmp_send_report(struct in_device *in_dev, struct ip_mc_list *pmc,
+ 		struct flowi fl = { .oif = dev->ifindex,
+ 				    .nl_u = { .ip4_u = { .daddr = dst } },
+ 				    .proto = IPPROTO_IGMP };
+-		if (ip_route_output_key(&init_net, &rt, &fl))
++		if (ip_route_output_key(net, &rt, &fl))
+ 			return -1;
+ 	}
+ 	if (rt->rt_src == 0) {
+@@ -1199,9 +1201,6 @@ void ip_mc_inc_group(struct in_device *in_dev, __be32 addr)
+ 
+ 	ASSERT_RTNL();
+ 
+-	if (dev_net(in_dev->dev) != &init_net)
+-		return;
+-
+ 	for (im=in_dev->mc_list; im; im=im->next) {
+ 		if (im->multiaddr == addr) {
+ 			im->users++;
+@@ -1281,9 +1280,6 @@ void ip_mc_dec_group(struct in_device *in_dev, __be32 addr)
+ 
+ 	ASSERT_RTNL();
+ 
+-	if (dev_net(in_dev->dev) != &init_net)
+-		return;
+-
+ 	for (ip=&in_dev->mc_list; (i=*ip)!=NULL; ip=&i->next) {
+ 		if (i->multiaddr==addr) {
+ 			if (--i->users == 0) {
+@@ -1311,9 +1307,6 @@ void ip_mc_down(struct in_device *in_dev)
+ 
+ 	ASSERT_RTNL();
+ 
+-	if (dev_net(in_dev->dev) != &init_net)
+-		return;
+-
+ 	for (i=in_dev->mc_list; i; i=i->next)
+ 		igmp_group_dropped(i);
+ 
+@@ -1334,9 +1327,6 @@ void ip_mc_init_dev(struct in_device *in_dev)
+ {
+ 	ASSERT_RTNL();
+ 
+-	if (dev_net(in_dev->dev) != &init_net)
+-		return;
+-
+ 	in_dev->mc_tomb = NULL;
+ #ifdef CONFIG_IP_MULTICAST
+ 	in_dev->mr_gq_running = 0;
+@@ -1360,9 +1350,6 @@ void ip_mc_up(struct in_device *in_dev)
+ 
+ 	ASSERT_RTNL();
+ 
+-	if (dev_net(in_dev->dev) != &init_net)
+-		return;
+-
+ 	ip_mc_inc_group(in_dev, IGMP_ALL_HOSTS);
+ 
+ 	for (i=in_dev->mc_list; i; i=i->next)
+@@ -1379,9 +1366,6 @@ void ip_mc_destroy_dev(struct in_device *in_dev)
+ 
+ 	ASSERT_RTNL();
+ 
+-	if (dev_net(in_dev->dev) != &init_net)
+-		return;
+-
+ 	/* Deactivate timers */
+ 	ip_mc_down(in_dev);
+ 
+@@ -1398,7 +1382,7 @@ void ip_mc_destroy_dev(struct in_device *in_dev)
+ 	write_unlock_bh(&in_dev->mc_list_lock);
+ }
+ 
+-static struct in_device * ip_mc_find_dev(struct ip_mreqn *imr)
++static struct in_device * ip_mc_find_dev(struct net *net, struct ip_mreqn *imr)
+ {
+ 	struct flowi fl = { .nl_u = { .ip4_u =
+ 				      { .daddr = imr->imr_multiaddr.s_addr } } };
+@@ -1407,19 +1391,19 @@ static struct in_device * ip_mc_find_dev(struct ip_mreqn *imr)
+ 	struct in_device *idev = NULL;
+ 
+ 	if (imr->imr_ifindex) {
+-		idev = inetdev_by_index(&init_net, imr->imr_ifindex);
++		idev = inetdev_by_index(net, imr->imr_ifindex);
+ 		if (idev)
+ 			__in_dev_put(idev);
+ 		return idev;
+ 	}
+ 	if (imr->imr_address.s_addr) {
+-		dev = ip_dev_find(&init_net, imr->imr_address.s_addr);
++		dev = ip_dev_find(net, imr->imr_address.s_addr);
+ 		if (!dev)
+ 			return NULL;
+ 		dev_put(dev);
+ 	}
+ 
+-	if (!dev && !ip_route_output_key(&init_net, &rt, &fl)) {
++	if (!dev && !ip_route_output_key(net, &rt, &fl)) {
+ 		dev = rt->u.dst.dev;
+ 		ip_rt_put(rt);
+ 	}
+@@ -1757,18 +1741,16 @@ int ip_mc_join_group(struct sock *sk , struct ip_mreqn *imr)
+ 	struct ip_mc_socklist *iml=NULL, *i;
+ 	struct in_device *in_dev;
+ 	struct inet_sock *inet = inet_sk(sk);
++	struct net *net = sock_net(sk);
+ 	int ifindex;
+ 	int count = 0;
+ 
+ 	if (!ipv4_is_multicast(addr))
+ 		return -EINVAL;
+ 
+-	if (sock_net(sk) != &init_net)
+-		return -EPROTONOSUPPORT;
+-
+ 	rtnl_lock();
+ 
+-	in_dev = ip_mc_find_dev(imr);
++	in_dev = ip_mc_find_dev(net, imr);
+ 
+ 	if (!in_dev) {
+ 		iml = NULL;
+@@ -1828,17 +1810,15 @@ static int ip_mc_leave_src(struct sock *sk, struct ip_mc_socklist *iml,
+ int ip_mc_leave_group(struct sock *sk, struct ip_mreqn *imr)
+ {
+ 	struct inet_sock *inet = inet_sk(sk);
++	struct net *net = sock_net(sk);
+ 	struct ip_mc_socklist *iml, **imlp;
+ 	struct in_device *in_dev;
+ 	__be32 group = imr->imr_multiaddr.s_addr;
+ 	u32 ifindex;
+ 	int ret = -EADDRNOTAVAIL;
+ 
+-	if (sock_net(sk) != &init_net)
+-		return -EPROTONOSUPPORT;
+-
+ 	rtnl_lock();
+-	in_dev = ip_mc_find_dev(imr);
++	in_dev = ip_mc_find_dev(net, imr);
+ 	ifindex = imr->imr_ifindex;
+ 	for (imlp = &inet->mc_list; (iml = *imlp) != NULL; imlp = &iml->next) {
+ 		if (iml->multi.imr_multiaddr.s_addr != group)
+@@ -1875,6 +1855,7 @@ int ip_mc_source(int add, int omode, struct sock *sk, struct
+ 	struct ip_mc_socklist *pmc;
+ 	struct in_device *in_dev = NULL;
+ 	struct inet_sock *inet = inet_sk(sk);
++	struct net *net = sock_net(sk);
+ 	struct ip_sf_socklist *psl;
+ 	int leavegroup = 0;
+ 	int i, j, rv;
+@@ -1882,15 +1863,12 @@ int ip_mc_source(int add, int omode, struct sock *sk, struct
+ 	if (!ipv4_is_multicast(addr))
+ 		return -EINVAL;
+ 
+-	if (sock_net(sk) != &init_net)
+-		return -EPROTONOSUPPORT;
+-
+ 	rtnl_lock();
+ 
+ 	imr.imr_multiaddr.s_addr = mreqs->imr_multiaddr;
+ 	imr.imr_address.s_addr = mreqs->imr_interface;
+ 	imr.imr_ifindex = ifindex;
+-	in_dev = ip_mc_find_dev(&imr);
++	in_dev = ip_mc_find_dev(net, &imr);
+ 
+ 	if (!in_dev) {
+ 		err = -ENODEV;
+@@ -2009,6 +1987,7 @@ int ip_mc_msfilter(struct sock *sk, struct ip_msfilter *msf, int ifindex)
+ 	struct ip_mc_socklist *pmc;
+ 	struct in_device *in_dev;
+ 	struct inet_sock *inet = inet_sk(sk);
++	struct net *net = sock_net(sk);
+ 	struct ip_sf_socklist *newpsl, *psl;
+ 	int leavegroup = 0;
+ 
+@@ -2018,15 +1997,12 @@ int ip_mc_msfilter(struct sock *sk, struct ip_msfilter *msf, int ifindex)
+ 	    msf->imsf_fmode != MCAST_EXCLUDE)
+ 		return -EINVAL;
+ 
+-	if (sock_net(sk) != &init_net)
+-		return -EPROTONOSUPPORT;
+-
+ 	rtnl_lock();
+ 
+ 	imr.imr_multiaddr.s_addr = msf->imsf_multiaddr;
+ 	imr.imr_address.s_addr = msf->imsf_interface;
+ 	imr.imr_ifindex = ifindex;
+-	in_dev = ip_mc_find_dev(&imr);
++	in_dev = ip_mc_find_dev(net, &imr);
+ 
+ 	if (!in_dev) {
+ 		err = -ENODEV;
+@@ -2096,20 +2072,18 @@ int ip_mc_msfget(struct sock *sk, struct ip_msfilter *msf,
+ 	struct ip_mc_socklist *pmc;
+ 	struct in_device *in_dev;
+ 	struct inet_sock *inet = inet_sk(sk);
++	struct net *net = sock_net(sk);
+ 	struct ip_sf_socklist *psl;
+ 
+ 	if (!ipv4_is_multicast(addr))
+ 		return -EINVAL;
+ 
+-	if (sock_net(sk) != &init_net)
+-		return -EPROTONOSUPPORT;
+-
+ 	rtnl_lock();
+ 
+ 	imr.imr_multiaddr.s_addr = msf->imsf_multiaddr;
+ 	imr.imr_address.s_addr = msf->imsf_interface;
+ 	imr.imr_ifindex = 0;
+-	in_dev = ip_mc_find_dev(&imr);
++	in_dev = ip_mc_find_dev(net, &imr);
+ 
+ 	if (!in_dev) {
+ 		err = -ENODEV;
+@@ -2166,9 +2140,6 @@ int ip_mc_gsfget(struct sock *sk, struct group_filter *gsf,
+ 	if (!ipv4_is_multicast(addr))
+ 		return -EINVAL;
+ 
+-	if (sock_net(sk) != &init_net)
+-		return -EPROTONOSUPPORT;
+-
+ 	rtnl_lock();
+ 
+ 	err = -EADDRNOTAVAIL;
+@@ -2253,15 +2224,12 @@ void ip_mc_drop_socket(struct sock *sk)
+ 	if (inet->mc_list == NULL)
+ 		return;
+ 
+-	if (sock_net(sk) != &init_net)
+-		return;
+-
+ 	rtnl_lock();
+ 	while ((iml = inet->mc_list) != NULL) {
+ 		struct in_device *in_dev;
+ 		inet->mc_list = iml->next;
+ 
+-		in_dev = inetdev_by_index(&init_net, iml->multi.imr_ifindex);
++		in_dev = inetdev_by_index(sock_net(sk), iml->multi.imr_ifindex);
+ 		(void) ip_mc_leave_src(sk, iml, in_dev);
+ 		if (in_dev != NULL) {
+ 			ip_mc_dec_group(in_dev, iml->multi.imr_multiaddr.s_addr);
+@@ -2306,6 +2274,7 @@ int ip_check_mc(struct in_device *in_dev, __be32 mc_addr, __be32 src_addr, u16 p
+ 
+ #if defined(CONFIG_PROC_FS)
+ struct igmp_mc_iter_state {
++	struct seq_net_private p;
+ 	struct net_device *dev;
+ 	struct in_device *in_dev;
+ };
+@@ -2316,9 +2285,10 @@ static inline struct ip_mc_list *igmp_mc_get_first(struct seq_file *seq)
+ {
+ 	struct ip_mc_list *im = NULL;
+ 	struct igmp_mc_iter_state *state = igmp_mc_seq_private(seq);
++	struct net *net = seq_file_net(seq);
+ 
+ 	state->in_dev = NULL;
+-	for_each_netdev(get_exec_env()->ve_netns, state->dev) {
++	for_each_netdev(net, state->dev) {
+ 		struct in_device *in_dev;
+ 		in_dev = in_dev_get(state->dev);
+ 		if (!in_dev)
+@@ -2439,7 +2409,7 @@ static const struct seq_operations igmp_mc_seq_ops = {
+ 
+ static int igmp_mc_seq_open(struct inode *inode, struct file *file)
+ {
+-	return seq_open_private(file, &igmp_mc_seq_ops,
++	return seq_open_net(inode, file, &igmp_mc_seq_ops,
+ 			sizeof(struct igmp_mc_iter_state));
+ }
+ 
+@@ -2448,10 +2418,11 @@ static const struct file_operations igmp_mc_seq_fops = {
+ 	.open		=	igmp_mc_seq_open,
+ 	.read		=	seq_read,
+ 	.llseek		=	seq_lseek,
+-	.release	=	seq_release_private,
++	.release	=	seq_release_net,
+ };
+ 
+ struct igmp_mcf_iter_state {
++	struct seq_net_private p;
+ 	struct net_device *dev;
+ 	struct in_device *idev;
+ 	struct ip_mc_list *im;
+@@ -2464,10 +2435,11 @@ static inline struct ip_sf_list *igmp_mcf_get_first(struct seq_file *seq)
+ 	struct ip_sf_list *psf = NULL;
+ 	struct ip_mc_list *im = NULL;
+ 	struct igmp_mcf_iter_state *state = igmp_mcf_seq_private(seq);
++	struct net *net = seq_file_net(seq);
+ 
+ 	state->idev = NULL;
+ 	state->im = NULL;
+-	for_each_netdev(get_exec_env()->ve_netns, state->dev) {
++	for_each_netdev(net, state->dev) {
+ 		struct in_device *idev;
+ 		idev = in_dev_get(state->dev);
+ 		if (unlikely(idev == NULL))
+@@ -2598,7 +2570,7 @@ static const struct seq_operations igmp_mcf_seq_ops = {
+ 
+ static int igmp_mcf_seq_open(struct inode *inode, struct file *file)
+ {
+-	return seq_open_private(file, &igmp_mcf_seq_ops,
++	return seq_open_net(inode, file, &igmp_mcf_seq_ops,
+ 			sizeof(struct igmp_mcf_iter_state));
+ }
+ 
+@@ -2607,7 +2579,7 @@ static const struct file_operations igmp_mcf_seq_fops = {
+ 	.open		=	igmp_mcf_seq_open,
+ 	.read		=	seq_read,
+ 	.llseek		=	seq_lseek,
+-	.release	=	seq_release_private,
++	.release	=	seq_release_net,
+ };
+ 
+ static int igmp_net_init(struct net *net)
+
+commit ef2def76125ba8753042329df1ede57449de4609
+Author: Pavel Emelyanov <xemul@openvz.org>
+Date:   Tue Sep 2 20:51:36 2008 +0400
+
+    cpt: Ban fib trie
+    
+    This sounds wierd (we restore routing via common API), but
+    with fib trie turned on after (successfull) restore I see the
+    CPT ERR: f6c1e240,296 :NLMERR: -3
+    message in logs and not working networking in container.
+    
+    So ban this thing for a while...
+    
+    Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+    
+    P.S. I know, that Kconfig ban looks better :)
+
+diff --git a/kernel/cpt/cpt_net.c b/kernel/cpt/cpt_net.c
+index 78919d8..d61126c 100644
+--- a/kernel/cpt/cpt_net.c
++++ b/kernel/cpt/cpt_net.c
+@@ -322,6 +322,10 @@ int cpt_dump_ifaddr(struct cpt_context * ctx)
+ 	return 0;
+ }
+ 
++#ifdef CONFIG_IP_FIB_TRIE
++#error "Trie fib rules are known not to be restored proprly yet"
++#endif
++
+ static int cpt_dump_route(struct cpt_context * ctx)
+ {
+ 	int err;
+
+commit fa7ac0b2423dc741cd7016565545abb8e36c4af4
+Author: Vitaliy Gusev <vgusev@openvz.org>
+Date:   Wed Aug 27 19:37:09 2008 +0400
+
+    nf: fix call to kmem_cache_destroy from VEs
+    
+    Free nf_conntrack_cachep only for VE0 as it is a global variable
+    for all VEs.
+    
+    Signed-off-by: Vitaliy Gusev <vgusev@openvz.org>
+    Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+
+diff --git a/net/netfilter/nf_conntrack_core.c b/net/netfilter/nf_conntrack_core.c
+index e811c0b..b4050b0 100644
+--- a/net/netfilter/nf_conntrack_core.c
++++ b/net/netfilter/nf_conntrack_core.c
+@@ -1041,7 +1041,8 @@ void nf_conntrack_cleanup(void)
+ 
+ 	rcu_assign_pointer(nf_ct_destroy, NULL);
+ 
+-	kmem_cache_destroy(nf_conntrack_cachep);
++	if (ve_is_super(ve))
++		kmem_cache_destroy(nf_conntrack_cachep);
+ skip_ct_cache:
+ 	nf_conntrack_helper_fini();
+ 	nf_conntrack_expect_fini();
+
+commit 8562975430153848dd817a050133b53adda96910
+Author: Vitaliy Gusev <vgusev@openvz.org>
+Date:   Wed Aug 27 19:36:28 2008 +0400
+
+    nf: fix use after free
+    
+    Fix use after free error: move freeing ve_nf_conntrack_l4proto_generic
+    to nf_ct_proto_generic_sysctl_cleanup().
+    
+    Signed-off-by: Vitaliy Gusev <vgusev@openvz.org>
+    Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+
+diff --git a/net/netfilter/nf_conntrack_proto.c b/net/netfilter/nf_conntrack_proto.c
+index 49fc01f..67c53a7 100644
+--- a/net/netfilter/nf_conntrack_proto.c
++++ b/net/netfilter/nf_conntrack_proto.c
+@@ -358,8 +358,4 @@ void nf_conntrack_proto_fini(void)
+ 	/* free l3proto protocol tables */
+ 	for (i = 0; i < PF_MAX; i++)
+ 		kfree(ve_nf_ct_protos[i]);
+-#ifdef CONFIG_VE_IPTABLES
+-	if (!ve_is_super(get_exec_env()))
+-		kfree(ve_nf_conntrack_l4proto_generic);
+-#endif
+ }
+diff --git a/net/netfilter/nf_conntrack_proto_generic.c b/net/netfilter/nf_conntrack_proto_generic.c
+index e65f9a7..24b0e29 100644
+--- a/net/netfilter/nf_conntrack_proto_generic.c
++++ b/net/netfilter/nf_conntrack_proto_generic.c
+@@ -163,6 +163,8 @@ void nf_ct_proto_generic_sysctl_cleanup(void)
+ 		kfree(ve_nf_conntrack_l4proto_generic->ctl_compat_table);
+ #endif
+ 		kfree(ve_nf_conntrack_l4proto_generic->ctl_table);
++
++		kfree(ve_nf_conntrack_l4proto_generic);
+ 	}
+ }
+ EXPORT_SYMBOL(nf_ct_proto_generic_sysctl_cleanup);
+
+commit 15a4a5735953413482dd6266541e4bdf9f5956bc
+Author: Pavel Emelyanov <xemul@openvz.org>
+Date:   Wed Aug 27 18:52:56 2008 +0400
+
+    Fix CONFIG_RT_GROUP_SCHED compilation case.
+    
+    http://bugzilla.openvz.org/show_bug.cgi?id=984
+
+diff --git a/kernel/sched.c b/kernel/sched.c
+index 57a7d99..56c19e6 100644
+--- a/kernel/sched.c
++++ b/kernel/sched.c
+@@ -8747,7 +8747,7 @@ static unsigned long to_ratio(u64 period, u64 runtime)
+ 	return div64_u64(runtime << 16, period);
+ }
+ 
+-#ifdef CONFIG_CGROUP_SCHED
++#if defined(CONFIG_CGROUP_SCHED) || defined(CONFIG_VZ_FAIRSCHED)
+ static int __rt_schedulable(struct task_group *tg, u64 period, u64 runtime)
+ {
+ 	struct task_group *tgi, *parent = tg ? tg->parent : NULL;
+@@ -8804,10 +8804,10 @@ static int __rt_schedulable(struct task_group *tg, u64 period, u64 runtime)
+ static inline int tg_has_rt_tasks(struct task_group *tg)
+ {
+ 	struct task_struct *g, *p;
+-	do_each_thread(g, p) {
++	do_each_thread_ve(g, p) {
+ 		if (rt_task(p) && rt_rq_of_se(&p->rt)->tg == tg)
+ 			return 1;
+-	} while_each_thread(g, p);
++	} while_each_thread_ve(g, p);
+ 	return 0;
+ }
+ 
+
+commit e5ea620c7d8240c1495d38f4348e1228fb633774
+Author: Pavel Emelyanov <xemul@openvz.org>
+Date:   Wed Aug 27 18:23:03 2008 +0400
+
+    ub: ub_sock_tcp_chargesend warning if called via tcp_fragment
+    
+    Ported patch from Denis Lunev pointed out by Konstantin Khlebnikov
+    (team work at its best).
+    
+    http://bugzilla.openvz.org/show_bug.cgi?id=974
+    
+    Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+
+diff --git a/include/bc/net.h b/include/bc/net.h
+index 5330a88..7c4c894 100644
+--- a/include/bc/net.h
++++ b/include/bc/net.h
+@@ -63,8 +63,6 @@ UB_DECLARE_VOID_FUNC(ub_sock_ret_wreserv(struct sock *sk, int bufid,
+ 			unsigned long size, unsigned long ressize))
+ UB_DECLARE_FUNC(int, ub_sock_tcp_chargesend(struct sock *sk,
+ 			struct sk_buff *skb, enum ub_severity strict))
+-UB_DECLARE_VOID_FUNC(ub_sock_tcp_unchargesend(struct sock *sk,
+-			unsigned long size))
+ UB_DECLARE_FUNC(int, ub_sock_tcp_chargepage(struct sock *sk))
+ UB_DECLARE_VOID_FUNC(ub_sock_tcp_detachpage(struct sock *sk))
+ 
+diff --git a/kernel/bc/net.c b/kernel/bc/net.c
+index e0244b4..ace2cb6 100644
+--- a/kernel/bc/net.c
++++ b/kernel/bc/net.c
+@@ -1142,14 +1142,6 @@ int ub_sock_tcp_chargesend(struct sock *sk, struct sk_buff *skb,
+ }
+ EXPORT_SYMBOL(ub_sock_tcp_chargesend);
+ 
+-void ub_sock_tcp_unchargesend(struct sock *sk, unsigned long size)
+-{
+-	if (unlikely(!sock_has_ubc(sk)))
+-		return;
+-	/* see ub_tcpsndbuf_uncharge */
+-	ub_sock_ret_wreserv(sk, UB_TCPSNDBUF, size, sock_bc(sk)->poll_reserv);
+-}
+-
+ /*
+  * Initialization
+  */
+diff --git a/net/ipv4/tcp_output.c b/net/ipv4/tcp_output.c
+index 4459fd3..3ad0e12 100644
+--- a/net/ipv4/tcp_output.c
++++ b/net/ipv4/tcp_output.c
+@@ -732,11 +732,9 @@ int tcp_fragment(struct sock *sk, struct sk_buff *skb, u32 len,
+ 		nsize = 0;
+ 
+ 	if (skb_cloned(skb) && skb_is_nonlinear(skb)) {
+-		unsigned long chargesize;
+-		chargesize = skb_bc(skb)->charged;
+ 		if (pskb_expand_head(skb, 0, 0, GFP_ATOMIC))
+ 			return -ENOMEM;
+-		ub_sock_tcp_unchargesend(sk, chargesize);
++		ub_skb_uncharge(skb);
+ 		ub_tcpsndbuf_charge_forced(sk, skb);
+ 	}
+ 
