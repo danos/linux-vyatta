@@ -154,13 +154,12 @@ class Gencontrol(Base):
         packages_dummy = []
         packages_own = []
 
-        build_headers = config_entry_base.get('modules', True)
-
         if config_entry_image['type'] == 'plain-s390-tape':
             image = self.templates["control.image.type-standalone"]
-            build_headers = False
+            build_modules = False
         elif config_entry_image['type'] == 'plain-xen':
             image = self.templates["control.image.type-modulesextra"]
+            build_modules = True
             config_entry_xen = self.config.merge('xen', arch, featureset, flavour)
             if config_entry_xen.get('dom0-support', True):
                 p = self.process_packages(self.templates['control.xen-linux-system'], vars)
@@ -171,6 +170,7 @@ class Gencontrol(Base):
                 p[0]['Depends'].append(l)
                 packages_dummy.extend(p)
         else:
+            build_modules = True
             image = self.templates["control.image.type-%s" % config_entry_image['type']]
             #image = self.templates["control.image.type-modulesinline"]
 
@@ -179,7 +179,7 @@ class Gencontrol(Base):
         packages_own.append(self.process_real_image(image[0], image_fields, vars))
         packages_own.extend(self.process_packages(image[1:], vars))
 
-        if build_headers:
+        if build_modules:
             makeflags['MODULES'] = True
             package_headers = self.process_package(headers[0], vars)
             package_headers['Depends'].extend(relations_compiler)
