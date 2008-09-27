@@ -93,6 +93,7 @@ class ConfigCoreHierarchy(ConfigCore):
         },
         'xen': {
             'dom0-support': SchemaItemBoolean(),
+            'flavours': SchemaItemList(),
             'versions': SchemaItemList(),
         }
     }

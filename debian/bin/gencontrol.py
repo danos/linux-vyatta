@@ -164,9 +164,12 @@ class Gencontrol(Base):
             if config_entry_xen.get('dom0-support', True):
                 p = self.process_packages(self.templates['control.xen-linux-system'], vars)
                 l = PackageRelationGroup()
-                for version in config_entry_xen['versions']:
-                    l.append("xen-hypervisor-%s-%s" % (version, config_entry_xen['flavour']))
-                makeflags['XEN_VERSIONS'] = ' '.join(['%s-%s' % (i, config_entry_xen['flavour']) for i in config_entry_xen['versions']])
+                xen_versions = []
+                for flavour in config_entry_xen['flavours']:
+                    for version in config_entry_xen['versions']:
+                        l.append("xen-hypervisor-%s-%s" % (version, flavour))
+                        xen_versions.append('%s-%s' % (version, flavour))
+                makeflags['XEN_VERSIONS'] = ' '.join(xen_versions)
                 p[0]['Depends'].append(l)
                 packages_dummy.extend(p)
         else:
