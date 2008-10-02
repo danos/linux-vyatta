@@ -1,0 +1,82 @@
+commit 01de85e057328ecbef36e108673b1e81059d54c1
+Author: Jens Axboe <jens.axboe@oracle.com>
+Date:   Tue Oct 17 19:50:36 2006 +0200
+
+    [PATCH] Add lockless helpers for remove_suid()
+    
+    Right now users have to grab i_mutex before calling remove_suid(), in the
+    unlikely event that a call to ->setattr() may be needed. Split up the
+    function in two parts:
+    
+    - One to check if we need to remove suid
+    - One to actually remove it
+    
+    The first we can call lockless.
+    
+    Signed-off-by: Jens Axboe <jens.axboe@oracle.com>
+
+diff --git a/include/linux/fs.h b/include/linux/fs.h
+index d695ba2..2fe6e3f 100644
+--- a/include/linux/fs.h
++++ b/include/linux/fs.h
+@@ -1712,6 +1712,8 @@ extern void __iget(struct inode * inode);
+ extern void clear_inode(struct inode *);
+ extern void destroy_inode(struct inode *);
+ extern struct inode *new_inode(struct super_block *);
++extern int __remove_suid(struct dentry *, int);
++extern int should_remove_suid(struct dentry *);
+ extern int remove_suid(struct dentry *);
+ extern void remove_dquot_ref(struct super_block *, int, struct list_head *);
+ 
+diff --git a/mm/filemap.c b/mm/filemap.c
+index 3464b68..7c7addb 100644
+--- a/mm/filemap.c
++++ b/mm/filemap.c
+@@ -1884,11 +1884,10 @@ repeat:
+  *	if suid or (sgid and xgrp)
+  *		remove privs
+  */
+-int remove_suid(struct dentry *dentry)
++int should_remove_suid(struct dentry *dentry)
+ {
+ 	mode_t mode = dentry->d_inode->i_mode;
+ 	int kill = 0;
+-	int result = 0;
+ 
+ 	/* suid always must be killed */
+ 	if (unlikely(mode & S_ISUID))
+@@ -1901,13 +1900,28 @@ int remove_suid(struct dentry *dentry)
+ 	if (unlikely((mode & S_ISGID) && (mode & S_IXGRP)))
+ 		kill |= ATTR_KILL_SGID;
+ 
+-	if (unlikely(kill && !capable(CAP_FSETID))) {
+-		struct iattr newattrs;
++	if (unlikely(kill && !capable(CAP_FSETID)))
++		return kill;
+ 
+-		newattrs.ia_valid = ATTR_FORCE | kill;
+-		result = notify_change(dentry, &newattrs);
+-	}
+-	return result;
++	return 0;
++}
++
++int __remove_suid(struct dentry *dentry, int kill)
++{
++	struct iattr newattrs;
++
++	newattrs.ia_valid = ATTR_FORCE | kill;
++	return notify_change(dentry, &newattrs);
++}
++
++int remove_suid(struct dentry *dentry)
++{
++	int kill = should_remove_suid(dentry);
++
++	if (unlikely(kill))
++		return __remove_suid(dentry, kill);
++
++	return 0;
+ }
+ EXPORT_SYMBOL(remove_suid);
+ 
