@@ -165,10 +165,10 @@ class Gencontrol(Base):
                 p = self.process_packages(self.templates['control.xen-linux-system'], vars)
                 l = PackageRelationGroup()
                 xen_versions = []
-                for flavour in config_entry_xen['flavours']:
+                for xen_flavour in config_entry_xen['flavours']:
                     for version in config_entry_xen['versions']:
-                        l.append("xen-hypervisor-%s-%s" % (version, flavour))
-                        xen_versions.append('%s-%s' % (version, flavour))
+                        l.append("xen-hypervisor-%s-%s" % (version, xen_flavour))
+                        xen_versions.append('%s-%s' % (version, xen_flavour))
                 makeflags['XEN_VERSIONS'] = ' '.join(xen_versions)
                 p[0]['Depends'].append(l)
                 packages_dummy.extend(p)
