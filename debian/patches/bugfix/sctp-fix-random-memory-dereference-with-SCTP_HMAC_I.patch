@@ -1,0 +1,51 @@
+commit d97240552cd98c4b07322f30f66fd9c3ba4171de
+Author: Vlad Yasevich <vladislav.yasevich@hp.com>
+Date:   Wed Aug 27 16:09:49 2008 -0700
+
+    sctp: fix random memory dereference with SCTP_HMAC_IDENT option.
+    
+    The number of identifiers needs to be checked against the option
+    length.  Also, the identifier index provided needs to be verified
+    to make sure that it doesn't exceed the bounds of the array.
+    
+    Signed-off-by: Vlad Yasevich <vladislav.yasevich@hp.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+Adjusted to apply to Debian's 2.6.24 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.24.orig/net/sctp/auth.c linux-source-2.6.24/net/sctp/auth.c
+--- linux-source-2.6.24.orig/net/sctp/auth.c	2008-01-24 15:58:37.000000000 -0700
++++ linux-source-2.6.24/net/sctp/auth.c	2008-10-09 23:57:42.000000000 -0600
+@@ -782,6 +782,9 @@ int sctp_auth_ep_set_hmacs(struct sctp_e
+ 	for (i = 0; i < hmacs->shmac_num_idents; i++) {
+ 		id = hmacs->shmac_idents[i];
+ 
++		if (id > SCTP_AUTH_HMAC_ID_MAX)
++			return -EOPNOTSUPP;
++
+ 		if (SCTP_AUTH_HMAC_ID_SHA1 == id)
+ 			has_sha1 = 1;
+ 
+diff -urpN linux-source-2.6.24.orig/net/sctp/socket.c linux-source-2.6.24/net/sctp/socket.c
+--- linux-source-2.6.24.orig/net/sctp/socket.c	2008-01-24 15:58:37.000000000 -0700
++++ linux-source-2.6.24/net/sctp/socket.c	2008-10-09 23:57:42.000000000 -0600
+@@ -2987,6 +2987,7 @@ static int sctp_setsockopt_hmac_ident(st
+ 				    int optlen)
+ {
+ 	struct sctp_hmacalgo *hmacs;
++	u32 idents;
+ 	int err;
+ 
+ 	if (optlen < sizeof(struct sctp_hmacalgo))
+@@ -3001,8 +3002,9 @@ static int sctp_setsockopt_hmac_ident(st
+ 		goto out;
+ 	}
+ 
+-	if (hmacs->shmac_num_idents == 0 ||
+-	    hmacs->shmac_num_idents > SCTP_AUTH_NUM_HMACS) {
++	idents = hmacs->shmac_num_idents;
++	if (idents == 0 || idents > SCTP_AUTH_NUM_HMACS ||
++	    (idents * sizeof(u16)) > (optlen - sizeof(struct sctp_hmacalgo))) {
+ 		err = -EINVAL;
+ 		goto out;
+ 	}
