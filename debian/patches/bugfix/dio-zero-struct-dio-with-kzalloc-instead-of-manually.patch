@@ -1,0 +1,95 @@
+commit 848c4dd5153c7a0de55470ce99a8e13a63b4703f
+Author: Zach Brown <zach.brown@oracle.com>
+Date:   Mon Aug 20 17:12:01 2007 -0700
+
+    dio: zero struct dio with kzalloc instead of manually
+    
+    This patch uses kzalloc to zero all of struct dio rather than manually
+    trying to track which fields we rely on being zero.  It passed aio+dio
+    stress testing and some bug regression testing on ext3.
+    
+    This patch was introduced by Linus in the conversation that lead up to
+    Badari's minimal fix to manually zero .map_bh.b_state in commit:
+    
+      6a648fa72161d1f6468dabd96c5d3c0db04f598a
+    
+    It makes the code a bit smaller.  Maybe a couple fewer cachelines to
+    load, if we're lucky:
+    
+       text    data     bss     dec     hex filename
+    3285925  568506 1304616 5159047  4eb887 vmlinux
+    3285797  568506 1304616 5158919  4eb807 vmlinux.patched
+    
+    I was unable to measure a stable difference in the number of cpu cycles
+    spent in blockdev_direct_IO() when pushing aio+dio 256K reads at
+    ~340MB/s.
+    
+    So the resulting intent of the patch isn't a performance gain but to
+    avoid exposing ourselves to the risk of finding another field like
+    .map_bh.b_state where we rely on zeroing but don't enforce it in the
+    code.
+    
+    Signed-off-by: Zach Brown <zach.brown@oracle.com>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+Backported to Debian's 2.6.18 by dann frazier <dannf@hp.com>
+
+diff -urpN linux-source-2.6.18.orig/fs/direct-io.c linux-source-2.6.18/fs/direct-io.c
+--- linux-source-2.6.18.orig/fs/direct-io.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/fs/direct-io.c	2008-09-07 23:18:43.000000000 -0600
+@@ -958,28 +958,17 @@ direct_io_worker(int rw, struct kiocb *i
+ 	ssize_t ret2;
+ 	size_t bytes;
+ 
+-	dio->bio = NULL;
+ 	dio->inode = inode;
+ 	dio->rw = rw;
+ 	dio->blkbits = blkbits;
+ 	dio->blkfactor = inode->i_blkbits - blkbits;
+-	dio->start_zero_done = 0;
+-	dio->size = 0;
+ 	dio->block_in_file = offset >> blkbits;
+-	dio->blocks_available = 0;
+-	dio->cur_page = NULL;
+ 
+-	dio->boundary = 0;
+-	dio->reap_counter = 0;
+ 	dio->get_block = get_block;
+ 	dio->end_io = end_io;
+-	dio->map_bh.b_private = NULL;
+ 	dio->final_block_in_bio = -1;
+ 	dio->next_block_for_io = -1;
+ 
+-	dio->page_errors = 0;
+-	dio->io_error = 0;
+-	dio->result = 0;
+ 	dio->iocb = iocb;
+ 	dio->i_size = i_size_read(inode);
+ 
+@@ -994,8 +983,6 @@ direct_io_worker(int rw, struct kiocb *i
+ 	dio->bio_count = 1;
+ 	dio->bios_in_flight = 0;
+ 	spin_lock_init(&dio->bio_lock);
+-	dio->bio_list = NULL;
+-	dio->waiter = NULL;
+ 
+ 	/*
+ 	 * In case of non-aligned buffers, we may need 2 more
+@@ -1003,8 +990,6 @@ direct_io_worker(int rw, struct kiocb *i
+ 	 */
+ 	if (unlikely(dio->blkfactor))
+ 		dio->pages_in_io = 2;
+-	else
+-		dio->pages_in_io = 0;
+ 
+ 	for (seg = 0; seg < nr_segs; seg++) {
+ 		user_addr = (unsigned long)iov[seg].iov_base;
+@@ -1222,7 +1207,7 @@ __blockdev_direct_IO(int rw, struct kioc
+ 		}
+ 	}
+ 
+-	dio = kmalloc(sizeof(*dio), GFP_KERNEL);
++	dio = kzalloc(sizeof(*dio), GFP_KERNEL);
+ 	retval = -ENOMEM;
+ 	if (!dio)
+ 		goto out;
