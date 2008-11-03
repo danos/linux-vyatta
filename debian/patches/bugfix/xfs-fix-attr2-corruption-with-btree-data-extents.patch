@@ -1,0 +1,149 @@
+commit e5889e90dda328443161e9512f1123c9814d03de
+Author: Barry Naujok <bnaujok@sgi.com>
+Date:   Sat Feb 10 18:35:58 2007 +1100
+
+    [XFS] Fix attr2 corruption with btree data extents
+    
+    SGI-PV: 958747
+    SGI-Modid: xfs-linux-melb:xfs-kern:27792a
+    
+    Signed-off-by: Barry Naujok <bnaujok@sgi.com>
+    Signed-off-by: Russell Cattelan <cattelan@thebarn.com>
+    Signed-off-by: Tim Shimmin <tes@sgi.com>
+
+Adjusted to apply to Debian's 2.6.18 by dann frazier <dannf@hp.com>
+
+diff -urpN linux-source-2.6.18.orig/fs/xfs/xfs_attr.c linux-source-2.6.18/fs/xfs/xfs_attr.c
+--- linux-source-2.6.18.orig/fs/xfs/xfs_attr.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/fs/xfs/xfs_attr.c	2008-09-08 17:13:25.000000000 -0600
+@@ -200,18 +200,14 @@ xfs_attr_set_int(xfs_inode_t *dp, const 
+ 		return (error);
+ 
+ 	/*
+-	 * Determine space new attribute will use, and if it would be
+-	 * "local" or "remote" (note: local != inline).
+-	 */
+-	size = xfs_attr_leaf_newentsize(namelen, valuelen,
+-					mp->m_sb.sb_blocksize, &local);
+-
+-	/*
+ 	 * If the inode doesn't have an attribute fork, add one.
+ 	 * (inode must not be locked when we call this routine)
+ 	 */
+ 	if (XFS_IFORK_Q(dp) == 0) {
+-		if ((error = xfs_bmap_add_attrfork(dp, size, rsvd)))
++		int sf_size = sizeof(xfs_attr_sf_hdr_t) +
++			      XFS_ATTR_SF_ENTSIZE_BYNAME(namelen, valuelen);
++
++		if ((error = xfs_bmap_add_attrfork(dp, sf_size, rsvd)))
+ 			return(error);
+ 	}
+ 
+@@ -232,6 +228,13 @@ xfs_attr_set_int(xfs_inode_t *dp, const 
+ 	args.addname = 1;
+ 	args.oknoent = 1;
+ 
++	/*
++	 * Determine space new attribute will use, and if it would be
++	 * "local" or "remote" (note: local != inline).
++	 */
++	size = xfs_attr_leaf_newentsize(namelen, valuelen,
++					mp->m_sb.sb_blocksize, &local);
++
+ 	nblks = XFS_DAENTER_SPACE_RES(mp, XFS_ATTR_FORK);
+ 	if (local) {
+ 		if (size > (mp->m_sb.sb_blocksize >> 1)) {
+diff -urpN linux-source-2.6.18.orig/fs/xfs/xfs_attr_leaf.c linux-source-2.6.18/fs/xfs/xfs_attr_leaf.c
+--- linux-source-2.6.18.orig/fs/xfs/xfs_attr_leaf.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/fs/xfs/xfs_attr_leaf.c	2008-09-08 17:13:25.000000000 -0600
+@@ -113,6 +113,7 @@ xfs_attr_shortform_bytesfit(xfs_inode_t 
+ 	int offset;
+ 	int minforkoff;	/* lower limit on valid forkoff locations */
+ 	int maxforkoff;	/* upper limit on valid forkoff locations */
++	int dsize;	
+ 	xfs_mount_t *mp = dp->i_mount;
+ 
+ 	offset = (XFS_LITINO(mp) - bytes) >> 3; /* rounded down */
+@@ -132,8 +133,43 @@ xfs_attr_shortform_bytesfit(xfs_inode_t 
+ 		return 0;
+ 	}
+ 
+-	/* data fork btree root can have at least this many key/ptr pairs */
+-	minforkoff = MAX(dp->i_df.if_bytes, XFS_BMDR_SPACE_CALC(MINDBTPTRS));
++	dsize = dp->i_df.if_bytes;
++	
++	switch (dp->i_d.di_format) {
++	case XFS_DINODE_FMT_EXTENTS:
++		/* 
++		 * If there is no attr fork and the data fork is extents, 
++		 * determine if creating the default attr fork will result 
++		 * in the extents form migrating to btree. If so, the 
++		 * minimum offset only needs to be the space required for 
++		 * the btree root.
++		 */ 
++		if (!dp->i_d.di_forkoff && dp->i_df.if_bytes > mp->m_attroffset)
++			dsize = XFS_BMDR_SPACE_CALC(MINDBTPTRS);
++		break;
++		
++	case XFS_DINODE_FMT_BTREE:
++		/*
++		 * If have data btree then keep forkoff if we have one,
++		 * otherwise we are adding a new attr, so then we set 
++		 * minforkoff to where the btree root can finish so we have 
++		 * plenty of room for attrs
++		 */
++		if (dp->i_d.di_forkoff) {
++			if (offset < dp->i_d.di_forkoff) 
++				return 0;
++			else 
++				return dp->i_d.di_forkoff;
++		} else
++			dsize = XFS_BMAP_BROOT_SPACE(dp->i_df.if_broot);
++		break;
++	}
++	
++	/* 
++	 * A data fork btree root must have space for at least 
++	 * MINDBTPTRS key/ptr pairs if the data fork is small or empty.
++	 */
++	minforkoff = MAX(dsize, XFS_BMDR_SPACE_CALC(MINDBTPTRS));
+ 	minforkoff = roundup(minforkoff, 8) >> 3;
+ 
+ 	/* attr fork btree root can have at least this many key/ptr pairs */
+@@ -308,7 +344,8 @@ xfs_attr_shortform_remove(xfs_da_args_t 
+ 	 */
+ 	totsize -= size;
+ 	if (totsize == sizeof(xfs_attr_sf_hdr_t) && !args->addname &&
+-	    (mp->m_flags & XFS_MOUNT_ATTR2)) {
++	    (mp->m_flags & XFS_MOUNT_ATTR2) && 
++	    (dp->i_d.di_format != XFS_DINODE_FMT_BTREE)) {
+ 		/*
+ 		 * Last attribute now removed, revert to original
+ 		 * inode format making all literal area available
+@@ -729,6 +766,7 @@ xfs_attr_shortform_allfit(xfs_dabuf_t *b
+ 				+ be16_to_cpu(name_loc->valuelen);
+ 	}
+ 	if ((dp->i_mount->m_flags & XFS_MOUNT_ATTR2) &&
++	    (dp->i_d.di_format != XFS_DINODE_FMT_BTREE) &&
+ 	    (bytes == sizeof(struct xfs_attr_sf_hdr)))
+ 		return(-1);
+ 	return(xfs_attr_shortform_bytesfit(dp, bytes));
+@@ -767,6 +805,7 @@ xfs_attr_leaf_to_shortform(xfs_dabuf_t *
+ 
+ 	if (forkoff == -1) {
+ 		ASSERT(dp->i_mount->m_flags & XFS_MOUNT_ATTR2);
++		ASSERT(dp->i_d.di_format != XFS_DINODE_FMT_BTREE);
+ 
+ 		/*
+ 		 * Last attribute was removed, revert to original
+diff -urpN linux-source-2.6.18.orig/fs/xfs/xfs_bmap.c linux-source-2.6.18/fs/xfs/xfs_bmap.c
+--- linux-source-2.6.18.orig/fs/xfs/xfs_bmap.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/fs/xfs/xfs_bmap.c	2008-09-08 17:13:25.000000000 -0600
+@@ -3541,6 +3541,7 @@ xfs_bmap_forkoff_reset(
+ 	if (whichfork == XFS_ATTR_FORK &&
+ 	    (ip->i_d.di_format != XFS_DINODE_FMT_DEV) &&
+ 	    (ip->i_d.di_format != XFS_DINODE_FMT_UUID) &&
++	    (ip->i_d.di_format != XFS_DINODE_FMT_BTREE) &&
+ 	    ((mp->m_attroffset >> 3) > ip->i_d.di_forkoff)) {
+ 		ip->i_d.di_forkoff = mp->m_attroffset >> 3;
+ 		ip->i_df.if_ext_max = XFS_IFORK_DSIZE(ip) /
