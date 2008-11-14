@@ -1,0 +1,100 @@
+From: David S. Miller <davem@davemloft.net>
+Date: Thu, 6 Nov 2008 23:45:32 +0000 (-0800)
+Subject: net: Fix recursive descent in __scm_destroy().
+X-Git-Tag: v2.6.28-rc4~22^2~1
+X-Git-Url: http://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Ftorvalds%2Flinux-2.6.git;a=commitdiff_plain;h=3b53fbf
+
+net: Fix recursive descent in __scm_destroy().
+
+__scm_destroy() walks the list of file descriptors in the scm_fp_list
+pointed to by the scm_cookie argument.
+
+Those, in turn, can close sockets and invoke __scm_destroy() again.
+
+There is nothing which limits how deeply this can occur.
+
+The idea for how to fix this is from Linus.  Basically, we do all of
+the fput()s at the top level by collecting all of the scm_fp_list
+objects hit by an fput().  Inside of the initial __scm_destroy() we
+keep running the list until it is empty.
+
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+
+Backported to Debian's 2.6.18 by dann frazier <dannf@hp.com>
+
+diff -urpN linux-source-2.6.18.orig/include/linux/sched.h linux-source-2.6.18/include/linux/sched.h
+--- linux-source-2.6.18.orig/include/linux/sched.h	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/include/linux/sched.h	2008-11-13 18:15:49.000000000 -0700
+@@ -996,6 +996,8 @@ struct task_struct {
+ #ifdef	CONFIG_TASK_DELAY_ACCT
+ 	struct task_delay_info *delays;
+ #endif
++
++	struct list_head	*scm_work_list;
+ };
+ 
+ static inline pid_t process_group(struct task_struct *tsk)
+diff -urpN linux-source-2.6.18.orig/include/net/scm.h linux-source-2.6.18/include/net/scm.h
+--- linux-source-2.6.18.orig/include/net/scm.h	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/include/net/scm.h	2008-11-13 18:12:27.000000000 -0700
+@@ -12,8 +12,9 @@
+ 
+ struct scm_fp_list
+ {
+-	int		count;
+-	struct file	*fp[SCM_MAX_FD];
++	struct list_head	list;
++	int			count;
++	struct file		*fp[SCM_MAX_FD];
+ };
+ 
+ struct scm_cookie
+diff -urpN linux-source-2.6.18.orig/net/core/scm.c linux-source-2.6.18/net/core/scm.c
+--- linux-source-2.6.18.orig/net/core/scm.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/net/core/scm.c	2008-11-13 18:12:27.000000000 -0700
+@@ -73,6 +73,7 @@ static int scm_fp_copy(struct cmsghdr *c
+ 		if (!fpl)
+ 			return -ENOMEM;
+ 		*fplp = fpl;
++		INIT_LIST_HEAD(&fpl->list);
+ 		fpl->count = 0;
+ 	}
+ 	fpp = &fpl->fp[fpl->count];
+@@ -104,9 +105,25 @@ void __scm_destroy(struct scm_cookie *sc
+ 
+ 	if (fpl) {
+ 		scm->fp = NULL;
+-		for (i=fpl->count-1; i>=0; i--)
+-			fput(fpl->fp[i]);
+-		kfree(fpl);
++		if (current->scm_work_list) {
++			list_add_tail(&fpl->list, current->scm_work_list);
++		} else {
++			LIST_HEAD(work_list);
++
++			current->scm_work_list = &work_list;
++
++			list_add(&fpl->list, &work_list);
++			while (!list_empty(&work_list)) {
++				fpl = list_entry((&work_list)->next, struct scm_fp_list, list);
++
++				list_del(&fpl->list);
++				for (i=fpl->count-1; i>=0; i--)
++					fput(fpl->fp[i]);
++				kfree(fpl);
++			}
++
++			current->scm_work_list = NULL;
++		}
+ 	}
+ }
+ 
+@@ -277,6 +294,7 @@ struct scm_fp_list *scm_fp_dup(struct sc
+ 
+ 	new_fpl = kmalloc(sizeof(*fpl), GFP_KERNEL);
+ 	if (new_fpl) {
++		INIT_LIST_HEAD(&new_fpl->list);
+ 		for (i=fpl->count-1; i>=0; i--)
+ 			get_file(fpl->fp[i]);
+ 		memcpy(new_fpl, fpl, sizeof(*fpl));

@@ -1,0 +1,81 @@
+From: Pavel Emelyanov <xemul@openvz.org>
+Date: Sun, 11 Nov 2007 06:07:13 +0000 (-0800)
+Subject: [AF_UNIX]: Convert socks to unix_socks in scan_inflight, not in callbacks
+X-Git-Tag: v2.6.24-rc3~155^2~3
+X-Git-Url: http://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Ftorvalds%2Flinux-2.6.git;a=commitdiff_plain;h=5c80f1ae9842a8b7985acd0f02efb9828effb05f
+
+[AF_UNIX]: Convert socks to unix_socks in scan_inflight, not in callbacks
+
+The scan_inflight() routine scans through the unix sockets and calls
+some passed callback. The fact is that all these callbacks work with
+the unix_sock objects, not the sock ones, so make this conversion in
+the scan_inflight() before calling the callbacks.
+
+This removes one unneeded variable from the inc_inflight_move_tail().
+
+Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+
+Backported to Debian's 2.6.18 by dann frazier <dannf@hp.com>
+
+diff --git a/net/unix/garbage.c b/net/unix/garbage.c
+index 399717e..ebdff3d 100644
+--- a/net/unix/garbage.c
++++ b/net/unix/garbage.c
+@@ -161,7 +161,7 @@ static inline struct sk_buff *sock_queue_head(struct sock *sk)
+ 	for (skb = sock_queue_head(sk)->next, next = skb->next; \
+ 	     skb != sock_queue_head(sk); skb = next, next = skb->next)
+ 
+-static void scan_inflight(struct sock *x, void (*func)(struct sock *),
++static void scan_inflight(struct sock *x, void (*func)(struct unix_sock *),
+ 			  struct sk_buff_head *hitlist)
+ {
+ 	struct sk_buff *skb;
+@@ -185,9 +185,9 @@ static void scan_inflight(struct sock *x, void (*func)(struct sock *),
+ 				 *	if it indeed does so
+ 				 */
+ 				struct sock *sk = unix_get_socket(*fp++);
+-				if(sk) {
++				if (sk) {
+ 					hit = 1;
+-					func(sk);
++					func(unix_sk(sk));
+ 				}
+ 			}
+ 			if (hit && hitlist != NULL) {
+@@ -199,7 +199,7 @@ static void scan_inflight(struct sock *x, void (*func)(struct sock *),
+ 	spin_unlock(&x->sk_receive_queue.lock);
+ }
+ 
+-static void scan_children(struct sock *x, void (*func)(struct sock *),
++static void scan_children(struct sock *x, void (*func)(struct unix_sock *),
+ 			  struct sk_buff_head *hitlist)
+ {
+ 	if (x->sk_state != TCP_LISTEN)
+@@ -235,20 +235,18 @@ static void scan_children(struct sock *x, void (*func)(struct sock *),
+ 	}
+ }
+ 
+-static void dec_inflight(struct sock *sk)
++static void dec_inflight(struct unix_sock *usk)
+ {
+-	atomic_dec(&unix_sk(sk)->inflight);
++	atomic_dec(&usk->inflight);
+ }
+ 
+-static void inc_inflight(struct sock *sk)
++static void inc_inflight(struct unix_sock *usk)
+ {
+-	atomic_inc(&unix_sk(sk)->inflight);
++	atomic_inc(&usk->inflight);
+ }
+ 
+-static void inc_inflight_move_tail(struct sock *sk)
++static void inc_inflight_move_tail(struct unix_sock *u)
+ {
+-	struct unix_sock *u = unix_sk(sk);
+-
+ 	atomic_inc(&u->inflight);
+ 	/*
+ 	 * If this is still a candidate, move it to the end of the
