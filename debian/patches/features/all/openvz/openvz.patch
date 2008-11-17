@@ -71890,17 +71890,16 @@ index fca23a3..26b529f 100644
  	dev_init_scheduler(dev);
  	dev_hold(dev);
  	list_netdevice(dev);
-@@ -3952,6 +3994,7 @@ static DEFINE_MUTEX(net_todo_run_mutex);
+@@ -3952,12 +3994,14 @@ static DEFINE_MUTEX(net_todo_run_mutex);
  void netdev_run_todo(void)
  {
  	struct list_head list;
 +	struct ve_struct *old_ve;
  
- 	/* Need to guard against multiple cpu's getting out of order. */
- 	mutex_lock(&net_todo_run_mutex);
-@@ -3969,6 +4012,7 @@ void netdev_run_todo(void)
+ 	/* Snapshot list, allow later requests */
  	list_replace_init(&net_todo_list, &list);
- 	spin_unlock(&net_todo_list_lock);
+
+ 	__rtnl_unlock();
  
 +	old_ve = get_exec_env();
  	while (!list_empty(&list)) {
@@ -71914,7 +71913,7 @@ index fca23a3..26b529f 100644
  		dev->reg_state = NETREG_UNREGISTERED;
  
  		netdev_wait_allrefs(dev);
-@@ -3991,13 +4036,21 @@ void netdev_run_todo(void)
+@@ -3991,12 +4036,21 @@ void netdev_run_todo(void)
  		BUG_TRAP(!dev->ip6_ptr);
  		BUG_TRAP(!dev->dn_ptr);
  
@@ -71932,11 +71931,10 @@ index fca23a3..26b529f 100644
  		/* Free network device */
  		kobject_put(&dev->dev.kobj);
  	}
--
 +	(void)set_exec_env(old_ve);
- out:
- 	mutex_unlock(&net_todo_run_mutex);
  }
+ 
+ static struct net_device_stats *internal_stats(struct net_device *dev)
 @@ -4037,7 +4090,7 @@ struct net_device *alloc_netdev_mq(int sizeof_priv, const char *name,
  	/* ensure 32-byte alignment of whole construct */
  	alloc_size += NETDEV_ALIGN_CONST;
@@ -72441,8 +72439,8 @@ index 10f5c65..65e0983 100644
 -	new_fpl = kmalloc(sizeof(*fpl), GFP_KERNEL);
 +	new_fpl = kmalloc(sizeof(*fpl), GFP_KERNEL_UBC);
  	if (new_fpl) {
+ 		INIT_LIST_HEAD(&new_fpl->list);
  		for (i=fpl->count-1; i>=0; i--)
- 			get_file(fpl->fp[i]);
 diff --git a/net/core/skbuff.c b/net/core/skbuff.c
 index 3666216..b82442c 100644
 --- a/net/core/skbuff.c
