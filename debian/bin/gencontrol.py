@@ -144,10 +144,10 @@ class Gencontrol(Base):
                     image_fields['Conflicts'].append(PackageRelationGroup([a]))
             image_fields['Depends'].append(l_depends)
 
-        if 'desc-parts' in config_entry_image:
+        desc_parts = self.config.get_merge('image', arch, featureset, flavour, 'desc-parts')
+        if desc_parts:
             desc = image_fields['Description']
-            parts = config_entry_image['desc-parts']
-            for part in parts:
+            for part in desc_parts[::-1]:
                 desc.append(config_entry_image['desc-long-part-' + part])
                 desc.append_short(config_entry_image.get('desc-short-part-' + part, ''))
 
