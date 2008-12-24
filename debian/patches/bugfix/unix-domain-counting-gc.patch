@@ -1,0 +1,204 @@
+commit 6209344f5a3795d34b7f2c0061f49802283b6bdd
+Author: Miklos Szeredi <mszeredi@suse.cz>
+Date:   Sun Nov 9 15:23:57 2008 +0100
+
+    net: unix: fix inflight counting bug in garbage collector
+    
+    Previously I assumed that the receive queues of candidates don't
+    change during the GC.  This is only half true, nothing can be received
+    from the queues (see comment in unix_gc()), but buffers could be added
+    through the other half of the socket pair, which may still have file
+    descriptors referring to it.
+    
+    This can result in inc_inflight_move_tail() erronously increasing the
+    "inflight" counter for a unix socket for which dec_inflight() wasn't
+    previously called.  This in turn can trigger the "BUG_ON(total_refs <
+    inflight_refs)" in a later garbage collection run.
+    
+    Fix this by only manipulating the "inflight" counter for sockets which
+    are candidates themselves.  Duplicating the file references in
+    unix_attach_fds() is also needed to prevent a socket becoming a
+    candidate for GC while the skb that contains it is not yet queued.
+    
+    Reported-by: Andrea Bittau <a.bittau@cs.ucl.ac.uk>
+    Signed-off-by: Miklos Szeredi <mszeredi@suse.cz>
+    CC: stable@kernel.org
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+    Backported to Debian's 2.6.24 by Alexander Prinsier <aphexer@mailhaven.com>
+
+diff --git a/include/net/af_unix.h b/include/net/af_unix.h
+index 7dd29b7..c29ff1d 100644
+--- a/include/net/af_unix.h
++++ b/include/net/af_unix.h
+@@ -54,6 +54,7 @@ struct unix_sock {
+         atomic_t                inflight;
+         spinlock_t		lock;
+ 	unsigned int		gc_candidate : 1;
++	unsigned int		gc_maybe_cycle : 1;
+         wait_queue_head_t       peer_wait;
+ };
+ #define unix_sk(__sk) ((struct unix_sock *)__sk)
+diff --git a/net/unix/af_unix.c b/net/unix/af_unix.c
+index 4d3c607..eb90f77 100644
+--- a/net/unix/af_unix.c
++++ b/net/unix/af_unix.c
+@@ -1311,14 +1311,23 @@ static void unix_destruct_fds(struct sk_buff *skb)
+ 	sock_wfree(skb);
+ }
+ 
+-static void unix_attach_fds(struct scm_cookie *scm, struct sk_buff *skb)
++static int unix_attach_fds(struct scm_cookie *scm, struct sk_buff *skb)
+ {
+ 	int i;
++
++	/*
++	 * Need to duplicate file references for the sake of garbage
++	 * collection.  Otherwise a socket in the fps might become a
++	 * candidate for GC while the skb is not yet queued.
++	 */
++	UNIXCB(skb).fp = scm_fp_dup(scm->fp);
++	if (!UNIXCB(skb).fp)
++		return -ENOMEM;
++
+ 	for (i=scm->fp->count-1; i>=0; i--)
+ 		unix_inflight(scm->fp->fp[i]);
+-	UNIXCB(skb).fp = scm->fp;
+ 	skb->destructor = unix_destruct_fds;
+-	scm->fp = NULL;
++	return 0;
+ }
+ 
+ /*
+@@ -1376,8 +1385,11 @@ static int unix_dgram_sendmsg(struct kiocb *kiocb, struct socket *sock,
+ 		goto out;
+ 
+ 	memcpy(UNIXCREDS(skb), &siocb->scm->creds, sizeof(struct ucred));
+-	if (siocb->scm->fp)
+-		unix_attach_fds(siocb->scm, skb);
++	if (siocb->scm->fp) {
++		err = unix_attach_fds(siocb->scm, skb);
++		if (err)
++			goto out_free;
++	}
+ 	unix_get_secdata(siocb->scm, skb);
+ 
+ 	skb_reset_transport_header(skb);
+@@ -1548,8 +1560,13 @@ static int unix_stream_sendmsg(struct kiocb *kiocb, struct socket *sock,
+ 		size = min_t(int, size, skb_tailroom(skb));
+ 
+ 		memcpy(UNIXCREDS(skb), &siocb->scm->creds, sizeof(struct ucred));
+-		if (siocb->scm->fp)
+-			unix_attach_fds(siocb->scm, skb);
++		if (siocb->scm->fp) {
++			err = unix_attach_fds(siocb->scm, skb);
++			if (err) {
++				kfree_skb(skb);
++				goto out_err;
++			}
++		}
+ 
+ 		if ((err = memcpy_fromiovec(skb_put(skb,size), msg->msg_iov, size)) != 0) {
+ 			kfree_skb(skb);
+diff --git a/net/unix/garbage.c b/net/unix/garbage.c
+index 2a27b84..6d4a9a8 100644
+--- a/net/unix/garbage.c
++++ b/net/unix/garbage.c
+@@ -186,8 +186,17 @@ static void scan_inflight(struct sock *x, void (*func)(struct unix_sock *),
+ 				 */
+ 				struct sock *sk = unix_get_socket(*fp++);
+ 				if (sk) {
+-					hit = true;
+-					func(unix_sk(sk));
++					struct unix_sock *u = unix_sk(sk);
++
++					/*
++					 * Ignore non-candidates, they could
++					 * have been added to the queues after
++					 * starting the garbage collection
++					 */
++					if (u->gc_candidate) {
++						hit = true;
++						func(u);
++					}
+ 				}
+ 			}
+ 			if (hit && hitlist != NULL) {
+@@ -249,11 +258,11 @@ static void inc_inflight_move_tail(struct unix_sock *u)
+ {
+ 	atomic_inc(&u->inflight);
+ 	/*
+-	 * If this is still a candidate, move it to the end of the
+-	 * list, so that it's checked even if it was already passed
+-	 * over
++	 * If this still might be part of a cycle, move it to the end
++	 * of the list, so that it's checked even if it was already
++	 * passed over
+ 	 */
+-	if (u->gc_candidate)
++	if (u->gc_maybe_cycle)
+ 		list_move_tail(&u->link, &gc_candidates);
+ }
+ 
+@@ -267,6 +276,7 @@ void unix_gc(void)
+ 	struct unix_sock *next;
+ 	struct sk_buff_head hitlist;
+ 	struct list_head cursor;
++	LIST_HEAD(not_cycle_list);
+ 
+ 	spin_lock(&unix_gc_lock);
+ 
+@@ -282,10 +292,14 @@ void unix_gc(void)
+ 	 *
+ 	 * Holding unix_gc_lock will protect these candidates from
+ 	 * being detached, and hence from gaining an external
+-	 * reference.  This also means, that since there are no
+-	 * possible receivers, the receive queues of these sockets are
+-	 * static during the GC, even though the dequeue is done
+-	 * before the detach without atomicity guarantees.
++	 * reference.  Since there are no possible receivers, all
++	 * buffers currently on the candidates' queues stay there
++	 * during the garbage collection.
++	 *
++	 * We also know that no new candidate can be added onto the
++	 * receive queues.  Other, non candidate sockets _can_ be
++	 * added to queue, so we must make sure only to touch
++	 * candidates.
+ 	 */
+ 	list_for_each_entry_safe(u, next, &gc_inflight_list, link) {
+ 		int total_refs;
+@@ -299,6 +313,7 @@ void unix_gc(void)
+ 		if (total_refs == inflight_refs) {
+ 			list_move_tail(&u->link, &gc_candidates);
+ 			u->gc_candidate = 1;
++			u->gc_maybe_cycle = 1;
+ 		}
+ 	}
+ 
+@@ -325,14 +340,24 @@ void unix_gc(void)
+ 		list_move(&cursor, &u->link);
+ 
+ 		if (atomic_read(&u->inflight) > 0) {
+-			list_move_tail(&u->link, &gc_inflight_list);
+-			u->gc_candidate = 0;
++			list_move_tail(&u->link, &not_cycle_list);
++			u->gc_maybe_cycle = 0;
+ 			scan_children(&u->sk, inc_inflight_move_tail, NULL);
+ 		}
+ 	}
+ 	list_del(&cursor);
+ 
+ 	/*
++	 * not_cycle_list contains those sockets which do not make up a
++	 * cycle.  Restore these to the inflight list.
++	 */
++	while (!list_empty(&not_cycle_list)) {
++		u = list_entry(not_cycle_list.next, struct unix_sock, link);
++		u->gc_candidate = 0;
++		list_move_tail(&u->link, &gc_inflight_list);
++	}
++
++	/*
+ 	 * Now gc_candidates contains only garbage.  Restore original
+ 	 * inflight counters for these as well, and remove the skbuffs
+ 	 * which are creating the cycle(s).
