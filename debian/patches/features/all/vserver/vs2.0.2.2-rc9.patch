@@ -378,25 +378,6 @@
  	.long sys_mbind
  	.long sys_get_mempolicy
  	.long sys_set_mempolicy
---- linux-2.6.18.5/arch/i386/kernel/sysenter.c	2006-09-20 16:57:58 +0200
-+++ linux-2.6.18.5-vs2.0.2.2-rc9/arch/i386/kernel/sysenter.c	2006-09-20 21:46:26 +0200
-@@ -17,6 +17,7 @@
- #include <linux/elf.h>
- #include <linux/mm.h>
- #include <linux/module.h>
-+#include <linux/vs_memory.h>
- 
- #include <asm/cpufeature.h>
- #include <asm/msr.h>
-@@ -156,7 +157,7 @@ int arch_setup_additional_pages(struct l
- 	current->mm->context.vdso = (void *)addr;
- 	current_thread_info()->sysenter_return =
- 				    (void *)VDSO_SYM(&SYSENTER_RETURN);
--	mm->total_vm++;
-+	vx_vmpages_inc(mm);
- up_fail:
- 	up_write(&mm->mmap_sem);
- 	return ret;
 --- linux-2.6.18.5/arch/i386/kernel/traps.c	2006-09-20 16:57:58 +0200
 +++ linux-2.6.18.5-vs2.0.2.2-rc9/arch/i386/kernel/traps.c	2006-09-20 20:10:14 +0200
 @@ -53,6 +53,7 @@
@@ -1633,25 +1614,6 @@
  	up_read(&uts_sem);
  	if (personality(current->personality) == PER_LINUX32) 
  		err |= copy_to_user(&name->machine, "i686", 5);
---- linux-2.6.18.5/arch/x86_64/ia32/syscall32.c	2005-10-28 20:49:18 +0200
-+++ linux-2.6.18.5-vs2.0.2.2-rc9/arch/x86_64/ia32/syscall32.c	2006-09-20 17:01:44 +0200
-@@ -10,6 +10,7 @@
- #include <linux/init.h>
- #include <linux/stringify.h>
- #include <linux/security.h>
-+#include <linux/vs_memory.h>
- #include <asm/proto.h>
- #include <asm/tlbflush.h>
- #include <asm/ia32_unistd.h>
-@@ -70,7 +71,7 @@ int syscall32_setup_pages(struct linux_b
- 		kmem_cache_free(vm_area_cachep, vma);
- 		return ret;
- 	}
--	mm->total_vm += npages;
-+	vx_vmpages_add(mm, npages);
- 	up_write(&mm->mmap_sem);
- 	return 0;
- }
 --- linux-2.6.18.5/arch/x86_64/kernel/sys_x86_64.c	2006-01-03 17:29:20 +0100
 +++ linux-2.6.18.5-vs2.0.2.2-rc9/arch/x86_64/kernel/sys_x86_64.c	2006-09-20 17:01:44 +0200
 @@ -16,6 +16,7 @@
@@ -20422,8 +20384,8 @@
  	if (!(flags & MCL_CURRENT) || (current->mm->total_vm <= lock_limit) ||
  	    capable(CAP_IPC_LOCK))
  		ret = do_mlockall(flags);
---- linux-2.6.18.5/mm/mmap.c	2006-09-20 16:58:45 +0200
-+++ linux-2.6.18.5-vs2.0.2.2-rc9/mm/mmap.c	2006-09-20 17:01:45 +0200
+--- linux-2.6.18.5/mm/mmap.c	2008-11-03 17:15:43.000000000 -0700
++++ linux-2.6.18.5-vs2.0.2.2-rc9/mm/mmap.c	2008-11-03 17:26:16.000000000 -0700
 @@ -1137,10 +1137,10 @@ munmap_back:
  		kmem_cache_free(vm_area_cachep, vma);
  	}
@@ -20437,7 +20399,7 @@
  		make_pages_present(addr, addr + len);
  	}
  	if (flags & MAP_POPULATE) {
-@@ -1500,9 +1500,9 @@ static int acct_stack_growth(struct vm_a
+@@ -1507,9 +1507,9 @@ static int acct_stack_growth(struct vm_a
  		return -ENOMEM;
  
  	/* Ok, everything looks good - let it rip */
@@ -20449,7 +20411,7 @@
  	vm_stat_account(mm, vma->vm_flags, vma->vm_file, grow);
  	return 0;
  }
-@@ -1655,9 +1655,9 @@ static void remove_vma_list(struct mm_st
+@@ -1662,9 +1662,9 @@ static void remove_vma_list(struct mm_st
  	do {
  		long nrpages = vma_pages(vma);
  
@@ -20461,7 +20423,7 @@
  		vm_stat_account(mm, vma->vm_flags, vma->vm_file, -nrpages);
  		vma = remove_vma(vma);
  	} while (vma);
-@@ -1893,6 +1893,8 @@ unsigned long do_brk(unsigned long addr,
+@@ -1900,6 +1900,8 @@ unsigned long do_brk(unsigned long addr,
  		lock_limit >>= PAGE_SHIFT;
  		if (locked > lock_limit && !capable(CAP_IPC_LOCK))
  			return -EAGAIN;
@@ -20470,7 +20432,7 @@
  	}
  
  	/*
-@@ -1919,7 +1921,8 @@ unsigned long do_brk(unsigned long addr,
+@@ -1926,7 +1928,8 @@ unsigned long do_brk(unsigned long addr,
  	if (mm->map_count > sysctl_max_map_count)
  		return -ENOMEM;
  
@@ -20480,7 +20442,7 @@
  		return -ENOMEM;
  
  	/* Can we just expand an old private anonymous mapping? */
-@@ -1945,9 +1948,9 @@ unsigned long do_brk(unsigned long addr,
+@@ -1952,9 +1955,9 @@ unsigned long do_brk(unsigned long addr,
  				(VM_READ|VM_WRITE|VM_EXEC|VM_SHARED)];
  	vma_link(mm, vma, prev, rb_link, rb_parent);
  out:
@@ -20492,7 +20454,7 @@
  		make_pages_present(addr, addr + len);
  	}
  	return addr;
-@@ -1973,6 +1976,11 @@ void exit_mmap(struct mm_struct *mm)
+@@ -1980,6 +1983,11 @@ void exit_mmap(struct mm_struct *mm)
  	free_pgtables(&tlb, vma, FIRST_USER_ADDRESS, 0);
  	tlb_finish_mmu(tlb, 0, end);
  
@@ -20504,7 +20466,7 @@
  	/*
  	 * Walk the list again, actually closing and freeing it,
  	 * with preemption enabled, without holding any MM locks.
-@@ -2012,7 +2020,8 @@ int insert_vm_struct(struct mm_struct * 
+@@ -2019,7 +2027,8 @@ int insert_vm_struct(struct mm_struct * 
  	if (__vma && __vma->vm_start < vma->vm_end)
  		return -ENOMEM;
  	if ((vma->vm_flags & VM_ACCOUNT) &&
@@ -20514,13 +20476,23 @@
  		return -ENOMEM;
  	vma_link(mm, vma, prev, rb_link, rb_parent);
  	return 0;
-@@ -2085,5 +2094,7 @@ int may_expand_vm(struct mm_struct *mm, 
+@@ -2092,6 +2101,8 @@ int may_expand_vm(struct mm_struct *mm, 
  
  	if (cur + npages > lim)
  		return 0;
 +	if (!vx_vmpages_avail(mm, npages))
 +		return 0;
  	return 1;
+ }
+ 
+@@ -2162,7 +2173,7 @@ int install_special_mapping(struct mm_st
+ 		return -ENOMEM;
+ 	}
+ 
+-	mm->total_vm += len >> PAGE_SHIFT;
++	vx_vmpages_add(mm, len >> PAGE_SHIFT);
+ 
+ 	return 0;
  }
 --- linux-2.6.18.5/mm/mremap.c	2006-09-20 16:58:45 +0200
 +++ linux-2.6.18.5-vs2.0.2.2-rc9/mm/mremap.c	2006-09-20 17:01:45 +0200

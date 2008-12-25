@@ -1,0 +1,113 @@
+commit fa5dc22f8586cc3742413dd05f5cd9e039dfab9e
+Author: Roland McGrath <roland@redhat.com>
+Date:   Thu Feb 8 14:20:41 2007 -0800
+
+    [PATCH] Add install_special_mapping
+    
+    This patch adds a utility function install_special_mapping, for creating a
+    special vma using a fixed set of preallocated pages as backing, such as for a
+    vDSO.  This consolidates some nearly identical code used for vDSO mapping
+    reimplemented for different architectures.
+    
+    Signed-off-by: Roland McGrath <roland@redhat.com>
+    Cc: Ingo Molnar <mingo@elte.hu>
+    Cc: Paul Mackerras <paulus@samba.org>
+    Cc: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+    Cc: Andi Kleen <ak@suse.de>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+Adjusted to apply to Debian's 2.6.18 by dann frazier <dannf@hp.com>
+
+diff -urpN linux-source-2.6.18.orig/include/linux/mm.h linux-source-2.6.18/include/linux/mm.h
+--- linux-source-2.6.18.orig/include/linux/mm.h	2008-10-13 09:28:32.000000000 -0600
++++ linux-source-2.6.18/include/linux/mm.h	2008-11-03 14:29:19.000000000 -0700
+@@ -929,6 +929,9 @@ extern struct vm_area_struct *copy_vma(s
+ 	unsigned long addr, unsigned long len, pgoff_t pgoff);
+ extern void exit_mmap(struct mm_struct *);
+ extern int may_expand_vm(struct mm_struct *mm, unsigned long npages);
++extern int install_special_mapping(struct mm_struct *mm,
++				   unsigned long addr, unsigned long len,
++				   unsigned long flags, struct page **pages);
+ 
+ extern unsigned long get_unmapped_area(struct file *, unsigned long, unsigned long, unsigned long, unsigned long);
+ 
+diff -urpN linux-source-2.6.18.orig/mm/mmap.c linux-source-2.6.18/mm/mmap.c
+--- linux-source-2.6.18.orig/mm/mmap.c	2008-10-13 09:28:33.000000000 -0600
++++ linux-source-2.6.18/mm/mmap.c	2008-11-03 14:29:19.000000000 -0700
+@@ -2094,3 +2094,75 @@ int may_expand_vm(struct mm_struct *mm, 
+ 		return 0;
+ 	return 1;
+ }
++
++
++static struct page *special_mapping_nopage(struct vm_area_struct *vma,
++					   unsigned long address, int *type)
++{
++	struct page **pages;
++
++	BUG_ON(address < vma->vm_start || address >= vma->vm_end);
++
++	address -= vma->vm_start;
++	for (pages = vma->vm_private_data; address > 0 && *pages; ++pages)
++		address -= PAGE_SIZE;
++
++	if (*pages) {
++		struct page *page = *pages;
++		get_page(page);
++		return page;
++	}
++
++	return NOPAGE_SIGBUS;
++}
++
++/*
++ * Having a close hook prevents vma merging regardless of flags.
++ */
++static void special_mapping_close(struct vm_area_struct *vma)
++{
++}
++
++static struct vm_operations_struct special_mapping_vmops = {
++	.close = special_mapping_close,
++	.nopage	= special_mapping_nopage,
++};
++
++/*
++ * Called with mm->mmap_sem held for writing.
++ * Insert a new vma covering the given region, with the given flags.
++ * Its pages are supplied by the given array of struct page *.
++ * The array can be shorter than len >> PAGE_SHIFT if it's null-terminated.
++ * The region past the last page supplied will always produce SIGBUS.
++ * The array pointer and the pages it points to are assumed to stay alive
++ * for as long as this mapping might exist.
++ */
++int install_special_mapping(struct mm_struct *mm,
++			    unsigned long addr, unsigned long len,
++			    unsigned long vm_flags, struct page **pages)
++{
++	struct vm_area_struct *vma;
++
++	vma = kmem_cache_zalloc(vm_area_cachep, SLAB_KERNEL);
++	if (unlikely(vma == NULL))
++		return -ENOMEM;
++
++	vma->vm_mm = mm;
++	vma->vm_start = addr;
++	vma->vm_end = addr + len;
++
++	vma->vm_flags = vm_flags | mm->def_flags;
++	vma->vm_page_prot = protection_map[vma->vm_flags & 7];
++
++	vma->vm_ops = &special_mapping_vmops;
++	vma->vm_private_data = pages;
++
++	if (unlikely(insert_vm_struct(mm, vma))) {
++		kmem_cache_free(vm_area_cachep, vma);
++		return -ENOMEM;
++	}
++
++	mm->total_vm += len >> PAGE_SHIFT;
++
++	return 0;
++}

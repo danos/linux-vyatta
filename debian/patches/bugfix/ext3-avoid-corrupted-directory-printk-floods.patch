@@ -1,0 +1,50 @@
+commit cdbf6dba28e8e6268c8420857696309470009fd9
+Author: Eric Sandeen <sandeen@redhat.com>
+Date:   Sat Oct 18 20:28:00 2008 -0700
+
+    ext3: avoid printk floods in the face of directory corruption
+    
+    A very large directory with many read failures (either due to storage
+    problems, or due to invalid size & blocks from corruption) will generate a
+    printk storm as the filesystem continues to try to read all the blocks.
+    This flood of messages can tie up the box until it is complete - which may
+    be a very long time, especially for very large corrupted values.
+    
+    This is fixed by only reporting the corruption once each time we try to
+    read the directory.
+    
+    Signed-off-by: Eric Sandeen <sandeen@redhat.com>
+    Signed-off-by: "Theodore Ts'o" <tytso@mit.edu>
+    Cc: Eugene Teo <eugeneteo@kernel.sg>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+Adjusted to apply to Debian's 2.6.18 by dann frazier <dannf@hp.com>
+
+diff -urpN linux-source-2.6.18.orig/fs/ext3/dir.c linux-source-2.6.18/fs/ext3/dir.c
+--- linux-source-2.6.18.orig/fs/ext3/dir.c	2008-10-13 09:28:32.000000000 -0600
++++ linux-source-2.6.18/fs/ext3/dir.c	2008-11-10 14:27:24.000000000 -0700
+@@ -102,6 +102,7 @@ static int ext3_readdir(struct file * fi
+ 	int err;
+ 	struct inode *inode = filp->f_dentry->d_inode;
+ 	int ret = 0;
++	int dir_has_error = 0;
+ 
+ 	sb = inode->i_sb;
+ 
+@@ -148,9 +149,12 @@ static int ext3_readdir(struct file * fi
+ 		 * of recovering data when there's a bad sector
+ 		 */
+ 		if (!bh) {
+-			ext3_error (sb, "ext3_readdir",
+-				"directory #%lu contains a hole at offset %lu",
+-				inode->i_ino, (unsigned long)filp->f_pos);
++			if (!dir_has_error) {
++				ext3_error(sb, __func__, "directory #%lu "
++					"contains a hole at offset %lld",
++					inode->i_ino, filp->f_pos);
++				dir_has_error = 1;
++			}
+ 			/* corrupt size?  Maybe no more blocks to read */
+ 			if (filp->f_pos > inode->i_blocks << 9)
+ 				break;
