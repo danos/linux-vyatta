@@ -1,0 +1,74 @@
+commit 088af9a6e05d51e7c3dc85d45d8b7a52c3ee08d7
+Author: Helge Deller <deller@gmx.de>
+Date:   Wed Dec 31 12:31:18 2008 +0100
+
+    module: fix module loading failure of large kernel modules for parisc
+    
+    When creating the final layout of a kernel module in memory, allow the
+    module loader to reserve some additional memory in front of a given section.
+    This is currently only needed for the parisc port which needs to put the
+    stub entries there to fulfill the 17/22bit PCREL relocations with large
+    kernel modules like xfs.
+    
+    Signed-off-by: Helge Deller <deller@gmx.de>
+    Signed-off-by: Rusty Russell <rusty@rustcorp.com.au> (renamed fn)
+
+Backported to Debian's 2.6.26 by dann frazier <dannf@hp.com>
+
+diff -urpN linux-source-2.6.26.orig/include/linux/moduleloader.h linux-source-2.6.26/include/linux/moduleloader.h
+--- linux-source-2.6.26.orig/include/linux/moduleloader.h	2008-07-13 15:51:29.000000000 -0600
++++ linux-source-2.6.26/include/linux/moduleloader.h	2009-01-06 10:43:08.000000000 -0700
+@@ -13,6 +13,9 @@ int module_frob_arch_sections(Elf_Ehdr *
+ 			      char *secstrings,
+ 			      struct module *mod);
+ 
++/* Additional bytes needed by arch in front of individual sections */
++unsigned int arch_mod_section_prepend(struct module *mod, unsigned int section);
++
+ /* Allocator used for allocating struct module, core sections and init
+    sections.  Returns NULL on failure. */
+ void *module_alloc(unsigned long size);
+diff -urpN linux-source-2.6.26.orig/kernel/module.c linux-source-2.6.26/kernel/module.c
+--- linux-source-2.6.26.orig/kernel/module.c	2008-12-31 16:43:35.000000000 -0700
++++ linux-source-2.6.26/kernel/module.c	2009-01-06 10:48:47.000000000 -0700
+@@ -1525,11 +1525,21 @@ static int simplify_symbols(Elf_Shdr *se
+ 	return ret;
+ }
+ 
++/* Additional bytes needed by arch in front of individual sections */
++unsigned int __weak arch_mod_section_prepend(struct module *mod,
++					     unsigned int section)
++{
++	/* default implementation just returns zero */
++	return 0;
++}
++
+ /* Update size with this section: return offset. */
+-static long get_offset(unsigned long *size, Elf_Shdr *sechdr)
++static long get_offset(struct module *mod, unsigned long *size,
++		       Elf_Shdr *sechdr, unsigned int section)
+ {
+ 	long ret;
+ 
++	*size += arch_mod_section_prepend(mod, section);
+ 	ret = ALIGN(*size, sechdr->sh_addralign ?: 1);
+ 	*size = ret + sechdr->sh_size;
+ 	return ret;
+@@ -1569,7 +1579,7 @@ static void layout_sections(struct modul
+ 			    || strncmp(secstrings + s->sh_name,
+ 				       ".init", 5) == 0)
+ 				continue;
+-			s->sh_entsize = get_offset(&mod->core_size, s);
++			s->sh_entsize = get_offset(mod, &mod->core_size, s, i);
+ 			DEBUGP("\t%s\n", secstrings + s->sh_name);
+ 		}
+ 		if (m == 0)
+@@ -1587,7 +1597,7 @@ static void layout_sections(struct modul
+ 			    || strncmp(secstrings + s->sh_name,
+ 				       ".init", 5) != 0)
+ 				continue;
+-			s->sh_entsize = (get_offset(&mod->init_size, s)
++			s->sh_entsize = (get_offset(mod, &mod->init_size, s, i)
+ 					 | INIT_OFFSET_MASK);
+ 			DEBUGP("\t%s\n", secstrings + s->sh_name);
+ 		}
