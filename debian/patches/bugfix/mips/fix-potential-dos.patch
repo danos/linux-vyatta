@@ -1,0 +1,69 @@
+From: Vlad Malov <Vlad.Malov@caviumnetworks.com>
+Date: Tue, 18 Nov 2008 23:05:46 +0000 (-0800)
+Subject: MIPS: Fix potential DOS by untrusted user app.
+X-Git-Url: http://www.linux-mips.org/git?p=linux.git;a=commitdiff_plain;h=9718dcd85e604007fcacfe9c6cf71f8a2ddb1c37
+
+MIPS: Fix potential DOS by untrusted user app.
+
+On a 64 bit kernel if an o32 syscall was made with a syscall number less
+than 4000, we would read the function from outside of the bounds of the
+syscall table.  This led to non-deterministic behavior including system
+crashes.
+
+While we were at it we reworked the 32 bit version as well to use fewer
+instructions.  Both 32 and 64 bit versions are use the same code now.
+
+Signed-off-by: Vlad Malov <Vlad.Malov@caviumnetworks.com>
+Signed-off-by: David Daney <ddaney@caviumnetworks.com>
+Signed-off-by: Ralf Baechle <ralf@linux-mips.org>
+(cherry picked from commit 24f8c295c60d135ba058eecf9b85a521ed2d50a3)
+---
+
+diff --git a/arch/mips/kernel/scall32-o32.S b/arch/mips/kernel/scall32-o32.S
+index 6aa1400..fb116bf 100644
+--- a/arch/mips/kernel/scall32-o32.S
++++ b/arch/mips/kernel/scall32-o32.S
+@@ -270,18 +270,11 @@ bad_alignment:
+ 	subu	t0, a0, __NR_O32_Linux	# check syscall number
+ 	sltiu	v0, t0, __NR_O32_Linux_syscalls + 1
+ #endif
++	beqz	t0, einval		# do not recurse
+ 	sll	t1, t0, 3
+ 	beqz	v0, einval
+-
+ 	lw	t2, sys_call_table(t1)		# syscall routine
+ 
+-#if defined(CONFIG_BINFMT_IRIX)
+-	li	v1, 4000			# nr of sys_syscall
+-#else
+-	li	v1, 4000 - __NR_O32_Linux	# index of sys_syscall
+-#endif
+-	beq	t0, v1, einval			# do not recurse
+-
+ 	/* Some syscalls like execve get their arguments from struct pt_regs
+ 	   and claim zero arguments in the syscall table. Thus we have to
+ 	   assume the worst case and shuffle around all potential arguments.
+diff --git a/arch/mips/kernel/scall64-o32.S b/arch/mips/kernel/scall64-o32.S
+index 9a275ef..8dce4c2 100644
+--- a/arch/mips/kernel/scall64-o32.S
++++ b/arch/mips/kernel/scall64-o32.S
+@@ -174,14 +174,12 @@ not_o32_scall:
+ 	END(handle_sys)
+ 
+ LEAF(sys32_syscall)
+-	sltu	v0, a0, __NR_O32_Linux + __NR_O32_Linux_syscalls + 1
++	subu	t0, a0, __NR_O32_Linux	# check syscall number
++	sltiu	v0, t0, __NR_O32_Linux_syscalls + 1
++	beqz	t0, einval		# do not recurse
++	dsll	t1, t0, 3
+ 	beqz	v0, einval
+-
+-	dsll	v0, a0, 3
+-	ld	t2, (sys_call_table - (__NR_O32_Linux * 8))(v0)
+-
+-	li	v1, 4000		# indirect syscall number
+-	beq	a0, v1, einval		# do not recurse
++	ld	t2, sys_call_table(t1)		# syscall routine
+ 
+ 	move	a0, a1			# shift argument registers
+ 	move	a1, a2
