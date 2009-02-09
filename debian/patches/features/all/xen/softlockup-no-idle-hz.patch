@@ -1,0 +1,63 @@
+# HG changeset patch
+# User Ian Campbell <ian.campbell@xensource.com>
+# Date 1180947924 -3600
+# Node ID 61ed8662b69cc65aeb3371bcc6bc13d616999cd1
+# Parent  139f7610ddf64d9eb149bfef48bc9ead83b54520
+Imported patch softlockup-no-idle-hz.patch from xen-unstable.hg 15200:bd3d6b4c52ec
+
+diff -r 139f7610ddf6 -r 61ed8662b69c include/linux/sched.h
+--- a/include/linux/sched.h	Mon Jun 04 10:05:24 2007 +0100
++++ b/include/linux/sched.h	Mon Jun 04 10:05:24 2007 +0100
+@@ -211,10 +211,15 @@
+ extern void scheduler_tick(void);
+ 
+ #ifdef CONFIG_DETECT_SOFTLOCKUP
++extern unsigned long softlockup_get_next_event(void);
+ extern void softlockup_tick(void);
+ extern void spawn_softlockup_task(void);
+ extern void touch_softlockup_watchdog(void);
+ #else
++static inline unsigned long softlockup_get_next_event(void)
++{
++	return MAX_JIFFY_OFFSET;
++}
+ static inline void softlockup_tick(void)
+ {
+ }
+diff -r 139f7610ddf6 -r 61ed8662b69c kernel/softlockup.c
+--- a/kernel/softlockup.c	Mon Jun 04 10:05:24 2007 +0100
++++ b/kernel/softlockup.c	Mon Jun 04 10:05:24 2007 +0100
+@@ -39,6 +39,19 @@
+ 	__raw_get_cpu_var(touch_timestamp) = jiffies;
+ }
+ EXPORT_SYMBOL(touch_softlockup_watchdog);
++
++unsigned long softlockup_get_next_event(void)
++{
++	int this_cpu = smp_processor_id();
++	unsigned long touch_timestamp = per_cpu(touch_timestamp, this_cpu);
++
++	if (per_cpu(print_timestamp, this_cpu) == touch_timestamp ||
++		did_panic ||
++			!per_cpu(watchdog_task, this_cpu))
++		return MAX_JIFFY_OFFSET;
++
++	return max_t(long, 0, touch_timestamp + HZ - jiffies);
++}
+ 
+ /*
+  * This callback runs from the timer interrupt, and checks
+diff -r 139f7610ddf6 -r 61ed8662b69c kernel/timer.c
+--- a/kernel/timer.c	Mon Jun 04 10:05:24 2007 +0100
++++ b/kernel/timer.c	Mon Jun 04 10:05:24 2007 +0100
+@@ -485,7 +485,9 @@
+ 		if (hr_expires < 3)
+ 			return hr_expires + jiffies;
+ 	}
+-	hr_expires += jiffies;
++	hr_expires = min_t(unsigned long,
++			   softlockup_get_next_event(),
++			   hr_expires) + jiffies;
+ 
+ 	base = __get_cpu_var(tvec_bases);
+ 	spin_lock(&base->lock);
