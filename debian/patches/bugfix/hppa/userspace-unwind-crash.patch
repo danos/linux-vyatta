@@ -1,0 +1,116 @@
+commit 7a3f5134a8f5bd7fa38b5645eef05e8a4eb62951
+Author: Helge Deller <deller@gmx.de>
+Date:   Wed Nov 26 12:46:22 2008 -0800
+
+    parisc: fix kernel crash when unwinding a userspace process
+    
+    Any user on existing parisc 32- and 64bit-kernels can easily crash
+    the kernel and as such enforce a DSO.
+    A simple testcase is available here:
+            http://gsyprf10.external.hp.com/~deller/crash.tgz
+    
+    The problem is introduced by the fact, that the handle_interruption()
+    crash handler calls the show_regs() function, which in turn tries to
+    unwind the stack by calling parisc_show_stack().  Since the stack contains
+    userspace addresses, a try to unwind the stack is dangerous and useless
+    and leads to the crash.
+    
+    The fix is trivial: For userspace processes
+    a) avoid to unwind the stack, and
+    b) avoid to resolve userspace addresses to kernel symbol names.
+    
+    While touching this code, I converted print_symbol() to %pS
+    printk formats and made parisc_show_stack() static.
+    
+    An initial patch for this was written by Kyle McMartin back in August:
+    http://marc.info/?l=linux-parisc&m=121805168830283&w=2
+    
+    Compile and run-tested with a 64bit parisc kernel.
+    
+    Signed-off-by: Helge Deller <deller@gmx.de>
+    Cc: Grant Grundler <grundler@parisc-linux.org>
+    Cc: Matthew Wilcox <matthew@wil.cx>
+    Cc: <stable@kernel.org>		[2.6.25.x, 2.6.26.x, 2.6.27.x, earlier...]
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Kyle McMartin <kyle@mcmartin.ca>
+
+Backported to Debian's 2.6.24 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.24.orig/arch/parisc/kernel/traps.c linux-source-2.6.24/arch/parisc/kernel/traps.c
+--- linux-source-2.6.24.orig/arch/parisc/kernel/traps.c	2008-01-24 15:58:37.000000000 -0700
++++ linux-source-2.6.24/arch/parisc/kernel/traps.c	2009-02-19 00:02:55.000000000 -0700
+@@ -24,7 +24,6 @@
+ #include <linux/init.h>
+ #include <linux/interrupt.h>
+ #include <linux/console.h>
+-#include <linux/kallsyms.h>
+ #include <linux/bug.h>
+ 
+ #include <asm/assembly.h>
+@@ -118,18 +117,19 @@ static void print_fr(char *level, struct
+ 
+ void show_regs(struct pt_regs *regs)
+ {
+-	int i;
++	int i, user;
+ 	char *level;
+ 	unsigned long cr30, cr31;
+ 
+-	level = user_mode(regs) ? KERN_DEBUG : KERN_CRIT;
++	user = user_mode(regs);
++	level = user ? KERN_DEBUG : KERN_CRIT;
+ 
+ 	print_gr(level, regs);
+ 
+ 	for (i = 0; i < 8; i += 4)
+ 		PRINTREGS(level, regs->sr, "sr", RFMT, i);
+ 
+-	if (user_mode(regs))
++	if (user)
+ 		print_fr(level, regs);
+ 
+ 	cr30 = mfctl(30);
+@@ -142,12 +142,16 @@ void show_regs(struct pt_regs *regs)
+ 	printk("%s CPU: %8d   CR30: " RFMT " CR31: " RFMT "\n",
+ 	       level, current_thread_info()->cpu, cr30, cr31);
+ 	printk("%s ORIG_R28: " RFMT "\n", level, regs->orig_r28);
+-	printk(level);
+-	print_symbol(" IAOQ[0]: %s\n", regs->iaoq[0]);
+-	printk(level);
+-	print_symbol(" IAOQ[1]: %s\n", regs->iaoq[1]);
+-	printk(level);
+-	print_symbol(" RP(r2): %s\n", regs->gr[2]);
++
++	if (user) {
++		printk("%s IAOQ[0]: " RFMT "\n", level, regs->iaoq[0]);
++		printk("%s IAOQ[1]: " RFMT "\n", level, regs->iaoq[1]);
++		printk("%s RP(r2): " RFMT "\n", level, regs->gr[2]);
++	} else {
++		printk("%s IAOQ[0]: %pS\n", level, (void *) regs->iaoq[0]);
++		printk("%s IAOQ[1]: %pS\n", level, (void *) regs->iaoq[1]);
++		printk("%s RP(r2): %pS\n", level, (void *) regs->gr[2]);
++	}
+ }
+ 
+ 
+@@ -168,17 +172,12 @@ static void do_show_stack(struct unwind_
+ 			break;
+ 
+ 		if (__kernel_text_address(info->ip)) {
+-			printk("%s [<" RFMT ">] ", (i&0x3)==1 ? KERN_CRIT : "", info->ip);
+-#ifdef CONFIG_KALLSYMS
+-			print_symbol("%s\n", info->ip);
+-#else
+-			if ((i & 0x03) == 0)
+-				printk("\n");
+-#endif
++			printk(KERN_CRIT " [<" RFMT ">] %pS\n",
++				info->ip, (void *) info->ip);
+ 			i++;
+ 		}
+ 	}
+-	printk("\n");
++	printk(KERN_CRIT "\n");
+ }
+ 
+ void show_stack(struct task_struct *task, unsigned long *s)
