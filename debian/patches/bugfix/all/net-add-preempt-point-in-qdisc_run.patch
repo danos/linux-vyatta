@@ -1,0 +1,52 @@
+commit 2ba2506ca7ca62c56edaa334b0fe61eb5eab6ab0
+Author: Herbert Xu <herbert@gondor.apana.org.au>
+Date:   Fri Mar 28 16:25:26 2008 -0700
+
+    [NET]: Add preemption point in qdisc_run
+    
+    The qdisc_run loop is currently unbounded and runs entirely in a
+    softirq.  This is bad as it may create an unbounded softirq run.
+    
+    This patch fixes this by calling need_resched and breaking out if
+    necessary.
+    
+    It also adds a break out if the jiffies value changes since that would
+    indicate we've been transmitting for too long which starves other
+    softirqs.
+    
+    Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+Backport from Jiri Pirko for RHEL5.
+
+diff -urpN linux-source-2.6.18.orig/net/sched/sch_generic.c linux-source-2.6.18/net/sched/sch_generic.c
+--- linux-source-2.6.18.orig/net/sched/sch_generic.c	2008-12-25 14:04:12.000000000 -0700
++++ linux-source-2.6.18/net/sched/sch_generic.c	2009-02-22 23:09:57.000000000 -0700
+@@ -183,11 +183,25 @@ requeue:
+ 
+ void __qdisc_run(struct net_device *dev)
+ {
++	unsigned long start_time = jiffies;
++
+ 	if (unlikely(dev->qdisc == &noop_qdisc))
+ 		goto out;
+ 
+-	while (qdisc_restart(dev) < 0 && !netif_queue_stopped(dev))
+-		/* NOTHING */;
++	while (qdisc_restart(dev) < 0) {
++		if (netif_queue_stopped(dev))
++			break;
++
++		/*
++		 * Postpone processing if
++		 * 1. another process needs the CPU;
++		 * 2. we've been doing it for too long.
++		 */
++		if (need_resched() || jiffies != start_time) {
++			netif_schedule(dev);
++			break;
++		}
++	}
+ 
+ out:
+ 	clear_bit(__LINK_STATE_QDISC_RUNNING, &dev->state);
