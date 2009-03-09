@@ -1,0 +1,112 @@
+From: Konstantin Khlebnikov <khlebnikov@openvz.org>
+Date: Tue, 7 Oct 2008 08:57:48 +0000 (+0400)
+Subject: fix wrong size of ub0_percpu.
+X-Git-Tag: sync-2.6.27-15.10.08~5
+X-Git-Url: http://git.openvz.org/?p=linux-2.6.26-openvz;a=commitdiff_plain;h=777e8164ebf8a03e43511983cdec472f8691a8af
+
+fix wrong size of ub0_percpu.
+
+after commit b3242151 struct percpu_data dynamically allocated
+and have array only for 1 cpu, so static usage of it does not work.
+
+Plus rework macros for static percpu variables declaration and initialization.
+
+http://bugzilla.openvz.org/show_bug.cgi?id=1039
+
+Signed-off-by: Konstantin Khlebnikov <khlebnikov@openvz.org>
+Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+---
+
+diff --git a/include/linux/percpu.h b/include/linux/percpu.h
+index 5ac97e1..e159f4d 100644
+--- a/include/linux/percpu.h
++++ b/include/linux/percpu.h
+@@ -74,11 +74,20 @@ struct percpu_data {
+         (__typeof__(ptr))__p->ptrs[(cpu)];	          \
+ })
+ 
+-#define static_percpu_ptr(sptr, sptrs) ({		\
++struct percpu_data_static {
++	void *ptrs[NR_CPUS];
++};
++
++#define DEFINE_PER_CPU_STATIC(type, name) \
++	static struct percpu_data_static per_cpu_data__##name; \
++	static __typeof__(type) per_cpu__##name[NR_CPUS]
++
++#define percpu_static_init(name) ({			\
+ 		int i;					\
+ 		for (i = 0; i < NR_CPUS; i++)		\
+-			(sptr)->ptrs[i] = &(sptrs)[i];	\
+-		(__typeof__(&sptrs[0]))__percpu_disguise(sptr);\
++			(per_cpu_data__##name).ptrs[i] = &(per_cpu__##name)[i];\
++		(__typeof__(&(per_cpu__##name)[0]))	\
++			__percpu_disguise(&(per_cpu_data__##name));\
+ 	})
+ 
+ extern void *percpu_populate(void *__pdata, size_t size, gfp_t gfp, int cpu);
+@@ -92,7 +101,11 @@ extern void percpu_free(void *__pdata);
+ #else /* CONFIG_SMP */
+ 
+ #define percpu_ptr(ptr, cpu) ({ (void)(cpu); (ptr); })
+-#define static_percpu_ptr(sptr, sptrs)	(&sptrs[0])
++
++#define DEFINE_PER_CPU_STATIC(type, name) \
++	static __typeof__(type) per_cpu__##name[NR_CPUS]
++
++#define percpu_static_init(name)	(&(per_cpu__##name)[0])
+ 
+ static inline void percpu_depopulate(void *__pdata, int cpu)
+ {
+diff --git a/kernel/bc/beancounter.c b/kernel/bc/beancounter.c
+index 48fa1cc..8cd0ef0 100644
+--- a/kernel/bc/beancounter.c
++++ b/kernel/bc/beancounter.c
+@@ -629,10 +629,7 @@ static void init_beancounter_syslimits(struct user_beancounter *ub)
+ 	ub->ub_limit_rl.interval = 300*HZ;
+ }
+ 
+-#ifdef CONFIG_SMP
+-static struct percpu_data ub0_percpu;
+-#endif
+-static struct ub_percpu_struct ub0_percpu_data[NR_CPUS];
++DEFINE_PER_CPU_STATIC(struct ub_percpu_struct, ub0_percpu);
+ 
+ void __init ub_init_early(void)
+ {
+@@ -645,7 +642,7 @@ void __init ub_init_early(void)
+ 	init_beancounter_nolimits(ub);
+ 	init_beancounter_store(ub);
+ 	init_beancounter_struct(ub);
+-	ub->ub_percpu = static_percpu_ptr(&ub0_percpu, ub0_percpu_data);
++	ub->ub_percpu = percpu_static_init(ub0_percpu);
+ 
+ 	memset(&current->task_bc, 0, sizeof(struct task_beancounter));
+ 	(void)set_exec_ub(ub);
+diff --git a/kernel/ve/ve.c b/kernel/ve/ve.c
+index 7322e50..0248f38 100644
+--- a/kernel/ve/ve.c
++++ b/kernel/ve/ve.c
+@@ -111,12 +111,7 @@ struct ve_struct ve0 = {
+ 
+ EXPORT_SYMBOL(ve0);
+ 
+-#ifdef CONFIG_SMP
+-static struct {
+-	void *ptrs[NR_CPUS];
+-} ve0_cpu_stats;
+-#endif
+-static struct ve_cpu_stats ve0_cpu_stats_data[NR_CPUS];
++DEFINE_PER_CPU_STATIC(struct ve_cpu_stats, ve0_cpu_stats);
+ 
+ LIST_HEAD(ve_list_head);
+ rwlock_t ve_list_lock = RW_LOCK_UNLOCKED;
+@@ -136,7 +131,7 @@ void init_ve0(void)
+ 	struct ve_struct *ve;
+ 
+ 	ve = get_ve0();
+-	ve->cpu_stats = static_percpu_ptr(&ve0_cpu_stats, ve0_cpu_stats_data);
++	ve->cpu_stats = percpu_static_init(ve0_cpu_stats);
+ 	list_add(&ve->ve_list, &ve_list_head);
+ }
+ 
