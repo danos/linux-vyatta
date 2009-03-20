@@ -1,0 +1,91 @@
+From 7d3f10fc5d8e268f7572cfdd2287c049bce3af7c Mon Sep 17 00:00:00 2001
+From: Vitaliy Gusev <vgusev@openvz.org>
+Date: Mon, 22 Sep 2008 14:04:45 +0400
+Subject: [PATCH] conntrack: prevent call register_pernet_subsys() from VE context
+
+nf_ct_frag6_init calls register_pernet_subsys. So move nf_ct_frag6_init to
+nf_conntrack_l3proto_ipv6_init() to prevent call from VE context.
+
+Signed-off-by: Vitaliy Gusev <vgusev@openvz.org>
+Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+---
+ net/ipv6/netfilter/nf_conntrack_l3proto_ipv6.c |   24 +++++++++++++-----------
+ 1 files changed, 13 insertions(+), 11 deletions(-)
+
+diff --git a/net/ipv6/netfilter/nf_conntrack_l3proto_ipv6.c b/net/ipv6/netfilter/nf_conntrack_l3proto_ipv6.c
+index cbfe1a2..b97914e 100644
+--- a/net/ipv6/netfilter/nf_conntrack_l3proto_ipv6.c
++++ b/net/ipv6/netfilter/nf_conntrack_l3proto_ipv6.c
+@@ -372,16 +372,10 @@ int init_nf_ct_l3proto_ipv6(void)
+ 	if (ret < 0)
+ 		goto no_mem_icmp;
+ #endif /* CONFIG_VE_IPTABLES */
+-	ret = nf_ct_frag6_init();
+-	if (ret < 0) {
+-		printk("nf_conntrack_ipv6: can't initialize frag6.\n");
+-		goto cleanup_sys;
+-	}
+-
+ 	ret = nf_conntrack_l4proto_register(ve_nf_conntrack_l4proto_tcp6);
+ 	if (ret < 0) {
+ 		printk("nf_conntrack_ipv6: can't register tcp.\n");
+-		goto cleanup_frag6;
++		goto cleanup_sys;
+ 	}
+ 
+ 	ret = nf_conntrack_l4proto_register(ve_nf_conntrack_l4proto_udp6);
+@@ -419,8 +413,6 @@ unreg_udp:
+ 	nf_conntrack_l4proto_unregister(ve_nf_conntrack_l4proto_udp6);
+ unreg_tcp:
+ 	nf_conntrack_l4proto_unregister(ve_nf_conntrack_l4proto_tcp6);
+-cleanup_frag6:
+-	nf_ct_frag6_cleanup();
+ cleanup_sys:
+ #ifdef CONFIG_VE_IPTABLES
+ no_mem_icmp:
+@@ -438,7 +430,6 @@ void fini_nf_ct_l3proto_ipv6(void)
+ 	nf_conntrack_l4proto_unregister(ve_nf_conntrack_l4proto_icmpv6);
+ 	nf_conntrack_l4proto_unregister(ve_nf_conntrack_l4proto_udp6);
+ 	nf_conntrack_l4proto_unregister(ve_nf_conntrack_l4proto_tcp6);
+-	nf_ct_frag6_cleanup();
+ 
+ #ifdef CONFIG_VE_IPTABLES
+ 	nf_ct_proto_icmpv6_sysctl_cleanup();
+@@ -454,15 +445,25 @@ static int __init nf_conntrack_l3proto_ipv6_init(void)
+ 
+ 	need_conntrack();
+ 
++	ret = nf_ct_frag6_init();
++	if (ret < 0) {
++		printk("nf_conntrack_ipv6: can't initialize frag6.\n");
++		return ret;
++	}
++
+ 	ret = init_nf_ct_l3proto_ipv6();
+ 	if (ret < 0) {
+ 		printk(KERN_ERR "Unable to initialize netfilter protocols\n");
+-		return ret;
++		goto cleanup_frag6;
+ 	}
+ 	KSYMRESOLVE(init_nf_ct_l3proto_ipv6);
+ 	KSYMRESOLVE(fini_nf_ct_l3proto_ipv6);
+ 	KSYMMODRESOLVE(nf_conntrack_ipv6);
+ 	return 0;
++
++cleanup_frag6:
++	nf_ct_frag6_cleanup();
++	return ret;
+ }
+ 
+ static void __exit nf_conntrack_l3proto_ipv6_fini(void)
+@@ -472,6 +473,7 @@ static void __exit nf_conntrack_l3proto_ipv6_fini(void)
+ 	KSYMUNRESOLVE(init_nf_ct_l3proto_ipv6);
+ 	KSYMUNRESOLVE(fini_nf_ct_l3proto_ipv6);
+ 	fini_nf_ct_l3proto_ipv6();
++	nf_ct_frag6_cleanup();
+ }
+ 
+ module_init(nf_conntrack_l3proto_ipv6_init);
+-- 
+1.6.0.6
+

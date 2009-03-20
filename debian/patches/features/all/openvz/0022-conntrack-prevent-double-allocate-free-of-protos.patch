@@ -1,0 +1,132 @@
+From 17b09e1de42db77743ea9ae3dfd3a910ac57ee71 Mon Sep 17 00:00:00 2001
+From: Vitaliy Gusev <vgusev@openvz.org>
+Date: Mon, 22 Sep 2008 13:53:27 +0400
+Subject: [PATCH] conntrack: prevent double allocate/free of protos
+
+Call nf_ct_proto_tcp_sysctl_xxx()/nf_ct_proto_tcp_sysctl_cleanup() from
+nf_conntrack_init_ve()/nf_conntrack_cleanup_ve() to prevent to be called twice
+from functions:
+
+  - init_nf_ct_l3proto_ipv4()
+  - init_nf_ct_l3proto_ipv6()
+  - fini_nf_ct_l3proto_ipv4()
+  - fini_nf_ct_l3proto_ipv6()
+
+Signed-off-by: Vitaliy Gusev <vgusev@openvz.org>
+Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+---
+ net/ipv4/netfilter/nf_conntrack_l3proto_ipv4.c |   12 ------------
+ net/ipv6/netfilter/nf_conntrack_l3proto_ipv6.c |   12 ------------
+ net/netfilter/nf_conntrack_standalone.c        |   13 +++++++++++++
+ 3 files changed, 13 insertions(+), 24 deletions(-)
+
+diff --git a/net/ipv4/netfilter/nf_conntrack_l3proto_ipv4.c b/net/ipv4/netfilter/nf_conntrack_l3proto_ipv4.c
+index dca8da7..b4bb436 100644
+--- a/net/ipv4/netfilter/nf_conntrack_l3proto_ipv4.c
++++ b/net/ipv4/netfilter/nf_conntrack_l3proto_ipv4.c
+@@ -512,12 +512,6 @@ int init_nf_ct_l3proto_ipv4(void)
+ 	ret = nf_ct_proto_ipv4_sysctl_init();
+ 	if (ret < 0)
+ 		goto no_mem_ipv4;
+-	ret = nf_ct_proto_tcp_sysctl_init();
+-	if (ret < 0)
+-		goto no_mem_tcp;
+-	ret = nf_ct_proto_udp_sysctl_init();
+-	if (ret < 0)
+-		goto no_mem_udp;
+ 	ret = nf_ct_proto_icmp_sysctl_init();
+ 	if (ret < 0)
+ 		goto no_mem_icmp;
+@@ -575,10 +569,6 @@ unreg_tcp:
+ cleanup_sys:
+ #ifdef CONFIG_VE_IPTABLES
+ no_mem_icmp:
+-	nf_ct_proto_udp_sysctl_cleanup();
+-no_mem_udp:
+-	nf_ct_proto_tcp_sysctl_cleanup();
+-no_mem_tcp:
+ 	nf_ct_proto_ipv4_sysctl_cleanup();
+ no_mem_ipv4:
+ 	nf_ct_proto_ipv4_fini();
+@@ -606,8 +596,6 @@ void fini_nf_ct_l3proto_ipv4(void)
+ 
+ #ifdef CONFIG_VE_IPTABLES 
+ 	nf_ct_proto_icmp_sysctl_cleanup();
+-	nf_ct_proto_udp_sysctl_cleanup();
+-	nf_ct_proto_tcp_sysctl_cleanup();
+ 	nf_ct_proto_ipv4_sysctl_cleanup();
+ 	nf_ct_proto_ipv4_fini();
+ 	if (!ve_is_super(get_exec_env()))
+diff --git a/net/ipv6/netfilter/nf_conntrack_l3proto_ipv6.c b/net/ipv6/netfilter/nf_conntrack_l3proto_ipv6.c
+index e6f8f7d..cbfe1a2 100644
+--- a/net/ipv6/netfilter/nf_conntrack_l3proto_ipv6.c
++++ b/net/ipv6/netfilter/nf_conntrack_l3proto_ipv6.c
+@@ -368,12 +368,6 @@ int init_nf_ct_l3proto_ipv6(void)
+ 	if (!ve_is_super(get_exec_env())) 
+ 		__module_get(THIS_MODULE);
+ 
+-	ret = nf_ct_proto_tcp_sysctl_init();
+-	if (ret < 0)
+-		goto no_mem_tcp;
+-	ret = nf_ct_proto_udp_sysctl_init();
+-	if (ret < 0)
+-		goto no_mem_udp;
+ 	ret = nf_ct_proto_icmpv6_sysctl_init();
+ 	if (ret < 0)
+ 		goto no_mem_icmp;
+@@ -430,10 +424,6 @@ cleanup_frag6:
+ cleanup_sys:
+ #ifdef CONFIG_VE_IPTABLES
+ no_mem_icmp:
+-	nf_ct_proto_udp_sysctl_cleanup();
+-no_mem_udp:
+-	nf_ct_proto_tcp_sysctl_cleanup();
+-no_mem_tcp:
+ 	if (!ve_is_super(get_exec_env()))
+ 		module_put(THIS_MODULE);
+ #endif /* CONFIG_VE_IPTABLES */
+@@ -452,8 +442,6 @@ void fini_nf_ct_l3proto_ipv6(void)
+ 
+ #ifdef CONFIG_VE_IPTABLES
+ 	nf_ct_proto_icmpv6_sysctl_cleanup();
+-	nf_ct_proto_udp_sysctl_cleanup();
+-	nf_ct_proto_tcp_sysctl_cleanup();
+ 	if (!ve_is_super(get_exec_env()))
+ 		module_put(THIS_MODULE);
+ #endif /* CONFIG_VE_IPTABLES */
+diff --git a/net/netfilter/nf_conntrack_standalone.c b/net/netfilter/nf_conntrack_standalone.c
+index c4d8ef2..0439df6 100644
+--- a/net/netfilter/nf_conntrack_standalone.c
++++ b/net/netfilter/nf_conntrack_standalone.c
+@@ -510,8 +510,19 @@ static int nf_conntrack_init_ve(void)
+ 	ret = nf_conntrack_standalone_init_sysctl();
+ 	if (ret < 0)
+ 		goto out_sysctl;
++	ret = nf_ct_proto_tcp_sysctl_init();
++	if (ret < 0)
++		goto out_tcp_sysctl;
++	ret = nf_ct_proto_udp_sysctl_init();
++	if (ret < 0)
++		goto out_udp_sysctl;
++
+ 	return 0;
+ 
++out_udp_sysctl:
++	nf_ct_proto_tcp_sysctl_cleanup();
++out_tcp_sysctl:
++	nf_conntrack_standalone_fini_sysctl();
+ out_sysctl:
+ 	nf_conntrack_standalone_fini_proc();
+ out_proc:
+@@ -522,6 +533,8 @@ out:
+ 
+ static void nf_conntrack_cleanup_ve(void)
+ {
++	nf_ct_proto_udp_sysctl_cleanup();
++	nf_ct_proto_tcp_sysctl_cleanup();
+ 	nf_conntrack_standalone_fini_sysctl();
+ 	nf_conntrack_standalone_fini_proc();
+ 	nf_conntrack_cleanup();
+-- 
+1.6.0.6
+
