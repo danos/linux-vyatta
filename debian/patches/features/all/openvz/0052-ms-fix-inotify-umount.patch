@@ -1,0 +1,133 @@
+From 86d74166a99f5ece5bcd46b85cba4ebd54126685 Mon Sep 17 00:00:00 2001
+From: Dmitri Monakhov <dmonakhov@openvz.org>
+Date: Wed, 26 Nov 2008 15:29:09 +0300
+Subject: [PATCH] ms: fix inotify umount
+
+On umount two event will be dispatched to watcher:
+1: inotify_dev_queue_event(.., IN_UNMOUNT,..)
+2: remove_watch(watch, dev)
+    ->inotify_dev_queue_event(.., IN_IGNORED, ..)
+But if watcher has IN_ONESHOT bit set then the watcher will be released
+inside first event. Which result in accessing invalid object later.
+IMHO it is not pure regression. This bug wasn't triggered while initial
+inotify interface testing phase because of another bug in IN_ONESHOT
+handling logic :)
+  commit ac74c00e499ed276a965e5b5600667d5dc04a84a
+  Author: Ulisses Furquim <ulissesf@gmail.com>
+  Date:   Fri Feb 8 04:18:16 2008 -0800
+    inotify: fix check for one-shot watches before destroying them
+    As the IN_ONESHOT bit is never set when an event is sent we must check it
+    in the watch's mask and not in the event's mask.
+
+TESTCASE:
+#Seems rkagan@ was the only one who try this since feb 2008 :)
+mkdir mnt
+mount -ttmpfs none mnt
+mkdir mnt/d
+/inotify mnt/d&
+umount mnt ## << lockup or crash here
+
+TESTSOURCE:
+/* gcc -oinotify inotify.c */
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/inotify.h>
+
+int main(int argc, char **argv)
+{
+        char buf[1024];
+        struct inotify_event *ie;
+        char *p;
+        int i;
+        ssize_t l;
+
+        p = argv[1];
+        i = inotify_init();
+        inotify_add_watch(i, p, ~0);
+
+        l = read(i, buf, sizeof(buf));
+        printf("read %d bytes\n", l);
+        ie = (struct inotify_event *) buf;
+        printf("event mask: %d\n", ie->mask);
+	return 0;
+}
+
+From: Dmitri Monakhov <dmonakhov@openvz.org>
+Date: Wed, 26 Nov 2008 15:18:24 +0300
+Subject: [PATCH] Fix incorrect refcount while dispatching unmount event
+
+On umount two event will be dispatched to watcher:
+1: inotify_dev_queue_event(.., IN_UNMOUNT,..)
+2: remove_watch(watch, dev)
+    ->inotify_dev_queue_event(.., IN_IGNORED, ..)
+But if watcher has IN_ONESHOT bit set then the watcher will be released
+inside first event. Which result in accessing invalid object later.
+IMHO it is not pure regression. This bug wasn't triggered while initial
+inotify interface testing phase because of another bug in IN_ONESHOT
+handling logic :)
+  commit ac74c00e499ed276a965e5b5600667d5dc04a84a
+  Author: Ulisses Furquim <ulissesf@gmail.com>
+  Date:   Fri Feb 8 04:18:16 2008 -0800
+    inotify: fix check for one-shot watches before destroying them
+    As the IN_ONESHOT bit is never set when an event is sent we must check it
+    in the watch's mask and not in the event's mask.
+
+TESTCASE:
+mkdir mnt
+mount -ttmpfs none mnt
+mkdir mnt/d
+/inotify mnt/d&
+umount mnt ## << lockup or crash here
+
+TESTSOURCE:
+/* gcc -oinotify inotify.c */
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/inotify.h>
+
+int main(int argc, char **argv)
+{
+        char buf[1024];
+        struct inotify_event *ie;
+        char *p;
+        int i;
+        ssize_t l;
+
+        p = argv[1];
+        i = inotify_init();
+        inotify_add_watch(i, p, ~0);
+
+        l = read(i, buf, sizeof(buf));
+        printf("read %d bytes\n", l);
+        ie = (struct inotify_event *) buf;
+        printf("event mask: %d\n", ie->mask);
+	return 0;
+}
+
+Signed-off-by: Dmitri Monakhov <dmonakhov@openvz.org>
+Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+---
+ fs/inotify.c |    2 ++
+ 1 files changed, 2 insertions(+), 0 deletions(-)
+
+diff --git a/fs/inotify.c b/fs/inotify.c
+index 01ddb06..b2671b6 100644
+--- a/fs/inotify.c
++++ b/fs/inotify.c
+@@ -398,11 +398,13 @@ void inotify_unmount_inodes(struct list_head *list)
+ 		watches = &inode->inotify_watches;
+ 		list_for_each_entry_safe(watch, next_w, watches, i_list) {
+ 			struct inotify_handle *ih= watch->ih;
++			get_inotify_watch(watch);
+ 			mutex_lock(&ih->mutex);
+ 			ih->in_ops->handle_event(watch, watch->wd, IN_UNMOUNT, 0,
+ 						 NULL, NULL);
+ 			inotify_remove_watch_locked(ih, watch);
+ 			mutex_unlock(&ih->mutex);
++			put_inotify_watch(watch);
+ 		}
+ 		mutex_unlock(&inode->inotify_mutex);
+ 		iput(inode);		
+-- 
+1.6.0.6
+
