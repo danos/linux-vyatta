@@ -1,0 +1,60 @@
+From 09686c184a2cb815cbd5af500fe468311887d746 Mon Sep 17 00:00:00 2001
+From: Vitaliy Gusev <vgusev@openvz.org>
+Date: Mon, 26 Jan 2009 15:48:02 +0300
+Subject: [PATCH] Free skb->nf_bridge in veth_xmit() and venet_xmit()
+
+We free skb->nfct in veth_xmit, but also have to free skb->nf_bridge.
+
+Note: Why it works in 2.6.24-ovz but doesn't work in 2.6.26-ovz ?
+
+   1. It issue is only if BRIDGE_NETFILTER=y
+
+   2. nf_hook_register() has effect to all VEs in 2.6.26-ovz
+      (in 2.6.24-ovz doesn't).
+      Thus bridge hook ip_sabotage_in is not called for 2.6.24-ovz, but
+      is called for 2.6.26-ovz.
+
+http://bugzilla.openvz.org/show_bug.cgi?id=1146
+
+Signed-off-by: Vitaliy Gusev <vgusev@openvz.org>
+Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+---
+ drivers/net/venet_core.c |    5 +----
+ drivers/net/vzethdev.c   |    5 +----
+ 2 files changed, 2 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/net/venet_core.c b/drivers/net/venet_core.c
+index 6b21630..8770255 100644
+--- a/drivers/net/venet_core.c
++++ b/drivers/net/venet_core.c
+@@ -272,10 +272,7 @@ static int venet_xmit(struct sk_buff *skb, struct net_device *dev)
+ 
+ 	dst_release(skb->dst);
+ 	skb->dst = NULL;
+-#if defined(CONFIG_NF_CONNTRACK) || defined(CONFIG_NF_CONNTRACK_MODULE)
+-	nf_conntrack_put(skb->nfct);
+-	skb->nfct = NULL;
+-#endif
++	nf_reset(skb);
+ 	length = skb->len;
+ 
+ 	netif_rx(skb);
+diff --git a/drivers/net/vzethdev.c b/drivers/net/vzethdev.c
+index 1414618..dd2b693 100644
+--- a/drivers/net/vzethdev.c
++++ b/drivers/net/vzethdev.c
+@@ -311,10 +311,7 @@ out:
+ 
+ 	dst_release(skb->dst);
+ 	skb->dst = NULL;
+-#if defined(CONFIG_NF_CONNTRACK) || defined(CONFIG_NF_CONNTRACK_MODULE)
+-	nf_conntrack_put(skb->nfct);
+-	skb->nfct = NULL;
+-#endif
++	nf_reset(skb);
+ 	length = skb->len;
+ 
+ 	netif_rx(skb);
+-- 
+1.6.0.6
+

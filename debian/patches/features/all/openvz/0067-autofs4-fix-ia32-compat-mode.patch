@@ -1,0 +1,60 @@
+From 397500cb89baf75c8035060585c0886b3012708a Mon Sep 17 00:00:00 2001
+From: Konstantin Khlebnikov <khlebnikov@openvz.org>
+Date: Tue, 27 Jan 2009 14:34:57 +0300
+Subject: [PATCH] autofs4: fix ia32 compat mode
+
+autofs4_notify_daemon is called from the context of task accessing
+the autofs, not the daemon one. Thus the bitness check of current is
+wrong for mixed environments.
+
+Signed-off-by: Konstantin Khlebnikov <khlebnikov@openvz.org>
+Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+---
+ fs/autofs4/autofs_i.h |    1 +
+ fs/autofs4/inode.c    |    4 ++++
+ fs/autofs4/waitq.c    |    2 +-
+ 3 files changed, 6 insertions(+), 1 deletions(-)
+
+diff --git a/fs/autofs4/autofs_i.h b/fs/autofs4/autofs_i.h
+index 4c8d035..80dc520 100644
+--- a/fs/autofs4/autofs_i.h
++++ b/fs/autofs4/autofs_i.h
+@@ -114,6 +114,7 @@ struct autofs_sb_info {
+ 	struct autofs_wait_queue *queues; /* Wait queue pointer */
+ 	spinlock_t rehash_lock;
+ 	struct list_head rehash_list;
++	unsigned is32bit:1;
+ };
+ 
+ static inline struct autofs_sb_info *autofs4_sbi(struct super_block *sb)
+diff --git a/fs/autofs4/inode.c b/fs/autofs4/inode.c
+index 2d8dcb2..40b7b90 100644
+--- a/fs/autofs4/inode.c
++++ b/fs/autofs4/inode.c
+@@ -337,6 +337,10 @@ int autofs4_fill_super(struct super_block *s, void *data, int silent)
+ 	sbi->type = 0;
+ 	sbi->min_proto = 0;
+ 	sbi->max_proto = 0;
++#if defined CONFIG_X86_64 && defined CONFIG_IA32_EMULATION
++	if (test_thread_flag(TIF_IA32))
++		sbi->is32bit = 1;
++#endif
+ 	mutex_init(&sbi->wq_mutex);
+ 	spin_lock_init(&sbi->fs_lock);
+ 	sbi->queues = NULL;
+diff --git a/fs/autofs4/waitq.c b/fs/autofs4/waitq.c
+index 67d444c..c6d34ea 100644
+--- a/fs/autofs4/waitq.c
++++ b/fs/autofs4/waitq.c
+@@ -143,7 +143,7 @@ static void autofs4_notify_daemon(struct autofs_sb_info *sbi,
+ 		 *
+ 		 * reduce size if work in 32-bit mode to satisfy userspace hope
+ 		 */
+-		if (test_thread_flag(TIF_IA32))
++		if (sbi->is32bit)
+ 			pktsz -= 4;
+ #endif
+ 
+-- 
+1.6.0.6
+
