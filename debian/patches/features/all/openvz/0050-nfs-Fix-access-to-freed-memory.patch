@@ -1,0 +1,79 @@
+From b8b70c37c8b114780a02492703c9682d8b09a14b Mon Sep 17 00:00:00 2001
+From: Vitaliy Gusev <vgusev@openvz.org>
+Date: Wed, 24 Dec 2008 20:32:43 +0300
+Subject: [PATCH] nfs: Fix access to freed memory
+
+rpc_shutdown_client() frees xprt, so we can't use this xprt.
+So move put_ve() to xprt::destroy level.
+
+Bug https://bugzilla.sw.ru/show_bug.cgi?id=265628
+
+Signed-off-by: Vitaliy Gusev <vgusev@openvz.org>
+Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+---
+ net/sunrpc/clnt.c               |    2 --
+ net/sunrpc/xprt.c               |    2 +-
+ net/sunrpc/xprtrdma/transport.c |    1 +
+ net/sunrpc/xprtsock.c           |    1 +
+ 4 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/net/sunrpc/clnt.c b/net/sunrpc/clnt.c
+index f303e1d..b6f53f1 100644
+--- a/net/sunrpc/clnt.c
++++ b/net/sunrpc/clnt.c
+@@ -324,7 +324,6 @@ struct rpc_clnt *rpc_create(struct rpc_create_args *args)
+ 	xprt = xprt_create_transport(&xprtargs);
+ 	if (IS_ERR(xprt))
+ 		return (struct rpc_clnt *)xprt;
+-	xprt->owner_env = get_ve(get_exec_env());
+ 
+ 	/*
+ 	 * By default, kernel RPC client connects from a reserved port.
+@@ -346,7 +345,6 @@ struct rpc_clnt *rpc_create(struct rpc_create_args *args)
+ 		int err = rpc_ping(clnt, RPC_TASK_SOFT);
+ 		if (err != 0) {
+ 			rpc_shutdown_client(clnt);
+-			put_ve(xprt->owner_env);
+ 			return ERR_PTR(err);
+ 		}
+ 	}
+diff --git a/net/sunrpc/xprt.c b/net/sunrpc/xprt.c
+index 831ad1b..23ce2ce 100644
+--- a/net/sunrpc/xprt.c
++++ b/net/sunrpc/xprt.c
+@@ -1056,7 +1056,7 @@ found:
+ 	xprt->last_used = jiffies;
+ 	xprt->cwnd = RPC_INITCWND;
+ 	xprt->bind_index = 0;
+-	xprt->owner_env = get_exec_env();
++	xprt->owner_env = get_ve(get_exec_env());
+ 
+ 	rpc_init_wait_queue(&xprt->binding, "xprt_binding");
+ 	rpc_init_wait_queue(&xprt->pending, "xprt_pending");
+diff --git a/net/sunrpc/xprtrdma/transport.c b/net/sunrpc/xprtrdma/transport.c
+index a564c1a..77714e3 100644
+--- a/net/sunrpc/xprtrdma/transport.c
++++ b/net/sunrpc/xprtrdma/transport.c
+@@ -286,6 +286,7 @@ xprt_rdma_destroy(struct rpc_xprt *xprt)
+ 
+ 	kfree(xprt->slot);
+ 	xprt->slot = NULL;
++	put_ve(xprt->owner_env);
+ 	kfree(xprt);
+ 
+ 	dprintk("RPC:       %s: returning\n", __func__);
+diff --git a/net/sunrpc/xprtsock.c b/net/sunrpc/xprtsock.c
+index 7ade3e3..27e62dd 100644
+--- a/net/sunrpc/xprtsock.c
++++ b/net/sunrpc/xprtsock.c
+@@ -816,6 +816,7 @@ static void xs_destroy(struct rpc_xprt *xprt)
+ 	xs_close(xprt);
+ 	xs_free_peer_addresses(xprt);
+ 	kfree(xprt->slot);
++	put_ve(xprt->owner_env);
+ 	kfree(xprt);
+ 	module_put(THIS_MODULE);
+ }
+-- 
+1.6.0.6
+

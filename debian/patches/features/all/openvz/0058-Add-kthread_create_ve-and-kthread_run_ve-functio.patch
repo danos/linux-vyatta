@@ -1,0 +1,156 @@
+From d4988b6efbdfb1b2416288c362d60351e1c5e5ff Mon Sep 17 00:00:00 2001
+From: Vitaliy Gusev <vgusev@openvz.org>
+Date: Tue, 13 Jan 2009 19:49:02 +0300
+Subject: [PATCH] Add kthread_create_ve() and kthread_run_ve() functions #2
+
+These functions are like kthread_create() and kthread_run()
+but create threads in VE context.
+
+Signed-off-by: Vitaliy Gusev <vgusev@openvz.org>
+Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+---
+ include/linux/kthread.h |   23 ++++++++++++++++++++++-
+ kernel/kthread.c        |   30 ++++++++++++++++++++++++------
+ 2 files changed, 46 insertions(+), 7 deletions(-)
+
+diff --git a/include/linux/kthread.h b/include/linux/kthread.h
+index 00dd957..f71c55a 100644
+--- a/include/linux/kthread.h
++++ b/include/linux/kthread.h
+@@ -4,10 +4,20 @@
+ #include <linux/err.h>
+ #include <linux/sched.h>
+ 
+-struct task_struct *kthread_create(int (*threadfn)(void *data),
++struct task_struct *kthread_create_ve(struct ve_struct *ve,
++				   int (*threadfn)(void *data),
+ 				   void *data,
+ 				   const char namefmt[], ...);
+ 
++
++#define kthread_create(threadfn, data, namefmt, ...)			\
++({									\
++	struct task_struct *__k						\
++		= kthread_create_ve(get_ve0(), threadfn, data, namefmt,	\
++				 ## __VA_ARGS__);			\
++	__k;								\
++})
++
+ /**
+  * kthread_run - create and wake a thread.
+  * @threadfn: the function to run until signal_pending(current).
+@@ -26,6 +36,17 @@ struct task_struct *kthread_create(int (*threadfn)(void *data),
+ 	__k;								   \
+ })
+ 
++/* Like kthread_run() but run a thread in VE context */
++#define kthread_run_ve(ve, threadfn, data, namefmt, ...)		   \
++({									   \
++	struct task_struct *__k						   \
++		= kthread_create_ve(ve, threadfn, data, namefmt,	   \
++				    ## __VA_ARGS__);			   \
++	if (!IS_ERR(__k))						   \
++		wake_up_process(__k);					   \
++	__k;								   \
++})
++
+ void kthread_bind(struct task_struct *k, unsigned int cpu);
+ int kthread_stop(struct task_struct *k);
+ int kthread_should_stop(void);
+diff --git a/kernel/kthread.c b/kernel/kthread.c
+index bd1b9ea..e8f1e53 100644
+--- a/kernel/kthread.c
++++ b/kernel/kthread.c
+@@ -13,6 +13,7 @@
+ #include <linux/file.h>
+ #include <linux/module.h>
+ #include <linux/mutex.h>
++#include <linux/nsproxy.h>
+ 
+ #define KTHREAD_NICE_LEVEL (-5)
+ 
+@@ -26,6 +27,7 @@ struct kthread_create_info
+ 	int (*threadfn)(void *data);
+ 	void *data;
+ 	struct completion started;
++	struct ve_struct *ve;
+ 
+ 	/* Result passed back to kthread_create() from kthreadd. */
+ 	struct task_struct *result;
+@@ -66,6 +68,18 @@ static int kthread(void *_create)
+ 	void *data;
+ 	int ret = -EINTR;
+ 
++	if (do_ve_enter_hook && create->ve != get_ve0()) {
++		ret = do_ve_enter_hook(create->ve, 0);
++		if (ret < 0) {
++			create->result = ERR_PTR(ret);
++			complete(&create->started);
++			return ret;
++		}
++	} else if (create->ve != get_ve0())
++		BUG();
++
++	create->result = current;
++
+ 	/* Copy data: it's on kthread's stack */
+ 	threadfn = create->threadfn;
+ 	data = create->data;
+@@ -97,9 +111,10 @@ static void create_kthread(struct kthread_create_info *create)
+ 	} else {
+ 		struct sched_param param = { .sched_priority = 0 };
+ 		wait_for_completion(&create->started);
+-		read_lock(&tasklist_lock);
+-		create->result = find_task_by_pid_ns(pid, &init_pid_ns);
+-		read_unlock(&tasklist_lock);
++
++		if (IS_ERR(create->result))
++			goto end;
++
+ 		/*
+ 		 * root may have changed our (kthreadd's) priority or CPU mask.
+ 		 * The kernel thread should not inherit these properties.
+@@ -108,11 +123,12 @@ static void create_kthread(struct kthread_create_info *create)
+ 		set_user_nice(create->result, KTHREAD_NICE_LEVEL);
+ 		set_cpus_allowed(create->result, CPU_MASK_ALL);
+ 	}
++end:
+ 	complete(&create->done);
+ }
+ 
+ /**
+- * kthread_create - create a kthread.
++ * kthread_create_ve - create a kthread.
+  * @threadfn: the function to run until signal_pending(current).
+  * @data: data ptr for @threadfn.
+  * @namefmt: printf-style name for the thread.
+@@ -130,7 +146,8 @@ static void create_kthread(struct kthread_create_info *create)
+  *
+  * Returns a task_struct or ERR_PTR(-ENOMEM).
+  */
+-struct task_struct *kthread_create(int (*threadfn)(void *data),
++struct task_struct *kthread_create_ve(struct ve_struct *ve,
++				   int (*threadfn)(void *data),
+ 				   void *data,
+ 				   const char namefmt[],
+ 				   ...)
+@@ -139,6 +156,7 @@ struct task_struct *kthread_create(int (*threadfn)(void *data),
+ 
+ 	create.threadfn = threadfn;
+ 	create.data = data;
++	create.ve = ve;
+ 	init_completion(&create.started);
+ 	init_completion(&create.done);
+ 
+@@ -158,7 +176,7 @@ struct task_struct *kthread_create(int (*threadfn)(void *data),
+ 	}
+ 	return create.result;
+ }
+-EXPORT_SYMBOL(kthread_create);
++EXPORT_SYMBOL(kthread_create_ve);
+ 
+ /**
+  * kthread_bind - bind a just-created kthread to a cpu.
+-- 
+1.6.2
+

@@ -1,0 +1,167 @@
+From 14131d2abbd2554276fe4488e3403d4c0a747cdf Mon Sep 17 00:00:00 2001
+From: Konstantin Khlebnikov <khlebnikov@openvz.org>
+Date: Fri, 9 Jan 2009 12:18:20 +0300
+Subject: [PATCH] ve: sanitize capability checks for namespaces creation
+
+The existing hard checking for namespaces mask is too bad. The
+intention was to ban namespaces creation for containers, but
+there aready exists a proper security mechanism to govern this
+question.
+
+Switch to existing capability-driven policy, thus allowing for
+namespaces creation from the HN.
+
+http://bugzilla.openvz.org/show_bug.cgi?id=1113
+
+Signed-off-by: Konstantin Khlebnikov <khlebnikov@openvz.org>
+Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+---
+ include/linux/nsproxy.h |    2 +-
+ include/linux/sched.h   |    4 ----
+ kernel/fork.c           |   15 +--------------
+ kernel/nsproxy.c        |    7 +++----
+ kernel/ve/vecalls.c     |    5 +++--
+ 5 files changed, 8 insertions(+), 25 deletions(-)
+
+diff --git a/include/linux/nsproxy.h b/include/linux/nsproxy.h
+index dd6d50f..e707e2c 100644
+--- a/include/linux/nsproxy.h
++++ b/include/linux/nsproxy.h
+@@ -62,7 +62,7 @@ static inline struct nsproxy *task_nsproxy(struct task_struct *tsk)
+ 	return rcu_dereference(tsk->nsproxy);
+ }
+ 
+-int copy_namespaces(unsigned long flags, struct task_struct *tsk);
++int copy_namespaces(unsigned long flags, struct task_struct *tsk, int force_admin);
+ void exit_task_namespaces(struct task_struct *tsk);
+ void switch_task_namespaces(struct task_struct *tsk, struct nsproxy *new);
+ void free_nsproxy(struct nsproxy *ns);
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index 272da80..ab38d35 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -29,10 +29,6 @@
+ #define CLONE_NEWNET		0x40000000	/* New network namespace */
+ #define CLONE_IO		0x80000000	/* Clone io context */
+ 
+-/* mask of clones which are disabled in OpenVZ VEs */
+-#define CLONE_NAMESPACES_MASK	(CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWUSER | \
+-				 CLONE_NEWPID | CLONE_NEWNET)
+-
+ /*
+  * Scheduling policies
+  */
+diff --git a/kernel/fork.c b/kernel/fork.c
+index f366869..2cd4ab7 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -917,13 +917,8 @@ static struct task_struct *copy_process(unsigned long clone_flags,
+ 	struct task_struct *p;
+ 	int cgroup_callbacks_done = 0;
+ 
+-#ifdef CONFIG_VE
+-	if (clone_flags & CLONE_NAMESPACES_MASK)
+-		return ERR_PTR(-EINVAL);
+-#else
+ 	if ((clone_flags & (CLONE_NEWNS|CLONE_FS)) == (CLONE_NEWNS|CLONE_FS))
+ 		return ERR_PTR(-EINVAL);
+-#endif
+ 
+ 	/*
+ 	 * Thread groups must share signals as well, and detached threads
+@@ -1099,7 +1094,7 @@ static struct task_struct *copy_process(unsigned long clone_flags,
+ 		goto bad_fork_cleanup_signal;
+ 	if ((retval = copy_keys(clone_flags, p)))
+ 		goto bad_fork_cleanup_mm;
+-	if ((retval = copy_namespaces(clone_flags, p)))
++	if ((retval = copy_namespaces(clone_flags, p, 0)))
+ 		goto bad_fork_cleanup_keys;
+ 	if ((retval = copy_io(clone_flags, p)))
+ 		goto bad_fork_cleanup_namespaces;
+@@ -1651,10 +1646,6 @@ asmlinkage long sys_unshare(unsigned long unshare_flags)
+ 				CLONE_NEWUTS|CLONE_NEWIPC|CLONE_NEWUSER|
+ 				CLONE_NEWNET))
+ 		goto bad_unshare_out;
+-#ifdef CONFIG_VE
+-	if (unshare_flags & CLONE_NAMESPACES_MASK)
+-		goto bad_unshare_out;
+-#endif
+ 
+ 	/*
+ 	 * CLONE_NEWIPC must also detach from the undolist: after switching
+@@ -1673,11 +1664,9 @@ asmlinkage long sys_unshare(unsigned long unshare_flags)
+ 		goto bad_unshare_cleanup_sigh;
+ 	if ((err = unshare_fd(unshare_flags, &new_fd)))
+ 		goto bad_unshare_cleanup_vm;
+-#ifndef CONFIG_VE
+ 	if ((err = unshare_nsproxy_namespaces(unshare_flags, &new_nsproxy,
+ 			new_fs)))
+ 		goto bad_unshare_cleanup_fd;
+-#endif
+ 
+ 	if (new_fs ||  new_mm || new_fd || do_sysvsem || new_nsproxy) {
+ 		if (do_sysvsem) {
+@@ -1721,9 +1710,7 @@ asmlinkage long sys_unshare(unsigned long unshare_flags)
+ 	if (new_nsproxy)
+ 		put_nsproxy(new_nsproxy);
+ 
+-#ifndef CONFIG_VE
+ bad_unshare_cleanup_fd:
+-#endif
+ 	if (new_fd)
+ 		put_files_struct(new_fd);
+ 
+diff --git a/kernel/nsproxy.c b/kernel/nsproxy.c
+index 1c0848f..49ff461 100644
+--- a/kernel/nsproxy.c
++++ b/kernel/nsproxy.c
+@@ -127,7 +127,8 @@ out_ns:
+  * called from clone.  This now handles copy for nsproxy and all
+  * namespaces therein.
+  */
+-int copy_namespaces(unsigned long flags, struct task_struct *tsk)
++int copy_namespaces(unsigned long flags, struct task_struct *tsk,
++		int force_admin)
+ {
+ 	struct nsproxy *old_ns = tsk->nsproxy;
+ 	struct nsproxy *new_ns;
+@@ -142,12 +143,10 @@ int copy_namespaces(unsigned long flags, struct task_struct *tsk)
+ 				CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET)))
+ 		return 0;
+ 
+-#ifndef CONFIG_VE
+-	if (!capable(CAP_SYS_ADMIN)) {
++	if (!capable(CAP_SYS_ADMIN) && !force_admin) {
+ 		err = -EPERM;
+ 		goto out;
+ 	}
+-#endif
+ 
+ 	/*
+ 	 * CLONE_NEWIPC must detach from the undolist: after switching
+diff --git a/kernel/ve/vecalls.c b/kernel/ve/vecalls.c
+index 4a4a24b..33e3ab1 100644
+--- a/kernel/ve/vecalls.c
++++ b/kernel/ve/vecalls.c
+@@ -680,7 +680,8 @@ static inline int init_ve_namespaces(struct ve_struct *ve,
+ 	tsk = current;
+ 	cur = tsk->nsproxy;
+ 
+-	err = copy_namespaces(CLONE_NAMESPACES_MASK & ~CLONE_NEWNET, tsk);
++	err = copy_namespaces(CLONE_NEWUTS | CLONE_NEWIPC
++			| CLONE_NEWUSER | CLONE_NEWPID, tsk, 1);
+ 	if (err < 0)
+ 		return err;
+ 
+@@ -723,7 +724,7 @@ static int init_ve_netns(struct ve_struct *ve, struct nsproxy **old)
+ 	tsk = current;
+ 	cur = tsk->nsproxy;
+ 
+-	err = copy_namespaces(CLONE_NEWNET, tsk);
++	err = copy_namespaces(CLONE_NEWNET, tsk, 1);
+ 	if (err < 0)
+ 		return err;
+ 
+-- 
+1.6.0.6
+
