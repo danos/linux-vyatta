@@ -1,0 +1,1279 @@
+From 66ec7f7f493fb98e8baa6591e9225086ae640fb8 Mon Sep 17 00:00:00 2001
+From: Denis Lunev <den@openvz.org>
+Date: Tue, 9 Sep 2008 18:32:50 +0400
+Subject: [PATCH] nfs: fix nfs clinet in VE (finally)
+
+Ah! Thanks to our Den we now have an NFS client back!
+
+It turned out, that while going the 2.6.18->2.6.20->...->2.6.26
+NFS changed too much and we didn't test it properly (nobody
+required it badly) in the intermediate states, lost many hunks
+and that's why the patch is *that* big.
+
+Signed-off-by: Denis Lunev <den@openvz.org>
+Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+---
+ fs/lockd/clntproc.c         |    4 ++
+ fs/lockd/host.c             |   52 +++++++++++++++++++
+ fs/lockd/svc.c              |   54 ++++++++++++++++----
+ fs/lockd/svcsubs.c          |    3 +
+ fs/nfs/client.c             |   11 ++++
+ fs/nfs/super.c              |   70 +++++++++++++++++++++++++-
+ fs/super.c                  |    2 +
+ include/linux/lockd/lockd.h |    8 ++-
+ include/linux/nfs_fs_sb.h   |    1 +
+ include/linux/sunrpc/clnt.h |    2 +
+ include/linux/sunrpc/xprt.h |    9 +++
+ include/linux/ve.h          |   12 ++++
+ include/linux/vzcalluser.h  |    1 +
+ include/net/sock.h          |    7 +++
+ net/socket.c                |    2 +-
+ net/sunrpc/clnt.c           |  117 +++++++++++++++++++++++++++++++++++++++++-
+ net/sunrpc/rpc_pipe.c       |    1 +
+ net/sunrpc/sched.c          |   10 +++-
+ net/sunrpc/sunrpc_syms.c    |    5 ++
+ net/sunrpc/svcsock.c        |   21 ++------
+ net/sunrpc/xprt.c           |    8 +++
+ net/sunrpc/xprtsock.c       |   61 ++++++++++++++++++++--
+ 22 files changed, 417 insertions(+), 44 deletions(-)
+
+diff --git a/fs/lockd/clntproc.c b/fs/lockd/clntproc.c
+index 5df517b..d05fcba 100644
+--- a/fs/lockd/clntproc.c
++++ b/fs/lockd/clntproc.c
+@@ -156,12 +156,15 @@ int nlmclnt_proc(struct nlm_host *host, int cmd, struct file_lock *fl)
+ {
+ 	struct nlm_rqst		*call;
+ 	int			status;
++	struct ve_struct *ve;
+ 
+ 	nlm_get_host(host);
+ 	call = nlm_alloc_call(host);
+ 	if (call == NULL)
+ 		return -ENOMEM;
+ 
++	ve = set_exec_env(host->owner_env);
++
+ 	nlmclnt_locks_init_private(fl, host);
+ 	/* Set up the argument struct */
+ 	nlmclnt_setlockargs(call, fl);
+@@ -181,6 +184,7 @@ int nlmclnt_proc(struct nlm_host *host, int cmd, struct file_lock *fl)
+ 	fl->fl_ops = NULL;
+ 
+ 	dprintk("lockd: clnt proc returns %d\n", status);
++	(void)set_exec_env(ve);
+ 	return status;
+ }
+ EXPORT_SYMBOL_GPL(nlmclnt_proc);
+diff --git a/fs/lockd/host.c b/fs/lockd/host.c
+index a17664c..cfa0cf3 100644
+--- a/fs/lockd/host.c
++++ b/fs/lockd/host.c
+@@ -53,6 +53,7 @@ static struct nlm_host *nlm_lookup_host(int server,
+ 	struct nlm_host	*host;
+ 	struct nsm_handle *nsm = NULL;
+ 	int		hash;
++	struct ve_struct *ve;
+ 
+ 	dprintk("lockd: nlm_lookup_host("NIPQUAD_FMT"->"NIPQUAD_FMT
+ 			", p=%d, v=%u, my role=%s, name=%.*s)\n",
+@@ -78,10 +79,14 @@ static struct nlm_host *nlm_lookup_host(int server,
+ 	 * different NLM rpc_clients into one single nlm_host object.
+ 	 * This would allow us to have one nlm_host per address.
+ 	 */
++
++	ve = get_exec_env();
+ 	chain = &nlm_hosts[hash];
+ 	hlist_for_each_entry(host, pos, chain, h_hash) {
+ 		if (!nlm_cmp_addr(&host->h_addr, sin))
+ 			continue;
++		if (!ve_accessible_strict(host->owner_env, ve))
++			continue;
+ 
+ 		/* See if we have an NSM handle for this client */
+ 		if (!nsm)
+@@ -141,6 +146,7 @@ static struct nlm_host *nlm_lookup_host(int server,
+ 	spin_lock_init(&host->h_lock);
+ 	INIT_LIST_HEAD(&host->h_granted);
+ 	INIT_LIST_HEAD(&host->h_reclaim);
++	host->owner_env    = ve;
+ 
+ 	nrhosts++;
+ out:
+@@ -454,6 +460,52 @@ nlm_gc_hosts(void)
+ 	next_gc = jiffies + NLM_HOST_COLLECT;
+ }
+ 
++#ifdef CONFIG_VE
++void ve_nlm_shutdown_hosts(struct ve_struct *ve)
++{
++	envid_t veid = ve->veid;
++	int  i;
++
++	dprintk("lockd: shutting down host module for ve %d\n", veid);
++	mutex_lock(&nlm_host_mutex);
++
++	/* Perform a garbage collection pass */
++	for (i = 0; i < NLM_HOST_NRHASH; i++) {
++		struct nlm_host	*host;
++		struct hlist_node *pos;
++
++		hlist_for_each_entry(host, pos, &nlm_hosts[i], h_hash) {
++			struct rpc_clnt	*clnt;
++
++			if (ve != host->owner_env)
++				continue;
++
++			hlist_del(&host->h_hash);
++			if (host->h_nsmhandle)
++				host->h_nsmhandle->sm_monitored = 0;
++			dprintk("lockd: delete host %s ve %d\n", host->h_name,
++				veid);
++			if ((clnt = host->h_rpcclnt) != NULL) {
++				if (!list_empty(&clnt->cl_tasks)) {
++					struct rpc_xprt *xprt;
++
++					printk(KERN_WARNING
++						"lockd: active RPC handle\n");
++					rpc_killall_tasks(clnt);
++					xprt = clnt->cl_xprt;
++					xprt_disconnect_done(xprt);
++					xprt->ops->close(xprt);
++				} else
++					rpc_shutdown_client(clnt);
++			}
++			kfree(host);
++			nrhosts--;
++		}
++	}
++
++	mutex_unlock(&nlm_host_mutex);
++}
++#endif
+ 
+ /*
+  * Manage NSM handles
+diff --git a/fs/lockd/svc.c b/fs/lockd/svc.c
+index 2169af4..f9f02fc 100644
+--- a/fs/lockd/svc.c
++++ b/fs/lockd/svc.c
+@@ -27,6 +27,7 @@
+ #include <linux/mutex.h>
+ #include <linux/kthread.h>
+ #include <linux/freezer.h>
++#include <linux/ve_proto.h>
+ 
+ #include <linux/sunrpc/types.h>
+ #include <linux/sunrpc/stats.h>
+@@ -48,11 +49,13 @@ struct nlmsvc_binding *		nlmsvc_ops;
+ EXPORT_SYMBOL(nlmsvc_ops);
+ 
+ static DEFINE_MUTEX(nlmsvc_mutex);
+-static unsigned int		nlmsvc_users;
+-static struct task_struct	*nlmsvc_task;
+-static struct svc_serv		*nlmsvc_serv;
+-int				nlmsvc_grace_period;
+-unsigned long			nlmsvc_timeout;
++#ifndef CONFIG_VE
++static unsigned int		_nlmsvc_users;
++static struct task_struct	*_nlmsvc_task;
++int				_nlmsvc_grace_period;
++unsigned long			_nlmsvc_timeout;
++static struct svc_serv		*_nlmsvc_serv;
++#endif
+ 
+ /*
+  * These can be set at insmod time (useful for NFS as root filesystem),
+@@ -175,6 +178,10 @@ lockd(void *vrqstp)
+ 		 */
+ 		err = svc_recv(rqstp, timeout);
+ 		if (err == -EAGAIN || err == -EINTR) {
++#ifdef CONFIG_VE
++			if (!get_exec_env()->is_running)
++				break;
++#endif
+ 			preverr = err;
+ 			continue;
+ 		}
+@@ -338,12 +345,12 @@ lockd_down(void)
+ 	} else {
+ 		printk(KERN_ERR "lockd_down: no users! task=%p\n",
+ 			nlmsvc_task);
+-		BUG();
++		goto out;
+ 	}
+ 
+ 	if (!nlmsvc_task) {
+ 		printk(KERN_ERR "lockd_down: no lockd running.\n");
+-		BUG();
++		goto out;
+ 	}
+ 	kthread_stop(nlmsvc_task);
+ out:
+@@ -485,6 +492,29 @@ static int lockd_authenticate(struct svc_rqst *rqstp)
+ 	return SVC_DENIED;
+ }
+ 
++#ifdef CONFIG_VE
++extern void ve_nlm_shutdown_hosts(struct ve_struct *ve);
++
++static int ve_lockd_start(void *data)
++{
++	return 0;
++}
++
++static void ve_lockd_stop(void *data)
++{
++	struct ve_struct *ve = (struct ve_struct *)data;
++
++	ve_nlm_shutdown_hosts(ve);
++	flush_scheduled_work();
++}
++
++static struct ve_hook lockd_hook = {
++	.init	  = ve_lockd_start,
++	.fini	  = ve_lockd_stop,
++	.owner	  = THIS_MODULE,
++	.priority = HOOK_PRIO_FS,
++};
++#endif
+ 
+ param_set_min_max(port, int, simple_strtol, 0, 65535)
+ param_set_min_max(grace_period, unsigned long, simple_strtoul,
+@@ -512,16 +542,20 @@ module_param(nsm_use_hostnames, bool, 0644);
+ 
+ static int __init init_nlm(void)
+ {
++	ve_hook_register(VE_SS_CHAIN, &lockd_hook);
+ #ifdef CONFIG_SYSCTL
+ 	nlm_sysctl_table = register_sysctl_table(nlm_sysctl_root);
+-	return nlm_sysctl_table ? 0 : -ENOMEM;
+-#else
+-	return 0;
++	if (nlm_sysctl_table == NULL) {
++		ve_hook_unregister(&lockd_hook);
++		return -ENOMEM;
++	}
+ #endif
++	return 0;
+ }
+ 
+ static void __exit exit_nlm(void)
+ {
++	ve_hook_unregister(&lockd_hook);
+ 	/* FIXME: delete all NLM clients */
+ 	nlm_shutdown_hosts();
+ #ifdef CONFIG_SYSCTL
+diff --git a/fs/lockd/svcsubs.c b/fs/lockd/svcsubs.c
+index d1c48b5..c226c9d 100644
+--- a/fs/lockd/svcsubs.c
++++ b/fs/lockd/svcsubs.c
+@@ -335,6 +335,9 @@ nlmsvc_is_client(void *data, struct nlm_host *dummy)
+ {
+ 	struct nlm_host *host = data;
+ 
++	if (!ve_accessible_strict(host->owner_env, get_exec_env()))
++		return 0;
++
+ 	if (host->h_server) {
+ 		/* we are destroying locks even though the client
+ 		 * hasn't asked us too, so don't unmonitor the
+diff --git a/fs/nfs/client.c b/fs/nfs/client.c
+index f2a092c..3366257 100644
+--- a/fs/nfs/client.c
++++ b/fs/nfs/client.c
+@@ -127,6 +127,7 @@ static struct nfs_client *nfs_alloc_client(const struct nfs_client_initdata *cl_
+ 
+ 	atomic_set(&clp->cl_count, 1);
+ 	clp->cl_cons_state = NFS_CS_INITING;
++	clp->owner_env = get_exec_env();
+ 
+ 	memcpy(&clp->cl_addr, cl_init->addr, cl_init->addrlen);
+ 	clp->cl_addrlen = cl_init->addrlen;
+@@ -257,6 +258,7 @@ static int nfs_sockaddr_match_ipaddr(const struct sockaddr *sa1,
+ struct nfs_client *nfs_find_client(const struct sockaddr *addr, u32 nfsversion)
+ {
+ 	struct nfs_client *clp;
++	struct ve_struct *ve = get_exec_env();
+ 
+ 	spin_lock(&nfs_client_lock);
+ 	list_for_each_entry(clp, &nfs_client_list, cl_share_link) {
+@@ -272,6 +274,9 @@ struct nfs_client *nfs_find_client(const struct sockaddr *addr, u32 nfsversion)
+ 
+ 		if (addr->sa_family != clap->sa_family)
+ 			continue;
++		if (!ve_accessible_strict(clp->owner_env, ve))
++			continue;
++
+ 		/* Match only the IP address, not the port number */
+ 		if (!nfs_sockaddr_match_ipaddr(addr, clap))
+ 			continue;
+@@ -292,6 +297,7 @@ struct nfs_client *nfs_find_client_next(struct nfs_client *clp)
+ {
+ 	struct sockaddr *sap = (struct sockaddr *)&clp->cl_addr;
+ 	u32 nfsvers = clp->rpc_ops->version;
++	struct ve_struct *ve = get_exec_env();
+ 
+ 	spin_lock(&nfs_client_lock);
+ 	list_for_each_entry_continue(clp, &nfs_client_list, cl_share_link) {
+@@ -307,6 +313,9 @@ struct nfs_client *nfs_find_client_next(struct nfs_client *clp)
+ 
+ 		if (sap->sa_family != clap->sa_family)
+ 			continue;
++		if (!ve_accessible_strict(clp->owner_env, ve))
++			continue;
++
+ 		/* Match only the IP address, not the port number */
+ 		if (!nfs_sockaddr_match_ipaddr(sap, clap))
+ 			continue;
+@@ -326,7 +335,9 @@ struct nfs_client *nfs_find_client_next(struct nfs_client *clp)
+ static struct nfs_client *nfs_match_client(const struct nfs_client_initdata *data)
+ {
+ 	struct nfs_client *clp;
++	struct ve_struct *ve;
+ 
++	ve = get_exec_env();
+ 	list_for_each_entry(clp, &nfs_client_list, cl_share_link) {
+ 		/* Don't match clients that failed to initialise properly */
+ 		if (clp->cl_cons_state < 0)
+diff --git a/fs/nfs/super.c b/fs/nfs/super.c
+index 614efee..cb4e28a 100644
+--- a/fs/nfs/super.c
++++ b/fs/nfs/super.c
+@@ -50,6 +50,9 @@
+ #include <linux/nfs_xdr.h>
+ #include <linux/magic.h>
+ #include <linux/parser.h>
++#include <linux/ve_proto.h>
++#include <linux/vzcalluser.h>
++#include <linux/ve_nfs.h>
+ 
+ #include <asm/system.h>
+ #include <asm/uaccess.h>
+@@ -213,7 +216,8 @@ static struct file_system_type nfs_fs_type = {
+ 	.name		= "nfs",
+ 	.get_sb		= nfs_get_sb,
+ 	.kill_sb	= nfs_kill_super,
+-	.fs_flags	= FS_RENAME_DOES_D_MOVE|FS_REVAL_DOT|FS_BINARY_MOUNTDATA,
++	.fs_flags	= FS_RENAME_DOES_D_MOVE|FS_REVAL_DOT|
++			  FS_BINARY_MOUNTDATA|FS_VIRTUALIZED,
+ };
+ 
+ struct file_system_type nfs_xdev_fs_type = {
+@@ -221,7 +225,8 @@ struct file_system_type nfs_xdev_fs_type = {
+ 	.name		= "nfs",
+ 	.get_sb		= nfs_xdev_get_sb,
+ 	.kill_sb	= nfs_kill_super,
+-	.fs_flags	= FS_RENAME_DOES_D_MOVE|FS_REVAL_DOT|FS_BINARY_MOUNTDATA,
++	.fs_flags	= FS_RENAME_DOES_D_MOVE|FS_REVAL_DOT|
++			  FS_BINARY_MOUNTDATA|FS_VIRTUALIZED,
+ };
+ 
+ static const struct super_operations nfs_sops = {
+@@ -286,6 +291,55 @@ static struct shrinker acl_shrinker = {
+ 	.seeks		= DEFAULT_SEEKS,
+ };
+ 
++#ifdef CONFIG_VE
++static int ve_nfs_start(void *data)
++{
++	return 0;
++}
++
++static void ve_nfs_stop(void *data)
++{
++	struct ve_struct *ve;
++	struct super_block *sb;
++
++	flush_scheduled_work();
++
++	ve = (struct ve_struct *)data;
++	/* Basically, on a valid stop we can be here iff NFS was mounted
++	   read-only. In such a case client force-stop is not a problem.
++	   If we are here and NFS is read-write, we are in a FORCE stop, so
++	   force the client to stop.
++	   Lock daemon is already dead.
++	   Only superblock client remains. Den */
++	spin_lock(&sb_lock);
++	list_for_each_entry(sb, &super_blocks, s_list) {
++		struct rpc_clnt *clnt;
++		struct rpc_xprt *xprt;
++		if (sb->s_type != &nfs_fs_type)
++			continue;
++		clnt = NFS_SB(sb)->client;
++		if (!ve_accessible_strict(clnt->cl_xprt->owner_env, ve))
++			continue;
++		clnt->cl_broken = 1;
++		rpc_killall_tasks(clnt);
++
++		xprt = clnt->cl_xprt;
++		xprt_disconnect_done(xprt);
++		xprt->ops->close(xprt);
++	}
++	spin_unlock(&sb_lock);
++
++	flush_scheduled_work();
++}
++
++static struct ve_hook nfs_hook = {
++	.init	  = ve_nfs_start,
++	.fini	  = ve_nfs_stop,
++	.owner	  = THIS_MODULE,
++	.priority = HOOK_PRIO_NET_POST,
++};
++#endif
++
+ /*
+  * Register the NFS filesystems
+  */
+@@ -306,6 +360,7 @@ int __init register_nfs_fs(void)
+ 		goto error_2;
+ #endif
+ 	register_shrinker(&acl_shrinker);
++	ve_hook_register(VE_SS_CHAIN, &nfs_hook);
+ 	return 0;
+ 
+ #ifdef CONFIG_NFS_V4
+@@ -324,6 +379,7 @@ error_0:
+ void __exit unregister_nfs_fs(void)
+ {
+ 	unregister_shrinker(&acl_shrinker);
++	ve_hook_unregister(&nfs_hook);
+ #ifdef CONFIG_NFS_V4
+ 	unregister_filesystem(&nfs4_fs_type);
+ #endif
+@@ -1591,6 +1647,11 @@ static int nfs_get_sb(struct file_system_type *fs_type,
+ 		.mntflags = flags,
+ 	};
+ 	int error = -ENOMEM;
++	struct ve_struct *ve;
++
++	ve = get_exec_env();
++	if (!ve_is_super(ve) && !(ve->features & VE_FEATURE_NFS))
++		return -ENODEV;
+ 
+ 	data = kzalloc(sizeof(*data), GFP_KERNEL);
+ 	mntfh = kzalloc(sizeof(*mntfh), GFP_KERNEL);
+@@ -1700,6 +1761,11 @@ static int nfs_xdev_get_sb(struct file_system_type *fs_type, int flags,
+ 		.mntflags = flags,
+ 	};
+ 	int error;
++	struct ve_struct *ve;
++
++	ve = get_exec_env();
++	if (!ve_is_super(ve) && !(ve->features & VE_FEATURE_NFS))
++		return -ENODEV;
+ 
+ 	dprintk("--> nfs_xdev_get_sb()\n");
+ 
+diff --git a/fs/super.c b/fs/super.c
+index 55ce500..960317f 100644
+--- a/fs/super.c
++++ b/fs/super.c
+@@ -44,7 +44,9 @@
+ 
+ 
+ LIST_HEAD(super_blocks);
++EXPORT_SYMBOL_GPL(super_blocks);
+ DEFINE_SPINLOCK(sb_lock);
++EXPORT_SYMBOL_GPL(sb_lock);
+ 
+ /**
+  *	alloc_super	-	create new superblock
+diff --git a/include/linux/lockd/lockd.h b/include/linux/lockd/lockd.h
+index 102d928..7ef434d 100644
+--- a/include/linux/lockd/lockd.h
++++ b/include/linux/lockd/lockd.h
+@@ -61,6 +61,7 @@ struct nlm_host {
+ 	struct list_head	h_granted;	/* Locks in GRANTED state */
+ 	struct list_head	h_reclaim;	/* Locks in RECLAIM state */
+ 	struct nsm_handle *	h_nsmhandle;	/* NSM status handle */
++	struct ve_struct *	owner_env;	/* VE owning the host */
+ };
+ 
+ struct nsm_handle {
+@@ -152,8 +153,11 @@ extern struct svc_procedure	nlmsvc_procedures[];
+ #ifdef CONFIG_LOCKD_V4
+ extern struct svc_procedure	nlmsvc_procedures4[];
+ #endif
+-extern int			nlmsvc_grace_period;
+-extern unsigned long		nlmsvc_timeout;
++
++#include <linux/ve_nfs.h>
++extern int			_nlmsvc_grace_period;
++extern unsigned long		_nlmsvc_timeout;
++
+ extern int			nsm_use_hostnames;
+ 
+ /*
+diff --git a/include/linux/nfs_fs_sb.h b/include/linux/nfs_fs_sb.h
+index c9beacd..cb87ca2 100644
+--- a/include/linux/nfs_fs_sb.h
++++ b/include/linux/nfs_fs_sb.h
+@@ -70,6 +70,7 @@ struct nfs_client {
+ 	char			cl_ipaddr[48];
+ 	unsigned char		cl_id_uniquifier;
+ #endif
++	struct ve_struct	*owner_env;
+ };
+ 
+ /*
+diff --git a/include/linux/sunrpc/clnt.h b/include/linux/sunrpc/clnt.h
+index 6fff7f8..7b4d4cf 100644
+--- a/include/linux/sunrpc/clnt.h
++++ b/include/linux/sunrpc/clnt.h
+@@ -43,6 +43,7 @@ struct rpc_clnt {
+ 	unsigned int		cl_softrtry : 1,/* soft timeouts */
+ 				cl_discrtry : 1,/* disconnect before retry */
+ 				cl_autobind : 1;/* use getport() */
++	unsigned int		cl_broken   : 1;/* no responce for too long */
+ 
+ 	struct rpc_rtt *	cl_rtt;		/* RTO estimator data */
+ 	const struct rpc_timeout *cl_timeout;	/* Timeout strategy */
+@@ -56,6 +57,7 @@ struct rpc_clnt {
+ 	struct rpc_rtt		cl_rtt_default;
+ 	struct rpc_timeout	cl_timeout_default;
+ 	struct rpc_program *	cl_program;
++	unsigned long		cl_pr_time;
+ 	char			cl_inline_name[32];
+ };
+ 
+diff --git a/include/linux/sunrpc/xprt.h b/include/linux/sunrpc/xprt.h
+index 4d80a11..ceee9a3 100644
+--- a/include/linux/sunrpc/xprt.h
++++ b/include/linux/sunrpc/xprt.h
+@@ -24,6 +24,14 @@
+ #define RPC_MAX_SLOT_TABLE	(128U)
+ 
+ /*
++ * Grand abort timeout (stop the client if occures)
++ */
++extern int xprt_abort_timeout;
++
++#define RPC_MIN_ABORT_TIMEOUT	300
++#define RPC_MAX_ABORT_TIMEOUT	INT_MAX
++
++/*
+  * This describes a timeout strategy
+  */
+ struct rpc_timeout {
+@@ -123,6 +131,7 @@ struct rpc_xprt_ops {
+ struct rpc_xprt {
+ 	struct kref		kref;		/* Reference count */
+ 	struct rpc_xprt_ops *	ops;		/* transport methods */
++	struct ve_struct *	owner_env;	/* VE owner of mount */
+ 
+ 	const struct rpc_timeout *timeout;	/* timeout parms */
+ 	struct sockaddr_storage	addr;		/* server address */
+diff --git a/include/linux/ve.h b/include/linux/ve.h
+index 7025716..970aadc 100644
+--- a/include/linux/ve.h
++++ b/include/linux/ve.h
+@@ -139,6 +139,7 @@ struct ve_cpu_stats {
+ 
+ struct ve_ipt_recent;
+ struct ve_xt_hashlimit;
++struct svc_serv;
+ 
+ struct cgroup;
+ struct css_set;
+@@ -183,6 +184,8 @@ struct ve_struct {
+ 	struct devpts_config	*devpts_config;
+ #endif
+ 
++	struct ve_nfs_context	*nfs_context;
++
+ 	struct file_system_type *shmem_fstype;
+ 	struct vfsmount		*shmem_mnt;
+ #ifdef CONFIG_SYSFS
+@@ -274,6 +277,15 @@ struct ve_struct {
+ 	struct proc_dir_entry	*monitor_proc;
+ 	unsigned long		meminfo_val;
+ 
++#if defined(CONFIG_NFS_FS) || defined(CONFIG_NFS_FS_MODULE) \
++	|| defined(CONFIG_NFSD) || defined(CONFIG_NFSD_MODULE)
++	unsigned int		_nlmsvc_users;
++	struct task_struct*	_nlmsvc_task;
++	int			_nlmsvc_grace_period;
++	unsigned long		_nlmsvc_timeout;
++	struct svc_serv*	_nlmsvc_serv;
++#endif
++
+ 	struct nsproxy		*ve_ns;
+ 	struct net		*ve_netns;
+ 	struct cgroup		*ve_cgroup;
+diff --git a/include/linux/vzcalluser.h b/include/linux/vzcalluser.h
+index 9736479..a62b84c 100644
+--- a/include/linux/vzcalluser.h
++++ b/include/linux/vzcalluser.h
+@@ -102,6 +102,7 @@ struct env_create_param3 {
+ };
+ 
+ #define VE_FEATURE_SYSFS	(1ULL << 0)
++#define VE_FEATURE_NFS		(1ULL << 1)
+ #define VE_FEATURE_DEF_PERMS	(1ULL << 2)
+ 
+ #define VE_FEATURES_OLD		(VE_FEATURE_SYSFS)
+diff --git a/include/net/sock.h b/include/net/sock.h
+index 873caf6..718e410 100644
+--- a/include/net/sock.h
++++ b/include/net/sock.h
+@@ -1334,6 +1334,13 @@ static inline void sk_change_net(struct sock *sk, struct net *net)
+ 	sock_net_set(sk, hold_net(net));
+ }
+ 
++static inline void sk_change_net_get(struct sock *sk, struct net *net)
++{
++	struct net *old_net = sock_net(sk);
++	sock_net_set(sk, get_net(net));
++	put_net(old_net);
++}
++
+ extern void sock_enable_timestamp(struct sock *sk);
+ extern int sock_get_timestamp(struct sock *, struct timeval __user *);
+ extern int sock_get_timestampns(struct sock *, struct timespec __user *);
+diff --git a/net/socket.c b/net/socket.c
+index 09d8fc5..799f3c9 100644
+--- a/net/socket.c
++++ b/net/socket.c
+@@ -2363,7 +2363,7 @@ int kernel_sock_ioctl(struct socket *sock, int cmd, unsigned long arg)
+ 	struct ve_struct *old_env;
+ 
+ 	set_fs(KERNEL_DS);
+-	old_env = set_exec_env(get_ve0());
++	old_env = set_exec_env(sock->sk->owner_env);
+ 	err = sock->ops->ioctl(sock, cmd, arg);
+ 	(void)set_exec_env(old_env);
+ 	set_fs(oldfs);
+diff --git a/net/sunrpc/clnt.c b/net/sunrpc/clnt.c
+index 8945307..f303e1d 100644
+--- a/net/sunrpc/clnt.c
++++ b/net/sunrpc/clnt.c
+@@ -31,6 +31,7 @@
+ #include <linux/utsname.h>
+ #include <linux/workqueue.h>
+ #include <linux/in6.h>
++#include <linux/ve_proto.h>
+ 
+ #include <linux/sunrpc/clnt.h>
+ #include <linux/sunrpc/rpc_pipe_fs.h>
+@@ -89,6 +90,35 @@ static void rpc_unregister_client(struct rpc_clnt *clnt)
+ 	spin_unlock(&rpc_client_lock);
+ }
+ 
++/*
++ * Grand abort timeout (stop the client if occures)
++ */
++int xprt_abort_timeout = RPC_MAX_ABORT_TIMEOUT;
++
++static int rpc_abort_hard(struct rpc_task *task)
++{
++	struct rpc_clnt *clnt;
++	clnt = task->tk_client;
++
++	if (clnt->cl_pr_time == 0) {
++		clnt->cl_pr_time = jiffies;
++		return 0;
++	}
++	if (xprt_abort_timeout == RPC_MAX_ABORT_TIMEOUT)
++		return 0;
++	if (time_before(jiffies, clnt->cl_pr_time + xprt_abort_timeout * HZ))
++		return 0;
++
++	clnt->cl_broken = 1;
++	rpc_killall_tasks(clnt);
++	return -ETIMEDOUT;
++}
++
++static void rpc_abort_clear(struct rpc_task *task)
++{
++	task->tk_client->cl_pr_time = 0;
++}
++
+ static int
+ rpc_setup_pipedir(struct rpc_clnt *clnt, char *dir_name)
+ {
+@@ -178,6 +208,7 @@ static struct rpc_clnt * rpc_new_client(const struct rpc_create_args *args, stru
+ 	clnt->cl_vers     = version->number;
+ 	clnt->cl_stats    = program->stats;
+ 	clnt->cl_metrics  = rpc_alloc_iostats(clnt);
++	clnt->cl_broken = 0;
+ 	err = -ENOMEM;
+ 	if (clnt->cl_metrics == NULL)
+ 		goto out_no_stats;
+@@ -293,6 +324,7 @@ struct rpc_clnt *rpc_create(struct rpc_create_args *args)
+ 	xprt = xprt_create_transport(&xprtargs);
+ 	if (IS_ERR(xprt))
+ 		return (struct rpc_clnt *)xprt;
++	xprt->owner_env = get_ve(get_exec_env());
+ 
+ 	/*
+ 	 * By default, kernel RPC client connects from a reserved port.
+@@ -305,13 +337,16 @@ struct rpc_clnt *rpc_create(struct rpc_create_args *args)
+ 		xprt->resvport = 0;
+ 
+ 	clnt = rpc_new_client(args, xprt);
+-	if (IS_ERR(clnt))
++	if (IS_ERR(clnt)) {
++		put_ve(xprt->owner_env);
+ 		return clnt;
++	}
+ 
+ 	if (!(args->flags & RPC_CLNT_CREATE_NOPING)) {
+ 		int err = rpc_ping(clnt, RPC_TASK_SOFT);
+ 		if (err != 0) {
+ 			rpc_shutdown_client(clnt);
++			put_ve(xprt->owner_env);
+ 			return ERR_PTR(err);
+ 		}
+ 	}
+@@ -517,6 +552,9 @@ struct rpc_task *rpc_run_task(const struct rpc_task_setup *task_setup_data)
+ {
+ 	struct rpc_task *task, *ret;
+ 
++	if (task_setup_data->rpc_client->cl_broken)
++		return ERR_PTR(-EIO);
++
+ 	task = rpc_new_task(task_setup_data);
+ 	if (task == NULL) {
+ 		rpc_release_calldata(task_setup_data->callback_ops,
+@@ -923,6 +961,7 @@ call_bind_status(struct rpc_task *task)
+ 
+ 	if (task->tk_status >= 0) {
+ 		dprint_status(task);
++		rpc_abort_clear(task);
+ 		task->tk_status = 0;
+ 		task->tk_action = call_connect;
+ 		return;
+@@ -948,6 +987,10 @@ call_bind_status(struct rpc_task *task)
+ 	case -ETIMEDOUT:
+ 		dprintk("RPC: %5u rpcbind request timed out\n",
+ 				task->tk_pid);
++		if (rpc_abort_hard(task)) {
++			status = -EIO;
++			break;
++		}
+ 		goto retry_timeout;
+ 	case -EPFNOSUPPORT:
+ 		/* server doesn't support any rpcbind version we know of */
+@@ -1013,6 +1056,8 @@ call_connect_status(struct rpc_task *task)
+ 
+ 	/* Something failed: remote service port may have changed */
+ 	rpc_force_rebind(clnt);
++	if (rpc_abort_hard(task))
++		goto exit;
+ 
+ 	switch (status) {
+ 	case -ENOTCONN:
+@@ -1025,6 +1070,7 @@ call_connect_status(struct rpc_task *task)
+ 		task->tk_action = call_timeout;
+ 		return;
+ 	}
++exit:
+ 	rpc_exit(task, -EIO);
+ }
+ 
+@@ -1156,7 +1202,7 @@ call_timeout(struct rpc_task *task)
+ 	dprintk("RPC: %5u call_timeout (major)\n", task->tk_pid);
+ 	task->tk_timeouts++;
+ 
+-	if (RPC_IS_SOFT(task)) {
++	if (RPC_IS_SOFT(task) || rpc_abort_hard(task)) {
+ 		printk(KERN_NOTICE "%s: server %s not responding, timed out\n",
+ 				clnt->cl_protname, clnt->cl_server);
+ 		rpc_exit(task, -EIO);
+@@ -1201,6 +1247,7 @@ call_decode(struct rpc_task *task)
+ 		task->tk_flags &= ~RPC_CALL_MAJORSEEN;
+ 	}
+ 
++	rpc_abort_clear(task);
+ 	/*
+ 	 * Ensure that we see all writes made by xprt_complete_rqst()
+ 	 * before it changed req->rq_received.
+@@ -1213,7 +1260,7 @@ call_decode(struct rpc_task *task)
+ 				sizeof(req->rq_rcv_buf)) != 0);
+ 
+ 	if (req->rq_rcv_buf.len < 12) {
+-		if (!RPC_IS_SOFT(task)) {
++		if (!RPC_IS_SOFT(task) && !rpc_abort_hard(task)) {
+ 			task->tk_action = call_bind;
+ 			clnt->cl_stats->rpcretrans++;
+ 			goto out_retry;
+@@ -1558,3 +1605,67 @@ out:
+ 	spin_unlock(&rpc_client_lock);
+ }
+ #endif
++
++#ifdef CONFIG_VE
++static int ve_sunrpc_start(void *data)
++{
++	return 0;
++}
++
++void ve_sunrpc_stop(void *data)
++{
++	struct ve_struct *ve = (struct ve_struct *)data;
++	struct rpc_clnt *clnt;
++	struct rpc_task	*rovr;
++
++	dprintk("RPC:       killing all tasks for VE %d\n", ve->veid);
++
++	spin_lock(&rpc_client_lock);
++	list_for_each_entry(clnt, &all_clients, cl_clients) {
++		if (clnt->cl_xprt->owner_env != ve)
++			continue;
++
++		spin_lock(&clnt->cl_lock);
++		list_for_each_entry(rovr, &clnt->cl_tasks, tk_task) {
++			if (!RPC_IS_ACTIVATED(rovr))
++				continue;
++			printk(KERN_WARNING "RPC: Killing task %d client %p\n",
++			       rovr->tk_pid, clnt);
++
++			rovr->tk_flags |= RPC_TASK_KILLED;
++			rpc_exit(rovr, -EIO);
++			rpc_wake_up_queued_task(rovr->tk_waitqueue, rovr);
++		}
++		schedule_work(&clnt->cl_xprt->task_cleanup);
++		spin_unlock(&clnt->cl_lock);
++	}
++	spin_unlock(&rpc_client_lock);
++
++	flush_scheduled_work();
++}
++
++static struct ve_hook sunrpc_hook = {
++	.init	  = ve_sunrpc_start,
++	.fini	  = ve_sunrpc_stop,
++	.owner	  = THIS_MODULE,
++	.priority = HOOK_PRIO_NET_PRE,
++};
++
++void ve_sunrpc_hook_register(void)
++{
++	ve_hook_register(VE_SS_CHAIN, &sunrpc_hook);
++}
++
++void ve_sunrpc_hook_unregister(void)
++{
++	ve_hook_unregister(&sunrpc_hook);
++}
++#else
++void ve_sunrpc_hook_register(void)
++{
++}
++
++void ve_sunrpc_hook_unregister(void)
++{
++}
++#endif
+diff --git a/net/sunrpc/rpc_pipe.c b/net/sunrpc/rpc_pipe.c
+index 5a9b0e7..ab6bf80 100644
+--- a/net/sunrpc/rpc_pipe.c
++++ b/net/sunrpc/rpc_pipe.c
+@@ -894,6 +894,7 @@ static struct file_system_type rpc_pipe_fs_type = {
+ 	.name		= "rpc_pipefs",
+ 	.get_sb		= rpc_get_sb,
+ 	.kill_sb	= kill_litter_super,
++	.fs_flags	= FS_VIRTUALIZED,	
+ };
+ 
+ static void
+diff --git a/net/sunrpc/sched.c b/net/sunrpc/sched.c
+index 4fba93a..265296d 100644
+--- a/net/sunrpc/sched.c
++++ b/net/sunrpc/sched.c
+@@ -617,7 +617,7 @@ static void __rpc_execute(struct rpc_task *task)
+ 	int		status = 0;
+ 	struct ve_struct *env;
+ 
+-	env = set_exec_env(get_ve0());
++	env = set_exec_env(task->tk_client->cl_xprt->owner_env);
+ 	dprintk("RPC: %5u __rpc_execute flags=0x%x\n",
+ 			task->tk_pid, task->tk_flags);
+ 
+@@ -663,10 +663,14 @@ static void __rpc_execute(struct rpc_task *task)
+ 		rpc_clear_running(task);
+ 		if (RPC_IS_ASYNC(task)) {
+ 			/* Careful! we may have raced... */
+-			if (RPC_IS_QUEUED(task))
++			if (RPC_IS_QUEUED(task)) {
++				(void)set_exec_env(env);
+ 				return;
+-			if (rpc_test_and_set_running(task))
++			}
++			if (rpc_test_and_set_running(task)) {
++				(void)set_exec_env(env);
+ 				return;
++			}
+ 			continue;
+ 		}
+ 
+diff --git a/net/sunrpc/sunrpc_syms.c b/net/sunrpc/sunrpc_syms.c
+index 843629f..94c3fb0 100644
+--- a/net/sunrpc/sunrpc_syms.c
++++ b/net/sunrpc/sunrpc_syms.c
+@@ -24,6 +24,9 @@
+ 
+ extern struct cache_detail ip_map_cache, unix_gid_cache;
+ 
++extern void ve_sunrpc_hook_register(void);
++extern void ve_sunrpc_hook_unregister(void);
++
+ static int __init
+ init_sunrpc(void)
+ {
+@@ -46,6 +49,7 @@ init_sunrpc(void)
+ 	svc_init_xprt_sock();	/* svc sock transport */
+ 	init_socket_xprt();	/* clnt sock transport */
+ 	rpcauth_init_module();
++	ve_sunrpc_hook_register();
+ out:
+ 	return err;
+ }
+@@ -53,6 +57,7 @@ out:
+ static void __exit
+ cleanup_sunrpc(void)
+ {
++	ve_sunrpc_hook_unregister();
+ 	rpcauth_remove_module();
+ 	cleanup_socket_xprt();
+ 	svc_cleanup_xprt_sock();
+diff --git a/net/sunrpc/svcsock.c b/net/sunrpc/svcsock.c
+index 029c673..0d49dfc 100644
+--- a/net/sunrpc/svcsock.c
++++ b/net/sunrpc/svcsock.c
+@@ -180,7 +180,7 @@ static int svc_sendto(struct svc_rqst *rqstp, struct xdr_buf *xdr)
+ 	RPC_IFDEBUG(char buf[RPC_MAX_ADDRBUFLEN]);
+ 	struct ve_struct *old_env;
+ 
+-	old_env = set_exec_env(get_ve0());
++	old_env = set_exec_env(sock->sk->owner_env);
+ 
+ 	slen = xdr->len;
+ 
+@@ -321,14 +321,11 @@ static int svc_recvfrom(struct svc_rqst *rqstp, struct kvec *iov, int nr,
+ 		.msg_flags	= MSG_DONTWAIT,
+ 	};
+ 	int len;
+-	struct ve_struct *old_env;
+ 
+ 	rqstp->rq_xprt_hlen = 0;
+ 
+-	old_env = set_exec_env(get_ve0());
+ 	len = kernel_recvmsg(svsk->sk_sock, &msg, iov, nr, buflen,
+ 				msg.msg_flags);
+-	(void)set_exec_env(get_ve0());
+ 
+ 	dprintk("svc: socket %p recvfrom(%p, %Zu) = %d\n",
+ 		svsk, iov[0].iov_base, iov[0].iov_len, len);
+@@ -727,13 +724,11 @@ static struct svc_xprt *svc_tcp_accept(struct svc_xprt *xprt)
+ 	struct svc_sock	*newsvsk;
+ 	int		err, slen;
+ 	RPC_IFDEBUG(char buf[RPC_MAX_ADDRBUFLEN]);
+-	struct ve_struct *old_env;
+ 
+ 	dprintk("svc: tcp_accept %p sock %p\n", svsk, sock);
+ 	if (!sock)
+ 		return NULL;
+ 
+-	old_env = set_exec_env(get_ve0());
+ 	clear_bit(XPT_CONN, &svsk->sk_xprt.xpt_flags);
+ 	err = kernel_accept(sock, &newsock, O_NONBLOCK);
+ 	if (err < 0) {
+@@ -743,7 +738,7 @@ static struct svc_xprt *svc_tcp_accept(struct svc_xprt *xprt)
+ 		else if (err != -EAGAIN && net_ratelimit())
+ 			printk(KERN_WARNING "%s: accept failed (err %d)!\n",
+ 				   serv->sv_name, -err);
+-		goto restore;
++		return NULL;
+ 	}
+ 	set_bit(XPT_CONN, &svsk->sk_xprt.xpt_flags);
+ 
+@@ -784,8 +779,6 @@ static struct svc_xprt *svc_tcp_accept(struct svc_xprt *xprt)
+ 	}
+ 	svc_xprt_set_local(&newsvsk->sk_xprt, sin, slen);
+ 
+-	(void)set_exec_env(old_env);
+-
+ 	if (serv->sv_stats)
+ 		serv->sv_stats->nettcpconn++;
+ 
+@@ -793,8 +786,6 @@ static struct svc_xprt *svc_tcp_accept(struct svc_xprt *xprt)
+ 
+ failed:
+ 	sock_release(newsock);
+-restore:
+-	(void)set_exec_env(old_env);
+ 	return NULL;
+ }
+ 
+@@ -1225,7 +1216,6 @@ static struct svc_xprt *svc_create_socket(struct svc_serv *serv,
+ 	struct sockaddr *newsin = (struct sockaddr *)&addr;
+ 	int		newlen;
+ 	RPC_IFDEBUG(char buf[RPC_MAX_ADDRBUFLEN]);
+-	struct ve_struct *old_env;
+ 
+ 	dprintk("svc: svc_create_socket(%s, %d, %s)\n",
+ 			serv->sv_program->pg_name, protocol,
+@@ -1238,11 +1228,11 @@ static struct svc_xprt *svc_create_socket(struct svc_serv *serv,
+ 	}
+ 	type = (protocol == IPPROTO_UDP)? SOCK_DGRAM : SOCK_STREAM;
+ 
+-	old_env = set_exec_env(get_ve0());
+ 	error = sock_create_kern(sin->sa_family, type, protocol, &sock);
+ 	if (error < 0)
+-		goto restore;
++		return ERR_PTR(-ENOMEM);
+ 
++	sk_change_net_get(sock->sk, get_exec_env()->ve_netns);
+ 	svc_reclassify_socket(sock);
+ 
+ 	if (type == SOCK_STREAM)
+@@ -1263,15 +1253,12 @@ static struct svc_xprt *svc_create_socket(struct svc_serv *serv,
+ 
+ 	if ((svsk = svc_setup_socket(serv, sock, &error, flags)) != NULL) {
+ 		svc_xprt_set_local(&svsk->sk_xprt, newsin, newlen);
+-		(void)set_exec_env(old_env);
+ 		return (struct svc_xprt *)svsk;
+ 	}
+ 
+ bummer:
+ 	dprintk("svc: svc_create_socket error = %d\n", -error);
+ 	sock_release(sock);
+-restore:
+-	(void)set_exec_env(old_env);
+ 	return ERR_PTR(error);
+ }
+ 
+diff --git a/net/sunrpc/xprt.c b/net/sunrpc/xprt.c
+index e1770f7..831ad1b 100644
+--- a/net/sunrpc/xprt.c
++++ b/net/sunrpc/xprt.c
+@@ -568,10 +568,13 @@ static void xprt_autoclose(struct work_struct *work)
+ {
+ 	struct rpc_xprt *xprt =
+ 		container_of(work, struct rpc_xprt, task_cleanup);
++	struct ve_struct *ve;
+ 
++	ve = set_exec_env(xprt->owner_env);
+ 	xprt->ops->close(xprt);
+ 	clear_bit(XPRT_CLOSE_WAIT, &xprt->state);
+ 	xprt_release_write(xprt, NULL);
++	(void)set_exec_env(ve);
+ }
+ 
+ /**
+@@ -638,7 +641,9 @@ static void
+ xprt_init_autodisconnect(unsigned long data)
+ {
+ 	struct rpc_xprt *xprt = (struct rpc_xprt *)data;
++	struct ve_struct *ve;
+ 
++	ve = set_exec_env(xprt->owner_env);
+ 	spin_lock(&xprt->transport_lock);
+ 	if (!list_empty(&xprt->recv) || xprt->shutdown)
+ 		goto out_abort;
+@@ -649,9 +654,11 @@ xprt_init_autodisconnect(unsigned long data)
+ 		xprt_release_write(xprt, NULL);
+ 	else
+ 		queue_work(rpciod_workqueue, &xprt->task_cleanup);
++	(void)set_exec_env(ve);
+ 	return;
+ out_abort:
+ 	spin_unlock(&xprt->transport_lock);
++	(void)set_exec_env(ve);
+ }
+ 
+ /**
+@@ -1049,6 +1056,7 @@ found:
+ 	xprt->last_used = jiffies;
+ 	xprt->cwnd = RPC_INITCWND;
+ 	xprt->bind_index = 0;
++	xprt->owner_env = get_exec_env();
+ 
+ 	rpc_init_wait_queue(&xprt->binding, "xprt_binding");
+ 	rpc_init_wait_queue(&xprt->pending, "xprt_pending");
+diff --git a/net/sunrpc/xprtsock.c b/net/sunrpc/xprtsock.c
+index ddbe981..7ade3e3 100644
+--- a/net/sunrpc/xprtsock.c
++++ b/net/sunrpc/xprtsock.c
+@@ -64,6 +64,8 @@ static unsigned int min_slot_table_size = RPC_MIN_SLOT_TABLE;
+ static unsigned int max_slot_table_size = RPC_MAX_SLOT_TABLE;
+ static unsigned int xprt_min_resvport_limit = RPC_MIN_RESVPORT;
+ static unsigned int xprt_max_resvport_limit = RPC_MAX_RESVPORT;
++static int xprt_min_abort_timeout = RPC_MIN_ABORT_TIMEOUT;
++static int xprt_max_abort_timeout = RPC_MAX_ABORT_TIMEOUT;
+ 
+ static struct ctl_table_header *sunrpc_table_header;
+ 
+@@ -117,6 +119,16 @@ static ctl_table xs_tunables_table[] = {
+ 		.extra2		= &xprt_max_resvport_limit
+ 	},
+ 	{
++		.procname	= "abort_timeout",
++		.data		= &xprt_abort_timeout,
++		.maxlen		= sizeof(unsigned int),
++		.mode		= 0644,
++		.proc_handler	= &proc_dointvec_minmax,
++		.strategy	= &sysctl_intvec,
++		.extra1		= &xprt_min_abort_timeout,
++		.extra2		= &xprt_max_abort_timeout
++	},
++	{
+ 		.ctl_name = 0,
+ 	},
+ };
+@@ -754,18 +766,23 @@ out_release:
+ static void xs_close(struct rpc_xprt *xprt)
+ {
+ 	struct sock_xprt *transport = container_of(xprt, struct sock_xprt, xprt);
+-	struct socket *sock = transport->sock;
+-	struct sock *sk = transport->inet;
+-
+-	if (!sk)
+-		goto clear_close_wait;
++	struct socket *sock;
++	struct sock *sk;
+ 
+ 	dprintk("RPC:       xs_close xprt %p\n", xprt);
+ 
+-	write_lock_bh(&sk->sk_callback_lock);
++	spin_lock_bh(&xprt->transport_lock);
++	if (transport->sock == NULL) {
++		spin_unlock_bh(&xprt->transport_lock);
++		goto clear_close_wait;
++	}
++	sock = transport->sock;
++	sk = transport->inet;
+ 	transport->inet = NULL;
+ 	transport->sock = NULL;
++	spin_unlock_bh(&xprt->transport_lock);
+ 
++	write_lock_bh(&sk->sk_callback_lock);
+ 	sk->sk_user_data = NULL;
+ 	sk->sk_data_ready = transport->old_data_ready;
+ 	sk->sk_state_change = transport->old_state_change;
+@@ -1489,7 +1506,12 @@ static void xs_udp_connect_worker4(struct work_struct *work)
+ 	struct rpc_xprt *xprt = &transport->xprt;
+ 	struct socket *sock = transport->sock;
+ 	int err, status = -EIO;
++	struct ve_struct *ve;
+ 
++	ve = set_exec_env(xprt->owner_env);
++	down_read(&xprt->owner_env->op_sem);
++	if (!xprt->owner_env->is_running)
++		goto out;
+ 	if (xprt->shutdown || !xprt_bound(xprt))
+ 		goto out;
+ 
+@@ -1500,6 +1522,7 @@ static void xs_udp_connect_worker4(struct work_struct *work)
+ 		dprintk("RPC:       can't create UDP transport socket (%d).\n", -err);
+ 		goto out;
+ 	}
++	sk_change_net_get(sock->sk, xprt->owner_env->ve_netns);
+ 	xs_reclassify_socket4(sock);
+ 
+ 	if (xs_bind4(transport, sock)) {
+@@ -1515,6 +1538,8 @@ static void xs_udp_connect_worker4(struct work_struct *work)
+ out:
+ 	xprt_wake_pending_tasks(xprt, status);
+ 	xprt_clear_connecting(xprt);
++	up_read(&xprt->owner_env->op_sem);
++	(void)set_exec_env(ve);
+ }
+ 
+ /**
+@@ -1530,7 +1555,12 @@ static void xs_udp_connect_worker6(struct work_struct *work)
+ 	struct rpc_xprt *xprt = &transport->xprt;
+ 	struct socket *sock = transport->sock;
+ 	int err, status = -EIO;
++	struct ve_struct *ve;
+ 
++	ve = set_exec_env(xprt->owner_env);
++	down_read(&xprt->owner_env->op_sem);
++	if (!xprt->owner_env->is_running)
++		goto out;
+ 	if (xprt->shutdown || !xprt_bound(xprt))
+ 		goto out;
+ 
+@@ -1541,6 +1571,7 @@ static void xs_udp_connect_worker6(struct work_struct *work)
+ 		dprintk("RPC:       can't create UDP transport socket (%d).\n", -err);
+ 		goto out;
+ 	}
++	sk_change_net_get(sock->sk, xprt->owner_env->ve_netns);
+ 	xs_reclassify_socket6(sock);
+ 
+ 	if (xs_bind6(transport, sock) < 0) {
+@@ -1556,6 +1587,8 @@ static void xs_udp_connect_worker6(struct work_struct *work)
+ out:
+ 	xprt_wake_pending_tasks(xprt, status);
+ 	xprt_clear_connecting(xprt);
++	up_read(&xprt->owner_env->op_sem);
++	(void)set_exec_env(ve);
+ }
+ 
+ /*
+@@ -1634,7 +1667,12 @@ static void xs_tcp_connect_worker4(struct work_struct *work)
+ 	struct rpc_xprt *xprt = &transport->xprt;
+ 	struct socket *sock = transport->sock;
+ 	int err, status = -EIO;
++	struct ve_struct *ve;
+ 
++	ve = set_exec_env(xprt->owner_env);
++	down_read(&xprt->owner_env->op_sem);
++	if (!xprt->owner_env->is_running)
++		goto out;
+ 	if (xprt->shutdown || !xprt_bound(xprt))
+ 		goto out;
+ 
+@@ -1644,6 +1682,7 @@ static void xs_tcp_connect_worker4(struct work_struct *work)
+ 			dprintk("RPC:       can't create TCP transport socket (%d).\n", -err);
+ 			goto out;
+ 		}
++		sk_change_net_get(sock->sk, xprt->owner_env->ve_netns);
+ 		xs_reclassify_socket4(sock);
+ 
+ 		if (xs_bind4(transport, sock) < 0) {
+@@ -1679,6 +1718,8 @@ out:
+ 	xprt_wake_pending_tasks(xprt, status);
+ out_clear:
+ 	xprt_clear_connecting(xprt);
++	up_read(&xprt->owner_env->op_sem);
++	(void)set_exec_env(ve);
+ }
+ 
+ /**
+@@ -1694,7 +1735,12 @@ static void xs_tcp_connect_worker6(struct work_struct *work)
+ 	struct rpc_xprt *xprt = &transport->xprt;
+ 	struct socket *sock = transport->sock;
+ 	int err, status = -EIO;
++	struct ve_struct *ve;
+ 
++	ve = set_exec_env(xprt->owner_env);
++	down_read(&xprt->owner_env->op_sem);
++	if (!xprt->owner_env->is_running)
++		goto out;
+ 	if (xprt->shutdown || !xprt_bound(xprt))
+ 		goto out;
+ 
+@@ -1704,6 +1750,7 @@ static void xs_tcp_connect_worker6(struct work_struct *work)
+ 			dprintk("RPC:       can't create TCP transport socket (%d).\n", -err);
+ 			goto out;
+ 		}
++		sk_change_net_get(sock->sk, xprt->owner_env->ve_netns);
+ 		xs_reclassify_socket6(sock);
+ 
+ 		if (xs_bind6(transport, sock) < 0) {
+@@ -1738,6 +1785,8 @@ out:
+ 	xprt_wake_pending_tasks(xprt, status);
+ out_clear:
+ 	xprt_clear_connecting(xprt);
++	up_read(&xprt->owner_env->op_sem);
++	(void)set_exec_env(ve);
+ }
+ 
+ /**
+-- 
+1.6.0.6
+

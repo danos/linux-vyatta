@@ -1,0 +1,173 @@
+From e29a555d7d8f88dbfcaed541e340a4e3977c76aa Mon Sep 17 00:00:00 2001
+From: Vitaliy Gusev <vgusev@openvz.org>
+Date: Wed, 24 Sep 2008 14:52:08 +0400
+Subject: [PATCH] ct: Move _nf_conntrack_l3proto_ipv6 to net namespace
+
+Move _nf_conntrack_l3proto_ipv6 from ve_nf_conntrack to net namespace.
+
+The patch [4/5] "conntrack: Allocate/free ve_nf_conntrack_l3proto_ipv6"
+has lines:
+
++static int nf_ct_proto_ipv6_init_net(struct net *net)
+...
++	ve_nf_conntrack_l3proto_ipv6 = ipv6;
++	return 0;
+
+ve_nf_conntrack_l3proto_ipv6 points to not allocated memory, as this function
+is called during net initialization (conntrack isn't initialized yet).
+
+So move ve_nf_conntrack_l3proto_ipv6 to net namespace
+
+Signed-off-by: Vitaliy Gusev <vgusev@openvz.org>
+Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+---
+ include/linux/ve.h                             |    1 -
+ include/net/netfilter/nf_conntrack_l3proto.h   |    2 --
+ include/net/netns/ipv6.h                       |    4 ++++
+ net/ipv6/netfilter/nf_conntrack_l3proto_ipv6.c |   12 ++++++++----
+ net/ipv6/netfilter/nf_conntrack_proto_icmpv6.c |    3 ++-
+ net/ipv6/netfilter/nf_conntrack_reasm.c        |    4 ++--
+ 6 files changed, 16 insertions(+), 10 deletions(-)
+
+diff --git a/include/linux/ve.h b/include/linux/ve.h
+index 970aadc..2180c1f 100644
+--- a/include/linux/ve.h
++++ b/include/linux/ve.h
+@@ -107,7 +107,6 @@ struct ve_nf_conntrack {
+ 	struct nf_conntrack_l4proto	**_nf_ct_protos[PF_MAX];
+ 	/* l3 protocols sysctl tables: */
+ 	struct nf_conntrack_l3proto	*_nf_conntrack_l3proto_ipv4;
+-	struct nf_conntrack_l3proto	*_nf_conntrack_l3proto_ipv6;
+ 	struct nf_conntrack_l3proto	*_nf_ct_l3protos[AF_MAX];
+ 	/* sysctl standalone stuff: */
+ 	struct ctl_table_header		*_nf_ct_sysctl_header;
+diff --git a/include/net/netfilter/nf_conntrack_l3proto.h b/include/net/netfilter/nf_conntrack_l3proto.h
+index 6b1f720..ac81973 100644
+--- a/include/net/netfilter/nf_conntrack_l3proto.h
++++ b/include/net/netfilter/nf_conntrack_l3proto.h
+@@ -79,14 +79,12 @@ struct nf_conntrack_l3proto
+ #if defined(CONFIG_VE_IPTABLES) && defined(CONFIG_SYSCTL)
+ #define ve_nf_ct_l3protos		ve_nf_ct3->_nf_ct_l3protos
+ #define ve_nf_conntrack_l3proto_ipv4	(ve_nf_ct3->_nf_conntrack_l3proto_ipv4)
+-#define	ve_nf_conntrack_l3proto_ipv6	(ve_nf_ct3->_nf_conntrack_l3proto_ipv6)
+ #define ve_nf_conntrack_max		(ve_nf_ct3->_nf_conntrack_max)
+ #define ve_nf_conntrack_count		(ve_nf_ct3->_nf_conntrack_count)
+ #define ve_nf_conntrack_checksum	(ve_nf_ct3->_nf_conntrack_checksum)
+ #else /* !CONFIG_VE_IPTABLES || !CONFIG_SYSCTL: */
+ #define ve_nf_ct_l3protos		nf_ct_l3protos
+ #define ve_nf_conntrack_l3proto_ipv4	&nf_conntrack_l3proto_ipv4
+-#define ve_nf_conntrack_l3proto_ipv6	&nf_conntrack_l3proto_ipv6
+ #define ve_nf_conntrack_max		nf_conntrack_max
+ #define ve_nf_conntrack_count		nf_conntrack_count
+ #define ve_nf_conntrack_checksum	nf_conntrack_checksum
+diff --git a/include/net/netns/ipv6.h b/include/net/netns/ipv6.h
+index c368713..11c8cc8 100644
+--- a/include/net/netns/ipv6.h
++++ b/include/net/netns/ipv6.h
+@@ -33,6 +33,10 @@ struct netns_ipv6 {
+ 	struct ipv6_devconf	*devconf_dflt;
+ 	struct netns_frags	frags;
+ 	struct netns_frags	ct_frags;
++
++#ifdef CONFIG_SYSCTL
++	struct nf_conntrack_l3proto *nf_conntrack_l3proto_ipv6;
++#endif
+ #ifdef CONFIG_NETFILTER
+ 	struct xt_table		*ip6table_filter;
+ 	struct xt_table		*ip6table_mangle;
+diff --git a/net/ipv6/netfilter/nf_conntrack_l3proto_ipv6.c b/net/ipv6/netfilter/nf_conntrack_l3proto_ipv6.c
+index 8623b7c..8288efc 100644
+--- a/net/ipv6/netfilter/nf_conntrack_l3proto_ipv6.c
++++ b/net/ipv6/netfilter/nf_conntrack_l3proto_ipv6.c
+@@ -372,14 +372,14 @@ static int nf_ct_proto_ipv6_init_net(struct net *net)
+ 			return -ENOMEM;
+ 	}
+ 
+-	ve_nf_conntrack_l3proto_ipv6 = ipv6;
++	net->ipv6.nf_conntrack_l3proto_ipv6 = ipv6;
+ 	return 0;
+ }
+ 
+ static void nf_ct_proto_ipv6_exit_net(struct net *net)
+ {
+ 	if (net != &init_net)
+-		kfree(ve_nf_conntrack_l3proto_ipv6);
++		kfree(net->ipv6.nf_conntrack_l3proto_ipv6);
+ }
+ 
+ static struct pernet_operations nf_ct_ipv6_ops = {
+@@ -389,6 +389,8 @@ static struct pernet_operations nf_ct_ipv6_ops = {
+ 
+ int init_nf_ct_l3proto_ipv6(void)
+ {
++	struct net *net = get_exec_env()->ve_netns;
++
+ 	int ret = -ENOMEM;
+ 
+ #ifdef CONFIG_VE_IPTABLES
+@@ -417,7 +419,7 @@ int init_nf_ct_l3proto_ipv6(void)
+ 		goto unreg_udp;
+ 	}
+ 
+-	ret = nf_conntrack_l3proto_register(ve_nf_conntrack_l3proto_ipv6);
++	ret = nf_conntrack_l3proto_register(net->ipv6.nf_conntrack_l3proto_ipv6);
+ 	if (ret < 0) {
+ 		printk("nf_conntrack_ipv6: can't register ipv6\n");
+ 		goto unreg_icmpv6;
+@@ -443,7 +445,9 @@ EXPORT_SYMBOL(init_nf_ct_l3proto_ipv6);
+ 
+ void fini_nf_ct_l3proto_ipv6(void)
+ {
+-	nf_conntrack_l3proto_unregister(ve_nf_conntrack_l3proto_ipv6);
++	struct net *net = get_exec_env()->ve_netns;
++
++	nf_conntrack_l3proto_unregister(net->ipv6.nf_conntrack_l3proto_ipv6);
+ 	nf_conntrack_l4proto_unregister(ve_nf_conntrack_l4proto_icmpv6);
+ 	nf_conntrack_l4proto_unregister(ve_nf_conntrack_l4proto_udp6);
+ 	nf_conntrack_l4proto_unregister(ve_nf_conntrack_l4proto_tcp6);
+diff --git a/net/ipv6/netfilter/nf_conntrack_proto_icmpv6.c b/net/ipv6/netfilter/nf_conntrack_proto_icmpv6.c
+index cae064f..20e8750 100644
+--- a/net/ipv6/netfilter/nf_conntrack_proto_icmpv6.c
++++ b/net/ipv6/netfilter/nf_conntrack_proto_icmpv6.c
+@@ -132,6 +132,7 @@ icmpv6_error_message(struct sk_buff *skb,
+ 	struct nf_conntrack_tuple intuple, origtuple;
+ 	const struct nf_conntrack_tuple_hash *h;
+ 	const struct nf_conntrack_l4proto *inproto;
++	struct net *net = get_exec_env()->ve_netns;
+ 
+ 	NF_CT_ASSERT(skb->nfct == NULL);
+ 
+@@ -151,7 +152,7 @@ icmpv6_error_message(struct sk_buff *skb,
+ 	/* Ordinarily, we'd expect the inverted tupleproto, but it's
+ 	   been preserved inside the ICMP. */
+ 	if (!nf_ct_invert_tuple(&intuple, &origtuple,
+-				ve_nf_conntrack_l3proto_ipv6, inproto)) {
++				net->ipv6.nf_conntrack_l3proto_ipv6, inproto)) {
+ 		pr_debug("icmpv6_error: Can't invert tuple\n");
+ 		return -NF_ACCEPT;
+ 	}
+diff --git a/net/ipv6/netfilter/nf_conntrack_reasm.c b/net/ipv6/netfilter/nf_conntrack_reasm.c
+index e8e4112..c2236df 100644
+--- a/net/ipv6/netfilter/nf_conntrack_reasm.c
++++ b/net/ipv6/netfilter/nf_conntrack_reasm.c
+@@ -700,7 +700,7 @@ static int nf_ct_frag6_init_net(struct net *net)
+ #ifdef CONFIG_SYSCTL
+ 	if (net != &init_net) {
+ 		struct nf_conntrack_l3proto *ipv6 =
+-			ve_nf_conntrack_l3proto_ipv6;
++			net->ipv6.nf_conntrack_l3proto_ipv6;
+ 
+ 		ipv6->ctl_table = kmemdup(nf_ct_ipv6_sysctl_table,
+ 					  sizeof(nf_ct_ipv6_sysctl_table),
+@@ -728,7 +728,7 @@ static void nf_ct_frag6_exit_net(struct net *net)
+ {
+ 	inet_frags_exit_net(&net->ipv6.ct_frags, &nf_frags);
+ 	if (net != &init_net)
+-		kfree(ve_nf_conntrack_l3proto_ipv6->ctl_table);
++		kfree(net->ipv6.nf_conntrack_l3proto_ipv6->ctl_table);
+ 
+ }
+ 
+-- 
+1.6.0.6
+

@@ -1,0 +1,78 @@
+From 43553442d9467e2cdca7be044ff0cd497abe987f Mon Sep 17 00:00:00 2001
+From: Vitaliy Gusev <vgusev@openvz.org>
+Date: Thu, 25 Sep 2008 13:06:13 +0400
+Subject: [PATCH] conntrack: fix oops in nf_ct_frag6_gather
+
+skb->dev == NULL in NF_LOCAL_OUT hook level. So dev_inet(skb->dev)
+in nf_ct_frag6_gather() function causes OOPS.
+Pass directly net namespace to nf_ct_frag6_gather() as parameter
+to avoid this issue.
+
+(#122210)
+
+Signed-off-by: Vitaliy Gusev <vgusev@openvz.org>
+Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+---
+ include/net/netfilter/ipv6/nf_conntrack_ipv6.h |    3 ++-
+ net/ipv6/netfilter/nf_conntrack_l3proto_ipv6.c |    3 ++-
+ net/ipv6/netfilter/nf_conntrack_reasm.c        |    4 ++--
+ 3 files changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/include/net/netfilter/ipv6/nf_conntrack_ipv6.h b/include/net/netfilter/ipv6/nf_conntrack_ipv6.h
+index abc55ad..9cc2036 100644
+--- a/include/net/netfilter/ipv6/nf_conntrack_ipv6.h
++++ b/include/net/netfilter/ipv6/nf_conntrack_ipv6.h
+@@ -9,7 +9,8 @@ extern struct nf_conntrack_l4proto nf_conntrack_l4proto_icmpv6;
+ 
+ extern int nf_ct_frag6_init(void);
+ extern void nf_ct_frag6_cleanup(void);
+-extern struct sk_buff *nf_ct_frag6_gather(struct sk_buff *skb);
++extern struct sk_buff *nf_ct_frag6_gather(struct net *net,
++					  struct sk_buff *skb);
+ extern void nf_ct_frag6_output(unsigned int hooknum, struct sk_buff *skb,
+ 			       struct net_device *in,
+ 			       struct net_device *out,
+diff --git a/net/ipv6/netfilter/nf_conntrack_l3proto_ipv6.c b/net/ipv6/netfilter/nf_conntrack_l3proto_ipv6.c
+index 8288efc..5ff46a2 100644
+--- a/net/ipv6/netfilter/nf_conntrack_l3proto_ipv6.c
++++ b/net/ipv6/netfilter/nf_conntrack_l3proto_ipv6.c
+@@ -191,12 +191,13 @@ static unsigned int ipv6_defrag(unsigned int hooknum,
+ 				int (*okfn)(struct sk_buff *))
+ {
+ 	struct sk_buff *reasm;
++	struct net *net = out ? dev_net(out) : dev_net(in);
+ 
+ 	/* Previously seen (loopback)?  */
+ 	if (skb->nfct)
+ 		return NF_ACCEPT;
+ 
+-	reasm = nf_ct_frag6_gather(skb);
++	reasm = nf_ct_frag6_gather(net, skb);
+ 
+ 	/* queued */
+ 	if (reasm == NULL)
+diff --git a/net/ipv6/netfilter/nf_conntrack_reasm.c b/net/ipv6/netfilter/nf_conntrack_reasm.c
+index c2236df..7036eba 100644
+--- a/net/ipv6/netfilter/nf_conntrack_reasm.c
++++ b/net/ipv6/netfilter/nf_conntrack_reasm.c
+@@ -593,7 +593,8 @@ find_prev_fhdr(struct sk_buff *skb, u8 *prevhdrp, int *prevhoff, int *fhoff)
+ 	return 0;
+ }
+ 
+-struct sk_buff *nf_ct_frag6_gather(struct sk_buff *skb)
++struct sk_buff *nf_ct_frag6_gather(struct net *net,
++				   struct sk_buff *skb)
+ {
+ 	struct sk_buff *clone;
+ 	struct net_device *dev = skb->dev;
+@@ -603,7 +604,6 @@ struct sk_buff *nf_ct_frag6_gather(struct sk_buff *skb)
+ 	int fhoff, nhoff;
+ 	u8 prevhdr;
+ 	struct sk_buff *ret_skb = NULL;
+-	struct net *net = dev_net(dev);
+ 
+ 	/* Jumbo payload inhibits frag. header */
+ 	if (ipv6_hdr(skb)->payload_len == 0) {
+-- 
+1.6.0.6
+
