@@ -1,0 +1,164 @@
+From 1acba8533b788e95c52f827d06d9629d672c80fc Mon Sep 17 00:00:00 2001
+From: Vitaliy Gusev <vgusev@openvz.org>
+Date: Wed, 19 Nov 2008 20:50:25 +0300
+Subject: [PATCH] netfilter: Fix NULL dereference in nf_nat_setup_info
+
+If conntrack is allowed in VE but iptable_nat is not allowed and loaded
+then Oops occurs:
+
+ BUG: unable to handle kernel NULL pointer dereference at 0000000000000008
+ IP: [<ffffffffa0123df6>] :nf_nat:nf_nat_setup_info+0x343/0x489
+ Oops: 0000 [1] SMP DEBUG_PAGEALLOC
+ CPU: 1
+ [<ffffffff8028c277>] ? poison_obj+0x27/0x32
+ [<ffffffffa012a084>] :iptable_nat:alloc_null_binding+0x44/0x46
+ [<ffffffffa012a1f7>] :iptable_nat:nf_nat_rule_find+0x62/0x6b
+ [<ffffffffa012a4e5>] :iptable_nat:nf_nat_fn+0x11d/0x149
+ [<ffffffffa012a551>] :iptable_nat:nf_nat_local_fn+0x40/0xbf
+ [<ffffffff80476ad5>] nf_iterate+0x43/0x80
+ [<ffffffff8047efa0>] ? dst_output+0x0/0xd
+ [<ffffffff80476de9>] nf_hook_slow+0x5e/0xc1
+ [<ffffffff8047efa0>] ? dst_output+0x0/0xd
+ [<ffffffff80480314>] __ip_local_out+0x9f/0xa1
+ [<ffffffff80480327>] ip_local_out+0x11/0x24
+ [<ffffffff80480600>] ip_push_pending_frames+0x2c6/0x345
+ [<ffffffff8049b668>] raw_sendmsg+0x6a9/0x739
+ [<ffffffff804a3750>] inet_sendmsg+0x46/0x53
+ [<ffffffff80455ffa>] sock_sendmsg+0xdf/0xf8
+ RIP  [<ffffffffa0123df6>] :nf_nat:nf_nat_setup_info+0x343/0x489
+
+So create/use iptable_nat to check was nat table initialized in VE or not.
+
+Bug #1051
+http://bugzilla.openvz.org/show_bug.cgi?id=1051
+
+Signed-off-by: Vitaliy Gusev <vgusev@openvz.org>
+Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+---
+ include/linux/netfilter.h        |   15 +++++++++++++++
+ include/linux/ve.h               |    1 -
+ include/net/netns/ipv4.h         |    1 +
+ net/ipv4/netfilter/nf_nat_rule.c |   25 +++++++++++--------------
+ 4 files changed, 27 insertions(+), 15 deletions(-)
+
+diff --git a/include/linux/netfilter.h b/include/linux/netfilter.h
+index 8d41ea4..63c92ad 100644
+--- a/include/linux/netfilter.h
++++ b/include/linux/netfilter.h
+@@ -394,6 +394,21 @@ static inline struct net *nf_post_routing_net(const struct net_device *in,
+ #endif
+ }
+ 
++static inline struct net *nf_net(unsigned hook,
++				 const struct net_device *in,
++				 const struct net_device *out)
++{
++	switch (hook) {
++		case NF_INET_PRE_ROUTING:
++		case NF_INET_LOCAL_IN:
++		case NF_INET_FORWARD:
++			return dev_net(in);
++		case NF_INET_POST_ROUTING:
++		case NF_INET_LOCAL_OUT:
++			return dev_net(out);
++	}
++}
++
+ #ifdef CONFIG_VE_IPTABLES
+ #include <linux/vziptable_defs.h>
+ 
+diff --git a/include/linux/ve.h b/include/linux/ve.h
+index 2180c1f..f55f43e 100644
+--- a/include/linux/ve.h
++++ b/include/linux/ve.h
+@@ -56,7 +56,6 @@ struct ve_nf_conntrack {
+ 	struct hlist_head		*_bysource;
+ 	struct nf_nat_protocol		**_nf_nat_protos;
+ 	int				_nf_nat_vmalloced;
+-	struct xt_table			*_nf_nat_table;
+ 	struct nf_conntrack_l3proto	*_nf_nat_l3proto;
+ 	atomic_t			_nf_conntrack_count;
+ 	int				_nf_conntrack_max;
+diff --git a/include/net/netns/ipv4.h b/include/net/netns/ipv4.h
+index d8588d5..31add33 100644
+--- a/include/net/netns/ipv4.h
++++ b/include/net/netns/ipv4.h
+@@ -34,6 +34,7 @@ struct netns_ipv4 {
+ 	struct netns_frags	frags;
+ #ifdef CONFIG_NETFILTER
+ 	struct xt_table		*iptable_filter;
++	struct xt_table		*iptable_nat;
+ 	struct xt_table		*iptable_mangle;
+ 	struct xt_table		*iptable_raw;
+ 	struct xt_table		*arptable_filter;
+diff --git a/net/ipv4/netfilter/nf_nat_rule.c b/net/ipv4/netfilter/nf_nat_rule.c
+index f301178..505c1cd 100644
+--- a/net/ipv4/netfilter/nf_nat_rule.c
++++ b/net/ipv4/netfilter/nf_nat_rule.c
+@@ -66,12 +66,6 @@ static struct xt_table __nat_table = {
+ 	.me		= THIS_MODULE,
+ 	.af		= AF_INET,
+ };
+-#ifdef CONFIG_VE_IPTABLES
+-#define nat_table			\
+-	(get_exec_env()->_nf_conntrack->_nf_nat_table)
+-#else
+-static struct xt_table *nat_table;
+-#endif
+ 
+ /* Source NAT */
+ static unsigned int ipt_snat_target(struct sk_buff *skb,
+@@ -202,7 +196,8 @@ int nf_nat_rule_find(struct sk_buff *skb,
+ {
+ 	int ret;
+ 
+-	ret = ipt_do_table(skb, hooknum, in, out, nat_table);
++	ret = ipt_do_table(skb, hooknum, in, out,
++			   nf_net(hooknum, in, out)->ipv4.iptable_nat);
+ 
+ 	if (ret == NF_ACCEPT) {
+ 		if (!nf_nat_initialized(ct, HOOK2MANIP(hooknum)))
+@@ -237,10 +232,10 @@ int nf_nat_rule_init(void)
+ 	int ret;
+ 	struct net *net = get_exec_env()->ve_netns;
+ 
+-	nat_table = ipt_register_table(net, &__nat_table,
++	net->ipv4.iptable_nat = ipt_register_table(net, &__nat_table,
+ 				       &nat_initial_table.repl);
+-	if (IS_ERR(nat_table))
+-		return PTR_ERR(nat_table);
++	if (IS_ERR(net->ipv4.iptable_nat))
++		return PTR_ERR(net->ipv4.iptable_nat);
+ 
+ 	ret = 0;
+ 	if (!ve_is_super(get_exec_env()))
+@@ -260,20 +255,22 @@ done:
+  unregister_snat:
+ 	xt_unregister_target(&ipt_snat_reg);
+  unregister_table:
+-	ipt_unregister_table(nat_table);
+-	nat_table = NULL;
++	ipt_unregister_table(net->ipv4.iptable_nat);
++	net->ipv4.iptable_nat = NULL;
+ 
+ 	return ret;
+ }
+ 
+ void nf_nat_rule_cleanup(void)
+ {
++	struct net *net = get_exec_env()->ve_netns;
++
+ 	if (!ve_is_super(get_exec_env()))
+ 		goto skip;
+ 
+ 	xt_unregister_target(&ipt_dnat_reg);
+ 	xt_unregister_target(&ipt_snat_reg);
+ skip:
+-	ipt_unregister_table(nat_table);
+-	nat_table = NULL;
++	ipt_unregister_table(net->ipv4.iptable_nat);
++	net->ipv4.iptable_nat = NULL;
+ }
+-- 
+1.6.0.6
+

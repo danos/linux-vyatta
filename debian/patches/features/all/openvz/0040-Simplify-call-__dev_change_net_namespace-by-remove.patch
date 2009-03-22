@@ -1,0 +1,114 @@
+From 9baf6095c98f930e02769b09addbd4b5f18772d5 Mon Sep 17 00:00:00 2001
+From: Vitaliy Gusev <vgusev@openvz.org>
+Date: Tue, 14 Oct 2008 19:18:57 +0400
+Subject: [PATCH] Simplify call __dev_change_net_namespace() by remove parameters.
+
+1. Source VE and destination VE doesn't need to pass to the
+__dev_change_net_namespace() as src VE can be obtained from
+dev->owner_env and dst VE from net->owner_ve.
+
+2. Destination VE that is passed to __dev_change_net_namespace()
+was wrong, so this patch also fixes it.
+
+Related to the bug http://bugzilla.openvz.org/show_bug.cgi?id=1044
+
+Signed-off-by: Vitaliy Gusev <vgusev@openvz.org>
+Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+---
+ include/linux/netdevice.h |    1 -
+ kernel/ve/vecalls.c       |    5 ++---
+ net/core/dev.c            |   14 ++++++++------
+ 3 files changed, 10 insertions(+), 10 deletions(-)
+
+diff --git a/include/linux/netdevice.h b/include/linux/netdevice.h
+index bacc0a0..2e2acdb 100644
+--- a/include/linux/netdevice.h
++++ b/include/linux/netdevice.h
+@@ -1175,7 +1175,6 @@ extern unsigned		dev_get_flags(const struct net_device *);
+ extern int		dev_change_flags(struct net_device *, unsigned);
+ extern int		dev_change_name(struct net_device *, char *);
+ int __dev_change_net_namespace(struct net_device *, struct net *, const char *,
+-			struct ve_struct *src_ve, struct ve_struct *dst_ve,
+ 			struct user_beancounter *exec_ub);
+ extern int		dev_change_net_namespace(struct net_device *,
+ 						 struct net *, const char *);
+diff --git a/kernel/ve/vecalls.c b/kernel/ve/vecalls.c
+index 5aab66c..b04c19f 100644
+--- a/kernel/ve/vecalls.c
++++ b/kernel/ve/vecalls.c
+@@ -1805,8 +1805,7 @@ static int ve_dev_add(envid_t veid, char *dev_name)
+ 	if (dev == NULL)
+ 		goto out_unlock;
+ 
+-	err = __dev_change_net_namespace(dev, dst_net, dev_name,
+-					get_ve0(), dst_ve, get_exec_ub());
++	err = __dev_change_net_namespace(dev, dst_net, dev_name, get_exec_ub());
+ out_unlock:
+ 	rtnl_unlock();
+ 	real_put_ve(dst_ve);
+@@ -1840,7 +1839,7 @@ static int ve_dev_del(envid_t veid, char *dev_name)
+ 		goto out_unlock;
+ 
+ 	err = __dev_change_net_namespace(dev, &init_net, dev_name,
+-				src_ve, get_ve0(), netdev_bc(dev)->owner_ub);
++					 netdev_bc(dev)->owner_ub);
+ out_unlock:
+ 	rtnl_unlock();
+ 	real_put_ve(src_ve);
+diff --git a/net/core/dev.c b/net/core/dev.c
+index 26b529f..ce7e730 100644
+--- a/net/core/dev.c
++++ b/net/core/dev.c
+@@ -4207,14 +4207,17 @@ EXPORT_SYMBOL(unregister_netdev);
+  */
+ 
+ int __dev_change_net_namespace(struct net_device *dev, struct net *net, const char *pat,
+-		struct ve_struct *src_ve, struct ve_struct *dst_ve,
+ 		struct user_beancounter *exec_ub)
+ {
+ 	char buf[IFNAMSIZ];
+ 	const char *destname;
+ 	int err;
+-	struct ve_struct *cur_ve;
+ 	struct user_beancounter *tmp_ub;
++#ifdef CONFIG_VE
++	struct ve_struct *cur_ve = get_exec_env();
++	struct ve_struct *src_ve = dev->owner_env;
++	struct ve_struct *dst_ve = net->owner_ve;
++#endif
+ 
+ 	ASSERT_RTNL();
+ 
+@@ -4278,7 +4281,7 @@ int __dev_change_net_namespace(struct net_device *dev, struct net *net, const ch
+ 	/* Notify protocols, that we are about to destroy
+ 	   this device. They should clean all the things.
+ 	*/
+-	cur_ve = set_exec_env(src_ve);
++	set_exec_env(src_ve);
+ 	call_netdevice_notifiers(NETDEV_UNREGISTER, dev);
+ 	(void)set_exec_env(cur_ve);
+ 
+@@ -4311,7 +4314,7 @@ int __dev_change_net_namespace(struct net_device *dev, struct net *net, const ch
+ 	list_netdevice(dev);
+ 
+ 	/* Notify protocols, that a new device appeared. */
+-	cur_ve = set_exec_env(dst_ve);
++	set_exec_env(dst_ve);
+ 	call_netdevice_notifiers(NETDEV_REGISTER, dev);
+ 	(void)set_exec_env(cur_ve);
+ 
+@@ -4323,10 +4326,9 @@ out:
+ 
+ int dev_change_net_namespace(struct net_device *dev, struct net *net, const char *pat)
+ {
+-	struct ve_struct *ve = get_exec_env();
+ 	struct user_beancounter *ub = get_exec_ub();
+ 
+-	return __dev_change_net_namespace(dev, net, pat, ve, ve, ub);
++	return __dev_change_net_namespace(dev, net, pat, ub);
+ }
+ 
+ static int dev_cpu_callback(struct notifier_block *nfb,
+-- 
+1.6.0.6
+

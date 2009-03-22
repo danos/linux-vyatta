@@ -1,0 +1,143 @@
+From bd5e8068db8448a24b87f096622a5f4dac93b31a Mon Sep 17 00:00:00 2001
+From: Pavel Emelyanov <xemul@openvz.org>
+Date: Tue, 30 Sep 2008 19:03:04 +0400
+Subject: [PATCH] Add "VE features" for sit and ipip devices.
+
+Currently these devices are created unconditionally in *each*
+ve after ipip or sit module load. This is bad for many reasons.
+
+I add two features, just like it's done for 2.6.18-rh5 kernel.
+The migration support will become available a bit later - I
+don't want to push the existing implementation till we settle
+with the new netdeives migration scheme (in rh5 of course).
+
+http://bugzilla.openvz.org/show_bug.cgi?id=874
+
+Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+---
+ include/linux/vzcalluser.h |    2 ++
+ kernel/ve/ve.c             |    2 ++
+ net/ipv4/ipip.c            |   10 ++++++++++
+ net/ipv6/sit.c             |   10 ++++++++++
+ 4 files changed, 24 insertions(+), 0 deletions(-)
+
+diff --git a/include/linux/vzcalluser.h b/include/linux/vzcalluser.h
+index a62b84c..46c04e6 100644
+--- a/include/linux/vzcalluser.h
++++ b/include/linux/vzcalluser.h
+@@ -104,6 +104,8 @@ struct env_create_param3 {
+ #define VE_FEATURE_SYSFS	(1ULL << 0)
+ #define VE_FEATURE_NFS		(1ULL << 1)
+ #define VE_FEATURE_DEF_PERMS	(1ULL << 2)
++#define VE_FEATURE_SIT          (1ULL << 3)
++#define VE_FEATURE_IPIP         (1ULL << 4)
+ 
+ #define VE_FEATURES_OLD		(VE_FEATURE_SYSFS)
+ #define VE_FEATURES_DEF		(VE_FEATURE_SYSFS | \
+diff --git a/kernel/ve/ve.c b/kernel/ve/ve.c
+index d4ba7b3..7322e50 100644
+--- a/kernel/ve/ve.c
++++ b/kernel/ve/ve.c
+@@ -36,6 +36,7 @@
+ #include <linux/devpts_fs.h>
+ 
+ #include <linux/nfcalls.h>
++#include <linux/vzcalluser.h>
+ 
+ unsigned long vz_rstamp = 0x37e0f59d;
+ 
+@@ -105,6 +106,7 @@ struct ve_struct ve0 = {
+ #ifdef CONFIG_VE_IPTABLES
+ 	.ipt_mask 		= ~0ULL,
+ #endif
++	.features		= VE_FEATURE_SIT | VE_FEATURE_IPIP,
+ };
+ 
+ EXPORT_SYMBOL(ve0);
+diff --git a/net/ipv4/ipip.c b/net/ipv4/ipip.c
+index af5cb53..67f3736 100644
+--- a/net/ipv4/ipip.c
++++ b/net/ipv4/ipip.c
+@@ -108,6 +108,7 @@
+ #include <linux/init.h>
+ #include <linux/netfilter_ipv4.h>
+ #include <linux/if_ether.h>
++#include <linux/vzcalluser.h>
+ 
+ #include <net/sock.h>
+ #include <net/ip.h>
+@@ -146,6 +147,9 @@ static struct ip_tunnel * ipip_tunnel_lookup(struct net *net,
+ 	struct ip_tunnel *t;
+ 	struct ipip_net *ipn = net_generic(net, ipip_net_id);
+ 
++	if (ipn == NULL)
++		return NULL;
++
+ 	for (t = ipn->tunnels_r_l[h0^h1]; t; t = t->next) {
+ 		if (local == t->parms.iph.saddr &&
+ 		    remote == t->parms.iph.daddr && (t->dev->flags&IFF_UP))
+@@ -779,6 +783,9 @@ static int ipip_init_net(struct net *net)
+ 	int err;
+ 	struct ipip_net *ipn;
+ 
++	if (!(get_exec_env()->features & VE_FEATURE_IPIP))
++		return 0;
++
+ 	err = -ENOMEM;
+ 	ipn = kzalloc(sizeof(struct ipip_net), GFP_KERNEL);
+ 	if (ipn == NULL)
+@@ -824,6 +831,9 @@ static void ipip_exit_net(struct net *net)
+ 	struct ipip_net *ipn;
+ 
+ 	ipn = net_generic(net, ipip_net_id);
++	if (ipn == NULL) /* no VE_FEATURE_IPIP */
++		return;
++
+ 	rtnl_lock();
+ 	ipip_destroy_tunnels(ipn);
+ 	unregister_netdevice(ipn->fb_tunnel_dev);
+diff --git a/net/ipv6/sit.c b/net/ipv6/sit.c
+index 32e871a..f8b0bdc 100644
+--- a/net/ipv6/sit.c
++++ b/net/ipv6/sit.c
+@@ -34,6 +34,7 @@
+ #include <linux/init.h>
+ #include <linux/netfilter_ipv4.h>
+ #include <linux/if_ether.h>
++#include <linux/vzcalluser.h>
+ 
+ #include <net/sock.h>
+ #include <net/snmp.h>
+@@ -89,6 +90,9 @@ static struct ip_tunnel * ipip6_tunnel_lookup(struct net *net,
+ 	struct ip_tunnel *t;
+ 	struct sit_net *sitn = net_generic(net, sit_net_id);
+ 
++	if (sitn == NULL)
++		return NULL;
++
+ 	for (t = sitn->tunnels_r_l[h0^h1]; t; t = t->next) {
+ 		if (local == t->parms.iph.saddr &&
+ 		    remote == t->parms.iph.daddr && (t->dev->flags&IFF_UP))
+@@ -1013,6 +1017,9 @@ static int sit_init_net(struct net *net)
+ 	int err;
+ 	struct sit_net *sitn;
+ 
++	if (!(get_exec_env()->features & VE_FEATURE_SIT))
++		return 0;
++
+ 	err = -ENOMEM;
+ 	sitn = kzalloc(sizeof(struct sit_net), GFP_KERNEL);
+ 	if (sitn == NULL)
+@@ -1057,6 +1064,9 @@ static void sit_exit_net(struct net *net)
+ 	struct sit_net *sitn;
+ 
+ 	sitn = net_generic(net, sit_net_id);
++	if (sitn == NULL) /* no VE_FEATURE_SIT */
++		return;
++
+ 	rtnl_lock();
+ 	sit_destroy_tunnels(sitn);
+ 	unregister_netdevice(sitn->fb_tunnel_dev);
+-- 
+1.6.2
+

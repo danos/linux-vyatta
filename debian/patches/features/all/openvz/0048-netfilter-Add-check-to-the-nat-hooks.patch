@@ -1,0 +1,82 @@
+From b405aed753ac48a46e66cccfd0a37006fd11feb8 Mon Sep 17 00:00:00 2001
+From: Vitaliy Gusev <vgusev@openvz.org>
+Date: Wed, 19 Nov 2008 20:39:51 +0300
+Subject: [PATCH] netfilter: Add check to the nat hooks
+
+Pass skb if VE wasn't granded to have nat table.
+
+Related to bug #1051
+http://bugzilla.openvz.org/show_bug.cgi?id=1051
+
+Signed-off-by: Vitaliy Gusev <vgusev@openvz.org>
+Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+---
+ net/ipv4/netfilter/nf_nat_standalone.c |   24 +++++++++++++++++++++++-
+ 1 files changed, 23 insertions(+), 1 deletions(-)
+
+diff --git a/net/ipv4/netfilter/nf_nat_standalone.c b/net/ipv4/netfilter/nf_nat_standalone.c
+index 72f45db..17d7527 100644
+--- a/net/ipv4/netfilter/nf_nat_standalone.c
++++ b/net/ipv4/netfilter/nf_nat_standalone.c
+@@ -157,6 +157,19 @@ nf_nat_fn(unsigned int hooknum,
+ }
+ 
+ static unsigned int
++nf_nat_local_in(unsigned int hooknum,
++		struct sk_buff *skb,
++		const struct net_device *in,
++		const struct net_device *out,
++		int (*okfn)(struct sk_buff *))
++{
++	if (!dev_net(in)->ipv4.iptable_nat)
++		return NF_ACCEPT;
++
++	return nf_nat_fn(hooknum, skb, in, out, okfn);
++}
++
++static unsigned int
+ nf_nat_in(unsigned int hooknum,
+ 	  struct sk_buff *skb,
+ 	  const struct net_device *in,
+@@ -166,6 +179,9 @@ nf_nat_in(unsigned int hooknum,
+ 	unsigned int ret;
+ 	__be32 daddr = ip_hdr(skb)->daddr;
+ 
++	if (!dev_net(in)->ipv4.iptable_nat)
++		return NF_ACCEPT;
++
+ 	ret = nf_nat_fn(hooknum, skb, in, out, okfn);
+ 	if (ret != NF_DROP && ret != NF_STOLEN &&
+ 	    daddr != ip_hdr(skb)->daddr) {
+@@ -188,6 +204,9 @@ nf_nat_out(unsigned int hooknum,
+ #endif
+ 	unsigned int ret;
+ 
++	if (!dev_net(out)->ipv4.iptable_nat)
++		return NF_ACCEPT;
++
+ 	/* root is playing with raw sockets. */
+ 	if (skb->len < sizeof(struct iphdr) ||
+ 	    ip_hdrlen(skb) < sizeof(struct iphdr))
+@@ -221,6 +240,9 @@ nf_nat_local_fn(unsigned int hooknum,
+ 	enum ip_conntrack_info ctinfo;
+ 	unsigned int ret;
+ 
++	if (!dev_net(out)->ipv4.iptable_nat)
++		return NF_ACCEPT;
++
+ 	/* root is playing with raw sockets. */
+ 	if (skb->len < sizeof(struct iphdr) ||
+ 	    ip_hdrlen(skb) < sizeof(struct iphdr))
+@@ -275,7 +297,7 @@ static struct nf_hook_ops nf_nat_ops[] __read_mostly = {
+ 	},
+ 	/* After packet filtering, change source */
+ 	{
+-		.hook		= nf_nat_fn,
++		.hook		= nf_nat_local_in,
+ 		.owner		= THIS_MODULE,
+ 		.pf		= PF_INET,
+ 		.hooknum	= NF_INET_LOCAL_IN,
+-- 
+1.6.0.6
+
