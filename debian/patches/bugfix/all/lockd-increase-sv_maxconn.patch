@@ -1,0 +1,60 @@
+commit c72a476b4b7ecadb80185de31236edb303c1a5d0
+Author: Jeff Layton <jlayton@redhat.com>
+Date:   Mon Oct 20 11:51:58 2008 -0400
+
+    lockd: set svc_serv->sv_maxconn to a more reasonable value (try #3)
+    
+    The default method for calculating the number of connections allowed
+    per RPC service arbitrarily limits single-threaded services to 80
+    connections. This is too low for services like lockd and artificially
+    limits the number of TCP clients that it can support.
+    
+    Have lockd set a default sv_maxconn value to 1024 (which is the typical
+    default value for RLIMIT_NOFILE. Also add a module parameter to allow an
+    admin to set this to an arbitrary value.
+    
+    Signed-off-by: Jeff Layton <jlayton@redhat.com>
+    Acked-by: Neil Brown <neilb@suse.de>
+    Signed-off-by: J. Bruce Fields <bfields@citi.umich.edu>
+
+Backported to Debian's 2.6.26 by dann frazier <dannf@debian.org>
+
+diff -urpN a/fs/lockd/svc.c b/fs/lockd/svc.c
+--- a/fs/lockd/svc.c	2008-07-13 15:51:29.000000000 -0600
++++ b/fs/lockd/svc.c	2009-03-22 14:55:51.000000000 -0600
+@@ -63,6 +63,9 @@ static unsigned long		nlm_timeout = LOCK
+ static int			nlm_udpport, nlm_tcpport;
+ int				nsm_use_hostnames = 0;
+ 
++/* RLIM_NOFILE defaults to 1024. That seems like a reasonable default here. */
++static unsigned int		nlm_max_connections = 1024;
++
+ /*
+  * Constants needed for the sysctl interface.
+  */
+@@ -149,6 +152,9 @@ lockd(void *vrqstp)
+ 		long timeout = MAX_SCHEDULE_TIMEOUT;
+ 		RPC_IFDEBUG(char buf[RPC_MAX_ADDRBUFLEN]);
+ 
++		/* update sv_maxconn if it has changed */
++		rqstp->rq_server->sv_maxconn = nlm_max_connections;
++
+ 		if (signalled()) {
+ 			flush_signals(current);
+ 			if (nlmsvc_ops) {
+@@ -298,6 +304,7 @@ lockd_up(int proto) /* Maybe add a 'fami
+ 	}
+ 
+ 	svc_sock_update_bufs(serv);
++	serv->sv_maxconn = nlm_max_connections;
+ 	nlmsvc_serv = rqstp->rq_server;
+ 
+ 	nlmsvc_task = kthread_run(lockd, rqstp, serv->sv_name);
+@@ -505,6 +512,7 @@ module_param_call(nlm_udpport, param_set
+ module_param_call(nlm_tcpport, param_set_port, param_get_int,
+ 		  &nlm_tcpport, 0644);
+ module_param(nsm_use_hostnames, bool, 0644);
++module_param(nlm_max_connections, uint, 0644);
+ 
+ /*
+  * Initialising and terminating the module.
