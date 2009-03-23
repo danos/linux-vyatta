@@ -1,0 +1,79 @@
+commit 92a0acce186cde8ead56c6915d9479773673ea1a
+Author: David S. Miller <davem@davemloft.net>
+Date:   Tue Feb 17 21:24:05 2009 -0800
+
+    net: Kill skb_truesize_check(), it only catches false-positives.
+    
+    A long time ago we had bugs, primarily in TCP, where we would modify
+    skb->truesize (for TSO queue collapsing) in ways which would corrupt
+    the socket memory accounting.
+    
+    skb_truesize_check() was added in order to try and catch this error
+    more systematically.
+    
+    However this debugging check has morphed into a Frankenstein of sorts
+    and these days it does nothing other than catch false-positives.
+    
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+Adjusted to apply to Debian's 2.6.26 by dann frazier <dannf@debian.org>
+
+diff -urpN a/include/linux/skbuff.h b/include/linux/skbuff.h
+--- a/include/linux/skbuff.h	2008-07-13 15:51:29.000000000 -0600
++++ b/include/linux/skbuff.h	2009-03-22 23:21:54.000000000 -0600
+@@ -390,15 +390,6 @@ extern void	      skb_over_panic(struct 
+ 				     void *here);
+ extern void	      skb_under_panic(struct sk_buff *skb, int len,
+ 				      void *here);
+-extern void	      skb_truesize_bug(struct sk_buff *skb);
+-
+-static inline void skb_truesize_check(struct sk_buff *skb)
+-{
+-	int len = sizeof(struct sk_buff) + skb->len;
+-
+-	if (unlikely((int)skb->truesize < len))
+-		skb_truesize_bug(skb);
+-}
+ 
+ extern int skb_append_datato_frags(struct sock *sk, struct sk_buff *skb,
+ 			int getfrag(void *from, char *to, int offset,
+diff -urpN a/include/net/sock.h b/include/net/sock.h
+--- a/include/net/sock.h	2008-07-13 15:51:29.000000000 -0600
++++ b/include/net/sock.h	2009-03-22 23:21:54.000000000 -0600
+@@ -777,7 +777,6 @@ static inline void sk_mem_uncharge(struc
+ 
+ static inline void sk_wmem_free_skb(struct sock *sk, struct sk_buff *skb)
+ {
+-	skb_truesize_check(skb);
+ 	sock_set_flag(sk, SOCK_QUEUE_SHRUNK);
+ 	sk->sk_wmem_queued -= skb->truesize;
+ 	sk_mem_uncharge(sk, skb->truesize);
+diff -urpN a/net/core/skbuff.c b/net/core/skbuff.c
+--- a/net/core/skbuff.c	2009-03-22 22:54:51.000000000 -0600
++++ b/net/core/skbuff.c	2009-03-22 23:22:24.000000000 -0600
+@@ -149,14 +149,6 @@ void skb_under_panic(struct sk_buff *skb
+ 	BUG();
+ }
+ 
+-void skb_truesize_bug(struct sk_buff *skb)
+-{
+-	printk(KERN_ERR "SKB BUG: Invalid truesize (%u) "
+-	       "len=%u, sizeof(sk_buff)=%Zd\n",
+-	       skb->truesize, skb->len, sizeof(struct sk_buff));
+-}
+-EXPORT_SYMBOL(skb_truesize_bug);
+-
+ /* 	Allocate a new skbuff. We do this ourselves so we can fill in a few
+  *	'private' fields and also do memory statistics to find all the
+  *	[BEEP] leaks.
+diff -urpN a/net/core/sock.c b/net/core/sock.c
+--- a/net/core/sock.c	2009-03-22 22:54:58.000000000 -0600
++++ b/net/core/sock.c	2009-03-22 23:21:56.000000000 -0600
+@@ -1138,7 +1138,6 @@ void sock_rfree(struct sk_buff *skb)
+ {
+ 	struct sock *sk = skb->sk;
+ 
+-	skb_truesize_check(skb);
+ 	atomic_sub(skb->truesize, &sk->sk_rmem_alloc);
+ 	sk_mem_uncharge(skb->sk, skb->truesize);
+ }
