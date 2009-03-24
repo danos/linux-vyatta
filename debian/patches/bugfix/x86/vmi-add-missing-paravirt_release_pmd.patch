@@ -1,0 +1,57 @@
+commit 55a8ba4b7f76bebd7e8ce3f74c04b140627a1bad
+Author: Alok Kataria <akataria@vmware.com>
+Date:   Fri Feb 6 10:29:35 2009 -0800
+
+    x86, vmi: put a missing paravirt_release_pmd in pgd_dtor
+    
+    Commit 6194ba6ff6ccf8d5c54c857600843c67aa82c407 ("x86: don't special-case
+    pmd allocations as much") made changes to the way we handle pmd allocations,
+    and while doing that it dropped a call to  paravirt_release_pd on the
+    pgd page from the pgd_dtor code path.
+    
+    As a result of this missing release, the hypervisor is now unaware of the
+    pgd page being freed, and as a result it ends up tracking this page as a
+    page table page.
+    
+    After this the guest may start using the same page for other purposes, and
+    depending on what use the page is put to, it may result in various performance
+    and/or functional issues ( hangs, reboots).
+    
+    Since this release is only required for VMI, I now release the pgd page from
+    the (vmi)_pgd_free hook.
+    
+    Signed-off-by: Alok N Kataria <akataria@vmware.com>
+    Acked-by: Jeremy Fitzhardinge <jeremy@goop.org>
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+    Cc: <stable@kernel.org>
+
+Adjusted to apply to Debian's 2.6.26 by dann frazier <dannf@debian.org>
+
+diff -urpN a/arch/x86/kernel/vmi_32.c b/arch/x86/kernel/vmi_32.c
+--- a/arch/x86/kernel/vmi_32.c	2009-03-23 21:26:16.000000000 -0600
++++ b/arch/x86/kernel/vmi_32.c	2009-03-23 21:35:47.000000000 -0600
+@@ -429,6 +429,16 @@ static void vmi_release_pmd(u32 pfn)
+ }
+ 
+ /*
++ * We use the pgd_free hook for releasing the pgd page:
++ */
++static void vmi_pgd_free(struct mm_struct *mm, pgd_t *pgd)
++{
++	unsigned long pfn = __pa(pgd) >> PAGE_SHIFT;
++
++	vmi_ops.release_page(pfn, VMI_PAGE_L2);
++}
++
++/*
+  * Helper macros for MMU update flags.  We can defer updates until a flush
+  * or page invalidation only if the update is to the current address space
+  * (otherwise, there is no flush).  We must check against init_mm, since
+@@ -880,6 +890,7 @@ static inline int __init activate_vmi(vo
+ 	if (vmi_ops.release_page) {
+ 		pv_mmu_ops.release_pte = vmi_release_pte;
+ 		pv_mmu_ops.release_pmd = vmi_release_pmd;
++		pv_mmu_ops.pgd_free = vmi_pgd_free;
+ 	}
+ 
+ 	/* Set linear is needed in all cases */

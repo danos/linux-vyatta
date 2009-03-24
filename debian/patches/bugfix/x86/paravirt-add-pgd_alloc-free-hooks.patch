@@ -1,0 +1,157 @@
+commit eba0045ff87bab465d3c80c289f3bf709c1800f5
+Author: Jeremy Fitzhardinge <jeremy@goop.org>
+Date:   Wed Jun 25 00:19:12 2008 -0400
+
+    x86/paravirt: add a pgd_alloc/free hooks
+    
+    Add hooks which are called at pgd_alloc/free time.  The pgd_alloc hook
+    may return an error code, which if non-zero, causes the pgd allocation
+    to be failed.  The hooks may be used to allocate/free auxillary
+    per-pgd information.
+    
+    also fix:
+    
+    > * Ingo Molnar <mingo@elte.hu> wrote:
+    >
+    >  include/asm/pgalloc.h: In function ‘paravirt_pgd_free':
+    >  include/asm/pgalloc.h:14: error: parameter name omitted
+    >  arch/x86/kernel/entry_64.S: In file included from
+    >  arch/x86/kernel/traps_64.c:51:include/asm/pgalloc.h: In function ‘paravirt_pgd_free':
+    >  include/asm/pgalloc.h:14: error: parameter name omitted
+    
+    Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+    Cc: xen-devel <xen-devel@lists.xensource.com>
+    Cc: Stephen Tweedie <sct@redhat.com>
+    Cc: Eduardo Habkost <ehabkost@redhat.com>
+    Cc: Mark McLoughlin <markmc@redhat.com>
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+Adjusted to apply to Debian's 2.6.26 by dann frazier <dannf@debian.org>
+
+diff -urpN a/arch/x86/kernel/paravirt.c b/arch/x86/kernel/paravirt.c
+--- a/arch/x86/kernel/paravirt.c	2009-03-23 21:26:13.000000000 -0600
++++ b/arch/x86/kernel/paravirt.c	2009-03-23 21:33:56.000000000 -0600
+@@ -30,6 +30,7 @@
+ #include <asm/setup.h>
+ #include <asm/arch_hooks.h>
+ #include <asm/time.h>
++#include <asm/pgalloc.h>
+ #include <asm/irq.h>
+ #include <asm/delay.h>
+ #include <asm/fixmap.h>
+@@ -366,6 +367,9 @@ struct pv_mmu_ops pv_mmu_ops = {
+ 	.flush_tlb_single = native_flush_tlb_single,
+ 	.flush_tlb_others = native_flush_tlb_others,
+ 
++	.pgd_alloc = __paravirt_pgd_alloc,
++	.pgd_free = paravirt_nop,
++
+ 	.alloc_pte = paravirt_nop,
+ 	.alloc_pmd = paravirt_nop,
+ 	.alloc_pmd_clone = paravirt_nop,
+diff -urpN a/arch/x86/mm/pgtable.c b/arch/x86/mm/pgtable.c
+--- a/arch/x86/mm/pgtable.c	2008-07-13 15:51:29.000000000 -0600
++++ b/arch/x86/mm/pgtable.c	2009-03-23 21:33:56.000000000 -0600
+@@ -214,13 +214,15 @@ pgd_t *pgd_alloc(struct mm_struct *mm)
+ 
+ 	/* so that alloc_pmd can use it */
+ 	mm->pgd = pgd;
+-	if (pgd)
++	if (pgd) {
+ 		pgd_ctor(pgd);
+ 
+-	if (pgd && !pgd_prepopulate_pmd(mm, pgd)) {
+-		pgd_dtor(pgd);
+-		free_page((unsigned long)pgd);
+-		pgd = NULL;
++		if (paravirt_pgd_alloc(mm) != 0 ||
++		    !pgd_prepopulate_pmd(mm, pgd)) {
++			pgd_dtor(pgd);
++			free_page((unsigned long)pgd);
++			pgd = NULL;
++		}
+ 	}
+ 
+ 	return pgd;
+@@ -230,6 +232,7 @@ void pgd_free(struct mm_struct *mm, pgd_
+ {
+ 	pgd_mop_up_pmds(mm, pgd);
+ 	pgd_dtor(pgd);
++	paravirt_pgd_free(mm, pgd);
+ 	free_page((unsigned long)pgd);
+ }
+ 
+diff -urpN a/arch/x86/xen/enlighten.c b/arch/x86/xen/enlighten.c
+--- a/arch/x86/xen/enlighten.c	2009-03-23 21:26:13.000000000 -0600
++++ b/arch/x86/xen/enlighten.c	2009-03-23 21:33:56.000000000 -0600
+@@ -45,6 +45,7 @@
+ #include <asm/pgtable.h>
+ #include <asm/tlbflush.h>
+ #include <asm/reboot.h>
++#include <asm/pgalloc.h>
+ 
+ #include "xen-ops.h"
+ #include "mmu.h"
+@@ -1126,6 +1127,9 @@ static const struct pv_mmu_ops xen_mmu_o
+ 	.pte_update = paravirt_nop,
+ 	.pte_update_defer = paravirt_nop,
+ 
++	.pgd_alloc = __paravirt_pgd_alloc,
++	.pgd_free = paravirt_nop,
++
+ 	.alloc_pte = xen_alloc_pte_init,
+ 	.release_pte = xen_release_pte_init,
+ 	.alloc_pmd = xen_alloc_pte_init,
+diff -urpN a/include/asm-x86/paravirt.h b/include/asm-x86/paravirt.h
+--- a/include/asm-x86/paravirt.h	2009-03-23 21:26:13.000000000 -0600
++++ b/include/asm-x86/paravirt.h	2009-03-23 21:33:56.000000000 -0600
+@@ -219,7 +219,14 @@ struct pv_mmu_ops {
+ 	void (*flush_tlb_others)(const cpumask_t *cpus, struct mm_struct *mm,
+ 				 unsigned long va);
+ 
+-	/* Hooks for allocating/releasing pagetable pages */
++	/* Hooks for allocating and freeing a pagetable top-level */
++	int  (*pgd_alloc)(struct mm_struct *mm);
++	void (*pgd_free)(struct mm_struct *mm, pgd_t *pgd);
++
++	/*
++	 * Hooks for allocating/releasing pagetable pages when they're
++	 * attached to a pagetable
++	 */
+ 	void (*alloc_pte)(struct mm_struct *mm, u32 pfn);
+ 	void (*alloc_pmd)(struct mm_struct *mm, u32 pfn);
+ 	void (*alloc_pmd_clone)(u32 pfn, u32 clonepfn, u32 start, u32 count);
+@@ -918,6 +925,16 @@ static inline void flush_tlb_others(cpum
+ 	PVOP_VCALL3(pv_mmu_ops.flush_tlb_others, &cpumask, mm, va);
+ }
+ 
++static inline int paravirt_pgd_alloc(struct mm_struct *mm)
++{
++	return PVOP_CALL1(int, pv_mmu_ops.pgd_alloc, mm);
++}
++
++static inline void paravirt_pgd_free(struct mm_struct *mm, pgd_t *pgd)
++{
++	PVOP_VCALL2(pv_mmu_ops.pgd_free, mm, pgd);
++}
++
+ static inline void paravirt_alloc_pte(struct mm_struct *mm, unsigned pfn)
+ {
+ 	PVOP_VCALL2(pv_mmu_ops.alloc_pte, mm, pfn);
+diff -urpN a/include/asm-x86/pgalloc.h b/include/asm-x86/pgalloc.h
+--- a/include/asm-x86/pgalloc.h	2008-07-13 15:51:29.000000000 -0600
++++ b/include/asm-x86/pgalloc.h	2009-03-23 21:33:56.000000000 -0600
+@@ -5,9 +5,13 @@
+ #include <linux/mm.h>		/* for struct page */
+ #include <linux/pagemap.h>
+ 
++static inline int  __paravirt_pgd_alloc(struct mm_struct *mm) { return 0; }
++
+ #ifdef CONFIG_PARAVIRT
+ #include <asm/paravirt.h>
+ #else
++#define paravirt_pgd_alloc(mm)	__paravirt_pgd_alloc(mm)
++static inline void paravirt_pgd_free(struct mm_struct *mm, pgd_t *pgd) {}
+ static inline void paravirt_alloc_pte(struct mm_struct *mm, unsigned long pfn)	{}
+ static inline void paravirt_alloc_pmd(struct mm_struct *mm, unsigned long pfn)	{}
+ static inline void paravirt_alloc_pmd_clone(unsigned long pfn, unsigned long clonepfn,
