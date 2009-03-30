@@ -1,0 +1,69 @@
+From 78f707bfc723552e8309b7c38a8d0cc51012e813 Mon Sep 17 00:00:00 2001
+From: Jens Axboe <jens.axboe@oracle.com>
+Date: Tue, 17 Feb 2009 13:59:08 +0100
+Subject: [PATCH] block: revert part of 18ce3751ccd488c78d3827e9f6bf54e6322676fb
+
+The above commit added WRITE_SYNC and switched various places to using
+that for committing writes that will be waited upon immediately after
+submission. However, this causes a performance regression with AS and CFQ
+for ext3 at least, since sync_dirty_buffer() will submit some writes with
+WRITE_SYNC while ext3 has sumitted others dependent writes without the sync
+flag set. This causes excessive anticipation/idling in the IO scheduler
+because sync and async writes get interleaved, causing a big performance
+regression for the below test case (which is meant to simulate sqlite
+like behaviour).
+
+---- test case ----
+
+int main(int argc, char **argv)
+{
+
+	int fdes, i;
+	FILE *fp;
+	struct timeval start;
+	struct timeval end;
+	struct timeval res;
+
+	gettimeofday(&start, NULL);
+	for (i=0; i<ROWS; i++) {
+		fp = fopen("test_file", "a");
+		fprintf(fp, "Some Text Data\n");
+		fdes = fileno(fp);
+		fsync(fdes);
+		fclose(fp);
+	}
+	gettimeofday(&end, NULL);
+
+	timersub(&end, &start, &res);
+	fprintf(stdout, "time to write %d lines is %ld(msec)\n", ROWS,
+			(res.tv_sec*1000000 + res.tv_usec)/1000);
+
+	return 0;
+}
+
+-------------------
+
+Thanks to Sean.White@APCC.com for tracking down this performance
+regression and providing a test case.
+
+Signed-off-by: Jens Axboe <jens.axboe@oracle.com>
+---
+ fs/buffer.c |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/fs/buffer.c b/fs/buffer.c
+index 665d446..62b57e3 100644
+--- a/fs/buffer.c
++++ b/fs/buffer.c
+@@ -3108,7 +3108,7 @@ int sync_dirty_buffer(struct buffer_head *bh)
+ 	if (test_clear_buffer_dirty(bh)) {
+ 		get_bh(bh);
+ 		bh->b_end_io = end_buffer_write_sync;
+-		ret = submit_bh(WRITE_SYNC, bh);
++		ret = submit_bh(WRITE, bh);
+ 		wait_on_buffer(bh);
+ 		if (buffer_eopnotsupp(bh)) {
+ 			clear_buffer_eopnotsupp(bh);
+-- 
+1.6.2.1
+
