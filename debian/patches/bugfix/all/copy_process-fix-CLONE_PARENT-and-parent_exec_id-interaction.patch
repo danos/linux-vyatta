@@ -1,0 +1,52 @@
+commit 2d5516cbb9daf7d0e342a2e3b0fc6f8c39a81205
+Author: Oleg Nesterov <oleg@redhat.com>
+Date:   Mon Mar 2 22:58:45 2009 +0100
+
+    copy_process: fix CLONE_PARENT && parent_exec_id interaction
+    
+    CLONE_PARENT can fool the ->self_exec_id/parent_exec_id logic. If we
+    re-use the old parent, we must also re-use ->parent_exec_id to make
+    sure exit_notify() sees the right ->xxx_exec_id's when the CLONE_PARENT'ed
+    task exits.
+    
+    Also, move down the "p->parent_exec_id = p->self_exec_id" thing, to place
+    two different cases together.
+    
+    Signed-off-by: Oleg Nesterov <oleg@redhat.com>
+    Cc: Roland McGrath <roland@redhat.com>
+    Cc: Andrew Morton <akpm@linux-foundation.org>
+    Cc: David Howells <dhowells@redhat.com>
+    Cc: Serge E. Hallyn <serge@hallyn.com>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+Adjusted to apply to Debian's 2.6.26 by dann frazier <dannf@debian.org>
+diff -urpN linux-source-2.6.26.orig/kernel/fork.c linux-source-2.6.26/kernel/fork.c
+--- linux-source-2.6.26.orig/kernel/fork.c	2009-03-25 17:20:41.000000000 -0600
++++ linux-source-2.6.26/kernel/fork.c	2009-04-03 19:10:19.000000000 -0600
+@@ -1109,10 +1109,6 @@ static struct task_struct *copy_process(
+ #endif
+ 	clear_all_latency_tracing(p);
+ 
+-	/* Our parent execution domain becomes current domain
+-	   These must match for thread signalling to apply */
+-	p->parent_exec_id = p->self_exec_id;
+-
+ 	/* ok, now we should be set up.. */
+ 	p->exit_signal = (clone_flags & CLONE_THREAD) ? -1 : (clone_flags & CSIGNAL);
+ 	p->pdeath_signal = 0;
+@@ -1152,10 +1148,13 @@ static struct task_struct *copy_process(
+ 		set_task_cpu(p, smp_processor_id());
+ 
+ 	/* CLONE_PARENT re-uses the old parent */
+-	if (clone_flags & (CLONE_PARENT|CLONE_THREAD))
++	if (clone_flags & (CLONE_PARENT|CLONE_THREAD)) {
+ 		p->real_parent = current->real_parent;
+-	else
++		p->parent_exec_id = current->parent_exec_id;
++	} else {
+ 		p->real_parent = current;
++		p->parent_exec_id = current->self_exec_id;
++	}
+ 	p->parent = p->real_parent;
+ 
+ 	spin_lock(&current->sighand->siglock);
