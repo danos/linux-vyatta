@@ -1,0 +1,143 @@
+commit 8faece5f906725c10e7a1f6caf84452abadbdc7b
+Author: Tyler Hicks <tyhicks@linux.vnet.ibm.com>
+Date:   Fri Mar 20 01:25:09 2009 -0500
+
+    eCryptfs: Allocate a variable number of pages for file headers
+    
+    When allocating the memory used to store the eCryptfs header contents, a
+    single, zeroed page was being allocated with get_zeroed_page().
+    However, the size of an eCryptfs header is either PAGE_CACHE_SIZE or
+    ECRYPTFS_MINIMUM_HEADER_EXTENT_SIZE (8192), whichever is larger, and is
+    stored in the file's private_data->crypt_stat->num_header_bytes_at_front
+    field.
+    
+    ecryptfs_write_metadata_to_contents() was using
+    num_header_bytes_at_front to decide how many bytes should be written to
+    the lower filesystem for the file header.  Unfortunately, at least 8K
+    was being written from the page, despite the chance of the single,
+    zeroed page being smaller than 8K.  This resulted in random areas of
+    kernel memory being written between the 0x1000 and 0x1FFF bytes offsets
+    in the eCryptfs file headers if PAGE_SIZE was 4K.
+    
+    This patch allocates a variable number of pages, calculated with
+    num_header_bytes_at_front, and passes the number of allocated pages
+    along to ecryptfs_write_metadata_to_contents().
+    
+    Thanks to Florian Streibelt for reporting the data leak and working with
+    me to find the problem.  2.6.28 is the only kernel release with this
+    vulnerability.  Corresponds to CVE-2009-0787
+    
+    Signed-off-by: Tyler Hicks <tyhicks@linux.vnet.ibm.com>
+    Acked-by: Dustin Kirkland <kirkland@canonical.com>
+    Reviewed-by: Eric Sandeen <sandeen@redhat.com>
+    Reviewed-by: Eugene Teo <eugeneteo@kernel.sg>
+    Cc: Greg KH <greg@kroah.com>
+    Cc: dann frazier <dannf@dannf.org>
+    Cc: Serge E. Hallyn <serue@us.ibm.com>
+    Cc: Florian Streibelt <florian@f-streibelt.de>
+    Cc: stable@kernel.org
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+Adjusted to apply to Debian's 2.6.26 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.26.orig/fs/ecryptfs/crypto.c linux-source-2.6.26/fs/ecryptfs/crypto.c
+--- linux-source-2.6.26.orig/fs/ecryptfs/crypto.c	2009-04-04 10:32:41.000000000 -0600
++++ linux-source-2.6.26/fs/ecryptfs/crypto.c	2009-04-04 10:33:51.000000000 -0600
+@@ -1317,14 +1317,13 @@ static int ecryptfs_write_headers_virt(c
+ }
+ 
+ static int
+-ecryptfs_write_metadata_to_contents(struct ecryptfs_crypt_stat *crypt_stat,
+-				    struct dentry *ecryptfs_dentry,
+-				    char *virt)
++ecryptfs_write_metadata_to_contents(struct dentry *ecryptfs_dentry,
++				    char *virt, size_t virt_len)
+ {
+ 	int rc;
+ 
+ 	rc = ecryptfs_write_lower(ecryptfs_dentry->d_inode, virt,
+-				  0, crypt_stat->num_header_bytes_at_front);
++				  0, virt_len);
+ 	if (rc)
+ 		printk(KERN_ERR "%s: Error attempting to write header "
+ 		       "information to lower file; rc = [%d]\n", __func__,
+@@ -1334,7 +1333,6 @@ ecryptfs_write_metadata_to_contents(stru
+ 
+ static int
+ ecryptfs_write_metadata_to_xattr(struct dentry *ecryptfs_dentry,
+-				 struct ecryptfs_crypt_stat *crypt_stat,
+ 				 char *page_virt, size_t size)
+ {
+ 	int rc;
+@@ -1344,6 +1342,17 @@ ecryptfs_write_metadata_to_xattr(struct 
+ 	return rc;
+ }
+ 
++static unsigned long ecryptfs_get_zeroed_pages(gfp_t gfp_mask,
++					       unsigned int order)
++{
++	struct page *page;
++
++	page = alloc_pages(gfp_mask | __GFP_ZERO, order);
++	if (page)
++		return (unsigned long) page_address(page);
++	return 0;
++}
++
+ /**
+  * ecryptfs_write_metadata
+  * @ecryptfs_dentry: The eCryptfs dentry
+@@ -1360,7 +1369,9 @@ int ecryptfs_write_metadata(struct dentr
+ {
+ 	struct ecryptfs_crypt_stat *crypt_stat =
+ 		&ecryptfs_inode_to_private(ecryptfs_dentry->d_inode)->crypt_stat;
++	unsigned int order;
+ 	char *virt;
++	size_t virt_len;
+ 	size_t size = 0;
+ 	int rc = 0;
+ 
+@@ -1376,33 +1387,35 @@ int ecryptfs_write_metadata(struct dentr
+ 		rc = -EINVAL;
+ 		goto out;
+ 	}
++	virt_len = crypt_stat->num_header_bytes_at_front;
++	order = get_order(virt_len);
+ 	/* Released in this function */
+-	virt = (char *)get_zeroed_page(GFP_KERNEL);
++	virt = (char *)ecryptfs_get_zeroed_pages(GFP_KERNEL, order);
+ 	if (!virt) {
+ 		printk(KERN_ERR "%s: Out of memory\n", __func__);
+ 		rc = -ENOMEM;
+ 		goto out;
+ 	}
+-	rc = ecryptfs_write_headers_virt(virt, PAGE_CACHE_SIZE, &size,
+-					 crypt_stat, ecryptfs_dentry);
++	rc = ecryptfs_write_headers_virt(virt, virt_len, &size, crypt_stat,
++					 ecryptfs_dentry);
+ 	if (unlikely(rc)) {
+ 		printk(KERN_ERR "%s: Error whilst writing headers; rc = [%d]\n",
+ 		       __func__, rc);
+ 		goto out_free;
+ 	}
+ 	if (crypt_stat->flags & ECRYPTFS_METADATA_IN_XATTR)
+-		rc = ecryptfs_write_metadata_to_xattr(ecryptfs_dentry,
+-						      crypt_stat, virt, size);
++		rc = ecryptfs_write_metadata_to_xattr(ecryptfs_dentry, virt,
++						      size);
+ 	else
+-		rc = ecryptfs_write_metadata_to_contents(crypt_stat,
+-							 ecryptfs_dentry, virt);
++		rc = ecryptfs_write_metadata_to_contents(ecryptfs_dentry, virt,
++							 virt_len);
+ 	if (rc) {
+ 		printk(KERN_ERR "%s: Error writing metadata out to lower file; "
+ 		       "rc = [%d]\n", __func__, rc);
+ 		goto out_free;
+ 	}
+ out_free:
+-	free_page((unsigned long)virt);
++	free_pages((unsigned long)virt, order);
+ out:
+ 	return rc;
+ }

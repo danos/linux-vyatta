@@ -1,0 +1,90 @@
+commit 87b811c3f96559e466403e22b1fa99d472571625
+Author: Eric Sandeen <sandeen@redhat.com>
+Date:   Wed Oct 29 14:01:08 2008 -0700
+
+    ecryptfs: fix memory corruption when storing crypto info in xattrs
+    
+    When ecryptfs allocates space to write crypto headers into, before copying
+    it out to file headers or to xattrs, it looks at the value of
+    crypt_stat->num_header_bytes_at_front to determine how much space it
+    needs.  This is also used as the file offset to the actual encrypted data,
+    so for xattr-stored crypto info, the value was zero.
+    
+    So, we kzalloc'd 0 bytes, and then ran off to write to that memory.
+    (Which returned as ZERO_SIZE_PTR, so we explode quickly).
+    
+    The right answer is to always allocate a page to write into; the current
+    code won't ever write more than that (this is enforced by the
+    (PAGE_CACHE_SIZE - offset) length in the call to
+    ecryptfs_generate_key_packet_set).  To be explicit about this, we now send
+    in a "max" parameter, rather than magically using PAGE_CACHE_SIZE there.
+    
+    Also, since the pointer we pass down the callchain eventually gets the
+    virt_to_page() treatment, we should be using a alloc_page variant, not
+    kzalloc (see also 7fcba054373d5dfc43d26e243a5c9b92069972ee)
+    
+    Signed-off-by: Eric Sandeen <sandeen@redhat.com>
+    Acked-by: Michael Halcrow <mhalcrow@us.ibm.com>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+Adjusted to apply to Debian's 2.6.26 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.26.orig/fs/ecryptfs/crypto.c linux-source-2.6.26/fs/ecryptfs/crypto.c
+--- linux-source-2.6.26.orig/fs/ecryptfs/crypto.c	2009-03-25 17:20:38.000000000 -0600
++++ linux-source-2.6.26/fs/ecryptfs/crypto.c	2009-04-04 10:32:41.000000000 -0600
+@@ -1258,6 +1258,7 @@ struct kmem_cache *ecryptfs_header_cache
+ /**
+  * ecryptfs_write_headers_virt
+  * @page_virt: The virtual address to write the headers to
++ * @max: The size of memory allocated at page_virt
+  * @size: Set to the number of bytes written by this function
+  * @crypt_stat: The cryptographic context
+  * @ecryptfs_dentry: The eCryptfs dentry
+@@ -1285,7 +1286,8 @@ struct kmem_cache *ecryptfs_header_cache
+  *
+  * Returns zero on success
+  */
+-static int ecryptfs_write_headers_virt(char *page_virt, size_t *size,
++static int ecryptfs_write_headers_virt(char *page_virt, size_t max,
++				       size_t *size,
+ 				       struct ecryptfs_crypt_stat *crypt_stat,
+ 				       struct dentry *ecryptfs_dentry)
+ {
+@@ -1303,7 +1305,7 @@ static int ecryptfs_write_headers_virt(c
+ 	offset += written;
+ 	rc = ecryptfs_generate_key_packet_set((page_virt + offset), crypt_stat,
+ 					      ecryptfs_dentry, &written,
+-					      PAGE_CACHE_SIZE - offset);
++					      max - offset);
+ 	if (rc)
+ 		ecryptfs_printk(KERN_WARNING, "Error generating key packet "
+ 				"set; rc = [%d]\n", rc);
+@@ -1375,14 +1377,14 @@ int ecryptfs_write_metadata(struct dentr
+ 		goto out;
+ 	}
+ 	/* Released in this function */
+-	virt = kzalloc(crypt_stat->num_header_bytes_at_front, GFP_KERNEL);
++	virt = (char *)get_zeroed_page(GFP_KERNEL);
+ 	if (!virt) {
+ 		printk(KERN_ERR "%s: Out of memory\n", __func__);
+ 		rc = -ENOMEM;
+ 		goto out;
+ 	}
+-	rc = ecryptfs_write_headers_virt(virt, &size, crypt_stat,
+-					 ecryptfs_dentry);
++	rc = ecryptfs_write_headers_virt(virt, PAGE_CACHE_SIZE, &size,
++					 crypt_stat, ecryptfs_dentry);
+ 	if (unlikely(rc)) {
+ 		printk(KERN_ERR "%s: Error whilst writing headers; rc = [%d]\n",
+ 		       __func__, rc);
+@@ -1400,8 +1402,7 @@ int ecryptfs_write_metadata(struct dentr
+ 		goto out_free;
+ 	}
+ out_free:
+-	memset(virt, 0, crypt_stat->num_header_bytes_at_front);
+-	kfree(virt);
++	free_page((unsigned long)virt);
+ out:
+ 	return rc;
+ }
