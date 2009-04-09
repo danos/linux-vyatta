@@ -1,0 +1,75 @@
+From 0ff728ef0d9d23987bb9b4e79772fda6fb466aef Mon Sep 17 00:00:00 2001
+From: Pavel Emelyanov <xemul@openvz.org>
+Date: Fri, 3 Apr 2009 17:59:56 +0400
+Subject: [PATCH 82/82] ve: show task's vpid and veid even inside a container
+
+Getting task real virtual :) pid is tricky in 2.6.26 and above...
+
+http://bugzilla.openvz.org/show_bug.cgi?id=1223
+http://bugzilla.openvz.org/show_bug.cgi?id=1224
+
+Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+---
+ fs/proc/array.c |   26 ++++++++++++++++++--------
+ 1 files changed, 18 insertions(+), 8 deletions(-)
+
+diff --git a/fs/proc/array.c b/fs/proc/array.c
+index 39fa215..9e42b20 100644
+--- a/fs/proc/array.c
++++ b/fs/proc/array.c
+@@ -159,19 +159,33 @@ static inline const char *get_task_state(struct task_struct *tsk)
+ 	return *p;
+ }
+ 
++static int task_virtual_pid(struct task_struct *t)
++{
++	struct pid *pid;
++
++	pid = task_pid(t);
++	/*
++	 * this will give wrong result for tasks,
++	 * that failed to enter VE, but that's OK
++	 */
++	return pid ? pid->numbers[pid->level].nr : 0;
++}
++
+ static inline void task_state(struct seq_file *m, struct pid_namespace *ns,
+ 				struct pid *pid, struct task_struct *p)
+ {
+ 	struct group_info *group_info;
+ 	int g;
+ 	struct fdtable *fdt = NULL;
+-	pid_t ppid, tpid;
++	pid_t ppid, tpid, vpid;
+ 
+ 	rcu_read_lock();
+ 	ppid = pid_alive(p) ?
+ 		task_tgid_nr_ns(rcu_dereference(p->real_parent), ns) : 0;
+ 	tpid = pid_alive(p) && p->ptrace ?
+ 		task_pid_nr_ns(rcu_dereference(p->parent), ns) : 0;
++	vpid = task_virtual_pid(p);
++
+ 	seq_printf(m,
+ 		"State:\t%s\n"
+ 		"Tgid:\t%d\n"
+@@ -206,14 +220,10 @@ static inline void task_state(struct seq_file *m, struct pid_namespace *ns,
+ 
+ 	seq_printf(m, "\n");
+ 
+-#ifdef CONFIG_VE
+-	if (ve_is_super(get_exec_env())) {
+-		seq_printf(m, "envID:\t%d\nVPid:\t%d\n",
+-			p->ve_task_info.owner_env->veid, task_pid_vnr(p));
+-		seq_printf(m, "PNState:\t%u\nStopState:\t%u\n",
++	seq_printf(m, "envID:\t%d\nVPid:\t%d\n",
++			p->ve_task_info.owner_env->veid, vpid);
++	seq_printf(m, "PNState:\t%u\nStopState:\t%u\n",
+ 			p->pn_state, p->stopped_state);
+-	}
+-#endif
+ }
+ 
+ static void render_sigset_t(struct seq_file *m, const char *header,
+-- 
+1.6.2.2
+

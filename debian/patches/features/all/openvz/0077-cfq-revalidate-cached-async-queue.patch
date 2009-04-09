@@ -1,0 +1,111 @@
+From 7e0f90d2f2d221e66d64e61ee3c4b3b83c2545de Mon Sep 17 00:00:00 2001
+From: Konstantin Khlebnikov <khlebnikov@openvz.org>
+Date: Fri, 27 Mar 2009 15:01:41 +0300
+Subject: [PATCH 77/82] cfq: revalidate cached async queue
+
+Async queues are stored on struct cfq_bc_data
+and are cached on per-process struct cfq_io_context.
+
+The cached queue may be invalid due to io_page beancounter
+driven io-context switch.
+
+So, cfq_io_context gets cached queue, but corresponding
+cfq_bc and user_beancounter may be already destroyed -- all
+this leads to oops at get_beancounter in cfq_set_request.
+
+Add check for async queue owner and refill cache if it invalid.
+
+The oops itself is like this:
+
+BUG: unable to handle kernel paging request at ffffffffffffff20
+IP: [<ffffffff81108f48>] cfq_set_request+0x362/0x3ef
+PGD 203067 PUD 204067 PMD 0
+Oops: 0002 [1] SMP
+CPU: 1
+Modules linked in: vzcpt tun simfs vzethdev vznetdev vzdquota vzmon vzdev ipt_MASQUERADE iptable_nat nf_nat nf_conntrack_ipv4 nf_conntrack ip_tables x_tables ipv6 bridge stp k8temp button shpchp amd_rng hwmon i2c_amd8111 i2c_amd756 i2c_core pcspkr ext3 jbd mbcache sg sr_mod cdrom sd_mod pata_acpi ata_generic sata_sil ohci_hcd pata_amd aic79xx scsi_transport_spi libata scsi_mod dm_mirror dm_log dm_snapshot dm_mod netconsole configfs tg3 libphy
+Pid: 210, comm: pdflush Not tainted 2.6.27-briullov.1 #1 briullov
+RIP: 0010:[<ffffffff81108f48>]  [<ffffffff81108f48>] cfq_set_request+0x362/0x3ef
+RSP: 0018:ffff88003f5f5890  EFLAGS: 00010297
+RAX: 0000000000000000 RBX: ffff88007f912630 RCX: 0000000000000001
+RDX: ffff88003dde0000 RSI: 0000000000000286 RDI: ffff88003dde0230
+RBP: ffff88007f902b28 R08: 0000000000000000 R09: ffff88007dcd1690
+R10: 0000000000000001 R11: ffffffff81108be6 R12: 0000000000000286
+R13: ffff88003e0ddc00 R14: 0000000000000001 R15: 0000000000000010
+FS:  00007f5db3cb66e0(0000) GS:ffff88007f633200(0000) knlGS:00000000b7de16c0
+CS:  0010 DS: 0018 ES: 0018 CR0: 000000008005003b
+CR2: ffffffffffffff20 CR3: 0000000076101000 CR4: 00000000000006a0
+DR0: 0000000000000000 DR1: 0000000000000000 DR2: 0000000000000000
+DR3: 0000000000000000 DR6: 00000000ffff0ff0 DR7: 0000000000000400
+Process pdflush (pid: 210, veid=0, threadinfo ffff88003f5f4000, task ffff88003fef0ea0)
+Stack:  ffff88007f902b28 ffff88003e0dde00 0000000100000000 ffff88007dcd1690
+ ffff88003dde0000 ffff88007dcd1690 ffff88003dde0000 0000000000000001
+ ffff88003dde0020 0000000000000001 0000000000000000 ffffffff810fd08b
+Call Trace:
+ [<ffffffff810fd08b>] ? get_request+0x252/0x35e
+ [<ffffffff810fd1cb>] ? get_request_wait+0x34/0x16d
+ [<ffffffffa0037abe>] ? __split_bio+0x3ea/0x3fd [dm_mod]
+ [<ffffffff81108506>] ? cfq_insert_request+0x5d/0x32e
+ [<ffffffff810fe638>] ? __make_request+0x352/0x3da
+ [<ffffffff810fd8b8>] ? generic_make_request+0x2f6/0x331
+ [<ffffffff8106d1d2>] ? mempool_alloc+0x3c/0xf4
+ [<ffffffff810fda2e>] ? submit_bio+0x13b/0x146
+ [<ffffffff810b92a6>] ? submit_bh+0xd5/0xf6
+ [<ffffffff810b9d18>] ? __block_write_full_page+0x1a5/0x28e
+ [<ffffffffa013ee5a>] ? ext3_get_block+0x0/0x102 [ext3]
+ [<ffffffffa013ce03>] ? ext3_ordered_writepage+0xba/0x134 [ext3]
+ [<ffffffff81071a98>] ? __writepage+0xa/0x21
+ [<ffffffff810720dd>] ? write_cache_pages+0x216/0x347
+ [<ffffffff81071a8e>] ? __writepage+0x0/0x21
+ [<ffffffff81264c90>] ? thread_return+0x3e/0xfe
+ [<ffffffff810483e5>] ? getnstimeofday+0x51/0xaf
+ [<ffffffff81072251>] ? do_writepages+0x27/0x2d
+ [<ffffffff810b4bf7>] ? __writeback_single_inode+0x15c/0x2c9
+ [<ffffffff8102cc69>] ? update_curr+0x40/0x7c
+ [<ffffffff8102cfc9>] ? dequeue_entity+0x6f/0x9f
+ [<ffffffff81025066>] ? __dequeue_entity+0x1f/0x64
+ [<ffffffffa0039b6b>] ? dm_table_any_congested+0x12/0x65 [dm_mod]
+ [<ffffffff810b4f33>] ? generic_sync_sb_inodes+0x1cf/0x312
+ [<ffffffff81072505>] ? pdflush+0x0/0x1f3
+ [<ffffffff810b50e4>] ? writeback_inodes+0x69/0xa2
+ [<ffffffff81071808>] ? background_writeout+0x7a/0xb5
+ [<ffffffff8107264a>] ? pdflush+0x145/0x1f3
+ [<ffffffff8107178e>] ? background_writeout+0x0/0xb5
+ [<ffffffff81042df7>] ? kthread+0x94/0xbb
+ [<ffffffff8100cea9>] ? child_rip+0xa/0x11
+ [<ffffffff81042d63>] ? kthread+0x0/0xbb
+ [<ffffffff8100ce9f>] ? child_rip+0x0/0x11
+
+Code: e8 23 d6 15 00 48 8b 44 24 18 48 89 a8 90 00 00 00 48 89 98 98 00 00 00 48 8b 83 88 00 00 00 48 8b 40 28 48 3d e8 00 00 00 74 07 <f0> ff 80 20 ff ff ff 31 c0 eb 73 48 85 ed 74 09 48 8b 7d 20 e8
+RIP  [<ffffffff81108f48>] cfq_set_request+0x362/0x3ef
+ RSP <ffff88003f5f5890>
+CR2: ffffffffffffff20
+---[ end trace f8088dc30c5423c2 ]---
+
+Signed-off-by: Konstantin Khlebnikov <khlebnikov@openvz.org>
+Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+---
+ block/cfq-iosched.c |    8 ++++++++
+ 1 files changed, 8 insertions(+), 0 deletions(-)
+
+diff --git a/block/cfq-iosched.c b/block/cfq-iosched.c
+index 264a086..b25b442 100644
+--- a/block/cfq-iosched.c
++++ b/block/cfq-iosched.c
+@@ -2038,6 +2038,14 @@ cfq_set_request(struct request_queue *q, struct request *rq, gfp_t gfp_mask)
+ 		cic_set_cfqq(cic, cfqq, is_sync);
+ 	}
+ 
++	if (!is_sync && cfqq->cfq_bc != cfq_bc) {
++		cfq_put_queue(cfqq);
++		cfqq = cfq_get_queue(cfqd, is_sync, cic->ioc, gfp_mask);
++		cic_set_cfqq(cic, cfqq, is_sync);
++		if (!cfqq)
++			goto queue_fail;
++	}
++
+ 	cfqq->allocated[rw]++;
+ 	cfq_clear_cfqq_must_alloc(cfqq);
+ 	atomic_inc(&cfqq->ref);
+-- 
+1.6.2.2
+
