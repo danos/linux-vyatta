@@ -1,0 +1,56 @@
+commit 54af3bb543c071769141387a42deaaab5074da55
+Author: Trond Myklebust <Trond.Myklebust@netapp.com>
+Date:   Fri Sep 28 12:27:41 2007 -0400
+
+    NFS: Fix an Oops in encode_lookup()
+    
+    It doesn't look as if the NFS file name limit is being initialised correctly
+    in the struct nfs_server. Make sure that we limit whatever is being set in
+    nfs_probe_fsinfo() and nfs_init_server().
+    
+    Also ensure that readdirplus and nfs4_path_walk respect our file name
+    limits.
+    
+    Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+Backported to Debian's 2.6.18 by dann frazier <dannf@debian.org>
+Based upon the RHEL4 backport by Sachin Prabhu
+
+diff -urpN linux-source-2.6.18.orig/fs/nfs/dir.c linux-source-2.6.18/fs/nfs/dir.c
+--- linux-source-2.6.18.orig/fs/nfs/dir.c	2008-12-25 14:04:12.000000000 -0700
++++ linux-source-2.6.18/fs/nfs/dir.c	2009-04-18 15:49:55.000000000 -0600
+@@ -1113,6 +1113,8 @@ static struct dentry *nfs_readdir_lookup
+ 		return dentry;
+ 	if (!desc->plus || !(entry->fattr->valid & NFS_ATTR_FATTR))
+ 		return NULL;
++	if (name.len > NFS_SERVER(dir)->namelen)
++		return NULL;
+ 	/* Note: caller is already holding the dir->i_mutex! */
+ 	dentry = d_alloc(parent, &name);
+ 	if (dentry == NULL)
+diff -urpN linux-source-2.6.18.orig/fs/nfs/nfs4proc.c linux-source-2.6.18/fs/nfs/nfs4proc.c
+--- linux-source-2.6.18.orig/fs/nfs/nfs4proc.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/fs/nfs/nfs4proc.c	2009-04-18 15:53:22.000000000 -0600
+@@ -1437,6 +1437,8 @@ static int nfs4_proc_get_root(struct nfs
+ 		while (*p && (*p != '/'))
+ 			p++;
+ 		q.len = p - q.name;
++		if (q.len > NFS4_MAXNAMLEN)
++			return -ENAMETOOLONG;
+ 
+ 		do {
+ 			nfs_fattr_init(fattr);
+diff -urpN linux-source-2.6.18.orig/fs/nfs/super.c linux-source-2.6.18/fs/nfs/super.c
+--- linux-source-2.6.18.orig/fs/nfs/super.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/fs/nfs/super.c	2009-04-18 15:52:24.000000000 -0600
+@@ -1254,6 +1254,9 @@ static int nfs4_fill_super(struct super_
+ 			goto out_fail;
+ 	}
+ 
++	if (server->namelen == 0 || server->namelen > NFS4_MAXNAMLEN)
++		server->namelen = NFS4_MAXNAMELEN;
++
+ 	sb->s_time_gran = 1;
+ 
+ 	sb->s_op = &nfs4_sops;
