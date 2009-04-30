@@ -1,0 +1,65 @@
+From: John Wright <john.wright@hp.com>
+Date: Wed, 29 Apr 2009 20:32:01 +0000 (-0600)
+Subject: x86: gettimeofday() vDSO: fix segfault when tv == NULL
+X-Git-Url: http://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Ftip%2Flinux-2.6-tip.git;a=commitdiff_plain;h=2f65dd475c6a8a997145ea83cc3d2d5e6dc55af1
+
+x86: gettimeofday() vDSO: fix segfault when tv == NULL
+
+According to the gettimeofday(2) manual:
+
+       If either tv or tz is NULL, the corresponding structure is not
+       set or returned.
+
+Since it is legal to give NULL as the tv argument, the code should make
+sure tv is not NULL before trying to dereference it.
+
+This issue manifests itself on x86_64 when vdso=0 is not on the kernel
+command-line and libc uses the vDSO for gettimeofday() (e.g. glibc >=
+2.7).  A simple reproducer:
+
+  #include <stdio.h>
+  #include <sys/time.h>
+
+  int main(void)
+  {
+      struct timezone tz;
+
+      gettimeofday(NULL, &tz);
+
+      return 0;
+  }
+
+See http://bugs.debian.org/466491 for more details.
+
+[ Impact: fix gettimeofday(NULL, &tz) segfault ]
+
+Signed-off-by: John Wright <john.wright@hp.com>
+Cc: Andi Kleen <ak@suse.de>
+Cc: John Wright <john.wright@hp.com>
+LKML-Reference: <1241037121-14805-1-git-send-email-john.wright@hp.com>
+Signed-off-by: Ingo Molnar <mingo@elte.hu>
+---
+
+diff --git a/arch/x86/vdso/vclock_gettime.c b/arch/x86/vdso/vclock_gettime.c
+index d9d3582..6a40b78 100644
+--- a/arch/x86/vdso/vclock_gettime.c
++++ b/arch/x86/vdso/vclock_gettime.c
+@@ -104,11 +104,13 @@ notrace int __vdso_gettimeofday(struct timeval *tv, struct timezone *tz)
+ {
+ 	long ret;
+ 	if (likely(gtod->sysctl_enabled && gtod->clock.vread)) {
+-		BUILD_BUG_ON(offsetof(struct timeval, tv_usec) !=
+-			     offsetof(struct timespec, tv_nsec) ||
+-			     sizeof(*tv) != sizeof(struct timespec));
+-		do_realtime((struct timespec *)tv);
+-		tv->tv_usec /= 1000;
++		if (likely(tv != NULL)) {
++			BUILD_BUG_ON(offsetof(struct timeval, tv_usec) !=
++				     offsetof(struct timespec, tv_nsec) ||
++				     sizeof(*tv) != sizeof(struct timespec));
++			do_realtime((struct timespec *)tv);
++			tv->tv_usec /= 1000;
++		}
+ 		if (unlikely(tz != NULL)) {
+ 			/* Avoid memcpy. Some old compilers fail to inline it */
+ 			tz->tz_minuteswest = gtod->sys_tz.tz_minuteswest;
