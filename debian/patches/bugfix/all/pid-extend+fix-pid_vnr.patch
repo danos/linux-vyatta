@@ -1,0 +1,92 @@
+commit 44c4e1b2581f7273ab14ef30b6430618801c57b1
+Author: Eric W. Biederman <ebiederm@xmission.com>
+Date:   Fri Feb 8 04:19:15 2008 -0800
+
+    pid: Extend/Fix pid_vnr
+    
+    pid_vnr returns the user space pid with respect to the pid namespace the
+    struct pid was allocated in.  What we want before we return a pid to user
+    space is the user space pid with respect to the pid namespace of current.
+    
+    pid_vnr is a very nice optimization but because it isn't quite what we want
+    it is easy to use pid_vnr at times when we aren't certain the struct pid
+    was allocated in our pid namespace.
+    
+    Currently this describes at least tiocgpgrp and tiocgsid in ttyio.c the
+    parent process reported in the core dumps and the parent process in
+    get_signal_to_deliver.
+    
+    So unless the performance impact is huge having an interface that does what
+    we want instead of always what we want should be much more reliable and
+    much less error prone.
+    
+    Signed-off-by: Eric W. Biederman <ebiederm@xmission.com>
+    Cc: Oleg Nesterov <oleg@tv-sign.ru>
+    Acked-by: Pavel Emelyanov <xemul@openvz.org>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+Adjusted to apply to Debian's 2.6.24 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.24.orig/include/linux/pid.h linux-source-2.6.24/include/linux/pid.h
+--- linux-source-2.6.24.orig/include/linux/pid.h	2008-01-24 15:58:37.000000000 -0700
++++ linux-source-2.6.24/include/linux/pid.h	2009-04-20 21:28:24.000000000 -0600
+@@ -127,9 +127,8 @@ extern void zap_pid_ns_processes(struct 
+  * the helpers to get the pid's id seen from different namespaces
+  *
+  * pid_nr()    : global id, i.e. the id seen from the init namespace;
+- * pid_vnr()   : virtual id, i.e. the id seen from the namespace this pid
+- *               belongs to. this only makes sence when called in the
+- *               context of the task that belongs to the same namespace;
++ * pid_vnr()   : virtual id, i.e. the id seen from the pid namespace of
++ *               current.
+  * pid_nr_ns() : id seen from the ns specified.
+  *
+  * see also task_xid_nr() etc in include/linux/sched.h
+@@ -144,14 +143,7 @@ static inline pid_t pid_nr(struct pid *p
+ }
+ 
+ pid_t pid_nr_ns(struct pid *pid, struct pid_namespace *ns);
+-
+-static inline pid_t pid_vnr(struct pid *pid)
+-{
+-	pid_t nr = 0;
+-	if (pid)
+-		nr = pid->numbers[pid->level].nr;
+-	return nr;
+-}
++pid_t pid_vnr(struct pid *pid);
+ 
+ #define do_each_pid_task(pid, type, task)				\
+ 	do {								\
+diff -urpN linux-source-2.6.24.orig/include/linux/sched.h linux-source-2.6.24/include/linux/sched.h
+--- linux-source-2.6.24.orig/include/linux/sched.h	2009-04-11 14:35:47.000000000 -0600
++++ linux-source-2.6.24/include/linux/sched.h	2009-04-20 21:28:24.000000000 -0600
+@@ -1252,9 +1252,8 @@ struct pid_namespace;
+  * from various namespaces
+  *
+  * task_xid_nr()     : global id, i.e. the id seen from the init namespace;
+- * task_xid_vnr()    : virtual id, i.e. the id seen from the namespace the task
+- *                     belongs to. this only makes sence when called in the
+- *                     context of the task that belongs to the same namespace;
++ * task_xid_vnr()    : virtual id, i.e. the id seen from the pid namespace of
++ *                     current.
+  * task_xid_nr_ns()  : id seen from the ns specified;
+  *
+  * set_task_vxid()   : assigns a virtual id to a task;
+diff -urpN linux-source-2.6.24.orig/kernel/pid.c linux-source-2.6.24/kernel/pid.c
+--- linux-source-2.6.24.orig/kernel/pid.c	2008-01-24 15:58:37.000000000 -0700
++++ linux-source-2.6.24/kernel/pid.c	2009-04-20 21:28:24.000000000 -0600
+@@ -443,6 +443,12 @@ pid_t pid_nr_ns(struct pid *pid, struct 
+ 	return nr;
+ }
+ 
++pid_t pid_vnr(struct pid *pid)
++{
++	return pid_nr_ns(pid, current->nsproxy->pid_ns);
++}
++EXPORT_SYMBOL_GPL(pid_vnr);
++
+ pid_t task_pid_nr_ns(struct task_struct *tsk, struct pid_namespace *ns)
+ {
+ 	return pid_nr_ns(task_pid(tsk), ns);
