@@ -1,0 +1,46 @@
+commit a68e61e8ff2d46327a37b69056998b47745db6fa
+Author: Tony Battersby <tonyb@cybernetics.com>
+Date:   Wed Feb 4 15:12:04 2009 -0800
+
+    shm: fix shmctl(SHM_INFO) lockup with !CONFIG_SHMEM
+    
+    shm_get_stat() assumes that the inode is a "struct shmem_inode_info",
+    which is incorrect for !CONFIG_SHMEM (see fs/ramfs/inode.c:
+    ramfs_get_inode() vs.  mm/shmem.c: shmem_get_inode()).
+    
+    This bad assumption can cause shmctl(SHM_INFO) to lockup when
+    shm_get_stat() tries to spin_lock(&info->lock).  Users of !CONFIG_SHMEM
+    may encounter this lockup simply by invoking the 'ipcs' command.
+    
+    Reported by Jiri Olsa back in February 2008:
+    http://lkml.org/lkml/2008/2/29/74
+    
+    Signed-off-by: Tony Battersby <tonyb@cybernetics.com>
+    Cc: Jiri Kosina <jkosina@suse.cz>
+    Reported-by: Jiri Olsa <olsajiri@gmail.com>
+    Cc: Hugh Dickins <hugh@veritas.com>
+    Cc: <stable@kernel.org>		[2.6.everything]
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+Adjusted to apply to Debian's 2.6.26 by dann frazier <dannf@debian.org
+
+diff -urpN linux-source-2.6.26.orig/ipc/shm.c linux-source-2.6.26/ipc/shm.c
+--- linux-source-2.6.26.orig/ipc/shm.c	2009-03-25 17:20:41.000000000 -0600
++++ linux-source-2.6.26/ipc/shm.c	2009-04-04 15:13:27.000000000 -0600
+@@ -579,11 +579,15 @@ static void shm_get_stat(struct ipc_name
+ 			struct address_space *mapping = inode->i_mapping;
+ 			*rss += (HPAGE_SIZE/PAGE_SIZE)*mapping->nrpages;
+ 		} else {
++#ifdef CONFIG_SHMEM
+ 			struct shmem_inode_info *info = SHMEM_I(inode);
+ 			spin_lock(&info->lock);
+ 			*rss += inode->i_mapping->nrpages;
+ 			*swp += info->swapped;
+ 			spin_unlock(&info->lock);
++#else
++			*rss += inode->i_mapping->nrpages;
++#endif
+ 		}
+ 
+ 		total++;

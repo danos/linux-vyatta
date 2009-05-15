@@ -1,0 +1,35 @@
+commit 878b8619f711280fd05845e21956434b5e588cc4
+Author: Mikulas Patocka <mpatocka@redhat.com>
+Date:   Fri Jan 30 15:27:14 2009 -0500
+
+    Fix memory corruption in console selection
+    
+    Fix an off-by-two memory error in console selection.
+    
+    The loop below goes from sel_start to sel_end (inclusive), so it writes
+    one more character.  This one more character was added to the allocated
+    size (+1), but it was not multiplied by an UTF-8 multiplier.
+    
+    This patch fixes a memory corruption when UTF-8 console is used and the
+    user selects a few characters, all of them 3-byte in UTF-8 (for example
+    a frame line).
+    
+    When memory redzones are enabled, a redzone corruption is reported.
+    When they are not enabled, trashing of random memory occurs.
+    
+    Signed-off-by: Mikulas Patocka <mpatocka@redhat.com>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/drivers/char/selection.c b/drivers/char/selection.c
+index f29fbe9..cb8ca56 100644
+--- a/drivers/char/selection.c
++++ b/drivers/char/selection.c
+@@ -268,7 +268,7 @@ int set_selection(const struct tiocl_selection __user *sel, struct tty_struct *t
+ 
+ 	/* Allocate a new buffer before freeing the old one ... */
+ 	multiplier = use_unicode ? 3 : 1;  /* chars can take up to 3 bytes */
+-	bp = kmalloc((sel_end-sel_start)/2*multiplier+1, GFP_KERNEL);
++	bp = kmalloc(((sel_end-sel_start)/2+1)*multiplier, GFP_KERNEL);
+ 	if (!bp) {
+ 		printk(KERN_WARNING "selection: kmalloc() failed\n");
+ 		clear_selection();
