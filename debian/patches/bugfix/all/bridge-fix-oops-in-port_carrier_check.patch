@@ -1,0 +1,58 @@
+commit a10d567c89dfba90dde2e0515e25760fd74cde06
+Author: Jarek Poplawski <jarkao2@o2.pl>
+Date:   Tue Feb 13 12:35:26 2007 -0800
+
+    [BRIDGE] br_if: Fix oops in port_carrier_check
+    
+    Signed-off-by: Jarek Poplawski <jarkao2@o2.pl>
+    Acked-by: Stephen Hemminger <shemminger@linux-foundation.org>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/bridge/br_if.c b/net/bridge/br_if.c
+index f35c1a3..aff6a77 100644
+--- a/net/bridge/br_if.c
++++ b/net/bridge/br_if.c
+@@ -108,6 +108,7 @@ static void port_carrier_check(struct work_struct *work)
+ 		spin_unlock_bh(&br->lock);
+ 	}
+ done:
++	dev_put(dev);
+ 	rtnl_unlock();
+ }
+ 
+@@ -161,7 +162,8 @@ static void del_nbp(struct net_bridge_port *p)
+ 
+ 	dev_set_promiscuity(dev, -1);
+ 
+-	cancel_delayed_work(&p->carrier_check);
++	if (cancel_delayed_work(&p->carrier_check))
++		dev_put(dev);
+ 
+ 	spin_lock_bh(&br->lock);
+ 	br_stp_disable_port(p);
+@@ -444,7 +446,9 @@ int br_add_if(struct net_bridge *br, struct net_device *dev)
+ 	spin_lock_bh(&br->lock);
+ 	br_stp_recalculate_bridge_id(br);
+ 	br_features_recompute(br);
+-	schedule_delayed_work(&p->carrier_check, BR_PORT_DEBOUNCE);
++	if (schedule_delayed_work(&p->carrier_check, BR_PORT_DEBOUNCE))
++		dev_hold(dev);
++
+ 	spin_unlock_bh(&br->lock);
+ 
+ 	dev_set_mtu(br->dev, br_min_mtu(br));
+diff --git a/net/bridge/br_notify.c b/net/bridge/br_notify.c
+index 8cd3e42..3311c4e 100644
+--- a/net/bridge/br_notify.c
++++ b/net/bridge/br_notify.c
+@@ -56,7 +56,9 @@ static int br_device_event(struct notifier_block *unused, unsigned long event, v
+ 
+ 	case NETDEV_CHANGE:
+ 		if (br->dev->flags & IFF_UP)
+-			schedule_delayed_work(&p->carrier_check, BR_PORT_DEBOUNCE);
++			if (schedule_delayed_work(&p->carrier_check,
++						BR_PORT_DEBOUNCE))
++				dev_hold(dev);
+ 		break;
+ 
+ 	case NETDEV_FEAT_CHANGE:
