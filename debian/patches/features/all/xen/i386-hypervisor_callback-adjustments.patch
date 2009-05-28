@@ -12,7 +12,7 @@ perhaps crash) the kernel.
 
 Further adjustments:
 - the 'main' critical region does not include the jmp following the
-  disabling of interrupts
+  disabling of interrupts [ijc: removed from backport]
 - the sysexit_[se]crit range checks got broken at some point - the
   sysexit ciritcal region is always at higher addresses than the
   'main'
@@ -23,25 +23,25 @@ Further adjustments:
   seemed pretty fragile to me, so the patch replaces this with a local
   named label
 - streamlined the critical_region_fixup code to eliminate a branch
+  [ijc: removed from backport]
 
 Signed-off-by: Jan Beulich <jbeulich@novell.com>
 
-Backported to Debian's 2.6.26 by dann frazier <dannf@debian.org>
+Backported to Debian's 2.6.26 and reduced to minimal fix by
+dann frazier <dannf@debian.org> and Ian Campbell <ijc@hellion.org.uk>
 
-diff -urpN a/arch/x86/kernel/entry_32-xen.S b/arch/x86/kernel/entry_32-xen.S
---- a/arch/x86/kernel/entry_32-xen.S	2009-05-22 16:30:50.000000000 -0600
-+++ b/arch/x86/kernel/entry_32-xen.S	2009-05-22 16:51:18.000000000 -0600
-@@ -522,8 +522,8 @@ scrit:	/**** START OF CRITICAL REGION **
+--- a/arch/x86/kernel/entry_32-xen.S	Thu May 14 10:08:10 2009 +0100
++++ b/arch/x86/kernel/entry_32-xen.S	Thu May 14 10:08:40 2009 +0100
+@@ -522,7 +522,7 @@
  .previous
  14:	__DISABLE_INTERRUPTS
  	TRACE_IRQS_OFF
 -	jmp  11f
- ecrit:  /**** END OF CRITICAL REGION ****/
 +	jmp  .Ldo_upcall
+ ecrit:  /**** END OF CRITICAL REGION ****/
  
  	CFI_RESTORE_STATE
- hypervisor_iret:
-@@ -795,17 +795,23 @@ ENTRY(hypervisor_callback)
+@@ -795,17 +795,23 @@
  	pushl %eax
  	CFI_ADJUST_CFA_OFFSET 4
  	SAVE_ALL
@@ -69,25 +69,7 @@ diff -urpN a/arch/x86/kernel/entry_32-xen.S b/arch/x86/kernel/entry_32-xen.S
  	CFI_ADJUST_CFA_OFFSET 4
  	call evtchn_do_upcall
  	add  $4,%esp
-@@ -821,40 +827,35 @@ ENTRY(hypervisor_callback)
- # provides the number of bytes which have already been popped from the
- # interrupted stack frame.
- critical_region_fixup:
--	movzbl critical_fixup_table-scrit(%eax),%ecx # %eax contains num bytes popped
--	cmpb $0xff,%cl                  # 0xff => vcpu_info critical region
--	jne  15f
--	xorl %ecx,%ecx
--15:	leal (%esp,%ecx),%esi		# %esi points at end of src region
-+	movsbl critical_fixup_table-scrit(%eax),%ecx # %ecx contains num slots popped
-+	testl %ecx,%ecx
-+	leal (%esp,%ecx,4),%esi		# %esi points at end of src region
- 	leal PT_OLDESP(%esp),%edi	# %edi points at end of dst region
--	shrl $2,%ecx			# convert words to bytes
--	je   17f			# skip loop if nothing to copy
-+	jle   17f			# skip loop if nothing to copy
- 16:	subl $4,%esi			# pre-decrementing copy loop
- 	subl $4,%edi
- 	movl (%esi),%eax
+@@ -835,7 +841,7 @@
  	movl %eax,(%edi)
  	loop 16b
  17:	movl %edi,%esp			# final %edi is top of merged stack
@@ -96,36 +78,12 @@ diff -urpN a/arch/x86/kernel/entry_32-xen.S b/arch/x86/kernel/entry_32-xen.S
  
  .section .rodata,"a"
  critical_fixup_table:
--	.byte 0xff,0xff,0xff		# testb $0xff,(%esi) = __TEST_PENDING
--	.byte 0xff,0xff			# jnz  14f
--	.byte 0x00			# pop  %ebx
--	.byte 0x04			# pop  %ecx
--	.byte 0x08			# pop  %edx
--	.byte 0x0c			# pop  %esi
--	.byte 0x10			# pop  %edi
--	.byte 0x14			# pop  %ebp
--	.byte 0x18			# pop  %eax
--	.byte 0x1c			# pop  %ds
--	.byte 0x20			# pop  %es
--	.byte 0x24,0x24			# pop  %fs
--	.byte 0x28,0x28,0x28		# add  $4,%esp
--	.byte 0x2c			# iret
--	.byte 0xff,0xff,0xff,0xff	# movb $1,1(%esi)
+@@ -854,7 +860,7 @@
+ 	.byte 0x28,0x28,0x28		# add  $4,%esp
+ 	.byte 0x2c			# iret
+ 	.byte 0xff,0xff,0xff,0xff	# movb $1,1(%esi)
 -	.byte 0x00,0x00			# jmp  11b
-+	.byte -1,-1,-1			# testb $0xff,(%esi) = __TEST_PENDING
-+	.byte -1,-1			# jnz  14f
-+	.byte 0				# pop  %ebx
-+	.byte 1				# pop  %ecx
-+	.byte 2				# pop  %edx
-+	.byte 3				# pop  %esi
-+	.byte 4				# pop  %edi
-+	.byte 5				# pop  %ebp
-+	.byte 6				# pop  %eax
-+	.byte 7				# pop  %ds
-+	.byte 8				# pop  %es
-+	.byte 9,9,9			# add  $4,%esp
-+	.byte 10			# iret
-+	.byte -1,-1,-1,-1		# movb $1,1(%esi)
++	.byte 0x00,0x00			# jmp  .Ldo_upcall
  .previous
  
  # Hypervisor uses this for application faults while it executes.
