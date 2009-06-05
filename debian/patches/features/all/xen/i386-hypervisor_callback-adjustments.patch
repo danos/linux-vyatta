@@ -1,0 +1,89 @@
+
+# HG changeset patch
+# User Keir Fraser <keir.fraser@citrix.com>
+# Date 1242292120 -3600
+# Node ID 9b945480054430882b60bb5e5f660822a1c07b70
+# Parent 271d9b9bee40657b1714b2bb62531e989c7b5813
+xen/i386: hypervisor_callback adjustments
+
+The missing check of the interrupted code's code selector in
+hypervisor_callback() allowed a user mode application to oops (and
+perhaps crash) the kernel.
+
+Further adjustments:
+- the 'main' critical region does not include the jmp following the
+  disabling of interrupts [ijc: removed from backport]
+- the sysexit_[se]crit range checks got broken at some point - the
+  sysexit ciritcal region is always at higher addresses than the
+  'main'
+  one, yielding the check pointless (but consuming execution time);
+  since the supervisor mode kernel isn't actively used afaict, I moved
+  that code into an #ifdef using a hypothetical config option
+- the use of a numeric label across more than 300 lines of code always
+  seemed pretty fragile to me, so the patch replaces this with a local
+  named label
+- streamlined the critical_region_fixup code to eliminate a branch
+  [ijc: removed from backport]
+
+Signed-off-by: Jan Beulich <jbeulich@novell.com>
+
+Backported to Debian's 2.6.26 and reduced to minimal fix by
+dann frazier <dannf@debian.org> and Ian Campbell <ijc@hellion.org.uk>
+
+--- a/arch/x86/kernel/entry_32-xen.S	Thu May 14 10:08:10 2009 +0100
++++ b/arch/x86/kernel/entry_32-xen.S	Thu May 14 10:08:40 2009 +0100
+@@ -522,7 +522,7 @@
+ .previous
+ 14:	__DISABLE_INTERRUPTS
+ 	TRACE_IRQS_OFF
+-	jmp  11f
++	jmp  .Ldo_upcall
+ ecrit:  /**** END OF CRITICAL REGION ****/
+ 
+ 	CFI_RESTORE_STATE
+@@ -795,17 +795,23 @@
+ 	pushl %eax
+ 	CFI_ADJUST_CFA_OFFSET 4
+ 	SAVE_ALL
++	testb $2,PT_CS(%esp)
+ 	movl PT_EIP(%esp),%eax
++	jnz  .Ldo_upcall
+ 	cmpl $scrit,%eax
+-	jb   11f
++	jb   0f
+ 	cmpl $ecrit,%eax
+ 	jb   critical_region_fixup
++0:
++#ifdef CONFIG_XEN_SUPERVISOR_MODE_KERNEL
+ 	cmpl $sysexit_scrit,%eax
+-	jb   11f
++	jb   .Ldo_upcall
+ 	cmpl $sysexit_ecrit,%eax
+-	ja   11f
++	ja   .Ldo_upcall
+ 	addl $PT_OLDESP,%esp		# Remove eflags...ebx from stack frame.
+-11:	push %esp
++#endif
++.Ldo_upcall:
++	push %esp
+ 	CFI_ADJUST_CFA_OFFSET 4
+ 	call evtchn_do_upcall
+ 	add  $4,%esp
+@@ -835,7 +841,7 @@
+ 	movl %eax,(%edi)
+ 	loop 16b
+ 17:	movl %edi,%esp			# final %edi is top of merged stack
+-	jmp  11b
++	jmp  .Ldo_upcall
+ 
+ .section .rodata,"a"
+ critical_fixup_table:
+@@ -854,7 +860,7 @@
+ 	.byte 0x28,0x28,0x28		# add  $4,%esp
+ 	.byte 0x2c			# iret
+ 	.byte 0xff,0xff,0xff,0xff	# movb $1,1(%esi)
+-	.byte 0x00,0x00			# jmp  11b
++	.byte 0x00,0x00			# jmp  .Ldo_upcall
+ .previous
+ 
+ # Hypervisor uses this for application faults while it executes.
