@@ -1,0 +1,44 @@
+commit 9744197c3d7b329590c2be33ad7b17409bd798fe
+Author: NeilBrown <neilb@suse.de>
+Date:   Fri Sep 19 11:49:54 2008 +1000
+
+    md: Don't wait UNINTERRUPTIBLE for other resync to finish
+    
+    When two md arrays share some block device (e.g each uses different
+    partitions on the one device), a resync of one array will wait for
+    the resync on the other to finish.
+    
+    This can be a long time and as it currently waits TASK_UNINTERRUPTIBLE,
+    the softlockup code notices and complains.
+    
+    So use TASK_INTERRUPTIBLE instead and make sure to flush signals
+    before calling schedule.
+    
+    Signed-off-by: NeilBrown <neilb@suse.de>
+
+diff --git a/drivers/md/md.c b/drivers/md/md.c
+index 4790c83..deeac4b 100644
+--- a/drivers/md/md.c
++++ b/drivers/md/md.c
+@@ -5761,7 +5761,11 @@ void md_do_sync(mddev_t *mddev)
+ 					 * time 'round when curr_resync == 2
+ 					 */
+ 					continue;
+-				prepare_to_wait(&resync_wait, &wq, TASK_UNINTERRUPTIBLE);
++				/* We need to wait 'interruptible' so as not to
++				 * contribute to the load average, and not to
++				 * be caught by 'softlockup'
++				 */
++				prepare_to_wait(&resync_wait, &wq, TASK_INTERRUPTIBLE);
+ 				if (!kthread_should_stop() &&
+ 				    mddev2->curr_resync >= mddev->curr_resync) {
+ 					printk(KERN_INFO "md: delaying %s of %s"
+@@ -5769,6 +5773,8 @@ void md_do_sync(mddev_t *mddev)
+ 					       " share one or more physical units)\n",
+ 					       desc, mdname(mddev), mdname(mddev2));
+ 					mddev_put(mddev2);
++					if (signal_pending(current))
++						flush_signals(current);
+ 					schedule();
+ 					finish_wait(&resync_wait, &wq);
+ 					goto try_again;
