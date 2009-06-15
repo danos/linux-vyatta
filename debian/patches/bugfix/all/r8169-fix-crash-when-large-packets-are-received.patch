@@ -1,0 +1,50 @@
+commit fdd7b4c3302c93f6833e338903ea77245eb510b4
+Author: Eric Dumazet <eric.dumazet@gmail.com>
+Date:   Tue Jun 9 04:01:02 2009 -0700
+
+    r8169: fix crash when large packets are received
+    
+    Michael Tokarev reported receiving a large packet could crash
+    a machine with RTL8169 NIC.
+    ( original thread at http://lkml.org/lkml/2009/6/8/192 )
+    
+    Problem is this driver tells that NIC frames up to 16383 bytes
+    can be received but provides skb to rx ring allocated with
+    smaller sizes (1536 bytes in case standard 1500 bytes MTU is used)
+    
+    When a frame larger than what was allocated by driver is received,
+    dma transfert can occurs past the end of buffer and corrupt
+    kernel memory.
+    
+    Fix is to tell to NIC what is the maximum size a frame can be.
+    
+    This bug is very old, (before git introduction, linux-2.6.10), and
+    should be backported to stable versions.
+    
+    Reported-by: Michael Tokarev <mjt@tls.msk.ru>
+    Signed-off-by: Eric Dumazet <eric.dumazet@gmail.com>
+    Tested-by: Michael Tokarev <mjt@tls.msk.ru>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+Backported to Debian's 2.6.18 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.18.orig/drivers/net/r8169.c linux-source-2.6.18/drivers/net/r8169.c
+--- linux-source-2.6.18.orig/drivers/net/r8169.c	2008-12-25 14:04:13.000000000 -0700
++++ linux-source-2.6.18/drivers/net/r8169.c	2009-06-14 19:12:19.000000000 -0600
+@@ -126,7 +126,6 @@ static const int multicast_filter_limit 
+ #define RX_DMA_BURST	6	/* Maximum PCI burst, '6' is 1024 */
+ #define TX_DMA_BURST	6	/* Maximum PCI burst, '6' is 1024 */
+ #define EarlyTxThld 	0x3F	/* 0x3F means NO early transmit */
+-#define RxPacketMaxSize	0x3FE8	/* 16K - 1 - ETH_HLEN - VLAN - CRC... */
+ #define SafeMtu		0x1c20	/* ... actually life sucks beyond ~7k */
+ #define InterFrameGap	0x03	/* 3 means InterFrameGap = the shortest one */
+ 
+@@ -1875,7 +1874,7 @@ static void rtl8169_hw_start(struct net_
+ 	RTL_W8(EarlyTxThres, EarlyTxThld);
+ 
+ 	/* Low hurts. Let's disable the filtering. */
+-	RTL_W16(RxMaxSize, 16383);
++	RTL_W16(RxMaxSize, tp->rx_buf_sz);
+ 
+ 	if ((tp->mac_version == RTL_GIGA_MAC_VER_01) ||
+ 	    (tp->mac_version == RTL_GIGA_MAC_VER_02) ||
