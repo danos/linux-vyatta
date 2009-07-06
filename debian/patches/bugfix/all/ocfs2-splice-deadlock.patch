@@ -1,0 +1,92 @@
+commit 7bfac9ecf0585962fe13584f5cf526d8c8e76f17
+Author: Miklos Szeredi <mszeredi@suse.cz>
+Date:   Mon Apr 6 17:41:00 2009 +0200
+
+    splice: fix deadlock in splicing to file
+    
+    There's a possible deadlock in generic_file_splice_write(),
+    splice_from_pipe() and ocfs2_file_splice_write():
+    
+     - task A calls generic_file_splice_write()
+     - this calls inode_double_lock(), which locks i_mutex on both
+       pipe->inode and target inode
+     - ordering depends on inode pointers, can happen that pipe->inode is
+       locked first
+     - __splice_from_pipe() needs more data, calls pipe_wait()
+     - this releases lock on pipe->inode, goes to interruptible sleep
+     - task B calls generic_file_splice_write(), similarly to the first
+     - this locks pipe->inode, then tries to lock inode, but that is
+       already held by task A
+     - task A is interrupted, it tries to lock pipe->inode, but fails, as
+       it is already held by task B
+     - ABBA deadlock
+    
+    Fix this by explicitly ordering locks: the outer lock must be on
+    target inode and the inner lock (which is later unlocked and relocked)
+    must be on pipe->inode.  This is OK, pipe inodes and target inodes
+    form two nonoverlapping sets, generic_file_splice_write() and friends
+    are not called with a target which is a pipe.
+    
+    Signed-off-by: Miklos Szeredi <mszeredi@suse.cz>
+    Acked-by: Mark Fasheh <mfasheh@suse.com>
+    Acked-by: Jens Axboe <jens.axboe@oracle.com>
+    Cc: stable@kernel.org
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+Backported to Debian's 2.6.24 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.24.orig/fs/ocfs2/file.c linux-source-2.6.24/fs/ocfs2/file.c
+--- linux-source-2.6.24.orig/fs/ocfs2/file.c	2008-01-24 15:58:37.000000000 -0700
++++ linux-source-2.6.24/fs/ocfs2/file.c	2009-07-05 21:37:39.000000000 -0600
+@@ -2056,7 +2056,7 @@ static ssize_t ocfs2_file_splice_write(s
+ 		   out->f_path.dentry->d_name.len,
+ 		   out->f_path.dentry->d_name.name);
+ 
+-	inode_double_lock(inode, pipe->inode);
++	mutex_lock_nested(&inode->i_mutex, I_MUTEX_PARENT);
+ 
+ 	ret = ocfs2_rw_lock(inode, 1);
+ 	if (ret < 0) {
+@@ -2071,12 +2071,16 @@ static ssize_t ocfs2_file_splice_write(s
+ 		goto out_unlock;
+ 	}
+ 
++	if (pipe->inode)
++		mutex_lock_nested(&pipe->inode->i_mutex, I_MUTEX_CHILD);
+ 	ret = generic_file_splice_write_nolock(pipe, out, ppos, len, flags);
++	if (pipe->inode)
++		mutex_unlock(&pipe->inode->i_mutex);
+ 
+ out_unlock:
+ 	ocfs2_rw_unlock(inode, 1);
+ out:
+-	inode_double_unlock(inode, pipe->inode);
++	mutex_unlock(&inode->i_mutex);
+ 
+ 	mlog_exit(ret);
+ 	return ret;
+diff -urpN linux-source-2.6.24.orig/fs/splice.c linux-source-2.6.24/fs/splice.c
+--- linux-source-2.6.24.orig/fs/splice.c	2008-10-10 00:11:29.000000000 -0600
++++ linux-source-2.6.24/fs/splice.c	2009-07-05 21:35:23.000000000 -0600
+@@ -738,10 +738,19 @@ ssize_t splice_from_pipe(struct pipe_ino
+ 	 * ->commit_write. Most of the time, these expect i_mutex to
+ 	 * be held. Since this may result in an ABBA deadlock with
+ 	 * pipe->inode, we have to order lock acquiry here.
++	 *
++	 * Outer lock must be inode->i_mutex, as pipe_wait() will
++	 * release and reacquire pipe->inode->i_mutex, AND inode must
++	 * never be a pipe.
+ 	 */
+-	inode_double_lock(inode, pipe->inode);
++	WARN_ON(S_ISFIFO(inode->i_mode));
++	mutex_lock_nested(&inode->i_mutex, I_MUTEX_PARENT);
++	if (pipe->inode)
++		mutex_lock_nested(&pipe->inode->i_mutex, I_MUTEX_CHILD);
+ 	ret = __splice_from_pipe(pipe, &sd, actor);
+-	inode_double_unlock(inode, pipe->inode);
++	if (pipe->inode)
++		mutex_unlock(&pipe->inode->i_mutex);
++	mutex_unlock(&inode->i_mutex);
+ 
+ 	return ret;
+ }
