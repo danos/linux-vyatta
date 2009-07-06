@@ -1,0 +1,164 @@
+commit e82a3b75127188f20c7780bec580e148beb29da7
+Author: Helge Deller <deller@gmx.de>
+Date:   Tue Jun 16 20:51:48 2009 +0000
+
+    parisc: ensure broadcast tlb purge runs single threaded
+    
+    The TLB flushing functions on hppa, which causes PxTLB broadcasts on the system
+    bus, needs to be protected by irq-safe spinlocks to avoid irq handlers to deadlock
+    the kernel. The deadlocks only happened during I/O intensive loads and triggered
+    pretty seldom, which is why this bug went so long unnoticed.
+    
+    Signed-off-by: Helge Deller <deller@gmx.de>
+    [edited to use spin_lock_irqsave on UP as well since we'd been locking there
+     all this time anyway, --kyle]
+    Signed-off-by: Kyle McMartin <kyle@mcmartin.ca>
+
+diff --git a/arch/parisc/include/asm/tlbflush.h b/arch/parisc/include/asm/tlbflush.h
+index 1f6fd4f..8f1a810 100644
+--- a/arch/parisc/include/asm/tlbflush.h
++++ b/arch/parisc/include/asm/tlbflush.h
+@@ -12,14 +12,12 @@
+  * N class systems, only one PxTLB inter processor broadcast can be
+  * active at any one time on the Merced bus.  This tlb purge
+  * synchronisation is fairly lightweight and harmless so we activate
+- * it on all SMP systems not just the N class.  We also need to have
+- * preemption disabled on uniprocessor machines, and spin_lock does that
+- * nicely.
++ * it on all systems not just the N class.
+  */
+ extern spinlock_t pa_tlb_lock;
+ 
+-#define purge_tlb_start(x) spin_lock(&pa_tlb_lock)
+-#define purge_tlb_end(x) spin_unlock(&pa_tlb_lock)
++#define purge_tlb_start(flags)	spin_lock_irqsave(&pa_tlb_lock, flags)
++#define purge_tlb_end(flags)	spin_unlock_irqrestore(&pa_tlb_lock, flags)
+ 
+ extern void flush_tlb_all(void);
+ extern void flush_tlb_all_local(void *);
+@@ -63,14 +61,16 @@ static inline void flush_tlb_mm(struct mm_struct *mm)
+ static inline void flush_tlb_page(struct vm_area_struct *vma,
+ 	unsigned long addr)
+ {
++	unsigned long flags;
++
+ 	/* For one page, it's not worth testing the split_tlb variable */
+ 
+ 	mb();
+ 	mtsp(vma->vm_mm->context,1);
+-	purge_tlb_start();
++	purge_tlb_start(flags);
+ 	pdtlb(addr);
+ 	pitlb(addr);
+-	purge_tlb_end();
++	purge_tlb_end(flags);
+ }
+ 
+ void __flush_tlb_range(unsigned long sid,
+diff --git a/arch/parisc/kernel/cache.c b/arch/parisc/kernel/cache.c
+index f34082d..b6ed34d 100644
+--- a/arch/parisc/kernel/cache.c
++++ b/arch/parisc/kernel/cache.c
+@@ -397,12 +397,13 @@ EXPORT_SYMBOL(flush_kernel_icache_range_asm);
+ 
+ void clear_user_page_asm(void *page, unsigned long vaddr)
+ {
++	unsigned long flags;
+ 	/* This function is implemented in assembly in pacache.S */
+ 	extern void __clear_user_page_asm(void *page, unsigned long vaddr);
+ 
+-	purge_tlb_start();
++	purge_tlb_start(flags);
+ 	__clear_user_page_asm(page, vaddr);
+-	purge_tlb_end();
++	purge_tlb_end(flags);
+ }
+ 
+ #define FLUSH_THRESHOLD 0x80000 /* 0.5MB */
+@@ -443,20 +444,24 @@ extern void clear_user_page_asm(void *page, unsigned long vaddr);
+ 
+ void clear_user_page(void *page, unsigned long vaddr, struct page *pg)
+ {
++	unsigned long flags;
++
+ 	purge_kernel_dcache_page((unsigned long)page);
+-	purge_tlb_start();
++	purge_tlb_start(flags);
+ 	pdtlb_kernel(page);
+-	purge_tlb_end();
++	purge_tlb_end(flags);
+ 	clear_user_page_asm(page, vaddr);
+ }
+ EXPORT_SYMBOL(clear_user_page);
+ 
+ void flush_kernel_dcache_page_addr(void *addr)
+ {
++	unsigned long flags;
++
+ 	flush_kernel_dcache_page_asm(addr);
+-	purge_tlb_start();
++	purge_tlb_start(flags);
+ 	pdtlb_kernel(addr);
+-	purge_tlb_end();
++	purge_tlb_end(flags);
+ }
+ EXPORT_SYMBOL(flush_kernel_dcache_page_addr);
+ 
+@@ -489,8 +494,10 @@ void __flush_tlb_range(unsigned long sid, unsigned long start,
+ 	if (npages >= 512)  /* 2MB of space: arbitrary, should be tuned */
+ 		flush_tlb_all();
+ 	else {
++		unsigned long flags;
++
+ 		mtsp(sid, 1);
+-		purge_tlb_start();
++		purge_tlb_start(flags);
+ 		if (split_tlb) {
+ 			while (npages--) {
+ 				pdtlb(start);
+@@ -503,7 +510,7 @@ void __flush_tlb_range(unsigned long sid, unsigned long start,
+ 				start += PAGE_SIZE;
+ 			}
+ 		}
+-		purge_tlb_end();
++		purge_tlb_end(flags);
+ 	}
+ }
+ 
+diff --git a/arch/parisc/kernel/pci-dma.c b/arch/parisc/kernel/pci-dma.c
+index 7d927ea..c07f618 100644
+--- a/arch/parisc/kernel/pci-dma.c
++++ b/arch/parisc/kernel/pci-dma.c
+@@ -90,12 +90,14 @@ static inline int map_pte_uncached(pte_t * pte,
+ 	if (end > PMD_SIZE)
+ 		end = PMD_SIZE;
+ 	do {
++		unsigned long flags;
++
+ 		if (!pte_none(*pte))
+ 			printk(KERN_ERR "map_pte_uncached: page already exists\n");
+ 		set_pte(pte, __mk_pte(*paddr_ptr, PAGE_KERNEL_UNC));
+-		purge_tlb_start();
++		purge_tlb_start(flags);
+ 		pdtlb_kernel(orig_vaddr);
+-		purge_tlb_end();
++		purge_tlb_end(flags);
+ 		vaddr += PAGE_SIZE;
+ 		orig_vaddr += PAGE_SIZE;
+ 		(*paddr_ptr) += PAGE_SIZE;
+@@ -168,11 +170,13 @@ static inline void unmap_uncached_pte(pmd_t * pmd, unsigned long vaddr,
+ 	if (end > PMD_SIZE)
+ 		end = PMD_SIZE;
+ 	do {
++		unsigned long flags;
+ 		pte_t page = *pte;
++
+ 		pte_clear(&init_mm, vaddr, pte);
+-		purge_tlb_start();
++		purge_tlb_start(flags);
+ 		pdtlb_kernel(orig_vaddr);
+-		purge_tlb_end();
++		purge_tlb_end(flags);
+ 		vaddr += PAGE_SIZE;
+ 		orig_vaddr += PAGE_SIZE;
+ 		pte++;
