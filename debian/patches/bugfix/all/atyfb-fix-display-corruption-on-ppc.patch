@@ -1,0 +1,54 @@
+From: Risto Suominen <Risto.Suominen@gmail.com>
+Date: Tue, 13 Jan 2009 20:09:30 +0000 (+0000)
+Subject: fbdev/atyfb: Fix DSP config on some PowerMacs & PowerBooks
+X-Git-Tag: v2.6.29-rc4~67^2
+X-Git-Url: http://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Ftorvalds%2Flinux-2.6.git;a=commitdiff_plain;h=7fbb7cadd062baf299fd8b26a80ea99da0c3fe01;hp=59b608c2c33feacc8be281ec3ba9ca2a3a5cb9a7
+
+fbdev/atyfb: Fix DSP config on some PowerMacs & PowerBooks
+
+Since the complete re-write in 2.6.10, some PowerMacs (At least PowerMac 5500
+and PowerMac G3 Beige rev A) with ATI Mach64 chip have suffered from unstable
+columns in their framebuffer image. This seems to depend on a value (4) read
+from PLL_EXT_CNTL register, which leads to incorrect DSP config parameters to
+be written to the chip. This patch uses a value calculated by aty_init_pll_ct
+instead, as a starting point.
+
+There are questions as to whether this should be extended to other platforms
+or maybe made dependent on specific chip types, but in the meantime, this has
+been tested on various powermacs and works for them so let's commit it.
+
+Signed-off-by: Risto Suominen <Risto.Suominen@gmail.com>
+Tested-by: Michael Pettersson <mike@it.uu.se>
+Cc: <stable@kernel.org>
+Signed-off-by: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+---
+
+diff --git a/drivers/video/aty/mach64_ct.c b/drivers/video/aty/mach64_ct.c
+index c50c7cf..2745b85 100644
+--- a/drivers/video/aty/mach64_ct.c
++++ b/drivers/video/aty/mach64_ct.c
+@@ -8,6 +8,9 @@
+ #include <asm/io.h>
+ #include <video/mach64.h>
+ #include "atyfb.h"
++#ifdef CONFIG_PPC
++#include <asm/machdep.h>
++#endif
+ 
+ #undef DEBUG
+ 
+@@ -536,6 +539,14 @@ static int __devinit aty_init_pll_ct(const struct fb_info *info,
+ 	pll->ct.xclk_post_div_real = postdividers[xpost_div];
+ 	pll->ct.mclk_fb_div = q * pll->ct.xclk_post_div_real / 8;
+ 
++#ifdef CONFIG_PPC
++	if (machine_is(powermac)) {
++		/* Override PLL_EXT_CNTL & 0x07. */
++		pll->ct.xclk_post_div = xpost_div;
++		pll->ct.xclk_ref_div = 1;
++	}
++#endif
++
+ #ifdef DEBUG
+ 	pllmclk = (1000000 * pll->ct.mclk_fb_mult * pll->ct.mclk_fb_div) /
+ 			(par->ref_clk_per * pll->ct.pll_ref_div);
