@@ -1,0 +1,58 @@
+commit a3ca86aea507904148870946d599e07a340b39bf
+Author: Eugene Teo <eteo@redhat.com>
+Date:   Wed Jul 15 14:59:10 2009 +0800
+
+    Add '-fno-delete-null-pointer-checks' to gcc CFLAGS
+    
+    Turning on this flag could prevent the compiler from optimising away
+    some "useless" checks for null pointers.  Such bugs can sometimes become
+    exploitable at compile time because of the -O2 optimisation.
+    
+    See http://gcc.gnu.org/onlinedocs/gcc-4.1.2/gcc/Optimize-Options.html
+    
+    An example that clearly shows this 'problem' is commit 6bf67672.
+    
+     static void __devexit agnx_pci_remove(struct pci_dev *pdev)
+     {
+         struct ieee80211_hw *dev = pci_get_drvdata(pdev);
+    -    struct agnx_priv *priv = dev->priv;
+    +    struct agnx_priv *priv;
+         AGNX_TRACE;
+    
+         if (!dev)
+             return;
+    +    priv = dev->priv;
+    
+    By reverting this patch, and compile it with and without
+    -fno-delete-null-pointer-checks flag, we can see that the check for dev
+    is compiled away.
+    
+        call    printk  #
+    -   testq   %r12, %r12  # dev
+    -   je  .L94    #,
+        movq    %r12, %rdi  # dev,
+    
+    Clearly the 'fix' is to stop using dev before it is tested, but building
+    with -fno-delete-null-pointer-checks flag at least makes it harder to
+    abuse.
+    
+    Signed-off-by: Eugene Teo <eugeneteo@kernel.sg>
+    Acked-by: Eric Paris <eparis@redhat.com>
+    Acked-by: Wang Cong <amwang@redhat.com>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+Backported to Debian's 2.6.26 by dann frazier <dannf@debian.org>
+
+diff -urpN a/Makefile b/Makefile
+--- a/Makefile	2009-07-19 13:43:58.000000000 -0600
++++ b/Makefile	2009-07-19 13:53:15.000000000 -0600
+@@ -320,7 +320,8 @@ KBUILD_CPPFLAGS := -D__KERNEL__ $(LINUXI
+ 
+ KBUILD_CFLAGS   := -Wall -Wundef -Wstrict-prototypes -Wno-trigraphs \
+ 		   -fno-strict-aliasing -fno-common \
+-		   -Werror-implicit-function-declaration
++		   -Werror-implicit-function-declaration \
++		   -fno-delete-null-pointer-checks
+ 
+ # .kernelvariables must be included before cc-option
+ # since it may change the value of $(CC)
