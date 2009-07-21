@@ -1,0 +1,786 @@
+diff --git a/Makefile b/Makefile
+index f8a0893..ab8cda6 100644
+--- a/Makefile
++++ b/Makefile
+@@ -351,7 +351,8 @@ KBUILD_CPPFLAGS := -D__KERNEL__
+ 
+ KBUILD_CFLAGS   := -Wall -Wundef -Wstrict-prototypes -Wno-trigraphs \
+ 		   -fno-strict-aliasing -fno-common \
+-		   -Werror-implicit-function-declaration
++		   -Werror-implicit-function-declaration \
++		   -fno-delete-null-pointer-checks
+ KBUILD_AFLAGS   := -D__ASSEMBLY__
+ 
+ # Read KERNELRELEASE from include/config/kernel.release (if it exists)
+@@ -573,7 +574,7 @@ KBUILD_CFLAGS += $(call cc-option,-Wdeclaration-after-statement,)
+ KBUILD_CFLAGS += $(call cc-option,-Wno-pointer-sign,)
+ 
+ # disable invalid "can't wrap" optimizations for signed / pointers
+-KBUILD_CFLAGS	+= $(call cc-option,-fwrapv)
++KBUILD_CFLAGS	+= $(call cc-option,-fno-strict-overflow)
+ 
+ # revert to pre-gcc-4.4 behaviour of .eh_frame
+ KBUILD_CFLAGS	+= $(call cc-option,-fno-dwarf2-cfi-asm)
+diff --git a/arch/alpha/include/asm/percpu.h b/arch/alpha/include/asm/percpu.h
+index 06c5c7a..b663f1f 100644
+--- a/arch/alpha/include/asm/percpu.h
++++ b/arch/alpha/include/asm/percpu.h
+@@ -30,7 +30,7 @@ extern unsigned long __per_cpu_offset[NR_CPUS];
+ 
+ #ifndef MODULE
+ #define SHIFT_PERCPU_PTR(var, offset) RELOC_HIDE(&per_cpu_var(var), (offset))
+-#define PER_CPU_ATTRIBUTES
++#define PER_CPU_DEF_ATTRIBUTES
+ #else
+ /*
+  * To calculate addresses of locally defined variables, GCC uses 32-bit
+@@ -49,7 +49,7 @@ extern unsigned long __per_cpu_offset[NR_CPUS];
+ 		: "=&r"(__ptr), "=&r"(tmp_gp));		\
+ 	(typeof(&per_cpu_var(var)))(__ptr + (offset)); })
+ 
+-#define PER_CPU_ATTRIBUTES	__used
++#define PER_CPU_DEF_ATTRIBUTES	__used
+ 
+ #endif /* MODULE */
+ 
+@@ -71,7 +71,7 @@ extern unsigned long __per_cpu_offset[NR_CPUS];
+ #define __get_cpu_var(var)		per_cpu_var(var)
+ #define __raw_get_cpu_var(var)		per_cpu_var(var)
+ 
+-#define PER_CPU_ATTRIBUTES
++#define PER_CPU_DEF_ATTRIBUTES
+ 
+ #endif /* SMP */
+ 
+diff --git a/arch/blackfin/kernel/irqchip.c b/arch/blackfin/kernel/irqchip.c
+index 401bd32..6ab0532 100644
+--- a/arch/blackfin/kernel/irqchip.c
++++ b/arch/blackfin/kernel/irqchip.c
+@@ -38,14 +38,6 @@
+ #include <asm/pda.h>
+ 
+ static atomic_t irq_err_count;
+-static spinlock_t irq_controller_lock;
+-
+-/*
+- * Dummy mask/unmask handler
+- */
+-void dummy_mask_unmask_irq(unsigned int irq)
+-{
+-}
+ 
+ void ack_bad_irq(unsigned int irq)
+ {
+@@ -53,21 +45,9 @@ void ack_bad_irq(unsigned int irq)
+ 	printk(KERN_ERR "IRQ: spurious interrupt %d\n", irq);
+ }
+ 
+-static struct irq_chip bad_chip = {
+-	.ack = dummy_mask_unmask_irq,
+-	.mask = dummy_mask_unmask_irq,
+-	.unmask = dummy_mask_unmask_irq,
+-};
+-
+ static struct irq_desc bad_irq_desc = {
+-	.status = IRQ_DISABLED,
+-	.chip = &bad_chip,
+ 	.handle_irq = handle_bad_irq,
+-	.depth = 1,
+ 	.lock = __SPIN_LOCK_UNLOCKED(irq_desc->lock),
+-#ifdef CONFIG_SMP
+-	.affinity = CPU_MASK_ALL
+-#endif
+ };
+ 
+ #ifdef CONFIG_CPUMASK_OFFSTACK
+@@ -117,21 +97,13 @@ __attribute__((l1_text))
+ #endif
+ asmlinkage void asm_do_IRQ(unsigned int irq, struct pt_regs *regs)
+ {
+-	struct pt_regs *old_regs;
+-	struct irq_desc *desc = irq_desc + irq;
+ #ifndef CONFIG_IPIPE
+ 	unsigned short pending, other_ints;
+ #endif
+-	old_regs = set_irq_regs(regs);
+-
+-	/*
+-	 * Some hardware gives randomly wrong interrupts.  Rather
+-	 * than crashing, do something sensible.
+-	 */
+-	if (irq >= NR_IRQS)
+-		desc = &bad_irq_desc;
++	struct pt_regs *old_regs = set_irq_regs(regs);
+ 
+ 	irq_enter();
++
+ #ifdef CONFIG_DEBUG_STACKOVERFLOW
+ 	/* Debugging check for stack overflow: is there less than STACK_WARN free? */
+ 	{
+@@ -147,7 +119,15 @@ asmlinkage void asm_do_IRQ(unsigned int irq, struct pt_regs *regs)
+ 		}
+ 	}
+ #endif
+-	generic_handle_irq(irq);
++
++	/*
++	 * Some hardware gives randomly wrong interrupts.  Rather
++	 * than crashing, do something sensible.
++	 */
++	if (irq >= NR_IRQS)
++		handle_bad_irq(irq, &bad_irq_desc);
++	else
++		generic_handle_irq(irq);
+ 
+ #ifndef CONFIG_IPIPE
+ 	/*
+@@ -171,14 +151,6 @@ asmlinkage void asm_do_IRQ(unsigned int irq, struct pt_regs *regs)
+ 
+ void __init init_IRQ(void)
+ {
+-	struct irq_desc *desc;
+-	int irq;
+-
+-	spin_lock_init(&irq_controller_lock);
+-	for (irq = 0, desc = irq_desc; irq < NR_IRQS; irq++, desc++) {
+-		*desc = bad_irq_desc;
+-	}
+-
+ 	init_arch_irq();
+ 
+ #ifdef CONFIG_DEBUG_BFIN_HWTRACE_EXPAND
+diff --git a/arch/blackfin/kernel/setup.c b/arch/blackfin/kernel/setup.c
+index a58687b..b550bae 100644
+--- a/arch/blackfin/kernel/setup.c
++++ b/arch/blackfin/kernel/setup.c
+@@ -831,7 +831,8 @@ void __init setup_arch(char **cmdline_p)
+     defined(CONFIG_BF538) || defined(CONFIG_BF539)
+ 	_bfin_swrst = bfin_read_SWRST();
+ #else
+-	_bfin_swrst = bfin_read_SYSCR();
++	/* Clear boot mode field */
++	_bfin_swrst = bfin_read_SYSCR() & ~0xf;
+ #endif
+ 
+ #ifdef CONFIG_DEBUG_DOUBLEFAULT_PRINT
+diff --git a/arch/blackfin/mach-common/head.S b/arch/blackfin/mach-common/head.S
+index 698d4c0..7e5143c 100644
+--- a/arch/blackfin/mach-common/head.S
++++ b/arch/blackfin/mach-common/head.S
+@@ -126,25 +126,25 @@ ENTRY(__start)
+ 	 * below
+ 	 */
+ 	GET_PDA(p0, r0);
+-	r7 = [p0 + PDA_RETX];
++	r6 = [p0 + PDA_RETX];
+ 	p1.l = _init_saved_retx;
+ 	p1.h = _init_saved_retx;
+-	[p1] = r7;
++	[p1] = r6;
+ 
+-	r7 = [p0 + PDA_DCPLB];
++	r6 = [p0 + PDA_DCPLB];
+ 	p1.l = _init_saved_dcplb_fault_addr;
+ 	p1.h = _init_saved_dcplb_fault_addr;
+-	[p1] = r7;
++	[p1] = r6;
+ 
+-	r7 = [p0 + PDA_ICPLB];
++	r6 = [p0 + PDA_ICPLB];
+ 	p1.l = _init_saved_icplb_fault_addr;
+ 	p1.h = _init_saved_icplb_fault_addr;
+-	[p1] = r7;
++	[p1] = r6;
+ 
+-	r7 = [p0 + PDA_SEQSTAT];
++	r6 = [p0 + PDA_SEQSTAT];
+ 	p1.l = _init_saved_seqstat;
+ 	p1.h = _init_saved_seqstat;
+-	[p1] = r7;
++	[p1] = r6;
+ #endif
+ 
+ 	/* Initialize stack pointer */
+diff --git a/arch/blackfin/mach-common/smp.c b/arch/blackfin/mach-common/smp.c
+index 93eab61..66fb780 100644
+--- a/arch/blackfin/mach-common/smp.c
++++ b/arch/blackfin/mach-common/smp.c
+@@ -139,7 +139,7 @@ static void ipi_call_function(unsigned int cpu, struct ipi_message *msg)
+ 
+ static irqreturn_t ipi_handler(int irq, void *dev_instance)
+ {
+-	struct ipi_message *msg, *mg;
++	struct ipi_message *msg;
+ 	struct ipi_message_queue *msg_queue;
+ 	unsigned int cpu = smp_processor_id();
+ 
+@@ -149,7 +149,8 @@ static irqreturn_t ipi_handler(int irq, void *dev_instance)
+ 	msg_queue->count++;
+ 
+ 	spin_lock(&msg_queue->lock);
+-	list_for_each_entry_safe(msg, mg, &msg_queue->head, list) {
++	while (!list_empty(&msg_queue->head)) {
++		msg = list_entry(msg_queue->head.next, typeof(*msg), list);
+ 		list_del(&msg->list);
+ 		switch (msg->type) {
+ 		case BFIN_IPI_RESCHEDULE:
+@@ -216,7 +217,7 @@ int smp_call_function(void (*func)(void *info), void *info, int wait)
+ 	for_each_cpu_mask(cpu, callmap) {
+ 		msg_queue = &per_cpu(ipi_msg_queue, cpu);
+ 		spin_lock_irqsave(&msg_queue->lock, flags);
+-		list_add(&msg->list, &msg_queue->head);
++		list_add_tail(&msg->list, &msg_queue->head);
+ 		spin_unlock_irqrestore(&msg_queue->lock, flags);
+ 		platform_send_ipi_cpu(cpu);
+ 	}
+@@ -256,7 +257,7 @@ int smp_call_function_single(int cpuid, void (*func) (void *info), void *info,
+ 
+ 	msg_queue = &per_cpu(ipi_msg_queue, cpu);
+ 	spin_lock_irqsave(&msg_queue->lock, flags);
+-	list_add(&msg->list, &msg_queue->head);
++	list_add_tail(&msg->list, &msg_queue->head);
+ 	spin_unlock_irqrestore(&msg_queue->lock, flags);
+ 	platform_send_ipi_cpu(cpu);
+ 
+@@ -287,7 +288,7 @@ void smp_send_reschedule(int cpu)
+ 
+ 	msg_queue = &per_cpu(ipi_msg_queue, cpu);
+ 	spin_lock_irqsave(&msg_queue->lock, flags);
+-	list_add(&msg->list, &msg_queue->head);
++	list_add_tail(&msg->list, &msg_queue->head);
+ 	spin_unlock_irqrestore(&msg_queue->lock, flags);
+ 	platform_send_ipi_cpu(cpu);
+ 
+@@ -315,7 +316,7 @@ void smp_send_stop(void)
+ 	for_each_cpu_mask(cpu, callmap) {
+ 		msg_queue = &per_cpu(ipi_msg_queue, cpu);
+ 		spin_lock_irqsave(&msg_queue->lock, flags);
+-		list_add(&msg->list, &msg_queue->head);
++		list_add_tail(&msg->list, &msg_queue->head);
+ 		spin_unlock_irqrestore(&msg_queue->lock, flags);
+ 		platform_send_ipi_cpu(cpu);
+ 	}
+diff --git a/arch/x86/include/asm/pci.h b/arch/x86/include/asm/pci.h
+index b51a1e8..abbc09b 100644
+--- a/arch/x86/include/asm/pci.h
++++ b/arch/x86/include/asm/pci.h
+@@ -91,7 +91,7 @@ extern void pci_iommu_alloc(void);
+ 
+ #define PCI_DMA_BUS_IS_PHYS (dma_ops->is_phys)
+ 
+-#if defined(CONFIG_X86_64) || defined(CONFIG_DMA_API_DEBUG)
++#if defined(CONFIG_X86_64) || defined(CONFIG_DMAR) || defined(CONFIG_DMA_API_DEBUG)
+ 
+ #define DECLARE_PCI_UNMAP_ADDR(ADDR_NAME)       \
+ 	        dma_addr_t ADDR_NAME;
+diff --git a/block/blk-core.c b/block/blk-core.c
+index c89883b..a59f180 100644
+--- a/block/blk-core.c
++++ b/block/blk-core.c
+@@ -1158,6 +1158,11 @@ static int __make_request(struct request_queue *q, struct bio *bio)
+ 
+ 	nr_sectors = bio_sectors(bio);
+ 
++	if (bio_barrier(bio) && bio_has_data(bio) &&
++	    (q->next_ordered == QUEUE_ORDERED_NONE)) {
++		bio_endio(bio, -EOPNOTSUPP);
++		return 0;
++	}
+ 	/*
+ 	 * low level driver can indicate that it wants pages above a
+ 	 * certain limit bounced to low memory (ie for highmem, or even
+@@ -1461,11 +1466,6 @@ static inline void __generic_make_request(struct bio *bio)
+ 			err = -EOPNOTSUPP;
+ 			goto end_io;
+ 		}
+-		if (bio_barrier(bio) && bio_has_data(bio) &&
+-		    (q->next_ordered == QUEUE_ORDERED_NONE)) {
+-			err = -EOPNOTSUPP;
+-			goto end_io;
+-		}
+ 
+ 		ret = q->make_request_fn(q, bio);
+ 	} while (ret);
+diff --git a/drivers/block/floppy.c b/drivers/block/floppy.c
+index 1300df6..39e1b58 100644
+--- a/drivers/block/floppy.c
++++ b/drivers/block/floppy.c
+@@ -3327,7 +3327,10 @@ static inline int set_geometry(unsigned int cmd, struct floppy_struct *g,
+ 		if (!capable(CAP_SYS_ADMIN))
+ 			return -EPERM;
+ 		mutex_lock(&open_lock);
+-		LOCK_FDC(drive, 1);
++		if (lock_fdc(drive, 1)) {
++			mutex_unlock(&open_lock);
++			return -EINTR;
++		}
+ 		floppy_type[type] = *g;
+ 		floppy_type[type].name = "user format";
+ 		for (cnt = type << 2; cnt < (type << 2) + 4; cnt++)
+diff --git a/drivers/md/md.c b/drivers/md/md.c
+index 641b211..eb1b73f 100644
+--- a/drivers/md/md.c
++++ b/drivers/md/md.c
+@@ -3589,7 +3589,8 @@ suspend_lo_store(mddev_t *mddev, const char *buf, size_t len)
+ 	char *e;
+ 	unsigned long long new = simple_strtoull(buf, &e, 10);
+ 
+-	if (mddev->pers->quiesce == NULL)
++	if (mddev->pers == NULL ||
++	    mddev->pers->quiesce == NULL)
+ 		return -EINVAL;
+ 	if (buf == e || (*e && *e != '\n'))
+ 		return -EINVAL;
+@@ -3617,7 +3618,8 @@ suspend_hi_store(mddev_t *mddev, const char *buf, size_t len)
+ 	char *e;
+ 	unsigned long long new = simple_strtoull(buf, &e, 10);
+ 
+-	if (mddev->pers->quiesce == NULL)
++	if (mddev->pers == NULL ||
++	    mddev->pers->quiesce == NULL)
+ 		return -EINVAL;
+ 	if (buf == e || (*e && *e != '\n'))
+ 		return -EINVAL;
+@@ -3876,6 +3878,8 @@ static int md_alloc(dev_t dev, char *name)
+ 			if (mddev2->gendisk &&
+ 			    strcmp(mddev2->gendisk->disk_name, name) == 0) {
+ 				spin_unlock(&all_mddevs_lock);
++				mutex_unlock(&disks_mutex);
++				mddev_put(mddev);
+ 				return -EEXIST;
+ 			}
+ 		spin_unlock(&all_mddevs_lock);
+diff --git a/drivers/md/raid5.c b/drivers/md/raid5.c
+index c0434e0..1f98ea4 100644
+--- a/drivers/md/raid5.c
++++ b/drivers/md/raid5.c
+@@ -3703,7 +3703,8 @@ static int make_request(struct request_queue *q, struct bio * bi)
+ 			/* FIXME what if we get a false positive because these
+ 			 * are being updated.
+ 			 */
+-			if (logical_sector >= mddev->suspend_lo &&
++			if (bio_data_dir(bi) == WRITE &&
++			    logical_sector >= mddev->suspend_lo &&
+ 			    logical_sector < mddev->suspend_hi) {
+ 				release_stripe(sh);
+ 				schedule();
+diff --git a/drivers/net/tun.c b/drivers/net/tun.c
+index 1be6a6b..8289292 100644
+--- a/drivers/net/tun.c
++++ b/drivers/net/tun.c
+@@ -486,12 +486,14 @@ static unsigned int tun_chr_poll(struct file *file, poll_table * wait)
+ {
+ 	struct tun_file *tfile = file->private_data;
+ 	struct tun_struct *tun = __tun_get(tfile);
+-	struct sock *sk = tun->sk;
++	struct sock *sk;
+ 	unsigned int mask = 0;
+ 
+ 	if (!tun)
+ 		return POLLERR;
+ 
++	sk = tun->sk;
++
+ 	DBG(KERN_INFO "%s: tun_chr_poll\n", tun->dev->name);
+ 
+ 	poll_wait(file, &tun->socket.wait, wait);
+diff --git a/drivers/pci/iova.c b/drivers/pci/iova.c
+index 2287116..46dd440 100644
+--- a/drivers/pci/iova.c
++++ b/drivers/pci/iova.c
+@@ -1,9 +1,19 @@
+ /*
+- * Copyright (c) 2006, Intel Corporation.
++ * Copyright © 2006-2009, Intel Corporation.
+  *
+- * This file is released under the GPLv2.
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms and conditions of the GNU General Public License,
++ * version 2, as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
++ * Place - Suite 330, Boston, MA 02111-1307 USA.
+  *
+- * Copyright (C) 2006-2008 Intel Corporation
+  * Author: Anil S Keshavamurthy <anil.s.keshavamurthy@intel.com>
+  */
+ 
+@@ -123,7 +133,15 @@ move_left:
+ 	/* Insert the new_iova into domain rbtree by holding writer lock */
+ 	/* Add new node and rebalance tree. */
+ 	{
+-		struct rb_node **entry = &((prev)), *parent = NULL;
++		struct rb_node **entry, *parent = NULL;
++
++		/* If we have 'prev', it's a valid place to start the
++		   insertion. Otherwise, start from the root. */
++		if (prev)
++			entry = &prev;
++		else
++			entry = &iovad->rbroot.rb_node;
++
+ 		/* Figure out where to put new node */
+ 		while (*entry) {
+ 			struct iova *this = container_of(*entry,
+diff --git a/fs/fuse/dev.c b/fs/fuse/dev.c
+index ba76b68..eb40335 100644
+--- a/fs/fuse/dev.c
++++ b/fs/fuse/dev.c
+@@ -904,7 +904,7 @@ static ssize_t fuse_dev_write(struct kiocb *iocb, const struct iovec *iov,
+ 			       unsigned long nr_segs, loff_t pos)
+ {
+ 	int err;
+-	unsigned nbytes = iov_length(iov, nr_segs);
++	size_t nbytes = iov_length(iov, nr_segs);
+ 	struct fuse_req *req;
+ 	struct fuse_out_header oh;
+ 	struct fuse_copy_state cs;
+diff --git a/fs/fuse/file.c b/fs/fuse/file.c
+index 06f30e9..053ff1c 100644
+--- a/fs/fuse/file.c
++++ b/fs/fuse/file.c
+@@ -1867,7 +1867,7 @@ static unsigned fuse_file_poll(struct file *file, poll_table *wait)
+ 
+ 	req = fuse_get_req(fc);
+ 	if (IS_ERR(req))
+-		return PTR_ERR(req);
++		return POLLERR;
+ 
+ 	req->in.h.opcode = FUSE_POLL;
+ 	req->in.h.nodeid = get_node_id(inode);
+diff --git a/include/asm-generic/percpu.h b/include/asm-generic/percpu.h
+index d7d50d7..aa00800 100644
+--- a/include/asm-generic/percpu.h
++++ b/include/asm-generic/percpu.h
+@@ -97,4 +97,8 @@ extern void setup_per_cpu_areas(void);
+ #define PER_CPU_ATTRIBUTES
+ #endif
+ 
++#ifndef PER_CPU_DEF_ATTRIBUTES
++#define PER_CPU_DEF_ATTRIBUTES
++#endif
++
+ #endif /* _ASM_GENERIC_PERCPU_H_ */
+diff --git a/include/linux/mm.h b/include/linux/mm.h
+index bff1f0d..0c21af6 100644
+--- a/include/linux/mm.h
++++ b/include/linux/mm.h
+@@ -580,12 +580,10 @@ static inline void set_page_links(struct page *page, enum zone_type zone,
+  */
+ static inline unsigned long round_hint_to_min(unsigned long hint)
+ {
+-#ifdef CONFIG_SECURITY
+ 	hint &= PAGE_MASK;
+ 	if (((void *)hint != NULL) &&
+ 	    (hint < mmap_min_addr))
+ 		return PAGE_ALIGN(mmap_min_addr);
+-#endif
+ 	return hint;
+ }
+ 
+diff --git a/include/linux/percpu-defs.h b/include/linux/percpu-defs.h
+index 8f921d7..68438e1 100644
+--- a/include/linux/percpu-defs.h
++++ b/include/linux/percpu-defs.h
+@@ -24,7 +24,8 @@
+ 
+ #define DEFINE_PER_CPU_SECTION(type, name, section)			\
+ 	__attribute__((__section__(PER_CPU_BASE_SECTION section)))	\
+-	PER_CPU_ATTRIBUTES __typeof__(type) per_cpu__##name
++	PER_CPU_ATTRIBUTES PER_CPU_DEF_ATTRIBUTES			\
++	__typeof__(type) per_cpu__##name
+ 
+ /*
+  * Variant on the per-CPU variable declaration/definition theme used for
+diff --git a/include/linux/personality.h b/include/linux/personality.h
+index a84e9ff..1261208 100644
+--- a/include/linux/personality.h
++++ b/include/linux/personality.h
+@@ -40,7 +40,10 @@ enum {
+  * Security-relevant compatibility flags that must be
+  * cleared upon setuid or setgid exec:
+  */
+-#define PER_CLEAR_ON_SETID (READ_IMPLIES_EXEC|ADDR_NO_RANDOMIZE)
++#define PER_CLEAR_ON_SETID (READ_IMPLIES_EXEC  | \
++			    ADDR_NO_RANDOMIZE  | \
++			    ADDR_COMPAT_LAYOUT | \
++			    MMAP_PAGE_ZERO)
+ 
+ /*
+  * Personality types.
+diff --git a/include/linux/security.h b/include/linux/security.h
+index d5fd616..5eff459 100644
+--- a/include/linux/security.h
++++ b/include/linux/security.h
+@@ -2197,6 +2197,8 @@ static inline int security_file_mmap(struct file *file, unsigned long reqprot,
+ 				     unsigned long addr,
+ 				     unsigned long addr_only)
+ {
++	if ((addr < mmap_min_addr) && !capable(CAP_SYS_RAWIO))
++		return -EACCES;
+ 	return 0;
+ }
+ 
+diff --git a/kernel/futex.c b/kernel/futex.c
+index d546b2d..4d973bd 100644
+--- a/kernel/futex.c
++++ b/kernel/futex.c
+@@ -241,6 +241,7 @@ again:
+ 	if (err < 0)
+ 		return err;
+ 
++	page = compound_head(page);
+ 	lock_page(page);
+ 	if (!page->mapping) {
+ 		unlock_page(page);
+@@ -278,6 +279,25 @@ void put_futex_key(int fshared, union futex_key *key)
+ 	drop_futex_key_refs(key);
+ }
+ 
++/*
++ * fault_in_user_writeable - fault in user address and verify RW access
++ * @uaddr:	pointer to faulting user space address
++ *
++ * Slow path to fixup the fault we just took in the atomic write
++ * access to @uaddr.
++ *
++ * We have no generic implementation of a non destructive write to the
++ * user address. We know that we faulted in the atomic pagefault
++ * disabled section so we can as well avoid the #PF overhead by
++ * calling get_user_pages() right away.
++ */
++static int fault_in_user_writeable(u32 __user *uaddr)
++{
++	int ret = get_user_pages(current, current->mm, (unsigned long)uaddr,
++				 1, 1, 0, NULL, NULL);
++	return ret < 0 ? ret : 0;
++}
++
+ static u32 cmpxchg_futex_value_locked(u32 __user *uaddr, u32 uval, u32 newval)
+ {
+ 	u32 curval;
+@@ -739,7 +759,6 @@ retry:
+ retry_private:
+ 	op_ret = futex_atomic_op_inuser(op, uaddr2);
+ 	if (unlikely(op_ret < 0)) {
+-		u32 dummy;
+ 
+ 		double_unlock_hb(hb1, hb2);
+ 
+@@ -757,7 +776,7 @@ retry_private:
+ 			goto out_put_keys;
+ 		}
+ 
+-		ret = get_user(dummy, uaddr2);
++		ret = fault_in_user_writeable(uaddr2);
+ 		if (ret)
+ 			goto out_put_keys;
+ 
+@@ -1097,7 +1116,7 @@ retry:
+ handle_fault:
+ 	spin_unlock(q->lock_ptr);
+ 
+-	ret = get_user(uval, uaddr);
++	ret = fault_in_user_writeable(uaddr);
+ 
+ 	spin_lock(q->lock_ptr);
+ 
+@@ -1552,16 +1571,9 @@ out:
+ 	return ret;
+ 
+ uaddr_faulted:
+-	/*
+-	 * We have to r/w  *(int __user *)uaddr, and we have to modify it
+-	 * atomically.  Therefore, if we continue to fault after get_user()
+-	 * below, we need to handle the fault ourselves, while still holding
+-	 * the mmap_sem.  This can occur if the uaddr is under contention as
+-	 * we have to drop the mmap_sem in order to call get_user().
+-	 */
+ 	queue_unlock(&q, hb);
+ 
+-	ret = get_user(uval, uaddr);
++	ret = fault_in_user_writeable(uaddr);
+ 	if (ret)
+ 		goto out_put_key;
+ 
+@@ -1657,17 +1669,10 @@ out:
+ 	return ret;
+ 
+ pi_faulted:
+-	/*
+-	 * We have to r/w  *(int __user *)uaddr, and we have to modify it
+-	 * atomically.  Therefore, if we continue to fault after get_user()
+-	 * below, we need to handle the fault ourselves, while still holding
+-	 * the mmap_sem.  This can occur if the uaddr is under contention as
+-	 * we have to drop the mmap_sem in order to call get_user().
+-	 */
+ 	spin_unlock(&hb->lock);
+ 	put_futex_key(fshared, &key);
+ 
+-	ret = get_user(uval, uaddr);
++	ret = fault_in_user_writeable(uaddr);
+ 	if (!ret)
+ 		goto retry;
+ 
+diff --git a/kernel/resource.c b/kernel/resource.c
+index ac5f3a3..78b0872 100644
+--- a/kernel/resource.c
++++ b/kernel/resource.c
+@@ -787,7 +787,7 @@ static int __init reserve_setup(char *str)
+ 	static struct resource reserve[MAXRESERVE];
+ 
+ 	for (;;) {
+-		int io_start, io_num;
++		unsigned int io_start, io_num;
+ 		int x = reserved;
+ 
+ 		if (get_option (&str, &io_start) != 2)
+diff --git a/kernel/sysctl.c b/kernel/sysctl.c
+index b2970d5..e5bfcc7 100644
+--- a/kernel/sysctl.c
++++ b/kernel/sysctl.c
+@@ -1225,7 +1225,6 @@ static struct ctl_table vm_table[] = {
+ 		.strategy	= &sysctl_jiffies,
+ 	},
+ #endif
+-#ifdef CONFIG_SECURITY
+ 	{
+ 		.ctl_name	= CTL_UNNUMBERED,
+ 		.procname	= "mmap_min_addr",
+@@ -1234,7 +1233,6 @@ static struct ctl_table vm_table[] = {
+ 		.mode		= 0644,
+ 		.proc_handler	= &proc_doulongvec_minmax,
+ 	},
+-#endif
+ #ifdef CONFIG_NUMA
+ 	{
+ 		.ctl_name	= CTL_UNNUMBERED,
+diff --git a/lib/dma-debug.c b/lib/dma-debug.c
+index 2b16536..6a4e3d4 100644
+--- a/lib/dma-debug.c
++++ b/lib/dma-debug.c
+@@ -599,7 +599,7 @@ static inline bool overlap(void *addr, u64 size, void *start, void *end)
+ 
+ 	return ((addr >= start && addr < end) ||
+ 		(addr2 >= start && addr2 < end) ||
+-		((addr < start) && (addr2 >= end)));
++		((addr < start) && (addr2 > end)));
+ }
+ 
+ static void check_for_illegal_area(struct device *dev, void *addr, u64 size)
+diff --git a/mm/Kconfig b/mm/Kconfig
+index c2b57d8..71830ba 100644
+--- a/mm/Kconfig
++++ b/mm/Kconfig
+@@ -226,6 +226,25 @@ config HAVE_MLOCKED_PAGE_BIT
+ config MMU_NOTIFIER
+ 	bool
+ 
++config DEFAULT_MMAP_MIN_ADDR
++        int "Low address space to protect from user allocation"
++        default 4096
++        help
++	  This is the portion of low virtual memory which should be protected
++	  from userspace allocation.  Keeping a user from writing to low pages
++	  can help reduce the impact of kernel NULL pointer bugs.
++
++	  For most ia64, ppc64 and x86 users with lots of address space
++	  a value of 65536 is reasonable and should cause no problems.
++	  On arm and other archs it should not be higher than 32768.
++	  Programs which use vm86 functionality would either need additional
++	  permissions from either the LSM or the capabilities module or have
++	  this protection disabled.
++
++	  This value can be changed after boot using the
++	  /proc/sys/vm/mmap_min_addr tunable.
++
++
+ config NOMMU_INITIAL_TRIM_EXCESS
+ 	int "Turn on mmap() excess space trimming before booting"
+ 	depends on !MMU
+diff --git a/mm/mmap.c b/mm/mmap.c
+index 6b7b1a9..2b43fa1 100644
+--- a/mm/mmap.c
++++ b/mm/mmap.c
+@@ -87,6 +87,9 @@ int sysctl_overcommit_ratio = 50;	/* default is 50% */
+ int sysctl_max_map_count __read_mostly = DEFAULT_MAX_MAP_COUNT;
+ struct percpu_counter vm_committed_as;
+ 
++/* amount of vm to protect from userspace access */
++unsigned long mmap_min_addr = CONFIG_DEFAULT_MMAP_MIN_ADDR;
++
+ /*
+  * Check that a process has enough memory to allocate a new virtual
+  * mapping. 0 means there is enough memory for the allocation to
+diff --git a/net/ipv4/arp.c b/net/ipv4/arp.c
+index f11931c..9c22032 100644
+--- a/net/ipv4/arp.c
++++ b/net/ipv4/arp.c
+@@ -801,11 +801,8 @@ static int arp_process(struct sk_buff *skb)
+  *  cache.
+  */
+ 
+-	/*
+-	 *  Special case: IPv4 duplicate address detection packet (RFC2131)
+-	 *  and Gratuitous ARP/ARP Announce. (RFC3927, Section 2.4)
+-	 */
+-	if (sip == 0 || tip == sip) {
++	/* Special case: IPv4 duplicate address detection packet (RFC2131) */
++	if (sip == 0) {
+ 		if (arp->ar_op == htons(ARPOP_REQUEST) &&
+ 		    inet_addr_type(net, tip) == RTN_LOCAL &&
+ 		    !arp_ignore(in_dev, sip, tip))
+diff --git a/security/Kconfig b/security/Kconfig
+index bb24477..d23c839 100644
+--- a/security/Kconfig
++++ b/security/Kconfig
+@@ -110,28 +110,8 @@ config SECURITY_ROOTPLUG
+ 
+ 	  See <http://www.linuxjournal.com/article.php?sid=6279> for
+ 	  more information about this module.
+-	  
+-	  If you are unsure how to answer this question, answer N.
+-
+-config SECURITY_DEFAULT_MMAP_MIN_ADDR
+-        int "Low address space to protect from user allocation"
+-        depends on SECURITY
+-        default 0
+-        help
+-	  This is the portion of low virtual memory which should be protected
+-	  from userspace allocation.  Keeping a user from writing to low pages
+-	  can help reduce the impact of kernel NULL pointer bugs.
+-
+-	  For most ia64, ppc64 and x86 users with lots of address space
+-	  a value of 65536 is reasonable and should cause no problems.
+-	  On arm and other archs it should not be higher than 32768.
+-	  Programs which use vm86 functionality would either need additional
+-	  permissions from either the LSM or the capabilities module or have
+-	  this protection disabled.
+-
+-	  This value can be changed after boot using the
+-	  /proc/sys/vm/mmap_min_addr tunable.
+ 
++	  If you are unsure how to answer this question, answer N.
+ 
+ source security/selinux/Kconfig
+ source security/smack/Kconfig
+diff --git a/security/security.c b/security/security.c
+index 5284255..dc7674f 100644
+--- a/security/security.c
++++ b/security/security.c
+@@ -26,9 +26,6 @@ extern void security_fixup_ops(struct security_operations *ops);
+ 
+ struct security_operations *security_ops;	/* Initialized to NULL */
+ 
+-/* amount of vm to protect from userspace access */
+-unsigned long mmap_min_addr = CONFIG_SECURITY_DEFAULT_MMAP_MIN_ADDR;
+-
+ static inline int verify(struct security_operations *ops)
+ {
+ 	/* verify the security_operations structure exists */
