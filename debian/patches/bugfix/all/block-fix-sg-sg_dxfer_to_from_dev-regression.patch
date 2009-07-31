@@ -1,0 +1,143 @@
+From ecb554a846f8e9d2a58f6d6c118168a63ac065aa Mon Sep 17 00:00:00 2001
+From: FUJITA Tomonori <fujita.tomonori@lab.ntt.co.jp>
+Date: Thu, 9 Jul 2009 14:46:53 +0200
+Subject: block: fix sg SG_DXFER_TO_FROM_DEV regression
+
+From: FUJITA Tomonori <fujita.tomonori@lab.ntt.co.jp>
+
+commit ecb554a846f8e9d2a58f6d6c118168a63ac065aa upstream.
+
+I overlooked SG_DXFER_TO_FROM_DEV support when I converted sg to use
+the block layer mapping API (2.6.28).
+
+Douglas Gilbert explained SG_DXFER_TO_FROM_DEV:
+
+http://www.spinics.net/lists/linux-scsi/msg37135.html
+
+=
+The semantics of SG_DXFER_TO_FROM_DEV were:
+   - copy user space buffer to kernel (LLD) buffer
+   - do SCSI command which is assumed to be of the DATA_IN
+     (data from device) variety. This would overwrite
+     some or all of the kernel buffer
+   - copy kernel (LLD) buffer back to the user space.
+
+The idea was to detect short reads by filling the original
+user space buffer with some marker bytes ("0xec" it would
+seem in this report). The "resid" value is a better way
+of detecting short reads but that was only added this century
+and requires co-operation from the LLD.
+=
+
+This patch changes the block layer mapping API to support this
+semantics. This simply adds another field to struct rq_map_data and
+enables __bio_copy_iov() to copy data from user space even with READ
+requests.
+
+It's better to add the flags field and kills null_mapped and the new
+from_user fields in struct rq_map_data but that approach makes it
+difficult to send this patch to stable trees because st and osst
+drivers use struct rq_map_data (they were converted to use the block
+layer in 2.6.29 and 2.6.30). Well, I should clean up the block layer
+mapping API.
+
+zhou sf reported this regiression and tested this patch:
+
+http://www.spinics.net/lists/linux-scsi/msg37128.html
+http://www.spinics.net/lists/linux-scsi/msg37168.html
+
+Reported-by: zhou sf <sxzzsf@gmail.com>
+Tested-by: zhou sf <sxzzsf@gmail.com>
+Signed-off-by: FUJITA Tomonori <fujita.tomonori@lab.ntt.co.jp>
+Signed-off-by: Jens Axboe <jens.axboe@oracle.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+
+---
+ drivers/scsi/sg.c      |    4 ++++
+ fs/bio.c               |   22 ++++++++++++----------
+ include/linux/blkdev.h |    1 +
+ 3 files changed, 17 insertions(+), 10 deletions(-)
+
+--- a/drivers/scsi/sg.c
++++ b/drivers/scsi/sg.c
+@@ -1656,6 +1656,10 @@ static int sg_start_req(Sg_request *srp,
+ 		md->nr_entries = req_schp->k_use_sg;
+ 		md->offset = 0;
+ 		md->null_mapped = hp->dxferp ? 0 : 1;
++		if (dxfer_dir == SG_DXFER_TO_FROM_DEV)
++			md->from_user = 1;
++		else
++			md->from_user = 0;
+ 	}
+ 
+ 	if (iov_count) {
+--- a/fs/bio.c
++++ b/fs/bio.c
+@@ -706,14 +706,13 @@ static struct bio_map_data *bio_alloc_ma
+ }
+ 
+ static int __bio_copy_iov(struct bio *bio, struct bio_vec *iovecs,
+-			  struct sg_iovec *iov, int iov_count, int uncopy,
+-			  int do_free_page)
++			  struct sg_iovec *iov, int iov_count,
++			  int to_user, int from_user, int do_free_page)
+ {
+ 	int ret = 0, i;
+ 	struct bio_vec *bvec;
+ 	int iov_idx = 0;
+ 	unsigned int iov_off = 0;
+-	int read = bio_data_dir(bio) == READ;
+ 
+ 	__bio_for_each_segment(bvec, bio, i, 0) {
+ 		char *bv_addr = page_address(bvec->bv_page);
+@@ -728,13 +727,14 @@ static int __bio_copy_iov(struct bio *bi
+ 			iov_addr = iov[iov_idx].iov_base + iov_off;
+ 
+ 			if (!ret) {
+-				if (!read && !uncopy)
+-					ret = copy_from_user(bv_addr, iov_addr,
+-							     bytes);
+-				if (read && uncopy)
++				if (to_user)
+ 					ret = copy_to_user(iov_addr, bv_addr,
+ 							   bytes);
+ 
++				if (from_user)
++					ret = copy_from_user(bv_addr, iov_addr,
++							     bytes);
++
+ 				if (ret)
+ 					ret = -EFAULT;
+ 			}
+@@ -771,7 +771,8 @@ int bio_uncopy_user(struct bio *bio)
+ 
+ 	if (!bio_flagged(bio, BIO_NULL_MAPPED))
+ 		ret = __bio_copy_iov(bio, bmd->iovecs, bmd->sgvecs,
+-				     bmd->nr_sgvecs, 1, bmd->is_our_pages);
++				     bmd->nr_sgvecs, bio_data_dir(bio) == READ,
++				     0, bmd->is_our_pages);
+ 	bio_free_map_data(bmd);
+ 	bio_put(bio);
+ 	return ret;
+@@ -876,8 +877,9 @@ struct bio *bio_copy_user_iov(struct req
+ 	/*
+ 	 * success
+ 	 */
+-	if (!write_to_vm && (!map_data || !map_data->null_mapped)) {
+-		ret = __bio_copy_iov(bio, bio->bi_io_vec, iov, iov_count, 0, 0);
++	if ((!write_to_vm && (!map_data || !map_data->null_mapped)) ||
++	    (map_data && map_data->from_user)) {
++		ret = __bio_copy_iov(bio, bio->bi_io_vec, iov, iov_count, 0, 1, 0);
+ 		if (ret)
+ 			goto cleanup;
+ 	}
+--- a/include/linux/blkdev.h
++++ b/include/linux/blkdev.h
+@@ -723,6 +723,7 @@ struct rq_map_data {
+ 	int nr_entries;
+ 	unsigned long offset;
+ 	int null_mapped;
++	int from_user;
+ };
+ 
+ struct req_iterator {
