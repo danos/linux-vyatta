@@ -1,0 +1,220 @@
+commit d8e965076514dcb16410c0d18c6c8de4dcba19fc
+Author: Leubner, Achim <Achim_Leubner@adaptec.com>
+Date:   Wed Apr 1 07:16:08 2009 -0700
+
+    [SCSI] aacraid driver update
+    
+    changes:
+    
+    - set aac_cache=2 as default value to avoid performance problem
+      (Novell bugzilla #469922)
+    
+    - Dell/PERC controller boot problem fixed (RedHat bugzilla #457552)
+    
+    - WWN flag added to fix SLES10 SP1/SP2 drive detection problems
+    
+    - 64-bit support changes
+    
+    - DECLARE_PCI_DEVICE_TABLE macro added
+    
+    - controller type changes
+    
+    Signed-off-by: Achim Leubner <aacraid@adaptec.com>
+    Signed-off-by: James Bottomley <James.Bottomley@HansenPartnership.com>
+
+Backported to Debian's 2.6.26 by dann frazier <dannf@debian.org>
+Dropped Documentation/ changes, non straightforward.
+
+diff -urpN linux-source-2.6.26.orig/Documentation/scsi/aacraid.txt linux-source-2.6.26/Documentation/scsi/aacraid.txt
+--- linux-source-2.6.26.orig/Documentation/scsi/aacraid.txt	2008-07-13 15:51:29.000000000 -0600
++++ linux-source-2.6.26/Documentation/scsi/aacraid.txt	2009-07-21 08:42:55.000000000 -0600
+@@ -126,6 +126,7 @@ Deanna Bonds                            
+ 					 where fibs that go to the hardware are consistently called hw_fibs and
+ 					 not just fibs like the name of the driver tracking structure)
+ Mark Salyzyn <Mark_Salyzyn@adaptec.com> Fixed panic issues and added some new product ids for upcoming hbas. Performance tuning, card failover and bug mitigations.
++Achim Leubner <Achim_Leubner@adaptec.com>
+ 
+ Original Driver
+ -------------------------
+diff -urpN linux-source-2.6.26.orig/drivers/scsi/aacraid/aachba.c linux-source-2.6.26/drivers/scsi/aacraid/aachba.c
+--- linux-source-2.6.26.orig/drivers/scsi/aacraid/aachba.c	2008-07-13 15:51:29.000000000 -0600
++++ linux-source-2.6.26/drivers/scsi/aacraid/aachba.c	2009-07-21 08:42:55.000000000 -0600
+@@ -143,7 +143,7 @@ static char *aac_get_status_string(u32 s
+  */
+ 
+ static int nondasd = -1;
+-static int aac_cache;
++static int aac_cache = 2;	/* WCE=0 to avoid performance problems */
+ static int dacmode = -1;
+ int aac_msi;
+ int aac_commit = -1;
+@@ -157,7 +157,7 @@ module_param_named(cache, aac_cache, int
+ MODULE_PARM_DESC(cache, "Disable Queue Flush commands:\n"
+ 	"\tbit 0 - Disable FUA in WRITE SCSI commands\n"
+ 	"\tbit 1 - Disable SYNCHRONIZE_CACHE SCSI command\n"
+-	"\tbit 2 - Disable only if Battery not protecting Cache");
++	"\tbit 2 - Disable only if Battery is protecting Cache");
+ module_param(dacmode, int, S_IRUGO|S_IWUSR);
+ MODULE_PARM_DESC(dacmode, "Control whether dma addressing is using 64 bit DAC."
+ 	" 0=off, 1=on");
+@@ -217,6 +217,14 @@ int aac_reset_devices;
+ module_param_named(reset_devices, aac_reset_devices, int, S_IRUGO|S_IWUSR);
+ MODULE_PARM_DESC(reset_devices, "Force an adapter reset at initialization.");
+ 
++int aac_wwn = 1;
++module_param_named(wwn, aac_wwn, int, S_IRUGO|S_IWUSR);
++MODULE_PARM_DESC(wwn, "Select a WWN type for the arrays:\n"
++	"\t0 - Disable\n"
++	"\t1 - Array Meta Data Signature (default)\n"
++	"\t2 - Adapter Serial Number");
++
++
+ static inline int aac_valid_context(struct scsi_cmnd *scsicmd,
+ 		struct fib *fibptr) {
+ 	struct scsi_device *device;
+@@ -1206,9 +1214,8 @@ static int aac_scsi_32(struct fib * fib,
+ 
+ static int aac_scsi_32_64(struct fib * fib, struct scsi_cmnd * cmd)
+ {
+-	if ((sizeof(dma_addr_t) > 4) &&
+-	 (num_physpages > (0xFFFFFFFFULL >> PAGE_SHIFT)) &&
+-	 (fib->dev->adapter_info.options & AAC_OPT_SGMAP_HOST64))
++	if ((sizeof(dma_addr_t) > 4) && fib->dev->needs_dac &&
++	    (fib->dev->adapter_info.options & AAC_OPT_SGMAP_HOST64))
+ 		return FAILED;
+ 	return aac_scsi_32(fib, cmd);
+ }
+@@ -1371,8 +1378,11 @@ int aac_get_adapter_info(struct aac_dev*
+ 	if (dev->nondasd_support && !dev->in_reset)
+ 		printk(KERN_INFO "%s%d: Non-DASD support enabled.\n",dev->name, dev->id);
+ 
++	if (dma_get_required_mask(&dev->pdev->dev) > DMA_32BIT_MASK)
++		dev->needs_dac = 1;
+ 	dev->dac_support = 0;
+-	if( (sizeof(dma_addr_t) > 4) && (dev->adapter_info.options & AAC_OPT_SGMAP_HOST64)){
++	if ((sizeof(dma_addr_t) > 4) && dev->needs_dac &&
++	    (dev->adapter_info.options & AAC_OPT_SGMAP_HOST64)) {
+ 		if (!dev->in_reset)
+ 			printk(KERN_INFO "%s%d: 64bit support enabled.\n",
+ 				dev->name, dev->id);
+@@ -1382,6 +1392,15 @@ int aac_get_adapter_info(struct aac_dev*
+ 	if(dacmode != -1) {
+ 		dev->dac_support = (dacmode!=0);
+ 	}
++
++	/* avoid problems with AAC_QUIRK_SCSI_32 controllers */
++	if (dev->dac_support &&	(aac_get_driver_ident(dev->cardtype)->quirks
++		& AAC_QUIRK_SCSI_32)) {
++		dev->nondasd_support = 0;
++		dev->jbod = 0;
++		expose_physicals = 0;
++	}
++
+ 	if(dev->dac_support != 0) {
+ 		if (!pci_set_dma_mask(dev->pdev, DMA_64BIT_MASK) &&
+ 			!pci_set_consistent_dma_mask(dev->pdev, DMA_64BIT_MASK)) {
+@@ -2058,7 +2077,7 @@ int aac_scsi_cmd(struct scsi_cmnd * scsi
+ 		dprintk((KERN_DEBUG "INQUIRY command, ID: %d.\n", cid));
+ 		memset(&inq_data, 0, sizeof (struct inquiry_data));
+ 
+-		if (scsicmd->cmnd[1] & 0x1) {
++		if ((scsicmd->cmnd[1] & 0x1) && aac_wwn) {
+ 			char *arr = (char *)&inq_data;
+ 
+ 			/* EVPD bit set */
+@@ -2081,7 +2100,12 @@ int aac_scsi_cmd(struct scsi_cmnd * scsi
+ 				arr[1] = scsicmd->cmnd[2];
+ 				scsi_sg_copy_from_buffer(scsicmd, &inq_data,
+ 							 sizeof(inq_data));
+-				return aac_get_container_serial(scsicmd);
++				if (aac_wwn != 2)
++					return aac_get_container_serial(
++						scsicmd);
++				/* SLES 10 SP1 special */
++				scsicmd->result = DID_OK << 16 |
++				  COMMAND_COMPLETE << 8 | SAM_STAT_GOOD;
+ 			} else {
+ 				/* vpd page not implemented */
+ 				scsicmd->result = DID_OK << 16 |
+diff -urpN linux-source-2.6.26.orig/drivers/scsi/aacraid/aacraid.h linux-source-2.6.26/drivers/scsi/aacraid/aacraid.h
+--- linux-source-2.6.26.orig/drivers/scsi/aacraid/aacraid.h	2008-07-13 15:51:29.000000000 -0600
++++ linux-source-2.6.26/drivers/scsi/aacraid/aacraid.h	2009-07-21 08:42:55.000000000 -0600
+@@ -12,7 +12,7 @@
+  *----------------------------------------------------------------------------*/
+ 
+ #ifndef AAC_DRIVER_BUILD
+-# define AAC_DRIVER_BUILD 2456
++# define AAC_DRIVER_BUILD 2461
+ # define AAC_DRIVER_BRANCH "-ms"
+ #endif
+ #define MAXIMUM_NUM_CONTAINERS	32
+@@ -865,7 +865,11 @@ struct aac_supplement_adapter_info
+ 	u8	MfgPcbaSerialNo[12];
+ 	u8	MfgWWNName[8];
+ 	__le32	SupportedOptions2;
+-	__le32	ReservedGrowth[1];
++	__le32	StructExpansion;
++	/* StructExpansion == 1 */
++	__le32	FeatureBits3;
++	__le32	SupportedPerformanceModes;
++	__le32	ReservedForFutureGrowth[80];
+ };
+ #define AAC_FEATURE_FALCON	cpu_to_le32(0x00000010)
+ #define AAC_FEATURE_JBOD	cpu_to_le32(0x08000000)
+@@ -1020,6 +1024,7 @@ struct aac_dev
+ 	u8			jbod;
+ 	u8			cache_protected;
+ 	u8			dac_support;
++	u8			needs_dac;
+ 	u8			raid_scsi_mode;
+ 	u8			comm_interface;
+ #	define AAC_COMM_PRODUCER 0
+diff -urpN linux-source-2.6.26.orig/drivers/scsi/aacraid/comminit.c linux-source-2.6.26/drivers/scsi/aacraid/comminit.c
+--- linux-source-2.6.26.orig/drivers/scsi/aacraid/comminit.c	2008-07-13 15:51:29.000000000 -0600
++++ linux-source-2.6.26/drivers/scsi/aacraid/comminit.c	2009-07-21 08:42:55.000000000 -0600
+@@ -54,6 +54,7 @@ static int aac_alloc_comm(struct aac_dev
+ 	const unsigned long printfbufsiz = 256;
+ 	struct aac_init *init;
+ 	dma_addr_t phys;
++	unsigned long aac_max_hostphysmempages;
+ 
+ 	size = fibsize + sizeof(struct aac_init) + commsize + commalign + printfbufsiz;
+ 
+@@ -90,7 +91,18 @@ static int aac_alloc_comm(struct aac_dev
+ 	init->AdapterFibsPhysicalAddress = cpu_to_le32((u32)phys);
+ 	init->AdapterFibsSize = cpu_to_le32(fibsize);
+ 	init->AdapterFibAlign = cpu_to_le32(sizeof(struct hw_fib));
+-	init->HostPhysMemPages = cpu_to_le32(AAC_MAX_HOSTPHYSMEMPAGES);
++	/*
++	 * number of 4k pages of host physical memory. The aacraid fw needs
++	 * this number to be less than 4gb worth of pages. New firmware doesn't
++	 * have any issues with the mapping system, but older Firmware did, and
++	 * had *troubles* dealing with the math overloading past 32 bits, thus
++	 * we must limit this field.
++	 */
++	aac_max_hostphysmempages = dma_get_required_mask(&dev->pdev->dev) >> 12;
++	if (aac_max_hostphysmempages < AAC_MAX_HOSTPHYSMEMPAGES)
++		init->HostPhysMemPages = cpu_to_le32(aac_max_hostphysmempages);
++	else
++		init->HostPhysMemPages = cpu_to_le32(AAC_MAX_HOSTPHYSMEMPAGES);
+ 
+ 	init->InitFlags = 0;
+ 	if (dev->comm_interface == AAC_COMM_MESSAGE) {
+diff -urpN linux-source-2.6.26.orig/drivers/scsi/aacraid/linit.c linux-source-2.6.26/drivers/scsi/aacraid/linit.c
+--- linux-source-2.6.26.orig/drivers/scsi/aacraid/linit.c	2008-07-13 15:51:29.000000000 -0600
++++ linux-source-2.6.26/drivers/scsi/aacraid/linit.c	2009-07-21 08:42:55.000000000 -0600
+@@ -85,7 +85,13 @@ char aac_driver_version[] = AAC_DRIVER_F
+  *
+  * Note: The last field is used to index into aac_drivers below.
+  */
+-static struct pci_device_id aac_pci_tbl[] = {
++#ifdef DECLARE_PCI_DEVICE_TABLE
++static DECLARE_PCI_DEVICE_TABLE(aac_pci_tbl) = {
++#elif defined(__devinitconst)
++static const struct pci_device_id aac_pci_tbl[] __devinitconst = {
++#else
++static const struct pci_device_id aac_pci_tbl[] __devinitdata = {
++#endif
+ 	{ 0x1028, 0x0001, 0x1028, 0x0001, 0, 0, 0 }, /* PERC 2/Si (Iguana/PERC2Si) */
+ 	{ 0x1028, 0x0002, 0x1028, 0x0002, 0, 0, 1 }, /* PERC 3/Di (Opal/PERC3Di) */
+ 	{ 0x1028, 0x0003, 0x1028, 0x0003, 0, 0, 2 }, /* PERC 3/Si (SlimFast/PERC3Si */
