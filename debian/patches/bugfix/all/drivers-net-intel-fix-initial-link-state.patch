@@ -1,0 +1,312 @@
+From eb62efd287fe6e12d18083287e38e4a811c28256 Mon Sep 17 00:00:00 2001
+From: Jesse Brandeburg <jesse.brandeburg@intel.com>
+Date: Fri, 17 Apr 2009 20:44:36 +0000
+Subject: [PATCH] e1000: init link state correctly
+
+As reported by Andrew Lutomirski <amluto@gmail.com>
+
+All the intel wired ethernet drivers were calling netif_carrier_off
+and netif_stop_queue (or variants) before calling register_netdevice
+
+This is incorrect behavior as was pointed out by davem, and causes
+ifconfig and friends to report a strange state before first link
+after the driver was loaded.
+
+This apparently confused *some* versions of networkmanager.
+
+Andy tested this for e1000e and confirmed it was working for him.
+
+Signed-off-by: Jesse Brandeburg <jesse.brandeburg@intel.com>
+Reported-by: Andrew Lutomirski <amluto@gmail.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/e1000/e1000_main.c |    9 +++++----
+ 1 files changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/net/e1000/e1000_main.c b/drivers/net/e1000/e1000_main.c
+index ef12931..9bdcf4d 100644
+--- a/drivers/net/e1000/e1000_main.c
++++ b/drivers/net/e1000/e1000_main.c
+@@ -1234,15 +1234,14 @@ static int __devinit e1000_probe(struct pci_dev *pdev,
+ 	    !e1000_check_mng_mode(hw))
+ 		e1000_get_hw_control(adapter);
+ 
+-	/* tell the stack to leave us alone until e1000_open() is called */
+-	netif_carrier_off(netdev);
+-	netif_stop_queue(netdev);
+-
+ 	strcpy(netdev->name, "eth%d");
+ 	err = register_netdev(netdev);
+ 	if (err)
+ 		goto err_register;
+ 
++	/* carrier off reporting is important to ethtool even BEFORE open */
++	netif_carrier_off(netdev);
++
+ 	DPRINTK(PROBE, INFO, "Intel(R) PRO/1000 Network Connection\n");
+ 
+ 	cards_found++;
+@@ -1441,6 +1440,8 @@ static int e1000_open(struct net_device *netdev)
+ 	if (test_bit(__E1000_TESTING, &adapter->flags))
+ 		return -EBUSY;
+ 
++	netif_carrier_off(netdev);
++
+ 	/* allocate transmit descriptors */
+ 	err = e1000_setup_all_tx_resources(adapter);
+ 	if (err)
+-- 
+1.6.3.3
+
+From 9c563d20671e5fbe3045fd79c18b306ccb77b0b6 Mon Sep 17 00:00:00 2001
+From: Jesse Brandeburg <jesse.brandeburg@intel.com>
+Date: Fri, 17 Apr 2009 20:44:34 +0000
+Subject: [PATCH] e1000e: indicate link down at load
+
+As reported by Andrew Lutomirski <amluto@gmail.com>
+
+All the intel wired ethernet drivers were calling netif_carrier_off
+and netif_stop_queue (or variants) before calling register_netdevice
+
+This is incorrect behavior as was pointed out by davem, and causes
+ifconfig and friends to report a strange state before first link
+after the driver was loaded, since without a netif_carrier_off, the stack
+assumes carrier_on, but before register_netdev, netlink messages are not
+sent out telling link state.
+
+This apparently confused *some* versions of networkmanager.
+
+Andy tested this for e1000e and confirmed it was working for him.
+
+see thread: http://marc.info/?l=linux-netdev&m=123946479705636&w=2
+
+Signed-off-by: Jesse Brandeburg <jesse.brandeburg@intel.com>
+Tested-by: Andy Lutomirski <amluto@gmail.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/e1000e/netdev.c |    9 +++++----
+ 1 files changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/net/e1000e/netdev.c b/drivers/net/e1000e/netdev.c
+index 1693ed1..c0ff550 100644
+--- a/drivers/net/e1000e/netdev.c
++++ b/drivers/net/e1000e/netdev.c
+@@ -3072,6 +3072,8 @@ static int e1000_open(struct net_device *netdev)
+ 	if (test_bit(__E1000_TESTING, &adapter->state))
+ 		return -EBUSY;
+ 
++	netif_carrier_off(netdev);
++
+ 	/* allocate transmit descriptors */
+ 	err = e1000e_setup_tx_resources(adapter);
+ 	if (err)
+@@ -5037,15 +5039,14 @@ static int __devinit e1000_probe(struct pci_dev *pdev,
+ 	if (!(adapter->flags & FLAG_HAS_AMT))
+ 		e1000_get_hw_control(adapter);
+ 
+-	/* tell the stack to leave us alone until e1000_open() is called */
+-	netif_carrier_off(netdev);
+-	netif_tx_stop_all_queues(netdev);
+-
+ 	strcpy(netdev->name, "eth%d");
+ 	err = register_netdev(netdev);
+ 	if (err)
+ 		goto err_register;
+ 
++	/* carrier off reporting is important to ethtool even BEFORE open */
++	netif_carrier_off(netdev);
++
+ 	e1000_print_device_info(adapter);
+ 
+ 	return 0;
+-- 
+1.6.3.3
+
+From b168dfc51604ec293db16dc4d558043585578a2d Mon Sep 17 00:00:00 2001
+From: Jesse Brandeburg <jesse.brandeburg@intel.com>
+Date: Fri, 17 Apr 2009 20:44:32 +0000
+Subject: [PATCH] igb: fix link down inital state
+
+As reported by Andrew Lutomirski <amluto@gmail.com>
+
+All the intel wired ethernet drivers were calling netif_carrier_off
+and netif_stop_queue (or variants) before calling register_netdevice
+
+This is incorrect behavior as was pointed out by davem, and causes
+ifconfig and friends to report a strange state before first link
+after the driver was loaded, since without a netif_carrier_off, the stack
+assumes carrier_on, but before register_netdev, netlink messages are not
+sent out telling link state.
+
+This apparently confused *some* versions of networkmanager.
+
+Signed-off-by: Jesse Brandeburg <jesse.brandeburg@intel.com>
+Reported-by: Andrew Lutomirski <amluto@gmail.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/igb/igb_main.c |    9 +++++----
+ 1 files changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/net/igb/igb_main.c b/drivers/net/igb/igb_main.c
+index 08c8014..ceaa585 100644
+--- a/drivers/net/igb/igb_main.c
++++ b/drivers/net/igb/igb_main.c
+@@ -1442,15 +1442,14 @@ static int __devinit igb_probe(struct pci_dev *pdev,
+ 	 * driver. */
+ 	igb_get_hw_control(adapter);
+ 
+-	/* tell the stack to leave us alone until igb_open() is called */
+-	netif_carrier_off(netdev);
+-	netif_tx_stop_all_queues(netdev);
+-
+ 	strcpy(netdev->name, "eth%d");
+ 	err = register_netdev(netdev);
+ 	if (err)
+ 		goto err_register;
+ 
++	/* carrier off reporting is important to ethtool even BEFORE open */
++	netif_carrier_off(netdev);
++
+ #ifdef CONFIG_IGB_DCA
+ 	if (dca_add_requester(&pdev->dev) == 0) {
+ 		adapter->flags |= IGB_FLAG_DCA_ENABLED;
+@@ -1699,6 +1698,8 @@ static int igb_open(struct net_device *netdev)
+ 	if (test_bit(__IGB_TESTING, &adapter->state))
+ 		return -EBUSY;
+ 
++	netif_carrier_off(netdev);
++
+ 	/* allocate transmit descriptors */
+ 	err = igb_setup_all_tx_resources(adapter);
+ 	if (err)
+-- 
+1.6.3.3
+
+From 3a6d1bc4163fee27c312184d5f1a9cc1e110d300 Mon Sep 17 00:00:00 2001
+From: Jesse Brandeburg <jesse.brandeburg@intel.com>
+Date: Fri, 17 Apr 2009 20:44:29 +0000
+Subject: [PATCH] ixgb: fix link down initial state
+
+As reported by Andrew Lutomirski <amluto@gmail.com>
+
+All the intel wired ethernet drivers were calling netif_carrier_off
+and netif_stop_queue (or variants) before calling register_netdevice
+
+This is incorrect behavior as was pointed out by davem, and causes
+ifconfig and friends to report a strange state before first link
+after the driver was loaded, since without a netif_carrier_off, the stack
+assumes carrier_on, but before register_netdev, netlink messages are not
+sent out telling link state.
+
+This apparently confused *some* versions of networkmanager.
+
+in addition this driver appeared to need a netif_start_queue at
+the end of open.
+
+Signed-off-by: Jesse Brandeburg <jesse.brandeburg@intel.com>
+Reported-by: Andrew Lutomirski <amluto@gmail.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/ixgb/ixgb_main.c |    8 +++++---
+ 1 files changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/net/ixgb/ixgb_main.c b/drivers/net/ixgb/ixgb_main.c
+index 4a0826b..ff741ca 100644
+--- a/drivers/net/ixgb/ixgb_main.c
++++ b/drivers/net/ixgb/ixgb_main.c
+@@ -471,10 +471,8 @@ ixgb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+ 	if (err)
+ 		goto err_register;
+ 
+-	/* we're going to reset, so assume we have no link for now */
+-
++	/* carrier off reporting is important to ethtool even BEFORE open */
+ 	netif_carrier_off(netdev);
+-	netif_stop_queue(netdev);
+ 
+ 	DPRINTK(PROBE, INFO, "Intel(R) PRO/10GbE Network Connection\n");
+ 	ixgb_check_options(adapter);
+@@ -592,6 +590,8 @@ ixgb_open(struct net_device *netdev)
+ 	if (err)
+ 		goto err_setup_tx;
+ 
++	netif_carrier_off(netdev);
++
+ 	/* allocate receive descriptors */
+ 
+ 	err = ixgb_setup_rx_resources(adapter);
+@@ -602,6 +602,8 @@ ixgb_open(struct net_device *netdev)
+ 	if (err)
+ 		goto err_up;
+ 
++	netif_start_queue(netdev);
++
+ 	return 0;
+ 
+ err_up:
+-- 
+1.6.3.3
+
+From 5438646724c34c2180664a57f862a1da8dd21db1 Mon Sep 17 00:00:00 2001
+From: Jesse Brandeburg <jesse.brandeburg@intel.com>
+Date: Fri, 17 Apr 2009 20:44:27 +0000
+Subject: [PATCH] ixgbe: fix link down initial state
+
+As reported by Andrew Lutomirski <amluto@gmail.com>
+
+All the intel wired ethernet drivers were calling netif_carrier_off
+and netif_stop_queue (or variants) before calling register_netdevice
+
+This is incorrect behavior as was pointed out by davem, and causes
+ifconfig and friends to report a strange state before first link
+after the driver was loaded, since without a netif_carrier_off, the stack
+assumes carrier_on, but before register_netdev, netlink messages are not
+sent out telling link state.
+
+This apparently confused *some* versions of networkmanager.
+
+Signed-off-by: Jesse Brandeburg <jesse.brandeburg@intel.com>
+Reported-by: Andrew Lutomirski <amluto@gmail.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/ixgbe/ixgbe_main.c |    7 +++++--
+ 1 files changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/ixgbe/ixgbe_main.c b/drivers/net/ixgbe/ixgbe_main.c
+index 0d9a3ac..d5d9589 100644
+--- a/drivers/net/ixgbe/ixgbe_main.c
++++ b/drivers/net/ixgbe/ixgbe_main.c
+@@ -3459,6 +3459,8 @@ static int ixgbe_open(struct net_device *netdev)
+ 	if (test_bit(__IXGBE_TESTING, &adapter->state))
+ 		return -EBUSY;
+ 
++	netif_carrier_off(netdev);
++
+ 	/* allocate transmit descriptors */
+ 	err = ixgbe_setup_all_tx_resources(adapter);
+ 	if (err)
+@@ -4772,13 +4774,14 @@ static int __devinit ixgbe_probe(struct pci_dev *pdev,
+ 	/* reset the hardware with the new settings */
+ 	hw->mac.ops.start_hw(hw);
+ 
+-	netif_carrier_off(netdev);
+-
+ 	strcpy(netdev->name, "eth%d");
+ 	err = register_netdev(netdev);
+ 	if (err)
+ 		goto err_register;
+ 
++	/* carrier off reporting is important to ethtool even BEFORE open */
++	netif_carrier_off(netdev);
++
+ #ifdef CONFIG_IXGBE_DCA
+ 	if (dca_add_requester(&pdev->dev) == 0) {
+ 		adapter->flags |= IXGBE_FLAG_DCA_ENABLED;
+-- 
+1.6.3.3
+
