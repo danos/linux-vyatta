@@ -1,0 +1,893 @@
+diff --git a/arch/arm/mm/highmem.c b/arch/arm/mm/highmem.c
+index a34954d..73cae57 100644
+--- a/arch/arm/mm/highmem.c
++++ b/arch/arm/mm/highmem.c
+@@ -40,11 +40,16 @@ void *kmap_atomic(struct page *page, enum km_type type)
+ {
+ 	unsigned int idx;
+ 	unsigned long vaddr;
++	void *kmap;
+ 
+ 	pagefault_disable();
+ 	if (!PageHighMem(page))
+ 		return page_address(page);
+ 
++	kmap = kmap_high_get(page);
++	if (kmap)
++		return kmap;
++
+ 	idx = type + KM_TYPE_NR * smp_processor_id();
+ 	vaddr = __fix_to_virt(FIX_KMAP_BEGIN + idx);
+ #ifdef CONFIG_DEBUG_HIGHMEM
+@@ -80,6 +85,9 @@ void kunmap_atomic(void *kvaddr, enum km_type type)
+ #else
+ 		(void) idx;  /* to kill a warning */
+ #endif
++	} else if (vaddr >= PKMAP_ADDR(0) && vaddr < PKMAP_ADDR(LAST_PKMAP)) {
++		/* this address was obtained through kmap_high_get() */
++		kunmap_high(pte_page(pkmap_page_table[PKMAP_NR(vaddr)]));
+ 	}
+ 	pagefault_enable();
+ }
+diff --git a/arch/powerpc/include/asm/mmu-hash64.h b/arch/powerpc/include/asm/mmu-hash64.h
+index 98c104a..edab67e 100644
+--- a/arch/powerpc/include/asm/mmu-hash64.h
++++ b/arch/powerpc/include/asm/mmu-hash64.h
+@@ -41,6 +41,7 @@ extern char initial_stab[];
+ 
+ #define SLB_NUM_BOLTED		3
+ #define SLB_CACHE_ENTRIES	8
++#define SLB_MIN_SIZE		32
+ 
+ /* Bits in the SLB ESID word */
+ #define SLB_ESID_V		ASM_CONST(0x0000000008000000) /* valid */
+@@ -296,6 +297,7 @@ extern void slb_flush_and_rebolt(void);
+ extern void stab_initialize(unsigned long stab);
+ 
+ extern void slb_vmalloc_update(void);
++extern void slb_set_size(u16 size);
+ #endif /* __ASSEMBLY__ */
+ 
+ /*
+diff --git a/arch/powerpc/kernel/lparcfg.c b/arch/powerpc/kernel/lparcfg.c
+index 78b3f78..f3bb5fb 100644
+--- a/arch/powerpc/kernel/lparcfg.c
++++ b/arch/powerpc/kernel/lparcfg.c
+@@ -35,6 +35,7 @@
+ #include <asm/prom.h>
+ #include <asm/vdso_datapage.h>
+ #include <asm/vio.h>
++#include <asm/mmu.h>
+ 
+ #define MODULE_VERS "1.8"
+ #define MODULE_NAME "lparcfg"
+@@ -501,6 +502,8 @@ static int pseries_lparcfg_data(struct seq_file *m, void *v)
+ 
+ 	seq_printf(m, "shared_processor_mode=%d\n", lppaca[0].shared_proc);
+ 
++	seq_printf(m, "slb_size=%d\n", mmu_slb_size);
++
+ 	return 0;
+ }
+ 
+diff --git a/arch/powerpc/kernel/rtas.c b/arch/powerpc/kernel/rtas.c
+index ee4c760..a36c6c3 100644
+--- a/arch/powerpc/kernel/rtas.c
++++ b/arch/powerpc/kernel/rtas.c
+@@ -38,6 +38,7 @@
+ #include <asm/syscalls.h>
+ #include <asm/smp.h>
+ #include <asm/atomic.h>
++#include <asm/mmu.h>
+ 
+ struct rtas_t rtas = {
+ 	.lock = SPIN_LOCK_UNLOCKED
+@@ -692,6 +693,7 @@ static void rtas_percpu_suspend_me(void *info)
+ {
+ 	long rc = H_SUCCESS;
+ 	unsigned long msr_save;
++	u16 slb_size = mmu_slb_size;
+ 	int cpu;
+ 	struct rtas_suspend_me_data *data =
+ 		(struct rtas_suspend_me_data *)info;
+@@ -714,13 +716,16 @@ static void rtas_percpu_suspend_me(void *info)
+ 		/* All other cpus are in H_JOIN, this cpu does
+ 		 * the suspend.
+ 		 */
++		slb_set_size(SLB_MIN_SIZE);
+ 		printk(KERN_DEBUG "calling ibm,suspend-me on cpu %i\n",
+ 		       smp_processor_id());
+ 		data->error = rtas_call(data->token, 0, 1, NULL);
+ 
+-		if (data->error)
++		if (data->error) {
+ 			printk(KERN_DEBUG "ibm,suspend-me returned %d\n",
+ 			       data->error);
++			slb_set_size(slb_size);
++		}
+ 	} else {
+ 		printk(KERN_ERR "H_JOIN on cpu %i failed with rc = %ld\n",
+ 		       smp_processor_id(), rc);
+diff --git a/arch/powerpc/mm/slb.c b/arch/powerpc/mm/slb.c
+index 89497fb..4d73765 100644
+--- a/arch/powerpc/mm/slb.c
++++ b/arch/powerpc/mm/slb.c
+@@ -247,14 +247,22 @@ void switch_slb(struct task_struct *tsk, struct mm_struct *mm)
+ static inline void patch_slb_encoding(unsigned int *insn_addr,
+ 				      unsigned int immed)
+ {
+-	/* Assume the instruction had a "0" immediate value, just
+-	 * "or" in the new value
+-	 */
+-	*insn_addr |= immed;
++	*insn_addr = (*insn_addr & 0xffff0000) | immed;
+ 	flush_icache_range((unsigned long)insn_addr, 4+
+ 			   (unsigned long)insn_addr);
+ }
+ 
++void slb_set_size(u16 size)
++{
++	extern unsigned int *slb_compare_rr_to_size;
++
++	if (mmu_slb_size == size)
++		return;
++
++	mmu_slb_size = size;
++	patch_slb_encoding(slb_compare_rr_to_size, mmu_slb_size);
++}
++
+ void slb_initialize(void)
+ {
+ 	unsigned long linear_llp, vmalloc_llp, io_llp;
+diff --git a/arch/powerpc/platforms/pseries/reconfig.c b/arch/powerpc/platforms/pseries/reconfig.c
+index b6f1b13..2e2bbe1 100644
+--- a/arch/powerpc/platforms/pseries/reconfig.c
++++ b/arch/powerpc/platforms/pseries/reconfig.c
+@@ -20,6 +20,7 @@
+ #include <asm/machdep.h>
+ #include <asm/uaccess.h>
+ #include <asm/pSeries_reconfig.h>
++#include <asm/mmu.h>
+ 
+ 
+ 
+@@ -439,9 +440,15 @@ static int do_update_property(char *buf, size_t bufsize)
+ 	if (!newprop)
+ 		return -ENOMEM;
+ 
++	if (!strcmp(name, "slb-size") || !strcmp(name, "ibm,slb-size"))
++		slb_set_size(*(int *)value);
++
+ 	oldprop = of_find_property(np, name,NULL);
+-	if (!oldprop)
++	if (!oldprop) {
++		if (strlen(name))
++			return prom_add_property(np, newprop);
+ 		return -ENODEV;
++	}
+ 
+ 	rc = prom_update_property(np, newprop, oldprop);
+ 	if (rc)
+diff --git a/arch/x86/include/asm/processor.h b/arch/x86/include/asm/processor.h
+index c2cceae..68e7172 100644
+--- a/arch/x86/include/asm/processor.h
++++ b/arch/x86/include/asm/processor.h
+@@ -402,7 +402,17 @@ extern unsigned long kernel_eflags;
+ extern asmlinkage void ignore_sysret(void);
+ #else	/* X86_64 */
+ #ifdef CONFIG_CC_STACKPROTECTOR
+-DECLARE_PER_CPU(unsigned long, stack_canary);
++/*
++ * Make sure stack canary segment base is cached-aligned:
++ *   "For Intel Atom processors, avoid non zero segment base address
++ *    that is not aligned to cache line boundary at all cost."
++ * (Optim Ref Manual Assembly/Compiler Coding Rule 15.)
++ */
++struct stack_canary {
++	char __pad[20];		/* canary at %gs:20 */
++	unsigned long canary;
++};
++DECLARE_PER_CPU(struct stack_canary, stack_canary) ____cacheline_aligned;
+ #endif
+ #endif	/* X86_64 */
+ 
+diff --git a/arch/x86/include/asm/stackprotector.h b/arch/x86/include/asm/stackprotector.h
+index c2d742c..decad97 100644
+--- a/arch/x86/include/asm/stackprotector.h
++++ b/arch/x86/include/asm/stackprotector.h
+@@ -78,14 +78,14 @@ static __always_inline void boot_init_stack_canary(void)
+ #ifdef CONFIG_X86_64
+ 	percpu_write(irq_stack_union.stack_canary, canary);
+ #else
+-	percpu_write(stack_canary, canary);
++	percpu_write(stack_canary.canary, canary);
+ #endif
+ }
+ 
+ static inline void setup_stack_canary_segment(int cpu)
+ {
+ #ifdef CONFIG_X86_32
+-	unsigned long canary = (unsigned long)&per_cpu(stack_canary, cpu) - 20;
++	unsigned long canary = (unsigned long)&per_cpu(stack_canary, cpu);
+ 	struct desc_struct *gdt_table = get_cpu_gdt_table(cpu);
+ 	struct desc_struct desc;
+ 
+diff --git a/arch/x86/include/asm/system.h b/arch/x86/include/asm/system.h
+index 643c59b..5bd119b 100644
+--- a/arch/x86/include/asm/system.h
++++ b/arch/x86/include/asm/system.h
+@@ -31,7 +31,7 @@ void __switch_to_xtra(struct task_struct *prev_p, struct task_struct *next_p,
+ 	"movl %P[task_canary](%[next]), %%ebx\n\t"			\
+ 	"movl %%ebx, "__percpu_arg([stack_canary])"\n\t"
+ #define __switch_canary_oparam						\
+-	, [stack_canary] "=m" (per_cpu_var(stack_canary))
++	, [stack_canary] "=m" (per_cpu_var(stack_canary.canary))
+ #define __switch_canary_iparam						\
+ 	, [task_canary] "i" (offsetof(struct task_struct, stack_canary))
+ #else	/* CC_STACKPROTECTOR */
+diff --git a/arch/x86/kernel/apic/es7000_32.c b/arch/x86/kernel/apic/es7000_32.c
+index 3029477..8f2db11 100644
+--- a/arch/x86/kernel/apic/es7000_32.c
++++ b/arch/x86/kernel/apic/es7000_32.c
+@@ -167,7 +167,7 @@ static int es7000_apic_is_cluster(void)
+ {
+ 	/* MPENTIUMIII */
+ 	if (boot_cpu_data.x86 == 6 &&
+-	    (boot_cpu_data.x86_model >= 7 || boot_cpu_data.x86_model <= 11))
++	    (boot_cpu_data.x86_model >= 7 && boot_cpu_data.x86_model <= 11))
+ 		return 1;
+ 
+ 	return 0;
+diff --git a/arch/x86/kernel/cpu/common.c b/arch/x86/kernel/cpu/common.c
+index 77848d9..ed9626a 100644
+--- a/arch/x86/kernel/cpu/common.c
++++ b/arch/x86/kernel/cpu/common.c
+@@ -1033,7 +1033,7 @@ DEFINE_PER_CPU(struct orig_ist, orig_ist);
+ #else	/* CONFIG_X86_64 */
+ 
+ #ifdef CONFIG_CC_STACKPROTECTOR
+-DEFINE_PER_CPU(unsigned long, stack_canary);
++DEFINE_PER_CPU(struct stack_canary, stack_canary) ____cacheline_aligned;
+ #endif
+ 
+ /* Make sure %fs and %gs are initialized properly in idle threads */
+diff --git a/arch/x86/kernel/head_32.S b/arch/x86/kernel/head_32.S
+index 3068388..a1614ed 100644
+--- a/arch/x86/kernel/head_32.S
++++ b/arch/x86/kernel/head_32.S
+@@ -442,7 +442,6 @@ is386:	movl $2,%ecx		# set MP
+ 	jne 1f
+ 	movl $per_cpu__gdt_page,%eax
+ 	movl $per_cpu__stack_canary,%ecx
+-	subl $20, %ecx
+ 	movw %cx, 8 * GDT_ENTRY_STACK_CANARY + 2(%eax)
+ 	shrl $16, %ecx
+ 	movb %cl, 8 * GDT_ENTRY_STACK_CANARY + 4(%eax)
+diff --git a/arch/x86/mm/pageattr.c b/arch/x86/mm/pageattr.c
+index 133bdba..f41d29b 100644
+--- a/arch/x86/mm/pageattr.c
++++ b/arch/x86/mm/pageattr.c
+@@ -808,6 +808,7 @@ static int change_page_attr_set_clr(unsigned long *addr, int numpages,
+ {
+ 	struct cpa_data cpa;
+ 	int ret, cache, checkalias;
++	unsigned long baddr = 0;
+ 
+ 	/*
+ 	 * Check, if we are requested to change a not supported
+@@ -839,6 +840,11 @@ static int change_page_attr_set_clr(unsigned long *addr, int numpages,
+ 			 */
+ 			WARN_ON_ONCE(1);
+ 		}
++		/*
++		 * Save address for cache flush. *addr is modified in the call
++		 * to __change_page_attr_set_clr() below.
++		 */
++		baddr = *addr;
+ 	}
+ 
+ 	/* Must avoid aliasing mappings in the highmem code */
+@@ -893,7 +899,7 @@ static int change_page_attr_set_clr(unsigned long *addr, int numpages,
+ 			cpa_flush_array(addr, numpages, cache,
+ 					cpa.flags, pages);
+ 		} else
+-			cpa_flush_range(*addr, numpages, cache);
++			cpa_flush_range(baddr, numpages, cache);
+ 	} else
+ 		cpa_flush_all(cache);
+ 
+diff --git a/drivers/ata/libata-core.c b/drivers/ata/libata-core.c
+index 7b2f499..bc20cf9 100644
+--- a/drivers/ata/libata-core.c
++++ b/drivers/ata/libata-core.c
+@@ -709,7 +709,13 @@ u64 ata_tf_read_block(struct ata_taskfile *tf, struct ata_device *dev)
+ 		head = tf->device & 0xf;
+ 		sect = tf->lbal;
+ 
+-		block = (cyl * dev->heads + head) * dev->sectors + sect;
++		if (!sect) {
++			ata_dev_printk(dev, KERN_WARNING, "device reported "
++				       "invalid CHS sector 0\n");
++			sect = 1; /* oh well */
++		}
++
++		block = (cyl * dev->heads + head) * dev->sectors + sect - 1;
+ 	}
+ 
+ 	return block;
+diff --git a/drivers/block/virtio_blk.c b/drivers/block/virtio_blk.c
+index 5d34764..69c6dbd 100644
+--- a/drivers/block/virtio_blk.c
++++ b/drivers/block/virtio_blk.c
+@@ -308,6 +308,9 @@ static int virtblk_probe(struct virtio_device *vdev)
+ 	else
+ 		blk_queue_max_segment_size(vblk->disk->queue, -1U);
+ 
++	/* No need to bounce any requests */
++	blk_queue_bounce_limit(vblk->disk->queue, BLK_BOUNCE_ANY);
++
+ 	/* Host can optionally specify the block size of the device */
+ 	err = virtio_config_val(vdev, VIRTIO_BLK_F_BLK_SIZE,
+ 				offsetof(struct virtio_blk_config, blk_size),
+diff --git a/drivers/char/agp/intel-agp.c b/drivers/char/agp/intel-agp.c
+index 3686912..d64a479 100644
+--- a/drivers/char/agp/intel-agp.c
++++ b/drivers/char/agp/intel-agp.c
+@@ -2315,15 +2315,6 @@ static int agp_intel_resume(struct pci_dev *pdev)
+ 	struct agp_bridge_data *bridge = pci_get_drvdata(pdev);
+ 	int ret_val;
+ 
+-	pci_restore_state(pdev);
+-
+-	/* We should restore our graphics device's config space,
+-	 * as host bridge (00:00) resumes before graphics device (02:00),
+-	 * then our access to its pci space can work right.
+-	 */
+-	if (intel_private.pcidev)
+-		pci_restore_state(intel_private.pcidev);
+-
+ 	if (bridge->driver == &intel_generic_driver)
+ 		intel_configure();
+ 	else if (bridge->driver == &intel_850_driver)
+diff --git a/drivers/char/tpm/tpm_tis.c b/drivers/char/tpm/tpm_tis.c
+index aec1931..0b73e4e 100644
+--- a/drivers/char/tpm/tpm_tis.c
++++ b/drivers/char/tpm/tpm_tis.c
+@@ -450,6 +450,12 @@ static int tpm_tis_init(struct device *dev, resource_size_t start,
+ 		goto out_err;
+ 	}
+ 
++	/* Default timeouts */
++	chip->vendor.timeout_a = msecs_to_jiffies(TIS_SHORT_TIMEOUT);
++	chip->vendor.timeout_b = msecs_to_jiffies(TIS_LONG_TIMEOUT);
++	chip->vendor.timeout_c = msecs_to_jiffies(TIS_SHORT_TIMEOUT);
++	chip->vendor.timeout_d = msecs_to_jiffies(TIS_SHORT_TIMEOUT);
++
+ 	if (request_locality(chip, 0) != 0) {
+ 		rc = -ENODEV;
+ 		goto out_err;
+@@ -457,12 +463,6 @@ static int tpm_tis_init(struct device *dev, resource_size_t start,
+ 
+ 	vendor = ioread32(chip->vendor.iobase + TPM_DID_VID(0));
+ 
+-	/* Default timeouts */
+-	chip->vendor.timeout_a = msecs_to_jiffies(TIS_SHORT_TIMEOUT);
+-	chip->vendor.timeout_b = msecs_to_jiffies(TIS_LONG_TIMEOUT);
+-	chip->vendor.timeout_c = msecs_to_jiffies(TIS_SHORT_TIMEOUT);
+-	chip->vendor.timeout_d = msecs_to_jiffies(TIS_SHORT_TIMEOUT);
+-
+ 	dev_info(dev,
+ 		 "1.2 TPM (device-id 0x%X, rev-id %d)\n",
+ 		 vendor >> 16, ioread8(chip->vendor.iobase + TPM_RID(0)));
+diff --git a/drivers/input/joydev.c b/drivers/input/joydev.c
+index 012a5e7..7ec7bcb 100644
+--- a/drivers/input/joydev.c
++++ b/drivers/input/joydev.c
+@@ -457,8 +457,11 @@ static int joydev_ioctl_common(struct joydev *joydev,
+ 				unsigned int cmd, void __user *argp)
+ {
+ 	struct input_dev *dev = joydev->handle.dev;
++	size_t len;
+ 	int i, j;
++	const char *name;
+ 
++	/* Process fixed-sized commands. */
+ 	switch (cmd) {
+ 
+ 	case JS_SET_CAL:
+@@ -500,9 +503,22 @@ static int joydev_ioctl_common(struct joydev *joydev,
+ 		return copy_to_user(argp, joydev->corr,
+ 			sizeof(joydev->corr[0]) * joydev->nabs) ? -EFAULT : 0;
+ 
+-	case JSIOCSAXMAP:
+-		if (copy_from_user(joydev->abspam, argp,
+-				   sizeof(__u8) * (ABS_MAX + 1)))
++	}
++
++	/*
++	 * Process variable-sized commands (the axis and button map commands
++	 * are considered variable-sized to decouple them from the values of
++	 * ABS_MAX and KEY_MAX).
++	 */
++	switch (cmd & ~IOCSIZE_MASK) {
++
++	case (JSIOCSAXMAP & ~IOCSIZE_MASK):
++		len = min_t(size_t, _IOC_SIZE(cmd), sizeof(joydev->abspam));
++		/*
++		 * FIXME: we should not copy into our axis map before
++		 * validating the data.
++		 */
++		if (copy_from_user(joydev->abspam, argp, len))
+ 			return -EFAULT;
+ 
+ 		for (i = 0; i < joydev->nabs; i++) {
+@@ -512,13 +528,17 @@ static int joydev_ioctl_common(struct joydev *joydev,
+ 		}
+ 		return 0;
+ 
+-	case JSIOCGAXMAP:
+-		return copy_to_user(argp, joydev->abspam,
+-			sizeof(__u8) * (ABS_MAX + 1)) ? -EFAULT : 0;
+-
+-	case JSIOCSBTNMAP:
+-		if (copy_from_user(joydev->keypam, argp,
+-				   sizeof(__u16) * (KEY_MAX - BTN_MISC + 1)))
++	case (JSIOCGAXMAP & ~IOCSIZE_MASK):
++		len = min_t(size_t, _IOC_SIZE(cmd), sizeof(joydev->abspam));
++		return copy_to_user(argp, joydev->abspam, len) ? -EFAULT : 0;
++
++	case (JSIOCSBTNMAP & ~IOCSIZE_MASK):
++		len = min_t(size_t, _IOC_SIZE(cmd), sizeof(joydev->keypam));
++		/*
++		 * FIXME: we should not copy into our keymap before
++		 * validating the data.
++		 */
++		if (copy_from_user(joydev->keypam, argp, len))
+ 			return -EFAULT;
+ 
+ 		for (i = 0; i < joydev->nkey; i++) {
+@@ -530,23 +550,19 @@ static int joydev_ioctl_common(struct joydev *joydev,
+ 
+ 		return 0;
+ 
+-	case JSIOCGBTNMAP:
+-		return copy_to_user(argp, joydev->keypam,
+-			sizeof(__u16) * (KEY_MAX - BTN_MISC + 1)) ? -EFAULT : 0;
++	case (JSIOCGBTNMAP & ~IOCSIZE_MASK):
++		len = min_t(size_t, _IOC_SIZE(cmd), sizeof(joydev->keypam));
++		return copy_to_user(argp, joydev->keypam, len) ? -EFAULT : 0;
+ 
+-	default:
+-		if ((cmd & ~IOCSIZE_MASK) == JSIOCGNAME(0)) {
+-			int len;
+-			if (!dev->name)
+-				return 0;
+-			len = strlen(dev->name) + 1;
+-			if (len > _IOC_SIZE(cmd))
+-				len = _IOC_SIZE(cmd);
+-			if (copy_to_user(argp, dev->name, len))
+-				return -EFAULT;
+-			return len;
+-		}
++	case JSIOCGNAME(0):
++		name = dev->name;
++		if (!name)
++			return 0;
++
++		len = min_t(size_t, _IOC_SIZE(cmd), strlen(name) + 1);
++		return copy_to_user(argp, name, len) ? -EFAULT : len;
+ 	}
++
+ 	return -EINVAL;
+ }
+ 
+diff --git a/drivers/media/video/em28xx/em28xx-cards.c b/drivers/media/video/em28xx/em28xx-cards.c
+index 7c70738..168e892 100644
+--- a/drivers/media/video/em28xx/em28xx-cards.c
++++ b/drivers/media/video/em28xx/em28xx-cards.c
+@@ -1886,6 +1886,9 @@ void em28xx_card_setup(struct em28xx *dev)
+ 	if (em28xx_boards[dev->model].tuner_addr)
+ 		dev->tuner_addr = em28xx_boards[dev->model].tuner_addr;
+ 
++	if (em28xx_boards[dev->model].tda9887_conf)
++		dev->tda9887_conf = em28xx_boards[dev->model].tda9887_conf;
++
+ 	/* request some modules */
+ 	switch (dev->model) {
+ 	case EM2820_BOARD_HAUPPAUGE_WINTV_USB_2:
+diff --git a/drivers/net/mlx4/eq.c b/drivers/net/mlx4/eq.c
+index 8830dcb..4602952 100644
+--- a/drivers/net/mlx4/eq.c
++++ b/drivers/net/mlx4/eq.c
+@@ -524,48 +524,6 @@ static void mlx4_unmap_clr_int(struct mlx4_dev *dev)
+ 	iounmap(priv->clr_base);
+ }
+ 
+-int mlx4_map_eq_icm(struct mlx4_dev *dev, u64 icm_virt)
+-{
+-	struct mlx4_priv *priv = mlx4_priv(dev);
+-	int ret;
+-
+-	/*
+-	 * We assume that mapping one page is enough for the whole EQ
+-	 * context table.  This is fine with all current HCAs, because
+-	 * we only use 32 EQs and each EQ uses 64 bytes of context
+-	 * memory, or 1 KB total.
+-	 */
+-	priv->eq_table.icm_virt = icm_virt;
+-	priv->eq_table.icm_page = alloc_page(GFP_HIGHUSER);
+-	if (!priv->eq_table.icm_page)
+-		return -ENOMEM;
+-	priv->eq_table.icm_dma  = pci_map_page(dev->pdev, priv->eq_table.icm_page, 0,
+-					       PAGE_SIZE, PCI_DMA_BIDIRECTIONAL);
+-	if (pci_dma_mapping_error(dev->pdev, priv->eq_table.icm_dma)) {
+-		__free_page(priv->eq_table.icm_page);
+-		return -ENOMEM;
+-	}
+-
+-	ret = mlx4_MAP_ICM_page(dev, priv->eq_table.icm_dma, icm_virt);
+-	if (ret) {
+-		pci_unmap_page(dev->pdev, priv->eq_table.icm_dma, PAGE_SIZE,
+-			       PCI_DMA_BIDIRECTIONAL);
+-		__free_page(priv->eq_table.icm_page);
+-	}
+-
+-	return ret;
+-}
+-
+-void mlx4_unmap_eq_icm(struct mlx4_dev *dev)
+-{
+-	struct mlx4_priv *priv = mlx4_priv(dev);
+-
+-	mlx4_UNMAP_ICM(dev, priv->eq_table.icm_virt, 1);
+-	pci_unmap_page(dev->pdev, priv->eq_table.icm_dma, PAGE_SIZE,
+-		       PCI_DMA_BIDIRECTIONAL);
+-	__free_page(priv->eq_table.icm_page);
+-}
+-
+ int mlx4_alloc_eq_table(struct mlx4_dev *dev)
+ {
+ 	struct mlx4_priv *priv = mlx4_priv(dev);
+diff --git a/drivers/net/mlx4/main.c b/drivers/net/mlx4/main.c
+index 30bea96..5a1387f 100644
+--- a/drivers/net/mlx4/main.c
++++ b/drivers/net/mlx4/main.c
+@@ -520,7 +520,10 @@ static int mlx4_init_icm(struct mlx4_dev *dev, struct mlx4_dev_cap *dev_cap,
+ 		goto err_unmap_aux;
+ 	}
+ 
+-	err = mlx4_map_eq_icm(dev, init_hca->eqc_base);
++	err = mlx4_init_icm_table(dev, &priv->eq_table.table,
++				  init_hca->eqc_base, dev_cap->eqc_entry_sz,
++				  dev->caps.num_eqs, dev->caps.num_eqs,
++				  0, 0);
+ 	if (err) {
+ 		mlx4_err(dev, "Failed to map EQ context memory, aborting.\n");
+ 		goto err_unmap_cmpt;
+@@ -663,7 +666,7 @@ err_unmap_mtt:
+ 	mlx4_cleanup_icm_table(dev, &priv->mr_table.mtt_table);
+ 
+ err_unmap_eq:
+-	mlx4_unmap_eq_icm(dev);
++	mlx4_cleanup_icm_table(dev, &priv->eq_table.table);
+ 
+ err_unmap_cmpt:
+ 	mlx4_cleanup_icm_table(dev, &priv->eq_table.cmpt_table);
+@@ -693,11 +696,11 @@ static void mlx4_free_icms(struct mlx4_dev *dev)
+ 	mlx4_cleanup_icm_table(dev, &priv->qp_table.qp_table);
+ 	mlx4_cleanup_icm_table(dev, &priv->mr_table.dmpt_table);
+ 	mlx4_cleanup_icm_table(dev, &priv->mr_table.mtt_table);
++	mlx4_cleanup_icm_table(dev, &priv->eq_table.table);
+ 	mlx4_cleanup_icm_table(dev, &priv->eq_table.cmpt_table);
+ 	mlx4_cleanup_icm_table(dev, &priv->cq_table.cmpt_table);
+ 	mlx4_cleanup_icm_table(dev, &priv->srq_table.cmpt_table);
+ 	mlx4_cleanup_icm_table(dev, &priv->qp_table.cmpt_table);
+-	mlx4_unmap_eq_icm(dev);
+ 
+ 	mlx4_UNMAP_ICM_AUX(dev);
+ 	mlx4_free_icm(dev, priv->fw.aux_icm, 0);
+diff --git a/drivers/net/mlx4/mlx4.h b/drivers/net/mlx4/mlx4.h
+index 5bd79c2..bc72d6e 100644
+--- a/drivers/net/mlx4/mlx4.h
++++ b/drivers/net/mlx4/mlx4.h
+@@ -205,9 +205,7 @@ struct mlx4_eq_table {
+ 	void __iomem	      **uar_map;
+ 	u32			clr_mask;
+ 	struct mlx4_eq	       *eq;
+-	u64			icm_virt;
+-	struct page	       *icm_page;
+-	dma_addr_t		icm_dma;
++	struct mlx4_icm_table	table;
+ 	struct mlx4_icm_table	cmpt_table;
+ 	int			have_irq;
+ 	u8			inta_pin;
+@@ -373,9 +371,6 @@ u64 mlx4_make_profile(struct mlx4_dev *dev,
+ 		      struct mlx4_dev_cap *dev_cap,
+ 		      struct mlx4_init_hca_param *init_hca);
+ 
+-int mlx4_map_eq_icm(struct mlx4_dev *dev, u64 icm_virt);
+-void mlx4_unmap_eq_icm(struct mlx4_dev *dev);
+-
+ int mlx4_cmd_init(struct mlx4_dev *dev);
+ void mlx4_cmd_cleanup(struct mlx4_dev *dev);
+ void mlx4_cmd_event(struct mlx4_dev *dev, u16 token, u8 status, u64 out_param);
+diff --git a/drivers/net/wireless/ath5k/base.c b/drivers/net/wireless/ath5k/base.c
+index 409f022..09eb47b 100644
+--- a/drivers/net/wireless/ath5k/base.c
++++ b/drivers/net/wireless/ath5k/base.c
+@@ -2623,7 +2623,7 @@ ath5k_reset(struct ath5k_softc *sc, struct ieee80211_channel *chan)
+ 		sc->curchan = chan;
+ 		sc->curband = &sc->sbands[chan->band];
+ 	}
+-	ret = ath5k_hw_reset(ah, sc->opmode, sc->curchan, true);
++	ret = ath5k_hw_reset(ah, sc->opmode, sc->curchan, chan != NULL);
+ 	if (ret) {
+ 		ATH5K_ERR(sc, "can't reset hardware (%d)\n", ret);
+ 		goto err;
+diff --git a/drivers/pci/quirks.c b/drivers/pci/quirks.c
+index 3067673..e66a343 100644
+--- a/drivers/pci/quirks.c
++++ b/drivers/pci/quirks.c
+@@ -1194,6 +1194,7 @@ static void __init asus_hides_smbus_hostbridge(struct pci_dev *dev)
+ 			switch(dev->subsystem_device) {
+ 			case 0x00b8: /* Compaq Evo D510 CMT */
+ 			case 0x00b9: /* Compaq Evo D510 SFF */
++			case 0x00ba: /* Compaq Evo D510 USDT */
+ 				/* Motherboard doesn't have Host bridge
+ 				 * subvendor/subdevice IDs and on-board VGA
+ 				 * controller is disabled if an AGP card is
+@@ -2353,8 +2354,10 @@ static void __devinit nv_msi_ht_cap_quirk_leaf(struct pci_dev *dev)
+ }
+ 
+ DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID, nv_msi_ht_cap_quirk_leaf);
++DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID, nv_msi_ht_cap_quirk_leaf);
+ 
+ DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AL, PCI_ANY_ID, nv_msi_ht_cap_quirk_all);
++DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_AL, PCI_ANY_ID, nv_msi_ht_cap_quirk_all);
+ 
+ static void __devinit quirk_msi_intx_disable_bug(struct pci_dev *dev)
+ {
+diff --git a/drivers/ps3/ps3stor_lib.c b/drivers/ps3/ps3stor_lib.c
+index 18066d5..af0afa1 100644
+--- a/drivers/ps3/ps3stor_lib.c
++++ b/drivers/ps3/ps3stor_lib.c
+@@ -23,6 +23,65 @@
+ #include <asm/lv1call.h>
+ #include <asm/ps3stor.h>
+ 
++/*
++ * A workaround for flash memory I/O errors when the internal hard disk
++ * has not been formatted for OtherOS use.  Delay disk close until flash
++ * memory is closed.
++ */
++
++static struct ps3_flash_workaround {
++	int flash_open;
++	int disk_open;
++	struct ps3_system_bus_device *disk_sbd;
++} ps3_flash_workaround;
++
++static int ps3stor_open_hv_device(struct ps3_system_bus_device *sbd)
++{
++	int error = ps3_open_hv_device(sbd);
++
++	if (error)
++		return error;
++
++	if (sbd->match_id == PS3_MATCH_ID_STOR_FLASH)
++		ps3_flash_workaround.flash_open = 1;
++
++	if (sbd->match_id == PS3_MATCH_ID_STOR_DISK)
++		ps3_flash_workaround.disk_open = 1;
++
++	return 0;
++}
++
++static int ps3stor_close_hv_device(struct ps3_system_bus_device *sbd)
++{
++	int error;
++
++	if (sbd->match_id == PS3_MATCH_ID_STOR_DISK
++		&& ps3_flash_workaround.disk_open
++		&& ps3_flash_workaround.flash_open) {
++		ps3_flash_workaround.disk_sbd = sbd;
++		return 0;
++	}
++
++	error = ps3_close_hv_device(sbd);
++
++	if (error)
++		return error;
++
++	if (sbd->match_id == PS3_MATCH_ID_STOR_DISK)
++		ps3_flash_workaround.disk_open = 0;
++
++	if (sbd->match_id == PS3_MATCH_ID_STOR_FLASH) {
++		ps3_flash_workaround.flash_open = 0;
++
++		if (ps3_flash_workaround.disk_sbd) {
++			ps3_close_hv_device(ps3_flash_workaround.disk_sbd);
++			ps3_flash_workaround.disk_open = 0;
++			ps3_flash_workaround.disk_sbd = NULL;
++		}
++	}
++
++	return 0;
++}
+ 
+ static int ps3stor_probe_access(struct ps3_storage_device *dev)
+ {
+@@ -90,7 +149,7 @@ int ps3stor_setup(struct ps3_storage_device *dev, irq_handler_t handler)
+ 	int error, res, alignment;
+ 	enum ps3_dma_page_size page_size;
+ 
+-	error = ps3_open_hv_device(&dev->sbd);
++	error = ps3stor_open_hv_device(&dev->sbd);
+ 	if (error) {
+ 		dev_err(&dev->sbd.core,
+ 			"%s:%u: ps3_open_hv_device failed %d\n", __func__,
+@@ -166,7 +225,7 @@ fail_free_irq:
+ fail_sb_event_receive_port_destroy:
+ 	ps3_sb_event_receive_port_destroy(&dev->sbd, dev->irq);
+ fail_close_device:
+-	ps3_close_hv_device(&dev->sbd);
++	ps3stor_close_hv_device(&dev->sbd);
+ fail:
+ 	return error;
+ }
+@@ -193,7 +252,7 @@ void ps3stor_teardown(struct ps3_storage_device *dev)
+ 			"%s:%u: destroy event receive port failed %d\n",
+ 			__func__, __LINE__, error);
+ 
+-	error = ps3_close_hv_device(&dev->sbd);
++	error = ps3stor_close_hv_device(&dev->sbd);
+ 	if (error)
+ 		dev_err(&dev->sbd.core,
+ 			"%s:%u: ps3_close_hv_device failed %d\n", __func__,
+diff --git a/drivers/scsi/sg.c b/drivers/scsi/sg.c
+index ff63279..ab96890 100644
+--- a/drivers/scsi/sg.c
++++ b/drivers/scsi/sg.c
+@@ -1811,7 +1811,7 @@ retry:
+ 	return 0;
+ out:
+ 	for (i = 0; i < k; i++)
+-		__free_pages(schp->pages[k], order);
++		__free_pages(schp->pages[i], order);
+ 
+ 	if (--order >= 0)
+ 		goto retry;
+diff --git a/fs/binfmt_elf.c b/fs/binfmt_elf.c
+index 605b17a..b4fb1d0 100644
+--- a/fs/binfmt_elf.c
++++ b/fs/binfmt_elf.c
+@@ -501,22 +501,22 @@ static unsigned long load_elf_interp(struct elfhdr *interp_elf_ex,
+ 		}
+ 	}
+ 
+-	/*
+-	 * Now fill out the bss section.  First pad the last page up
+-	 * to the page boundary, and then perform a mmap to make sure
+-	 * that there are zero-mapped pages up to and including the 
+-	 * last bss page.
+-	 */
+-	if (padzero(elf_bss)) {
+-		error = -EFAULT;
+-		goto out_close;
+-	}
++	if (last_bss > elf_bss) {
++		/*
++		 * Now fill out the bss section.  First pad the last page up
++		 * to the page boundary, and then perform a mmap to make sure
++		 * that there are zero-mapped pages up to and including the
++		 * last bss page.
++		 */
++		if (padzero(elf_bss)) {
++			error = -EFAULT;
++			goto out_close;
++		}
+ 
+-	/* What we have mapped so far */
+-	elf_bss = ELF_PAGESTART(elf_bss + ELF_MIN_ALIGN - 1);
++		/* What we have mapped so far */
++		elf_bss = ELF_PAGESTART(elf_bss + ELF_MIN_ALIGN - 1);
+ 
+-	/* Map the last of the bss segment */
+-	if (last_bss > elf_bss) {
++		/* Map the last of the bss segment */
+ 		down_write(&current->mm->mmap_sem);
+ 		error = do_brk(elf_bss, last_bss - elf_bss);
+ 		up_write(&current->mm->mmap_sem);
+diff --git a/fs/udf/lowlevel.c b/fs/udf/lowlevel.c
+index 703843f..1b88fd5 100644
+--- a/fs/udf/lowlevel.c
++++ b/fs/udf/lowlevel.c
+@@ -56,7 +56,12 @@ unsigned long udf_get_last_block(struct super_block *sb)
+ 	struct block_device *bdev = sb->s_bdev;
+ 	unsigned long lblock = 0;
+ 
+-	if (ioctl_by_bdev(bdev, CDROM_LAST_WRITTEN, (unsigned long) &lblock))
++	/*
++	 * ioctl failed or returned obviously bogus value?
++	 * Try using the device size...
++	 */
++	if (ioctl_by_bdev(bdev, CDROM_LAST_WRITTEN, (unsigned long) &lblock) ||
++	    lblock == 0)
+ 		lblock = bdev->bd_inode->i_size >> sb->s_blocksize_bits;
+ 
+ 	if (lblock)
+diff --git a/ipc/shm.c b/ipc/shm.c
+index 30b1265..75aac57 100644
+--- a/ipc/shm.c
++++ b/ipc/shm.c
+@@ -411,7 +411,7 @@ static int newseg(struct ipc_namespace *ns, struct ipc_params *params)
+ 	return error;
+ 
+ no_id:
+-	if (shp->mlock_user)	/* shmflg & SHM_HUGETLB case */
++	if (is_file_hugepages(file) && shp->mlock_user)
+ 		user_shm_unlock(size, shp->mlock_user);
+ 	fput(file);
+ no_file:
+diff --git a/net/wireless/scan.c b/net/wireless/scan.c
+index f5be6a8..f9c53f3 100644
+--- a/net/wireless/scan.c
++++ b/net/wireless/scan.c
+@@ -97,7 +97,7 @@ void cfg80211_bss_expire(struct cfg80211_registered_device *dev)
+ 		dev->bss_generation++;
+ }
+ 
+-static u8 *find_ie(u8 num, u8 *ies, size_t len)
++static u8 *find_ie(u8 num, u8 *ies, int len)
+ {
+ 	while (len > 2 && ies[0] != num) {
+ 		len -= ies[1] + 2;
+diff --git a/sound/pci/cs46xx/cs46xx_lib.h b/sound/pci/cs46xx/cs46xx_lib.h
+index 4eb55aa..b518949 100644
+--- a/sound/pci/cs46xx/cs46xx_lib.h
++++ b/sound/pci/cs46xx/cs46xx_lib.h
+@@ -35,7 +35,7 @@
+ 
+ 
+ #ifdef CONFIG_SND_CS46XX_NEW_DSP
+-#define CS46XX_MIN_PERIOD_SIZE 1
++#define CS46XX_MIN_PERIOD_SIZE 64
+ #define CS46XX_MAX_PERIOD_SIZE 1024*1024
+ #else
+ #define CS46XX_MIN_PERIOD_SIZE 2048
+diff --git a/sound/pci/oxygen/oxygen_io.c b/sound/pci/oxygen/oxygen_io.c
+index c1eb923..09b2b2a 100644
+--- a/sound/pci/oxygen/oxygen_io.c
++++ b/sound/pci/oxygen/oxygen_io.c
+@@ -215,17 +215,8 @@ EXPORT_SYMBOL(oxygen_write_spi);
+ 
+ void oxygen_write_i2c(struct oxygen *chip, u8 device, u8 map, u8 data)
+ {
+-	unsigned long timeout;
+-
+ 	/* should not need more than about 300 us */
+-	timeout = jiffies + msecs_to_jiffies(1);
+-	do {
+-		if (!(oxygen_read16(chip, OXYGEN_2WIRE_BUS_STATUS)
+-		      & OXYGEN_2WIRE_BUSY))
+-			break;
+-		udelay(1);
+-		cond_resched();
+-	} while (time_after_eq(timeout, jiffies));
++	msleep(1);
+ 
+ 	oxygen_write8(chip, OXYGEN_2WIRE_MAP, map);
+ 	oxygen_write8(chip, OXYGEN_2WIRE_DATA, data);
+diff --git a/sound/soc/codecs/wm8350.c b/sound/soc/codecs/wm8350.c
+index 0275321..223d3af 100644
+--- a/sound/soc/codecs/wm8350.c
++++ b/sound/soc/codecs/wm8350.c
+@@ -613,7 +613,7 @@ SOC_DAPM_SINGLE("Switch", WM8350_BEEP_VOLUME, 15, 1, 1);
+ 
+ /* Out4 Capture Mux */
+ static const struct snd_kcontrol_new wm8350_out4_capture_controls =
+-SOC_DAPM_ENUM("Route", wm8350_enum[8]);
++SOC_DAPM_ENUM("Route", wm8350_enum[7]);
+ 
+ static const struct snd_soc_dapm_widget wm8350_dapm_widgets[] = {
+ 
