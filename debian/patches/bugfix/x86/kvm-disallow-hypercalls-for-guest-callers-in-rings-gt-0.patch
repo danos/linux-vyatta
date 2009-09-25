@@ -1,0 +1,55 @@
+commit 07708c4af1346ab1521b26a202f438366b7bcffd
+Author: Jan Kiszka <jan.kiszka@siemens.com>
+Date:   Mon Aug 3 18:43:28 2009 +0200
+
+    KVM: x86: Disallow hypercalls for guest callers in rings > 0
+    
+    So far unprivileged guest callers running in ring 3 can issue, e.g., MMU
+    hypercalls. Normally, such callers cannot provide any hand-crafted MMU
+    command structure as it has to be passed by its physical address, but
+    they can still crash the guest kernel by passing random addresses.
+    
+    To close the hole, this patch considers hypercalls valid only if issued
+    from guest ring 0. This may still be relaxed on a per-hypercall base in
+    the future once required.
+    
+    Cc: stable@kernel.org
+    Signed-off-by: Jan Kiszka <jan.kiszka@siemens.com>
+    Signed-off-by: Avi Kivity <avi@redhat.com>
+
+Backported to Debian's 2.6.26 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.26.orig/arch/x86/kvm/x86.c linux-source-2.6.26/arch/x86/kvm/x86.c
+--- linux-source-2.6.26.orig/arch/x86/kvm/x86.c	2009-08-18 23:15:14.000000000 -0600
++++ linux-source-2.6.26/arch/x86/kvm/x86.c	2009-09-24 11:40:09.000000000 -0600
+@@ -2532,6 +2532,11 @@ int kvm_emulate_hypercall(struct kvm_vcp
+ 		a3 &= 0xFFFFFFFF;
+ 	}
+ 
++	if (kvm_x86_ops->get_cpl(vcpu) != 0) {
++		ret = -KVM_EPERM;
++		goto out;
++	}
++
+ 	switch (nr) {
+ 	case KVM_HC_VAPIC_POLL_IRQ:
+ 		ret = 0;
+@@ -2543,6 +2548,7 @@ int kvm_emulate_hypercall(struct kvm_vcp
+ 		ret = -KVM_ENOSYS;
+ 		break;
+ 	}
++out:
+ 	vcpu->arch.regs[VCPU_REGS_RAX] = ret;
+ 	kvm_x86_ops->decache_regs(vcpu);
+ 	++vcpu->stat.hypercalls;
+diff -urpN linux-source-2.6.26.orig/include/linux/kvm_para.h linux-source-2.6.26/include/linux/kvm_para.h
+--- linux-source-2.6.26.orig/include/linux/kvm_para.h	2008-07-13 15:51:29.000000000 -0600
++++ linux-source-2.6.26/include/linux/kvm_para.h	2009-09-24 11:37:19.000000000 -0600
+@@ -13,6 +13,7 @@
+ #define KVM_ENOSYS		1000
+ #define KVM_EFAULT		EFAULT
+ #define KVM_E2BIG		E2BIG
++#define KVM_EPERM		EPERM
+ 
+ #define KVM_HC_VAPIC_POLL_IRQ		1
+ #define KVM_HC_MMU_OP			2
