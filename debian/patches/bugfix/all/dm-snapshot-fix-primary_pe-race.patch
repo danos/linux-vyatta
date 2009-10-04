@@ -1,0 +1,107 @@
+From 7c5f78b9d7f21937e46c26db82976df4b459c95c Mon Sep 17 00:00:00 2001
+From: Mikulas Patocka <mpatocka@redhat.com>
+Date: Tue, 21 Oct 2008 17:44:51 +0100
+Subject: [PATCH] dm snapshot: fix primary_pe race
+
+Fix a race condition with primary_pe ref_count handling.
+
+put_pending_exception runs under dm_snapshot->lock, it does atomic_dec_and_test
+on primary_pe->ref_count, and later does atomic_read primary_pe->ref_count.
+
+__origin_write does atomic_dec_and_test on primary_pe->ref_count without holding
+dm_snapshot->lock.
+
+This opens the following race condition:
+Assume two CPUs, CPU1 is executing put_pending_exception (and holding
+dm_snapshot->lock). CPU2 is executing __origin_write in parallel.
+primary_pe->ref_count == 2.
+
+CPU1:
+if (primary_pe && atomic_dec_and_test(&primary_pe->ref_count))
+	origin_bios = bio_list_get(&primary_pe->origin_bios);
+... decrements primary_pe->ref_count to 1. Doesn't load origin_bios
+
+CPU2:
+if (first && atomic_dec_and_test(&primary_pe->ref_count)) {
+	flush_bios(bio_list_get(&primary_pe->origin_bios));
+	free_pending_exception(primary_pe);
+	/* If we got here, pe_queue is necessarily empty. */
+	return r;
+}
+... decrements primary_pe->ref_count to 0, submits pending bios, frees
+primary_pe.
+
+CPU1:
+if (!primary_pe || primary_pe != pe)
+	free_pending_exception(pe);
+... this has no effect.
+if (primary_pe && !atomic_read(&primary_pe->ref_count))
+	free_pending_exception(primary_pe);
+... sees ref_count == 0 (written by CPU 2), does double free !!
+
+This bug can happen only if someone is simultaneously writing to both the
+origin and the snapshot.
+
+If someone is writing only to the origin, __origin_write will submit kcopyd
+request after it decrements primary_pe->ref_count (so it can't happen that the
+finished copy races with primary_pe->ref_count decrementation).
+
+If someone is writing only to the snapshot, __origin_write isn't invoked at all
+and the race can't happen.
+
+The race happens when someone writes to the snapshot --- this creates
+pending_exception with primary_pe == NULL and starts copying. Then, someone
+writes to the same chunk in the snapshot, and __origin_write races with
+termination of already submitted request in pending_complete (that calls
+put_pending_exception).
+
+This race may be reason for bugs:
+  http://bugzilla.kernel.org/show_bug.cgi?id=11636
+  https://bugzilla.redhat.com/show_bug.cgi?id=465825
+
+The patch fixes the code to make sure that:
+1. If atomic_dec_and_test(&primary_pe->ref_count) returns false, the process
+must no longer dereference primary_pe (because someone else may free it under
+us).
+2. If atomic_dec_and_test(&primary_pe->ref_count) returns true, the process
+is responsible for freeing primary_pe.
+
+Signed-off-by: Mikulas Patocka <mpatocka@redhat.com>
+Signed-off-by: Alasdair G Kergon <agk@redhat.com>
+Cc: stable@kernel.org
+---
+ drivers/md/dm-snap.c |   10 +++-------
+ 1 files changed, 3 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/md/dm-snap.c b/drivers/md/dm-snap.c
+index 6e5528a..4ed9b7a 100644
+--- a/drivers/md/dm-snap.c
++++ b/drivers/md/dm-snap.c
+@@ -824,8 +824,10 @@ static struct bio *put_pending_exception(struct dm_snap_pending_exception *pe)
+ 	 * the bios for the original write to the origin.
+ 	 */
+ 	if (primary_pe &&
+-	    atomic_dec_and_test(&primary_pe->ref_count))
++	    atomic_dec_and_test(&primary_pe->ref_count)) {
+ 		origin_bios = bio_list_get(&primary_pe->origin_bios);
++		free_pending_exception(primary_pe);
++	}
+ 
+ 	/*
+ 	 * Free the pe if it's not linked to an origin write or if
+@@ -834,12 +836,6 @@ static struct bio *put_pending_exception(struct dm_snap_pending_exception *pe)
+ 	if (!primary_pe || primary_pe != pe)
+ 		free_pending_exception(pe);
+ 
+-	/*
+-	 * Free the primary pe if nothing references it.
+-	 */
+-	if (primary_pe && !atomic_read(&primary_pe->ref_count))
+-		free_pending_exception(primary_pe);
+-
+ 	return origin_bios;
+ }
+ 
+-- 
+1.6.4.3
+
