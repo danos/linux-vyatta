@@ -66,16 +66,6 @@ diff -urpN linux-source-2.6.26.orig/include/linux/security.h linux-source-2.6.26
  #include <linux/msg.h>
  #include <linux/sched.h>
  #include <linux/key.h>
-@@ -58,6 +59,9 @@ extern int cap_inode_setxattr(struct den
- extern int cap_inode_removexattr(struct dentry *dentry, const char *name);
- extern int cap_inode_need_killpriv(struct dentry *dentry);
- extern int cap_inode_killpriv(struct dentry *dentry);
-+extern int cap_file_mmap(struct file *file, unsigned long reqprot,
-+			 unsigned long prot, unsigned long flags,
-+			 unsigned long addr, unsigned long addr_only);
- extern int cap_task_post_setuid(uid_t old_ruid, uid_t old_euid, uid_t old_suid, int flags);
- extern void cap_task_reparent_to_init(struct task_struct *p);
- extern int cap_task_prctl(int option, unsigned long arg2, unsigned long arg3,
 @@ -84,6 +88,7 @@ extern int cap_netlink_send(struct sock 
  extern int cap_netlink_recv(struct sk_buff *skb, int cap);
  
@@ -106,17 +96,6 @@ diff -urpN linux-source-2.6.26.orig/include/linux/security.h linux-source-2.6.26
  /**
   * struct security_operations - main security structure
   *
-@@ -2135,9 +2155,7 @@ static inline int security_file_mmap(str
- 				     unsigned long addr,
- 				     unsigned long addr_only)
- {
--	if ((addr < mmap_min_addr) && !capable(CAP_SYS_RAWIO))
--		return -EACCES;
--	return 0;
-+	return cap_file_mmap(file, reqprot, prot, flags, addr, addr_only);
- }
- 
- static inline int security_file_mprotect(struct vm_area_struct *vma,
 diff -urpN linux-source-2.6.26.orig/kernel/sysctl.c linux-source-2.6.26/kernel/sysctl.c
 --- linux-source-2.6.26.orig/kernel/sysctl.c	2009-09-30 09:13:56.000000000 -0600
 +++ linux-source-2.6.26/kernel/sysctl.c	2009-09-30 09:21:57.000000000 -0600
@@ -163,55 +142,6 @@ diff -urpN linux-source-2.6.26.orig/mm/mmap.c linux-source-2.6.26/mm/mmap.c
  /*
   * Check that a process has enough memory to allocate a new virtual
   * mapping. 0 means there is enough memory for the allocation to
-diff -urpN linux-source-2.6.26.orig/security/commoncap.c linux-source-2.6.26/security/commoncap.c
---- linux-source-2.6.26.orig/security/commoncap.c	2009-08-18 23:15:10.000000000 -0600
-+++ linux-source-2.6.26/security/commoncap.c	2009-09-30 09:34:11.000000000 -0600
-@@ -689,3 +689,31 @@ int cap_vm_enough_memory(struct mm_struc
- 	return __vm_enough_memory(mm, pages, cap_sys_admin);
- }
- 
-+/*
-+ * cap_file_mmap - check if able to map given addr
-+ * @file: unused
-+ * @reqprot: unused
-+ * @prot: unused
-+ * @flags: unused
-+ * @addr: address attempting to be mapped
-+ * @addr_only: unused
-+ *
-+ * If the process is attempting to map memory below mmap_min_addr they need
-+ * CAP_SYS_RAWIO.  The other parameters to this function are unused by the
-+ * capability security module.  Returns 0 if this mapping should be allowed
-+ * -EPERM if not.
-+ */
-+int cap_file_mmap(struct file *file, unsigned long reqprot,
-+		  unsigned long prot, unsigned long flags,
-+		  unsigned long addr, unsigned long addr_only)
-+{
-+	int ret = 0;
-+
-+	if (addr < dac_mmap_min_addr) {
-+		ret = cap_capable(current, CAP_SYS_RAWIO);
-+		/* set PF_SUPERPRIV if it turns out we allow the low mmap */
-+		if (ret == 0)
-+			current->flags |= PF_SUPERPRIV;
-+	}
-+	return ret;
-+}
-diff -urpN linux-source-2.6.26.orig/security/dummy.c linux-source-2.6.26/security/dummy.c
---- linux-source-2.6.26.orig/security/dummy.c	2008-07-13 15:51:29.000000000 -0600
-+++ linux-source-2.6.26/security/dummy.c	2009-09-30 09:14:23.000000000 -0600
-@@ -459,9 +459,7 @@ static int dummy_file_mmap (struct file 
- 			    unsigned long addr,
- 			    unsigned long addr_only)
- {
--	if ((addr < mmap_min_addr) && !capable(CAP_SYS_RAWIO))
--		return -EACCES;
--	return 0;
-+	return cap_file_mmap(file, reqprot, prot, flags, addr, addr_only);
- }
- 
- static int dummy_file_mprotect (struct vm_area_struct *vma,
 diff -urpN linux-source-2.6.26.orig/security/Kconfig linux-source-2.6.26/security/Kconfig
 --- linux-source-2.6.26.orig/security/Kconfig	2009-09-30 09:13:56.000000000 -0600
 +++ linux-source-2.6.26/security/Kconfig	2009-09-30 09:21:57.000000000 -0600
