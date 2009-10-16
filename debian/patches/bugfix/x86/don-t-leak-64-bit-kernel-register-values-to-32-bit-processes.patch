@@ -1,0 +1,103 @@
+From cebbert@redhat.com  Fri Oct  9 15:37:09 2009
+From: Jan Beulich <JBeulich@novell.com>
+Date: Wed, 7 Oct 2009 17:34:09 -0400
+Subject: x86: Don't leak 64-bit kernel register values to 32-bit processes
+To: stable@kernel.org
+Cc: Jan Beulich <jbeulich@novell.com>
+Message-ID: <20091007173409.2d4978d9@katamari.usersys.redhat.com>
+
+From: Jan Beulich <JBeulich@novell.com>
+
+commit 24e35800cdc4350fc34e2bed37b608a9e13ab3b6 upstream
+
+x86: Don't leak 64-bit kernel register values to 32-bit processes
+
+While 32-bit processes can't directly access R8...R15, they can
+gain access to these registers by temporarily switching themselves
+into 64-bit mode.
+
+Therefore, registers not preserved anyway by called C functions
+(i.e. R8...R11) must be cleared prior to returning to user mode.
+
+Signed-off-by: Jan Beulich <jbeulich@novell.com>
+LKML-Reference: <4AC34D73020000780001744A@vpn.id2.novell.com>
+Signed-off-by: Ingo Molnar <mingo@elte.hu>
+Cc: Chuck Ebbert <cebbert@redhat.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+
+---
+ arch/x86/ia32/ia32entry.S |   36 +++++++++++++++++++++++-------------
+ 1 file changed, 23 insertions(+), 13 deletions(-)
+
+Backported to Debian's 2.6.26 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.26.orig/arch/x86/ia32/ia32entry.S linux-source-2.6.26/arch/x86/ia32/ia32entry.S
+--- linux-source-2.6.26.orig/arch/x86/ia32/ia32entry.S	2009-10-15 22:15:48.000000000 -0600
++++ linux-source-2.6.26/arch/x86/ia32/ia32entry.S	2009-10-15 23:03:06.000000000 -0600
+@@ -29,12 +29,12 @@
+ 	.endm 
+ 
+ 	/* clobbers %eax */	
+-	.macro  CLEAR_RREGS _r9=rax
++	.macro  CLEAR_RREGS offset=0, _r9=rax
+ 	xorl 	%eax,%eax
+-	movq	%rax,R11(%rsp)
+-	movq	%rax,R10(%rsp)
+-	movq	%\_r9,R9(%rsp)
+-	movq	%rax,R8(%rsp)
++	movq	%rax,\offset+R11(%rsp)
++	movq	%rax,\offset+R10(%rsp)
++	movq	%\_r9,\offset+R9(%rsp)
++	movq	%rax,\offset+R8(%rsp)
+ 	.endm
+ 
+ 	.macro LOAD_ARGS32 offset, _r9=0
+@@ -143,6 +143,10 @@ sysenter_do_call:	
+ 	movl	RIP-R11(%rsp),%edx		/* User %eip */
+ 	CFI_REGISTER rip,rdx
+ 	RESTORE_ARGS 1,24,1,1,1,1
++	xorq	%r8,%r8
++	xorq	%r9,%r9
++	xorq	%r10,%r10
++	xorq	%r11,%r11
+ 	popfq
+ 	CFI_ADJUST_CFA_OFFSET -8
+ 	/*CFI_RESTORE rflags*/
+@@ -247,6 +251,9 @@ cstar_do_call:
+ 	CFI_REGISTER rip,rcx
+ 	movl EFLAGS-ARGOFFSET(%rsp),%r11d	
+ 	/*CFI_REGISTER rflags,r11*/
++	xorq	%r10,%r10
++	xorq	%r9,%r9
++	xorq	%r8,%r8
+ 	TRACE_IRQS_ON
+ 	movl RSP-ARGOFFSET(%rsp),%esp
+ 	CFI_RESTORE rsp
+@@ -257,7 +264,7 @@ cstar_tracesys:	
+ 	CFI_RESTORE_STATE
+ 	xchgl %r9d,%ebp
+ 	SAVE_REST
+-	CLEAR_RREGS r9
++	CLEAR_RREGS 0, r9
+ 	movq $-ENOSYS,RAX(%rsp)	/* ptrace can change this for a bad syscall */
+ 	movq %rsp,%rdi        /* &pt_regs -> arg1 */
+ 	call syscall_trace_enter
+@@ -328,6 +335,7 @@ ia32_do_call:
+ 	call *ia32_sys_call_table(,%rax,8) # xxx: rip relative
+ ia32_sysret:
+ 	movq %rax,RAX-ARGOFFSET(%rsp)
++	CLEAR_RREGS -ARGOFFSET
+ 	jmp int_ret_from_sys_call 
+ 
+ ia32_tracesys:			 
+@@ -345,8 +353,8 @@ END(ia32_syscall)
+ 
+ ia32_badsys:
+ 	movq $0,ORIG_RAX-ARGOFFSET(%rsp)
+-	movq $-ENOSYS,RAX-ARGOFFSET(%rsp)
+-	jmp int_ret_from_sys_call
++	movq $-ENOSYS,%rax
++	jmp ia32_sysret
+ 
+ quiet_ni_syscall:
+ 	movq $-ENOSYS,%rax

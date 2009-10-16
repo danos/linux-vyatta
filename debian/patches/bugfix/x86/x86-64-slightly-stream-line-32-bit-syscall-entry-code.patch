@@ -1,0 +1,122 @@
+From cebbert@redhat.com  Fri Oct  9 15:36:28 2009
+From: Jan Beulich <jbeulich@novell.com>
+Date: Wed, 7 Oct 2009 17:33:08 -0400
+Subject: x86-64: slightly stream-line 32-bit syscall entry code
+To: stable@kernel.org
+Cc: Jan Beulich <jbeulich@novell.com>
+Message-ID: <20091007173308.1e56746f@katamari.usersys.redhat.com>
+
+From: Jan Beulich <jbeulich@novell.com>
+
+commit 295286a89107c353b9677bc604361c537fd6a1c0 upstream
+
+x86-64: slightly stream-line 32-bit syscall entry code
+
+[ required for following patch to apply properly ]
+
+Avoid updating registers or memory twice as well as needlessly loading
+or copying registers.
+
+Signed-off-by: Jan Beulich <jbeulich@novell.com>
+Signed-off-by: Ingo Molnar <mingo@elte.hu>
+Cc: Chuck Ebbert <cebbert@redhat.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+
+---
+ arch/x86/ia32/ia32entry.S |   26 ++++++++++----------------
+ 1 file changed, 10 insertions(+), 16 deletions(-)
+
+Backported to Debian's 2.6.26 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.26.orig/arch/x86/ia32/ia32entry.S linux-source-2.6.26/arch/x86/ia32/ia32entry.S
+--- linux-source-2.6.26.orig/arch/x86/ia32/ia32entry.S	2009-08-18 23:15:13.000000000 -0600
++++ linux-source-2.6.26/arch/x86/ia32/ia32entry.S	2009-10-15 22:15:48.000000000 -0600
+@@ -29,19 +29,18 @@
+ 	.endm 
+ 
+ 	/* clobbers %eax */	
+-	.macro  CLEAR_RREGS
++	.macro  CLEAR_RREGS _r9=rax
+ 	xorl 	%eax,%eax
+ 	movq	%rax,R11(%rsp)
+ 	movq	%rax,R10(%rsp)
+-	movq	%rax,R9(%rsp)
++	movq	%\_r9,R9(%rsp)
+ 	movq	%rax,R8(%rsp)
+ 	.endm
+ 
+-	.macro LOAD_ARGS32 offset
+-	movl \offset(%rsp),%r11d
+-	movl \offset+8(%rsp),%r10d
++	.macro LOAD_ARGS32 offset, _r9=0
++	.if \_r9
+ 	movl \offset+16(%rsp),%r9d
+-	movl \offset+24(%rsp),%r8d
++	.endif
+ 	movl \offset+40(%rsp),%ecx
+ 	movl \offset+48(%rsp),%edx
+ 	movl \offset+56(%rsp),%esi
+@@ -118,7 +117,7 @@ ENTRY(ia32_sysenter_target)
+ 	SAVE_ARGS 0,0,1
+  	/* no need to do an access_ok check here because rbp has been
+  	   32bit zero extended */ 
+-1:	movl	(%rbp),%r9d
++1:	movl	(%rbp),%ebp
+  	.section __ex_table,"a"
+  	.quad 1b,ia32_badarg
+  	.previous	
+@@ -130,7 +129,7 @@ ENTRY(ia32_sysenter_target)
+ sysenter_do_call:	
+ 	cmpl	$(IA32_NR_syscalls-1),%eax
+ 	ja	ia32_badsys
+-	IA32_ARG_FIXUP 1
++	IA32_ARG_FIXUP
+ 	call	*ia32_sys_call_table(,%rax,8)
+ 	movq	%rax,RAX-ARGOFFSET(%rsp)
+ 	GET_THREAD_INFO(%r10)
+@@ -158,16 +157,13 @@ sysenter_do_call:	
+ 
+ sysenter_tracesys:
+ 	CFI_RESTORE_STATE
+-	xchgl	%r9d,%ebp
+ 	SAVE_REST
+ 	CLEAR_RREGS
+-	movq	%r9,R9(%rsp)
+ 	movq	$-ENOSYS,RAX(%rsp)/* ptrace can change this for a bad syscall */
+ 	movq	%rsp,%rdi        /* &pt_regs -> arg1 */
+ 	call	syscall_trace_enter
+ 	LOAD_ARGS32 ARGOFFSET  /* reload args from stack in case ptrace changed it */
+ 	RESTORE_REST
+-	xchgl	%ebp,%r9d
+ 	cmpl	$(IA32_NR_syscalls-1),%eax
+ 	ja	int_ret_from_sys_call /* sysenter_tracesys has set RAX(%rsp) */
+ 	jmp	sysenter_do_call
+@@ -234,9 +230,9 @@ ENTRY(ia32_cstar_target)
+ 	testl $(_TIF_SYSCALL_TRACE|_TIF_SYSCALL_AUDIT|_TIF_SECCOMP),threadinfo_flags(%r10)
+ 	CFI_REMEMBER_STATE
+ 	jnz   cstar_tracesys
+-cstar_do_call:	
+ 	cmpl $IA32_NR_syscalls-1,%eax
+ 	ja  ia32_badsys
++cstar_do_call:
+ 	IA32_ARG_FIXUP 1
+ 	call *ia32_sys_call_table(,%rax,8)
+ 	movq %rax,RAX-ARGOFFSET(%rsp)
+@@ -261,15 +257,13 @@ cstar_tracesys:	
+ 	CFI_RESTORE_STATE
+ 	xchgl %r9d,%ebp
+ 	SAVE_REST
+-	CLEAR_RREGS
+-	movq %r9,R9(%rsp)
++	CLEAR_RREGS r9
+ 	movq $-ENOSYS,RAX(%rsp)	/* ptrace can change this for a bad syscall */
+ 	movq %rsp,%rdi        /* &pt_regs -> arg1 */
+ 	call syscall_trace_enter
+-	LOAD_ARGS32 ARGOFFSET  /* reload args from stack in case ptrace changed it */
++	LOAD_ARGS32 ARGOFFSET, 1  /* reload args from stack in case ptrace changed it */
+ 	RESTORE_REST
+ 	xchgl %ebp,%r9d
+-	movl RSP-ARGOFFSET(%rsp), %r8d
+ 	cmpl $(IA32_NR_syscalls-1),%eax
+ 	ja int_ret_from_sys_call /* cstar_tracesys has set RAX(%rsp) */
+ 	jmp cstar_do_call
