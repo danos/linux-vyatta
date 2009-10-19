@@ -1,0 +1,99 @@
+commit 6885ffb3a1b4abf731fd0891a2c1544a83c2651d
+Author: Mark Smith <lk-netdev@lk-netdev.nosense.org>
+Date:   Thu Aug 6 23:21:22 2009 +0000
+
+    Use correct NET_RX_* returns for atalk_rcv()
+    
+    In all rx'd SKB cases, atalk_rcv() either eventually jumps to or falls through
+        to the label out:, which  returns numeric 0. Numeric 0 corresponds to
+        NET_RX_SUCCESS, which is incorrect in failed SKB cases.
+    
+        This patch makes atalk_rcv() provide the correct returns by:
+    
+        o  explicitly returning NET_RX_SUCCESS in the two success cases
+        o  having the out: label return NET_RX_DROP, instead of numeric 0
+        o  making the failed SKB labels and processing more consistent with other
+           _rcv() routines in the kernel, simplifying validation and removing a
+           backwards goto
+    
+    Signed-off-by: Mark Smith <markzzzsmith@yahoo.com.au>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+Backported to Debian's 2.6.26 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.26.orig/net/appletalk/ddp.c linux-source-2.6.26/net/appletalk/ddp.c
+--- linux-source-2.6.26.orig/net/appletalk/ddp.c	2008-07-13 15:51:29.000000000 -0600
++++ linux-source-2.6.26/net/appletalk/ddp.c	2009-09-15 22:35:19.000000000 -0600
+@@ -1406,7 +1406,7 @@ static int atalk_rcv(struct sk_buff *skb
+ 	__u16 len_hops;
+ 
+ 	if (dev_net(dev) != &init_net)
+-		goto freeit;
++		goto drop;
+ 
+ 	/* Don't mangle buffer if shared */
+ 	if (!(skb = skb_share_check(skb, GFP_ATOMIC)))
+@@ -1414,7 +1414,7 @@ static int atalk_rcv(struct sk_buff *skb
+ 
+ 	/* Size check and make sure header is contiguous */
+ 	if (!pskb_may_pull(skb, sizeof(*ddp)))
+-		goto freeit;
++		goto drop;
+ 
+ 	ddp = ddp_hdr(skb);
+ 
+@@ -1432,7 +1432,7 @@ static int atalk_rcv(struct sk_buff *skb
+ 	if (skb->len < sizeof(*ddp) || skb->len < (len_hops & 1023)) {
+ 		pr_debug("AppleTalk: dropping corrupted frame (deh_len=%u, "
+ 			 "skb->len=%u)\n", len_hops & 1023, skb->len);
+-		goto freeit;
++		goto drop;
+ 	}
+ 
+ 	/*
+@@ -1442,7 +1442,7 @@ static int atalk_rcv(struct sk_buff *skb
+ 	if (ddp->deh_sum &&
+ 	    atalk_checksum(skb, len_hops & 1023) != ddp->deh_sum)
+ 		/* Not a valid AppleTalk frame - dustbin time */
+-		goto freeit;
++		goto drop;
+ 
+ 	/* Check the packet is aimed at us */
+ 	if (!ddp->deh_dnet)	/* Net 0 is 'this network' */
+@@ -1455,7 +1455,7 @@ static int atalk_rcv(struct sk_buff *skb
+ 		 * AppleTalk iface
+ 		 */
+ 		atalk_route_packet(skb, dev, ddp, len_hops, origlen);
+-		goto out;
++		return NET_RX_SUCCESS;
+ 	}
+ 
+ 	/* if IP over DDP is not selected this code will be optimized out */
+@@ -1471,18 +1471,21 @@ static int atalk_rcv(struct sk_buff *skb
+ 
+ 	sock = atalk_search_socket(&tosat, atif);
+ 	if (!sock) /* But not one of our sockets */
+-		goto freeit;
++		goto drop;
+ 
+ 	/* Queue packet (standard) */
+ 	skb->sk = sock;
+ 
+ 	if (sock_queue_rcv_skb(sock, skb) < 0)
+-		goto freeit;
+-out:
+-	return 0;
+-freeit:
++		goto drop;
++
++	return NET_RX_SUCCESS;
++
++drop:
+ 	kfree_skb(skb);
+-	goto out;
++out:
++	return NET_RX_DROP;
++
+ }
+ 
+ /*
