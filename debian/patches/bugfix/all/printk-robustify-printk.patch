@@ -1,0 +1,99 @@
+From b845b517b5e3706a3729f6ea83b88ab85f0725b0 Mon Sep 17 00:00:00 2001
+From: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Date: Fri, 8 Aug 2008 21:47:09 +0200
+Subject: [PATCH] printk: robustify printk
+
+Avoid deadlocks against rq->lock and xtime_lock by deferring the klogd
+wakeup by polling from the timer tick.
+
+Signed-off-by: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Signed-off-by: Ingo Molnar <mingo@elte.hu>
+---
+ include/linux/kernel.h   |    4 ++++
+ kernel/printk.c          |   19 +++++++++++++++++--
+ kernel/time/tick-sched.c |    2 +-
+ kernel/timer.c           |    1 +
+ 4 files changed, 23 insertions(+), 3 deletions(-)
+
+diff --git a/include/linux/kernel.h b/include/linux/kernel.h
+index aaa998f..113ac8d 100644
+--- a/include/linux/kernel.h
++++ b/include/linux/kernel.h
+@@ -200,6 +200,8 @@ extern struct ratelimit_state printk_ratelimit_state;
+ extern int printk_ratelimit(void);
+ extern bool printk_timed_ratelimit(unsigned long *caller_jiffies,
+ 				   unsigned int interval_msec);
++extern void printk_tick(void);
++extern int printk_needs_cpu(int);
+ #else
+ static inline int vprintk(const char *s, va_list args)
+ 	__attribute__ ((format (printf, 1, 0)));
+@@ -211,6 +213,8 @@ static inline int printk_ratelimit(void) { return 0; }
+ static inline bool printk_timed_ratelimit(unsigned long *caller_jiffies, \
+ 					  unsigned int interval_msec)	\
+ 		{ return false; }
++static inline void printk_tick(void) { }
++static inline int printk_needs_cpu(int) { return 0; }
+ #endif
+ 
+ extern void asmlinkage __attribute__((format(printf, 1, 2)))
+diff --git a/kernel/printk.c b/kernel/printk.c
+index b51b156..655cc2c 100644
+--- a/kernel/printk.c
++++ b/kernel/printk.c
+@@ -982,10 +982,25 @@ int is_console_locked(void)
+ 	return console_locked;
+ }
+ 
+-void wake_up_klogd(void)
++static DEFINE_PER_CPU(int, printk_pending);
++
++void printk_tick(void)
+ {
+-	if (!oops_in_progress && waitqueue_active(&log_wait))
++	if (__get_cpu_var(printk_pending)) {
++		__get_cpu_var(printk_pending) = 0;
+ 		wake_up_interruptible(&log_wait);
++	}
++}
++
++int printk_needs_cpu(int cpu)
++{
++	return per_cpu(printk_pending, cpu);
++}
++
++void wake_up_klogd(void)
++{
++	if (waitqueue_active(&log_wait))
++		__get_cpu_var(printk_pending) = 1;
+ }
+ 
+ /**
+diff --git a/kernel/time/tick-sched.c b/kernel/time/tick-sched.c
+index 825b4c0..c13d4f1 100644
+--- a/kernel/time/tick-sched.c
++++ b/kernel/time/tick-sched.c
+@@ -255,7 +255,7 @@ void tick_nohz_stop_sched_tick(int inidle)
+ 	next_jiffies = get_next_timer_interrupt(last_jiffies);
+ 	delta_jiffies = next_jiffies - last_jiffies;
+ 
+-	if (rcu_needs_cpu(cpu))
++	if (rcu_needs_cpu(cpu) || printk_needs_cpu(cpu))
+ 		delta_jiffies = 1;
+ 	/*
+ 	 * Do not stop the tick, if we are only one off
+diff --git a/kernel/timer.c b/kernel/timer.c
+index 03bc7f1..510fe69 100644
+--- a/kernel/timer.c
++++ b/kernel/timer.c
+@@ -978,6 +978,7 @@ void update_process_times(int user_tick)
+ 	run_local_timers();
+ 	if (rcu_pending(cpu))
+ 		rcu_check_callbacks(cpu, user_tick);
++	printk_tick();
+ 	scheduler_tick();
+ 	run_posix_cpu_timers(p);
+ }
+-- 
+1.6.4.3
+
