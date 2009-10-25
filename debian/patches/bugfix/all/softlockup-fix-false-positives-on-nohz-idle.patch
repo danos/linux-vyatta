@@ -1,0 +1,46 @@
+From 02ff375590ac4140d88afc76505df1ad45c6af59 Mon Sep 17 00:00:00 2001
+From: Ingo Molnar <mingo@elte.hu>
+Date: Mon, 12 May 2008 15:43:53 +0200
+Subject: [PATCH] softlockup: fix false positives on nohz if CPU is 100% idle for more than 60 seconds
+
+Fix (probably theoretical only) rq->clock update bug:
+in tick_nohz_update_jiffies() [which is called on all irq
+entry on all cpus where the irq entry hits an idle cpu] we
+call touch_softlockup_watchdog() before we update jiffies.
+That works fine most of the time when idle timeouts are within
+60 seconds. But when an idle timeout is beyond 60 seconds,
+jiffies is updated with a jump of more than 60 seconds,
+which causes a jump in cpu-clock of more than 60 seconds,
+triggering a false positive.
+
+Reported-by: David Miller <davem@davemloft.net>
+Signed-off-by: Ingo Molnar <mingo@elte.hu>
+---
+ kernel/time/tick-sched.c |    4 ++--
+ 1 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/kernel/time/tick-sched.c b/kernel/time/tick-sched.c
+index b854a89..28abad6 100644
+--- a/kernel/time/tick-sched.c
++++ b/kernel/time/tick-sched.c
+@@ -133,8 +133,6 @@ void tick_nohz_update_jiffies(void)
+ 	if (!ts->tick_stopped)
+ 		return;
+ 
+-	touch_softlockup_watchdog();
+-
+ 	cpu_clear(cpu, nohz_cpu_mask);
+ 	now = ktime_get();
+ 	ts->idle_waketime = now;
+@@ -142,6 +140,8 @@ void tick_nohz_update_jiffies(void)
+ 	local_irq_save(flags);
+ 	tick_do_update_jiffies64(now);
+ 	local_irq_restore(flags);
++
++	touch_softlockup_watchdog();
+ }
+ 
+ void tick_nohz_stop_idle(int cpu)
+-- 
+1.6.4.3
+
