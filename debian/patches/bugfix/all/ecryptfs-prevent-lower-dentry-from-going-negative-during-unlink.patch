@@ -1,0 +1,53 @@
+commit 9c2d2056647790c5034d722bd24e9d913ebca73c
+Author: Tyler Hicks <tyhicks@linux.vnet.ibm.com>
+Date:   Tue Sep 22 12:52:17 2009 -0500
+
+    eCryptfs: Prevent lower dentry from going negative during unlink
+    
+    When calling vfs_unlink() on the lower dentry, d_delete() turns the
+    dentry into a negative dentry when the d_count is 1.  This eventually
+    caused a NULL pointer deref when a read() or write() was done and the
+    negative dentry's d_inode was dereferenced in
+    ecryptfs_read_update_atime() or ecryptfs_getxattr().
+    
+    Placing mutt's tmpdir in an eCryptfs mount is what initially triggered
+    the oops and I was able to reproduce it with the following sequence:
+    
+    open("/tmp/upper/foo", O_RDWR|O_CREAT|O_EXCL|O_NOFOLLOW, 0600) = 3
+    link("/tmp/upper/foo", "/tmp/upper/bar") = 0
+    unlink("/tmp/upper/foo")                = 0
+    open("/tmp/upper/bar", O_RDWR|O_CREAT|O_NOFOLLOW, 0600) = 4
+    unlink("/tmp/upper/bar")                = 0
+    write(4, "eCryptfs test\n"..., 14 <unfinished ...>
+    +++ killed by SIGKILL +++
+    
+    https://bugs.launchpad.net/ecryptfs/+bug/387073
+    
+    Reported-by: Loïc Minier <loic.minier@canonical.com>
+    Cc: Serge Hallyn <serue@us.ibm.com>
+    Cc: Dave Kleikamp <shaggy@linux.vnet.ibm.com>
+    Cc: ecryptfs-devel@lists.launchpad.net
+    Cc: stable <stable@kernel.org>
+    Signed-off-by: Tyler Hicks <tyhicks@linux.vnet.ibm.com>
+
+Adjusted to apply to Debian's 2.6.24 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.24.orig/fs/ecryptfs/inode.c linux-source-2.6.24/fs/ecryptfs/inode.c
+--- linux-source-2.6.24.orig/fs/ecryptfs/inode.c	2008-01-24 15:58:37.000000000 -0700
++++ linux-source-2.6.24/fs/ecryptfs/inode.c	2009-10-27 23:52:07.000000000 -0600
+@@ -428,6 +428,7 @@ static int ecryptfs_unlink(struct inode 
+ 	struct dentry *lower_dentry = ecryptfs_dentry_to_lower(dentry);
+ 	struct inode *lower_dir_inode = ecryptfs_inode_to_lower(dir);
+ 
++	dget(lower_dentry);
+ 	lock_parent(lower_dentry);
+ 	rc = vfs_unlink(lower_dir_inode, lower_dentry);
+ 	if (rc) {
+@@ -441,6 +442,7 @@ static int ecryptfs_unlink(struct inode 
+ 	d_drop(dentry);
+ out_unlock:
+ 	unlock_parent(lower_dentry);
++	dput(lower_dentry);
+ 	return rc;
+ }
+ 
