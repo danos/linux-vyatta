@@ -1,0 +1,53 @@
+Based on:
+
+From: Francois Romieu <romieu@fr.zoreil.com>
+Date: Sun, 1 Jun 2008 12:31:57 +0200
+Subject: [PATCH] r8169: shuffle some registers handling around (8168 operation only)
+
+I can not argue strongly for (or against) a specific ordering
+on a purely technical ground but the patch avoids to swallow
+Realtek's changes in one big, hard-to-read gulp.
+
+Let aside the way the RxConfig register is written (see
+rtl_set_rx_tx_config_registers / RxConfig / rtl_set_rx_mode),
+this change brings the registers write ordering closer with
+Realtek's driver one (version 8.006.00) for the 8168 chipsets.
+
+More 8168 specific code which touches the Configx registers will
+be added in the section covered by Cfg9346_UnLock / Cfg9346_Lock.
+
+This code should not be the cause of regression for 810x and
+8110 users.
+
+--- a/drivers/net/r8169.c
++++ b/drivers/net/r8169.c
+@@ -2396,8 +2396,6 @@ static void rtl_hw_start_8168(struct net_device *dev)
+ 
+ 	rtl_set_rx_max_size(ioaddr, tp->rx_buf_sz);
+ 
+-	rtl_set_rx_tx_config_registers(tp);
+-
+ 	tp->cp_cmd |= RTL_R16(CPlusCmd) | PktCntrDisable | INTT_1;
+ 
+ 	RTL_W16(CPlusCmd, tp->cp_cmd);
+@@ -2414,14 +2410,17 @@ static void rtl_hw_start_8168(struct net_device *dev)
+ 
+ 	rtl_set_rx_tx_desc_registers(tp, ioaddr);
+ 
+-	RTL_W8(Cfg9346, Cfg9346_Lock);
++	rtl_set_rx_mode(dev);
++
++	RTL_W32(TxConfig, (TX_DMA_BURST << TxDMAShift) |
++		(InterFrameGap << TxInterFrameGapShift));
+ 
+ 	RTL_R8(IntrMask);
+ 
+-	rtl_set_rx_mode(dev);
+-
+ 	RTL_W8(ChipCmd, CmdTxEnb | CmdRxEnb);
+ 
++	RTL_W8(Cfg9346, Cfg9346_Lock);
++
+ 	RTL_W16(MultiIntr, RTL_R16(MultiIntr) & 0xF000);
+ 
+ 	RTL_W16(IntrMask, tp->intr_event);

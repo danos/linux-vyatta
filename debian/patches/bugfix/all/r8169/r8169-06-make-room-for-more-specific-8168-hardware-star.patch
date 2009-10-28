@@ -1,0 +1,117 @@
+Based on:
+
+From: Francois Romieu <romieu@fr.zoreil.com>
+Date: Sat, 28 Jun 2008 11:58:39 +0200
+Subject: [PATCH] r8169: make room for more specific 8168 hardware start procedure
+
+Broadly speaking the 8168c* share some common code which will
+be factored in __rtl_hw_start_8168cp. The 8168b* share some
+code too but it will be a bit different.
+
+Any change of behavior should be confined to the currently
+unidentified 8168 chipsets. They will not be applied the Tx
+performance tweak and will emit a warning instead.
+
+--- a/drivers/net/r8169.c
++++ b/drivers/net/r8169.c
+@@ -1387,7 +1387,7 @@ static void rtl8168cp_hw_phy_config(void __iomem *ioaddr)
+ 	rtl_phy_write(ioaddr, phy_reg_init, ARRAY_SIZE(phy_reg_init));
+ }
+ 
+-static void rtl8168c_hw_phy_config(void __iomem *ioaddr)
++static void rtl8168c_1_hw_phy_config(void __iomem *ioaddr)
+ {
+ 	struct phy_reg phy_reg_init[] = {
+ 		{ 0x1f, 0x0001 },
+@@ -1416,7 +1416,7 @@ static void rtl8168c_hw_phy_config(void __iomem *ioaddr)
+ 	mdio_write(ioaddr, 0x1f, 0x0000);
+ }
+ 
+-static void rtl8168cx_hw_phy_config(void __iomem *ioaddr)
++static void rtl8168c_2_hw_phy_config(void __iomem *ioaddr)
+ {
+ 	struct phy_reg phy_reg_init[] = {
+ 		{ 0x1f, 0x0001 },
+@@ -1495,10 +1495,10 @@ static void rtl_hw_phy_config(struct net_device *dev)
+ 		rtl8168cp_hw_phy_config(ioaddr);
+ 		break;
+ 	case RTL_GIGA_MAC_VER_19:
+-		rtl8168c_hw_phy_config(ioaddr);
++		rtl8168c_1_hw_phy_config(ioaddr);
+ 		break;
+ 	case RTL_GIGA_MAC_VER_20:
+-		rtl8168cx_hw_phy_config(ioaddr);
++		rtl8168c_2_hw_phy_config(ioaddr);
+ 		break;
+ 	default:
+ 		break;
+@@ -2384,6 +2384,34 @@ static void rtl_ephy_init(void __iomem *ioaddr, struct ephy_info *e, int len)
+ 	}
+ }
+ 
++static void rtl_hw_start_8168bb(void __iomem *ioaddr, struct pci_dev *pdev)
++{
++}
++
++static void rtl_hw_start_8168bef(void __iomem *ioaddr, struct pci_dev *pdev)
++{
++	rtl_hw_start_8168bb(ioaddr, pdev);
++}
++
++static void __rtl_hw_start_8168cp(void __iomem *ioaddr, struct pci_dev *pdev)
++{
++}
++
++static void rtl_hw_start_8168cp(void __iomem *ioaddr, struct pci_dev *pdev)
++{
++	__rtl_hw_start_8168cp(ioaddr, pdev);
++}
++
++static void rtl_hw_start_8168c_1(void __iomem *ioaddr, struct pci_dev *pdev)
++{
++	__rtl_hw_start_8168cp(ioaddr, pdev);
++}
++
++static void rtl_hw_start_8168c_2(void __iomem *ioaddr, struct pci_dev *pdev)
++{
++	__rtl_hw_start_8168cp(ioaddr, pdev);
++}
++
+ static void rtl_hw_start_8168(struct net_device *dev)
+ {
+ 	struct rtl8169_private *tp = netdev_priv(dev);
+@@ -2417,6 +2447,34 @@ static void rtl_hw_start_8168(struct net_device *dev)
+ 
+ 	RTL_R8(IntrMask);
+ 
++	switch (tp->mac_version) {
++	case RTL_GIGA_MAC_VER_11:
++		rtl_hw_start_8168bb(ioaddr, pdev);
++	break;
++
++	case RTL_GIGA_MAC_VER_12:
++	case RTL_GIGA_MAC_VER_17:
++		rtl_hw_start_8168bef(ioaddr, pdev);
++	break;
++
++	case RTL_GIGA_MAC_VER_18:
++		rtl_hw_start_8168cp(ioaddr, pdev);
++	break;
++
++	case RTL_GIGA_MAC_VER_19:
++		rtl_hw_start_8168c_1(ioaddr, pdev);
++	break;
++
++	case RTL_GIGA_MAC_VER_20:
++		rtl_hw_start_8168c_2(ioaddr, pdev);
++	break;
++
++	default:
++		printk(KERN_ERR PFX "%s: unknown chipset (mac_version = %d).\n",
++			dev->name, tp->mac_version);
++	break;
++	}
++
+ 	RTL_W8(ChipCmd, CmdTxEnb | CmdRxEnb);
+ 
+ 	RTL_W8(Cfg9346, Cfg9346_Lock);
