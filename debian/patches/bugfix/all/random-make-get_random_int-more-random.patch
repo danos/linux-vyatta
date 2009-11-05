@@ -1,0 +1,71 @@
+commit 8a0a9bd4db63bc45e3017bedeafbd88d0eb84d02
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Tue May 5 08:17:43 2009 -0700
+
+    random: make get_random_int() more random
+    
+    It's a really simple patch that basically just open-codes the current
+    "secure_ip_id()" call, but when open-coding it we now use a _static_
+    hashing area, so that it gets updated every time.
+    
+    And to make sure somebody can't just start from the same original seed of
+    all-zeroes, and then do the "half_md4_transform()" over and over until
+    they get the same sequence as the kernel has, each iteration also mixes in
+    the same old "current->pid + jiffies" we used - so we should now have a
+    regular strong pseudo-number generator, but we also have one that doesn't
+    have a single seed.
+    
+    Note: the "pid + jiffies" is just meant to be a tiny tiny bit of noise. It
+    has no real meaning. It could be anything. I just picked the previous
+    seed, it's just that now we keep the state in between calls and that will
+    feed into the next result, and that should make all the difference.
+    
+    I made that hash be a per-cpu data just to avoid cache-line ping-pong:
+    having multiple CPU's write to the same data would be fine for randomness,
+    and add yet another layer of chaos to it, but since get_random_int() is
+    supposed to be a fast interface I did it that way instead. I considered
+    using "__raw_get_cpu_var()" to avoid any preemption overhead while still
+    getting the hash be _mostly_ ping-pong free, but in the end good taste won
+    out.
+    
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+Backported to Debian's 2.6.18 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.18.orig/drivers/char/random.c linux-source-2.6.18/drivers/char/random.c
+--- linux-source-2.6.18.orig/drivers/char/random.c	2009-08-15 12:05:11.000000000 -0600
++++ linux-source-2.6.18/drivers/char/random.c	2009-11-04 19:47:12.000000000 -0700
+@@ -1636,6 +1636,7 @@ EXPORT_SYMBOL(secure_dccp_sequence_numbe
+ #endif /* CONFIG_INET */
+ 
+ 
++DEFINE_PER_CPU(__u32 [4], get_random_int_hash);
+ /*
+  * Get a random word for internal kernel use only. Similar to urandom but
+  * with the goal of minimal entropy pool depletion. As a result, the random
+@@ -1644,13 +1645,17 @@ EXPORT_SYMBOL(secure_dccp_sequence_numbe
+  */
+ unsigned int get_random_int(void)
+ {
+-	/*
+-	 * Use IP's RNG. It suits our purpose perfectly: it re-keys itself
+-	 * every second, from the entropy pool (and thus creates a limited
+-	 * drain on it), and uses halfMD4Transform within the second. We
+-	 * also mix it with jiffies and the PID:
+-	 */
+-	return secure_ip_id(current->pid + jiffies);
++	struct keydata *keyptr;
++	__u32 *hash = get_cpu_var(get_random_int_hash);
++	int ret;
++
++	keyptr = get_keyptr();
++	hash[0] += current->pid + jiffies + get_cycles() + (int)(long)&ret;
++
++	ret = half_md4_transform(hash, keyptr->secret);
++	put_cpu_var(get_random_int_hash);
++
++	return ret;
+ }
+ 
+ /*
