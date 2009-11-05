@@ -1,0 +1,96 @@
+commit 81ac95c5569d7a60ab5db6c1ccec56c12b3ebcb5
+Author: J. Bruce Fields <bfields@fieldses.org>
+Date:   Wed Nov 8 17:44:40 2006 -0800
+
+    [PATCH] nfsd4: fix open-create permissions
+    
+    In the case where an open creates the file, we shouldn't be rechecking
+    permissions to open the file; the open succeeds regardless of what the new
+    file's mode bits say.
+    
+    This patch fixes the problem, but only by introducing yet another parameter
+    to nfsd_create_v3.  This is ugly.  This will be fixed by later patches.
+    
+    Signed-off-by: J. Bruce Fields <bfields@citi.umich.edu>
+    Acked-by: Neil Brown <neilb@suse.de>
+    Cc: Jeff Garzik <jeff@garzik.org>
+    Signed-off-by: Andrew Morton <akpm@osdl.org>
+    Signed-off-by: Linus Torvalds <torvalds@osdl.org>
+
+Backported to Debian's 2.6.18 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.18.orig/fs/nfsd/nfs3proc.c linux-source-2.6.18/fs/nfsd/nfs3proc.c
+--- linux-source-2.6.18.orig/fs/nfsd/nfs3proc.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/fs/nfsd/nfs3proc.c	2009-11-04 20:03:16.000000000 -0700
+@@ -256,7 +256,7 @@ nfsd3_proc_create(struct svc_rqst *rqstp
+ 	/* Now create the file and set attributes */
+ 	nfserr = nfsd_create_v3(rqstp, dirfhp, argp->name, argp->len,
+ 				attr, newfhp,
+-				argp->createmode, argp->verf, NULL);
++				argp->createmode, argp->verf, NULL, NULL);
+ 
+ 	RETURN_STATUS(nfserr);
+ }
+diff -urpN linux-source-2.6.18.orig/fs/nfsd/nfs4proc.c linux-source-2.6.18/fs/nfsd/nfs4proc.c
+--- linux-source-2.6.18.orig/fs/nfsd/nfs4proc.c	2009-11-04 20:02:09.000000000 -0700
++++ linux-source-2.6.18/fs/nfsd/nfs4proc.c	2009-11-04 20:04:14.000000000 -0700
+@@ -93,6 +93,7 @@ do_open_lookup(struct svc_rqst *rqstp, s
+ {
+ 	struct svc_fh resfh;
+ 	int status;
++	int created = 0;
+ 
+ 	fh_init(&resfh, NFS4_FHSIZE);
+ 	open->op_truncate = 0;
+@@ -105,7 +106,7 @@ do_open_lookup(struct svc_rqst *rqstp, s
+ 		status = nfsd_create_v3(rqstp, current_fh, open->op_fname.data,
+ 					open->op_fname.len, &open->op_iattr,
+ 					&resfh, open->op_createmode,
+-					(u32 *)open->op_verf.data, &open->op_truncate);
++					(u32 *)open->op_verf.data, &open->op_truncate, &created);
+ 	} else {
+ 		status = nfsd_lookup(rqstp, current_fh,
+ 				     open->op_fname.data, open->op_fname.len, &resfh);
+@@ -122,7 +123,8 @@ do_open_lookup(struct svc_rqst *rqstp, s
+ 	memcpy(open->op_stateowner->so_replay.rp_openfh,
+ 			&resfh.fh_handle.fh_base, resfh.fh_handle.fh_size);
+ 
+-	status = do_open_permission(rqstp, current_fh, open);
++	if (!created)
++		status = do_open_permission(rqstp, current_fh, open);
+ 
+ out:
+ 	fh_put(&resfh);
+diff -urpN linux-source-2.6.18.orig/fs/nfsd/vfs.c linux-source-2.6.18/fs/nfsd/vfs.c
+--- linux-source-2.6.18.orig/fs/nfsd/vfs.c	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/fs/nfsd/vfs.c	2009-11-04 20:03:16.000000000 -0700
+@@ -1212,7 +1212,7 @@ int
+ nfsd_create_v3(struct svc_rqst *rqstp, struct svc_fh *fhp,
+ 		char *fname, int flen, struct iattr *iap,
+ 		struct svc_fh *resfhp, int createmode, u32 *verifier,
+-	        int *truncp)
++	        int *truncp, int *created)
+ {
+ 	struct dentry	*dentry, *dchild = NULL;
+ 	struct inode	*dirp;
+@@ -1305,6 +1305,8 @@ nfsd_create_v3(struct svc_rqst *rqstp, s
+ 	err = vfs_create(dirp, dchild, iap->ia_mode, NULL);
+ 	if (err < 0)
+ 		goto out_nfserr;
++	if (created)
++		*created = 1;
+ 
+ 	if (EX_ISSYNC(fhp->fh_export)) {
+ 		err = nfserrno(nfsd_sync_dir(dentry));
+diff -urpN linux-source-2.6.18.orig/include/linux/nfsd/nfsd.h linux-source-2.6.18/include/linux/nfsd/nfsd.h
+--- linux-source-2.6.18.orig/include/linux/nfsd/nfsd.h	2006-09-19 21:42:06.000000000 -0600
++++ linux-source-2.6.18/include/linux/nfsd/nfsd.h	2009-11-04 20:03:36.000000000 -0700
+@@ -89,7 +89,7 @@ int		nfsd_access(struct svc_rqst *, stru
+ int		nfsd_create_v3(struct svc_rqst *, struct svc_fh *,
+ 				char *name, int len, struct iattr *attrs,
+ 				struct svc_fh *res, int createmode,
+-				u32 *verifier, int *truncp);
++				u32 *verifier, int *truncp, int *created);
+ int		nfsd_commit(struct svc_rqst *, struct svc_fh *,
+ 				loff_t, unsigned long);
+ #endif /* CONFIG_NFSD_V3 */
