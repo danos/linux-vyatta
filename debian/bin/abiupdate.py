@@ -76,7 +76,7 @@ class main(object):
         f = self.retrieve_package(self.url, filename)
         d = self.extract_package(f, "linux-headers-%s_%s" % (prefix, arch))
         f1 = d + "/usr/src/linux-headers-%s-%s/Module.symvers" % (self.version_abi, prefix)
-        s = Symbols(f1)
+        s = Symbols(open(f1))
         shutil.rmtree(d)
         return s
 
@@ -107,7 +107,7 @@ class main(object):
         if not os.path.exists(dir):
             os.makedirs(dir)
         out = "%s/%s_%s_%s" % (dir, arch, featureset, flavour)
-        Symbols.write(file(out, 'w'))
+        symbols.write(open(out, 'w'))
 
     def update_arch(self, config, arch):
         if self.override_featureset:
