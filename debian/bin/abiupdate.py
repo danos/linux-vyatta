@@ -93,11 +93,7 @@ class main(object):
         u = url(self.source, filename)
         filename_out = self.dir + "/" + filename
 
-        try:
-            f_in = urllib2.urlopen(u)
-        except urllib2.HTTPError, e:
-            raise RuntimeError('Failed to retrieve %s: %s' % (e.filename, e))
-
+        f_in = urllib2.urlopen(u)
         f_out = file(filename_out, 'w')
         while 1:
             r = f_in.read()
@@ -150,8 +146,12 @@ class main(object):
             abi = self.get_abi(arch, localversion)
             self.save_abi(abi, arch, featureset, flavour)
             self.log("Ok.\n")
+        except urllib2.HTTPError, e:
+            self.log("Failed to retrieve %s: %s\n" % (e.filename, e))
         except StandardError, e:
-            self.log("FAILED! (%s)\n" % str(e))
+            self.log("FAILED!\n")
+            import traceback
+            traceback.print_exc(None, sys.stdout)
 
 if __name__ == '__main__':
     options = optparse.OptionParser()
