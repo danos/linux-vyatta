@@ -1,0 +1,63 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Subject: [PATCH] Undo PCMCIA ABI change in 2.6.31.6
+
+Use unused bit of pcmcia_socket::state instead of adding a separate
+resume_status member.
+
+diff --git a/drivers/pcmcia/cs.c b/drivers/pcmcia/cs.c
+index 698d75c..ccf9968 100644
+--- a/drivers/pcmcia/cs.c
++++ b/drivers/pcmcia/cs.c
+@@ -560,7 +560,8 @@ static int socket_early_resume(struct pcmcia_socket *skt)
+ 	skt->ops->init(skt);
+ 	skt->ops->set_socket(skt, &skt->socket);
+ 	if (skt->state & SOCKET_PRESENT)
+-		skt->resume_status = socket_setup(skt, resume_delay);
++		if (socket_setup(skt, resume_delay))
++			skt->state |= SOCKET_RESUME_FAILED;
+ 	return 0;
+ }
+ 
+@@ -571,7 +572,7 @@ static int socket_late_resume(struct pcmcia_socket *skt)
+ 		return socket_insert(skt);
+ 	}
+ 
+-	if (skt->resume_status == 0) {
++	if (!(skt->state & SOCKET_RESUME_FAILED)) {
+ 		/*
+ 		 * FIXME: need a better check here for cardbus cards.
+ 		 */
+@@ -594,7 +595,7 @@ static int socket_late_resume(struct pcmcia_socket *skt)
+ 		socket_shutdown(skt);
+ 	}
+ 
+-	skt->state &= ~SOCKET_SUSPEND;
++	skt->state &= ~(SOCKET_SUSPEND | SOCKET_RESUME_FAILED);
+ 
+ 	return 0;
+ }
+diff --git a/drivers/pcmcia/cs_internal.h b/drivers/pcmcia/cs_internal.h
+index 79615e6..e10e616 100644
+--- a/drivers/pcmcia/cs_internal.h
++++ b/drivers/pcmcia/cs_internal.h
+@@ -86,6 +86,7 @@ struct pccard_resource_ops {
+ #define SOCKET_WIN_REQ(i)	(0x0100<<(i))
+ #define SOCKET_CARDBUS		0x8000
+ #define SOCKET_CARDBUS_CONFIG	0x10000
++#define SOCKET_RESUME_FAILED	0x20000
+ 
+ static inline int cs_socket_get(struct pcmcia_socket *skt)
+ {
+diff --git a/include/pcmcia/ss.h b/include/pcmcia/ss.h
+index fbc0146..10ee3a8 100644
+--- a/include/pcmcia/ss.h
++++ b/include/pcmcia/ss.h
+@@ -262,8 +262,6 @@ struct pcmcia_socket {
+ 	struct device			dev;
+ 	/* data internal to the socket driver */
+ 	void				*driver_data;
+-	/* status of the card during resume from a system sleep state */
+-	int				resume_status;
+ };
+ 
+ 
