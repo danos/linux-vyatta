@@ -1,0 +1,49 @@
+commit eb3c79e64a70fb8f7473e30fa07e89c1ecc2c9bb
+Author: Avi Kivity <avi@redhat.com>
+Date:   Tue Nov 24 15:20:15 2009 +0200
+
+    KVM: x86 emulator: limit instructions to 15 bytes
+    
+    While we are never normally passed an instruction that exceeds 15 bytes,
+    smp games can cause us to attempt to interpret one, which will cause
+    large latencies in non-preempt hosts.
+    
+    Cc: stable@kernel.org
+    Signed-off-by: Avi Kivity <avi@redhat.com>
+
+Backported to Debian's 2.6.26 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.26.orig/arch/x86/kvm/x86_emulate.c linux-source-2.6.26/arch/x86/kvm/x86_emulate.c
+--- linux-source-2.6.26.orig/arch/x86/kvm/x86_emulate.c	2009-10-17 11:09:10.000000000 -0600
++++ linux-source-2.6.26/arch/x86/kvm/x86_emulate.c	2009-12-24 00:03:23.000000000 -0700
+@@ -544,6 +544,9 @@ static int do_insn_fetch(struct x86_emul
+ {
+ 	int rc = 0;
+ 
++	/* x86 instructions are limited to 15 bytes. */
++	if (eip + size - ctxt->decode.eip_orig > 15)
++		return X86EMUL_UNHANDLEABLE;
+ 	eip += ctxt->cs_base;
+ 	while (size--) {
+ 		rc = do_fetch_insn_byte(ctxt, ops, eip++, dest++);
+@@ -837,7 +840,7 @@ x86_decode_insn(struct x86_emulate_ctxt 
+ 	/* Shadow copy of register state. Committed on successful emulation. */
+ 
+ 	memset(c, 0, sizeof(struct decode_cache));
+-	c->eip = ctxt->vcpu->arch.rip;
++	c->eip = c->eip_orig = ctxt->vcpu->arch.rip;
+ 	memcpy(c->regs, ctxt->vcpu->arch.regs, sizeof c->regs);
+ 
+ 	switch (mode) {
+diff -urpN linux-source-2.6.26.orig/include/asm-x86/kvm_x86_emulate.h linux-source-2.6.26/include/asm-x86/kvm_x86_emulate.h
+--- linux-source-2.6.26.orig/include/asm-x86/kvm_x86_emulate.h	2008-07-13 15:51:29.000000000 -0600
++++ linux-source-2.6.26/include/asm-x86/kvm_x86_emulate.h	2009-12-24 00:02:04.000000000 -0700
+@@ -127,7 +127,7 @@ struct decode_cache {
+ 	unsigned long *override_base;
+ 	unsigned int d;
+ 	unsigned long regs[NR_VCPU_REGS];
+-	unsigned long eip;
++	unsigned long eip, eip_orig;
+ 	/* modrm */
+ 	u8 modrm;
+ 	u8 modrm_mod;
