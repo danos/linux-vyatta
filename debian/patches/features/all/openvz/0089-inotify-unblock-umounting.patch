@@ -1,0 +1,125 @@
+From ddbec374c4beae6643db9297c2968f6dfaf43635 Mon Sep 17 00:00:00 2001
+From: Konstantin Khlebnikov <khlebnikov@openvz.org>
+Date: Fri, 25 Dec 2009 21:39:51 +0300
+Subject: [PATCH 89/90] inotify: unblock umounting
+
+Replace getting vfsmount with pinning and unmounts watch
+at vfsmount umount time.
+
+Signed-off-by: Konstantin Khlebnikov <khlebnikov@openvz.org>
+Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+---
+ fs/inotify.c            |   22 ++++++++++++++++++++--
+ fs/namespace.c          |    2 ++
+ include/linux/inotify.h |    5 +++++
+ 3 files changed, 27 insertions(+), 2 deletions(-)
+
+diff --git a/fs/inotify.c b/fs/inotify.c
+index b2671b6..007734f 100644
+--- a/fs/inotify.c
++++ b/fs/inotify.c
+@@ -106,6 +106,7 @@ void put_inotify_watch(struct inotify_watch *watch)
+ 		struct inotify_handle *ih = watch->ih;
+ 
+ 		iput(watch->inode);
++		mnt_unpin(watch->path.mnt);
+ 		path_put(&watch->path);
+ 		watch->path.dentry = NULL;
+ 		watch->path.mnt = NULL;
+@@ -340,7 +341,7 @@ EXPORT_SYMBOL_GPL(inotify_get_cookie);
+  * of inodes, and with iprune_mutex held, keeping shrink_icache_memory() at bay.
+  * We temporarily drop inode_lock, however, and CAN block.
+  */
+-void inotify_unmount_inodes(struct list_head *list)
++void inotify_unmount_inodes_mnt(struct list_head *list, struct vfsmount *mnt)
+ {
+ 	struct inode *inode, *next_i, *need_iput = NULL;
+ 
+@@ -398,6 +399,10 @@ void inotify_unmount_inodes(struct list_head *list)
+ 		watches = &inode->inotify_watches;
+ 		list_for_each_entry_safe(watch, next_w, watches, i_list) {
+ 			struct inotify_handle *ih= watch->ih;
++
++			if (mnt && mnt != watch->path.mnt)
++				continue;
++
+ 			get_inotify_watch(watch);
+ 			mutex_lock(&ih->mutex);
+ 			ih->in_ops->handle_event(watch, watch->wd, IN_UNMOUNT, 0,
+@@ -412,8 +417,20 @@ void inotify_unmount_inodes(struct list_head *list)
+ 		spin_lock(&inode_lock);
+ 	}
+ }
++
++void inotify_unmount_inodes(struct list_head *list)
++{
++	inotify_unmount_inodes_mnt(list, NULL);
++}
+ EXPORT_SYMBOL_GPL(inotify_unmount_inodes);
+ 
++void inotify_unmount_mnt(struct vfsmount *mnt)
++{
++	spin_lock(&inode_lock);
++	inotify_unmount_inodes_mnt(&mnt->mnt_sb->s_inodes, mnt);
++	spin_unlock(&inode_lock);
++}
++
+ /**
+  * inotify_inode_is_dead - an inode has been deleted, cleanup any watches
+  * @inode: inode that is about to be removed
+@@ -641,7 +658,8 @@ s32 __inotify_add_watch(struct inotify_handle *ih, struct inotify_watch *watch,
+ 	 * official.  We hold a reference to nameidata, which makes this safe.
+ 	 */
+ 	if (path) {
+-		path_get(path);
++		mnt_pin(path->mnt);
++		dget(path->dentry);
+ 		watch->path = *path;
+ 	}
+ 	watch->inode = igrab(inode);
+diff --git a/fs/namespace.c b/fs/namespace.c
+index 6873efd..57308ab 100644
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -27,6 +27,7 @@
+ #include <linux/ramfs.h>
+ #include <linux/log2.h>
+ #include <linux/idr.h>
++#include <linux/inotify.h>
+ #include <asm/uaccess.h>
+ #include <asm/unistd.h>
+ #include "pnode.h"
+@@ -655,6 +656,7 @@ repeat:
+ 		spin_unlock(&vfsmount_lock);
+ 		acct_auto_close_mnt(mnt);
+ 		security_sb_umount_close(mnt);
++		inotify_unmount_mnt(mnt);
+ 		goto repeat;
+ 	}
+ }
+diff --git a/include/linux/inotify.h b/include/linux/inotify.h
+index a935bb3..a2a3cae 100644
+--- a/include/linux/inotify.h
++++ b/include/linux/inotify.h
+@@ -108,6 +108,7 @@ extern void inotify_inode_queue_event(struct inode *, __u32, __u32,
+ extern void inotify_dentry_parent_queue_event(struct dentry *, __u32, __u32,
+ 					      const char *);
+ extern void inotify_unmount_inodes(struct list_head *);
++extern void inotify_unmount_mnt(struct vfsmount *);
+ extern void inotify_inode_is_dead(struct inode *);
+ extern u32 inotify_get_cookie(void);
+ 
+@@ -221,6 +222,10 @@ static inline void inotify_unmount_inodes(struct list_head *list)
+ {
+ }
+ 
++static inline void inotify_unmount_mnt(struct vfsmount *)
++{
++}
++
+ static inline void inotify_inode_is_dead(struct inode *inode)
+ {
+ }
+-- 
+1.6.5.7
+
