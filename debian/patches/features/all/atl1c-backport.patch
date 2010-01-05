@@ -1,0 +1,75 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Subject: [PATCH] Backport atl1c to 2.6.26
+
+--- a/drivers/net/atl1c/atl1c_main.c
++++ b/drivers/net/atl1c/atl1c_main.c
+@@ -1740,6 +1740,7 @@
+ 		} else
+ 			netif_receive_skb(skb);
+ 
++		netdev->last_rx = jiffies;
+ 		(*work_done)++;
+ 		count++;
+ 	}
+@@ -2055,8 +2055,7 @@
+ 	AT_WRITE_REG(&adapter->hw, REG_MB_PRIO_PROD_IDX, prod_data);
+ }
+ 
++static int atl1c_xmit_frame(struct sk_buff *skb, struct net_device *netdev)
+-static netdev_tx_t atl1c_xmit_frame(struct sk_buff *skb,
+-					  struct net_device *netdev)
+ {
+ 	struct atl1c_adapter *adapter = netdev_priv(netdev);
+ 	unsigned long flags;
+@@ -2113,6 +2113,7 @@
+ 	atl1c_tx_map(adapter, skb, tpd, type);
+ 	atl1c_tx_queue(adapter, skb, tpd, type);
+ 
++	netdev->trans_start = jiffies;
+ 	spin_unlock_irqrestore(&adapter->tx_lock, flags);
+ 	return NETDEV_TX_OK;
+ }
+@@ -2439,30 +2439,25 @@
+ 	atl1c_suspend(pdev, PMSG_SUSPEND);
+ }
+ 
+-static const struct net_device_ops atl1c_netdev_ops = {
+-	.ndo_open		= atl1c_open,
+-	.ndo_stop		= atl1c_close,
+-	.ndo_validate_addr	= eth_validate_addr,
+-	.ndo_start_xmit		= atl1c_xmit_frame,
+-	.ndo_set_mac_address 	= atl1c_set_mac_addr,
+-	.ndo_set_multicast_list = atl1c_set_multi,
+-	.ndo_change_mtu		= atl1c_change_mtu,
+-	.ndo_do_ioctl		= atl1c_ioctl,
+-	.ndo_tx_timeout		= atl1c_tx_timeout,
+-	.ndo_get_stats		= atl1c_get_stats,
+-	.ndo_vlan_rx_register	= atl1c_vlan_rx_register,
+-#ifdef CONFIG_NET_POLL_CONTROLLER
+-	.ndo_poll_controller	= atl1c_netpoll,
+-#endif
+-};
+-
+ static int atl1c_init_netdev(struct net_device *netdev, struct pci_dev *pdev)
+ {
+ 	SET_NETDEV_DEV(netdev, &pdev->dev);
+ 	pci_set_drvdata(pdev, netdev);
+ 
+ 	netdev->irq  = pdev->irq;
+-	netdev->netdev_ops = &atl1c_netdev_ops;
++	netdev->open = atl1c_open;
++	netdev->stop = atl1c_close;
++	netdev->hard_start_xmit = atl1c_xmit_frame;
++	netdev->set_mac_address = atl1c_set_mac_addr;
++	netdev->set_multicast_list = atl1c_set_multi;
++	netdev->change_mtu = atl1c_change_mtu;
++	netdev->do_ioctl = atl1c_ioctl;
++	netdev->tx_timeout = atl1c_tx_timeout;
++	netdev->get_stats = atl1c_get_stats;
++	netdev->vlan_rx_register = atl1c_vlan_rx_register;
++#ifdef CONFIG_NET_POLL_CONTROLLER
++	netdev->poll_controller = atl1c_netpoll;
++#endif
+ 	netdev->watchdog_timeo = AT_TX_WATCHDOG;
+ 	atl1c_set_ethtool_ops(netdev);
+ 
