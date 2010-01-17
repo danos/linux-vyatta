@@ -1,0 +1,55 @@
+Based on:
+
+From: Michael Chan <mchan@broadcom.com>
+Subject: [PATCH] bnx2: Fix panic in bnx2_poll_work().
+
+commit 581daf7e00c5e766f26aff80a61a860a17b0d75a upstream.
+
+Add barrier() to bnx2_get_hw_{tx|rx}_cons() to fix this issue:
+
+http://bugzilla.kernel.org/show_bug.cgi?id=12698
+
+This issue was reported by multiple i386 users.  Without barrier(),
+the compiled code looks like the following where %eax contains the
+address of the tx_cons or rx_cons in the DMA status block.  The
+status block contents can change between the cmpb and the movzwl
+instruction.  The driver would crash if the value was not 0xff during
+the cmpb instruction, but changed to 0xff during the movzwl
+instruction.
+
+6828:	80 38 ff             	cmpb   $0xff,(%eax)
+682b:	0f b7 10             	movzwl (%eax),%edx
+
+With the added barrier(), the compiled code now looks correct:
+
+683d:	0f b7 10             	movzwl (%eax),%edx
+6840:	0f b6 c2             	movzbl %dl,%eax
+6843:	3d ff 00 00 00       	cmp    $0xff,%eax
+
+Thanks to Pascal de Bruijn <pmjdebruijn@pcode.nl> for reporting the
+problem and Holger Noefer <hnoefer@pironet-ndh.com> for patiently
+testing test patches for us.
+
+[greg - took out version change]
+
+--- a/drivers/net/bnx2.c
++++ b/drivers/net/bnx2.c
+@@ -2491,7 +2491,7 @@ bnx2_get_hw_tx_cons(struct bnx2_napi *bnapi)
+ 		cons = bnapi->status_blk->status_tx_quick_consumer_index0;
+ 	else
+ 		cons = bnapi->status_blk_msix->status_tx_quick_consumer_index;
+-
++	barrier();
+ 	if (unlikely((cons & MAX_TX_DESC_CNT) == MAX_TX_DESC_CNT))
+ 		cons++;
+ 	return cons;
+@@ -2755,7 +2755,7 @@ bnx2_get_hw_rx_cons(struct bnx2_napi *bnapi)
+ bnx2_get_hw_rx_cons(struct bnx2_napi *bnapi)
+ {
+ 	u16 cons = bnapi->status_blk->status_rx_quick_consumer_index0;
+-
++	barrier();
+ 	if (unlikely((cons & MAX_RX_DESC_CNT) == MAX_RX_DESC_CNT))
+ 		cons++;
+ 	return cons;
+
