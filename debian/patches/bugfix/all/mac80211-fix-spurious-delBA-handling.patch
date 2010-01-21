@@ -1,0 +1,120 @@
+commit 827d42c9ac91ddd728e4f4a31fefb906ef2ceff7
+Author: Johannes Berg <johannes@sipsolutions.net>
+Date:   Sun Nov 22 12:28:41 2009 +0100
+
+    mac80211: fix spurious delBA handling
+    
+    Lennert Buytenhek noticed that delBA handling in mac80211
+    was broken and has remotely triggerable problems, some of
+    which are due to some code shuffling I did that ended up
+    changing the order in which things were done -- this was
+    
+      commit d75636ef9c1af224f1097941879d5a8db7cd04e5
+      Author: Johannes Berg <johannes@sipsolutions.net>
+      Date:   Tue Feb 10 21:25:53 2009 +0100
+    
+        mac80211: RX aggregation: clean up stop session
+    
+    and other parts were already present in the original
+    
+      commit d92684e66091c0f0101819619b315b4bb8b5bcc5
+      Author: Ron Rindjunsky <ron.rindjunsky@intel.com>
+      Date:   Mon Jan 28 14:07:22 2008 +0200
+    
+          mac80211: A-MPDU Tx add delBA from recipient support
+    
+    The first problem is that I moved a BUG_ON before various
+    checks -- thereby making it possible to hit. As the comment
+    indicates, the BUG_ON can be removed since the ampdu_action
+    callback must already exist when the state is != IDLE.
+    
+    The second problem isn't easily exploitable but there's a
+    race condition due to unconditionally setting the state to
+    OPERATIONAL when a delBA frame is received, even when no
+    aggregation session was ever initiated. All the drivers
+    accept stopping the session even then, but that opens a
+    race window where crashes could happen before the driver
+    accepts it. Right now, a WARN_ON may happen with non-HT
+    drivers, while the race opens only for HT drivers.
+    
+    For this case, there are two things necessary to fix it:
+     1) don't process spurious delBA frames, and be more careful
+        about the session state; don't drop the lock
+    
+     2) HT drivers need to be prepared to handle a session stop
+        even before the session was really started -- this is
+        true for all drivers (that support aggregation) but
+        iwlwifi which can be fixed easily. The other HT drivers
+        (ath9k and ar9170) are behaving properly already.
+    
+    Reported-by: Lennert Buytenhek <buytenh@marvell.com>
+    Cc: stable@kernel.org
+    Signed-off-by: Johannes Berg <johannes@sipsolutions.net>
+    Signed-off-by: John W. Linville <linville@tuxdriver.com>
+
+Second case backported to Debian's 2.6.26 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.26.orig/drivers/net/wireless/iwlwifi/iwl-4965.c linux-source-2.6.26/drivers/net/wireless/iwlwifi/iwl-4965.c
+--- linux-source-2.6.26.orig/drivers/net/wireless/iwlwifi/iwl-4965.c	2008-07-13 15:51:29.000000000 -0600
++++ linux-source-2.6.26/drivers/net/wireless/iwlwifi/iwl-4965.c	2010-01-19 21:54:16.000000000 -0700
+@@ -4842,8 +4842,16 @@ static int iwl4965_mac_ht_tx_agg_stop(st
+ 	if (sta_id == IWL_INVALID_STATION)
+ 		return -ENXIO;
+ 
++	if (priv->stations[sta_id].tid[tid].agg.state ==
++				IWL_EMPTYING_HW_QUEUE_ADDBA) {
++		IWL_DEBUG_HT("AGG stop before setup done\n");
++		ieee80211_stop_tx_ba_cb_irqsafe(priv->hw, da, tid);
++		priv->stations[sta_id].tid[tid].agg.state = IWL_AGG_OFF;
++		return 0;
++	}
++
+ 	if (priv->stations[sta_id].tid[tid].agg.state != IWL_AGG_ON)
+-		IWL_WARNING("Stopping AGG while state not IWL_AGG_ON\n");
++		IWL_WARNING("Stopping AGG while state not ON or starting\n");
+ 
+ 	tid_data = &priv->stations[sta_id].tid[tid];
+ 	ssn = (tid_data->seq_number & IEEE80211_SCTL_SEQ) >> 4;
+diff -urpN linux-source-2.6.26.orig/include/net/mac80211.h linux-source-2.6.26/include/net/mac80211.h
+--- linux-source-2.6.26.orig/include/net/mac80211.h	2008-07-13 15:51:29.000000000 -0600
++++ linux-source-2.6.26/include/net/mac80211.h	2010-01-19 21:46:53.000000000 -0700
+@@ -957,6 +957,12 @@ enum ieee80211_filter_flags {
+  *
+  * These flags are used with the ampdu_action() callback in
+  * &struct ieee80211_ops to indicate which action is needed.
++ *
++ * Note that drivers MUST be able to deal with a TX aggregation
++ * session being stopped even before they OK'ed starting it by
++ * calling ieee80211_start_tx_ba_cb(_irqsafe), because the peer
++ * might receive the addBA frame and send a delBA right away!
++ *
+  * @IEEE80211_AMPDU_RX_START: start Rx aggregation
+  * @IEEE80211_AMPDU_RX_STOP: stop Rx aggregation
+  * @IEEE80211_AMPDU_TX_START: start Tx aggregation
+--- linux-source-2.6.26.orig/net/mac80211/mlme.c	2008-07-13 15:51:29.000000000 -0600
++++ linux-source-2.6.26/net/mac80211/mlme.c	2010-01-20 17:29:08.000000000 -0700
+@@ -1597,11 +1597,20 @@
+ 						 WLAN_BACK_INITIATOR, 0);
+ 	else { /* WLAN_BACK_RECIPIENT */
+ 		spin_lock_bh(&sta->ampdu_mlme.ampdu_tx);
+-		sta->ampdu_mlme.tid_state_tx[tid] =
+-				HT_AGG_STATE_OPERATIONAL;
++		if (sta->ampdu_mlme.tid_state_tx[tid] & HT_ADDBA_REQUESTED_MSK) {
++			u8 *state = &sta->ampdu_mlme.tid_state_tx[tid];
++
++			if (*state == HT_AGG_STATE_OPERATIONAL)
++				sta->ampdu_mlme.tid_state_tx[tid] = 0;
++
++			*state = HT_AGG_STATE_REQ_STOP_BA_MSK |
++				(WLAN_BACK_RECIPIENT << HT_AGG_STATE_INITIATOR_SHIFT);
++
++			if (local->ops->ampdu_action)
++				local->ops->ampdu_action(&local->hw, IEEE80211_AMPDU_TX_STOP,
++							 sta->addr, tid, NULL);
++		}
+ 		spin_unlock_bh(&sta->ampdu_mlme.ampdu_tx);
+-		ieee80211_stop_tx_ba_session(&local->hw, sta->addr, tid,
+-					     WLAN_BACK_RECIPIENT);
+ 	}
+ 	rcu_read_unlock();
+ }
