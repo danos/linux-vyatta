@@ -1,0 +1,59 @@
+kernel: /proc/$pid/maps visible during initial setuid ELF loading
+
+Description of problem:
+From Kees Cook: Steve Beattie and I noticed that the /proc/$pid/maps and smaps
+files are readable during ELF loading for processes that a user should not
+normally be able to see (for example, when launching a setuid process).  
+
+Oleg Nesterov wrote the original version of this patch and Clark Williams
+slighly modified it.
+
+Author: Oleg Nesterov <onestero@redhat.com>
+Signed-off-by: Clark Williams <williams@redhat.com>
+
+Adjusted to apply to Debian's 2.6.24 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.24.orig/fs/exec.c linux-source-2.6.24/fs/exec.c
+--- linux-source-2.6.24.orig/fs/exec.c	2009-11-04 18:42:05.000000000 -0700
++++ linux-source-2.6.24/fs/exec.c	2010-01-31 17:15:54.000000000 -0700
+@@ -342,6 +342,7 @@ int bprm_mm_init(struct linux_binprm *bp
+ 	if (err)
+ 		goto err;
+ 
++	mm->flags |= MMF_IN_EXEC;
+ 	return 0;
+ 
+ err:
+@@ -1132,6 +1133,7 @@ void compute_creds(struct linux_binprm *
+ 	task_lock(current);
+ 	unsafe = unsafe_exec(current);
+ 	security_bprm_apply_creds(bprm, unsafe);
++	clear_bit(MMF_IN_EXEC, &current->mm->flags);
+ 	task_unlock(current);
+ 	security_bprm_post_apply_creds(bprm);
+ }
+diff -urpN linux-source-2.6.24.orig/fs/proc/base.c linux-source-2.6.24/fs/proc/base.c
+--- linux-source-2.6.24.orig/fs/proc/base.c	2008-01-24 15:58:37.000000000 -0700
++++ linux-source-2.6.24/fs/proc/base.c	2010-01-31 17:15:54.000000000 -0700
+@@ -211,7 +211,8 @@ struct mm_struct *mm_for_maps(struct tas
+ 	task_lock(task);
+ 	if (task->mm != mm)
+ 		goto out;
+-	if (task->mm != current->mm && __ptrace_may_attach(task) < 0)
++	if (task->mm != current->mm && ((mm->flags & MMF_IN_EXEC) ||
++					__ptrace_may_attach(task) < 0))
+ 		goto out;
+ 	task_unlock(task);
+ 	return mm;
+diff -urpN linux-source-2.6.24.orig/include/linux/sched.h linux-source-2.6.24/include/linux/sched.h
+--- linux-source-2.6.24.orig/include/linux/sched.h	2009-11-04 18:42:05.000000000 -0700
++++ linux-source-2.6.24/include/linux/sched.h	2010-01-31 17:15:54.000000000 -0700
+@@ -360,6 +360,8 @@ extern int get_dumpable(struct mm_struct
+ #define MMF_DUMP_SECURELY 1  /* core file is readable only by root */
+ #define MMF_DUMPABLE_BITS 2
+ 
++#define MMF_IN_EXEC	  4  /* Not sure we can use 4 .... */
++
+ /* coredump filter bits */
+ #define MMF_DUMP_ANON_PRIVATE	2
+ #define MMF_DUMP_ANON_SHARED	3
