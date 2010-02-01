@@ -1,0 +1,144 @@
+commit a5ecbcb8c13ea8a822d243bf782d0dc9525b4f84
+Author: Eric Paris <eparis@redhat.com>
+Date:   Thu Jan 31 15:11:22 2008 -0500
+
+    security: allow Kconfig to set default mmap_min_addr protection
+    
+    Since it was decided that low memory protection from userspace couldn't
+    be turned on by default add a Kconfig option to allow users/distros to
+    set a default at compile time.  This value is still tunable after boot
+    in /proc/sys/vm/mmap_min_addr
+    
+    Discussion:
+    http://www.mail-archive.com/linux-security-module@vger.kernel.org/msg02543.h
+    
+    Signed-off-by: Eric Paris <eparis@redhat.com>
+    Signed-off-by: James Morris <jmorris@namei.org>
+
+commit e0a94c2a63f2644826069044649669b5e7ca75d3
+Author: Christoph Lameter <cl@linux-foundation.org>
+Date:   Wed Jun 3 16:04:31 2009 -0400
+
+    security: use mmap_min_addr indepedently of security models
+    
+    This patch removes the dependency of mmap_min_addr on CONFIG_SECURITY.
+    It also sets a default mmap_min_addr of 4096.
+    
+    mmapping of addresses below 4096 will only be possible for processes
+    with CAP_SYS_RAWIO.
+    
+    Signed-off-by: Christoph Lameter <cl@linux-foundation.org>
+    Acked-by: Eric Paris <eparis@redhat.com>
+    Looks-ok-by: Linus Torvalds <torvalds@linux-foundation.org>
+    Signed-off-by: James Morris <jmorris@namei.org>
+
+Adjusted to apply to Debian's 2.6.24 by dann frazier <dannf@debian.org>
+diff -urpN linux-source-2.6.24.orig/include/linux/mm.h linux-source-2.6.24/include/linux/mm.h
+--- linux-source-2.6.24.orig/include/linux/mm.h	2008-01-24 15:58:37.000000000 -0700
++++ linux-source-2.6.24/include/linux/mm.h	2010-01-31 17:42:23.000000000 -0700
+@@ -519,12 +519,10 @@ static inline void set_page_links(struct
+  */
+ static inline unsigned long round_hint_to_min(unsigned long hint)
+ {
+-#ifdef CONFIG_SECURITY
+ 	hint &= PAGE_MASK;
+ 	if (((void *)hint != NULL) &&
+ 	    (hint < mmap_min_addr))
+ 		return PAGE_ALIGN(mmap_min_addr);
+-#endif
+ 	return hint;
+ }
+ 
+diff -urpN linux-source-2.6.24.orig/include/linux/security.h linux-source-2.6.24/include/linux/security.h
+--- linux-source-2.6.24.orig/include/linux/security.h	2009-11-04 18:42:04.000000000 -0700
++++ linux-source-2.6.24/include/linux/security.h	2010-01-31 17:42:23.000000000 -0700
+@@ -2138,6 +2138,8 @@ static inline void security_task_to_inod
+ static inline int security_ipc_permission (struct kern_ipc_perm *ipcp,
+ 					   short flag)
+ {
++	if ((addr < mmap_min_addr) && !capable(CAP_SYS_RAWIO))
++		return -EACCES;
+ 	return 0;
+ }
+ 
+diff -urpN linux-source-2.6.24.orig/kernel/sysctl.c linux-source-2.6.24/kernel/sysctl.c
+--- linux-source-2.6.24.orig/kernel/sysctl.c	2009-11-04 18:42:05.000000000 -0700
++++ linux-source-2.6.24/kernel/sysctl.c	2010-01-31 17:42:23.000000000 -0700
+@@ -1047,7 +1047,6 @@ static struct ctl_table vm_table[] = {
+ 		.strategy	= &sysctl_jiffies,
+ 	},
+ #endif
+-#ifdef CONFIG_SECURITY
+ 	{
+ 		.ctl_name	= CTL_UNNUMBERED,
+ 		.procname	= "mmap_min_addr",
+@@ -1056,7 +1055,6 @@ static struct ctl_table vm_table[] = {
+ 		.mode		= 0644,
+ 		.proc_handler	= &proc_doulongvec_minmax,
+ 	},
+-#endif
+ #ifdef CONFIG_NUMA
+ 	{
+ 		.ctl_name	= CTL_UNNUMBERED,
+diff -urpN linux-source-2.6.24.orig/mm/Kconfig linux-source-2.6.24/mm/Kconfig
+--- linux-source-2.6.24.orig/mm/Kconfig	2008-01-24 15:58:37.000000000 -0700
++++ linux-source-2.6.24/mm/Kconfig	2010-01-31 17:42:23.000000000 -0700
+@@ -193,3 +193,23 @@ config NR_QUICK
+ config VIRT_TO_BUS
+ 	def_bool y
+ 	depends on !ARCH_NO_VIRT_TO_BUS
++
++config DEFAULT_MMAP_MIN_ADDR
++        int "Low address space to protect from user allocation"
++        default 4096
++        help
++	  This is the portion of low virtual memory which should be protected
++	  from userspace allocation.  Keeping a user from writing to low pages
++	  can help reduce the impact of kernel NULL pointer bugs.
++
++	  For most ia64, ppc64 and x86 users with lots of address space
++	  a value of 65536 is reasonable and should cause no problems.
++	  On arm and other archs it should not be higher than 32768.
++	  Programs which use vm86 functionality would either need additional
++	  permissions from either the LSM or the capabilities module or have
++	  this protection disabled.
++
++	  This value can be changed after boot using the
++	  /proc/sys/vm/mmap_min_addr tunable.
++
++
+diff -urpN linux-source-2.6.24.orig/mm/mmap.c linux-source-2.6.24/mm/mmap.c
+--- linux-source-2.6.24.orig/mm/mmap.c	2009-11-04 18:42:05.000000000 -0700
++++ linux-source-2.6.24/mm/mmap.c	2010-01-31 17:42:23.000000000 -0700
+@@ -78,6 +78,9 @@ int sysctl_overcommit_ratio = 50;	/* def
+ int sysctl_max_map_count __read_mostly = DEFAULT_MAX_MAP_COUNT;
+ atomic_t vm_committed_space = ATOMIC_INIT(0);
+ 
++/* amount of vm to protect from userspace access */
++unsigned long mmap_min_addr = CONFIG_DEFAULT_MMAP_MIN_ADDR;
++
+ /*
+  * Check that a process has enough memory to allocate a new virtual
+  * mapping. 0 means there is enough memory for the allocation to
+diff -urpN linux-source-2.6.24.orig/security/Kconfig linux-source-2.6.24/security/Kconfig
+--- linux-source-2.6.24.orig/security/Kconfig	2008-01-24 15:58:37.000000000 -0700
++++ linux-source-2.6.24/security/Kconfig	2010-01-31 17:43:00.000000000 -0700
+@@ -103,6 +103,7 @@ config SECURITY_ROOTPLUG
+ 	  
+ 	  If you are unsure how to answer this question, answer N.
+ 
++
+ source security/selinux/Kconfig
+ 
+ endmenu
+diff -urpN linux-source-2.6.24.orig/security/security.c linux-source-2.6.24/security/security.c
+--- linux-source-2.6.24.orig/security/security.c	2008-01-24 15:58:37.000000000 -0700
++++ linux-source-2.6.24/security/security.c	2010-01-31 17:42:23.000000000 -0700
+@@ -23,7 +23,6 @@ extern struct security_operations dummy_
+ extern void security_fixup_ops(struct security_operations *ops);
+ 
+ struct security_operations *security_ops;	/* Initialized to NULL */
+-unsigned long mmap_min_addr;		/* 0 means no protection */
+ 
+ static inline int verify(struct security_operations *ops)
+ {

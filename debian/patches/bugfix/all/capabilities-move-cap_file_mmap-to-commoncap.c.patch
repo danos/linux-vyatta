@@ -1,0 +1,91 @@
+commit 9c0d90103c7e0eb6e638e5b649e9f6d8d9c1b4b3
+Author: Eric Paris <eparis@redhat.com>
+Date:   Fri Jul 31 12:53:58 2009 -0400
+
+    Capabilities: move cap_file_mmap to commoncap.c
+    
+    Currently we duplicate the mmap_min_addr test in cap_file_mmap and in
+    security_file_mmap if !CONFIG_SECURITY.  This patch moves cap_file_mmap
+    into commoncap.c and then calls that function directly from
+    security_file_mmap ifndef CONFIG_SECURITY like all of the other capability
+    checks are done.
+    
+    Signed-off-by: Eric Paris <eparis@redhat.com>
+    Acked-by: Serge Hallyn <serue@us.ibm.com>
+    Signed-off-by: James Morris <jmorris@namei.org>
+
+Backported to Debian's 2.6.24 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.24.orig/include/linux/security.h linux-source-2.6.24/include/linux/security.h
+--- linux-source-2.6.24.orig/include/linux/security.h	2010-01-31 17:42:23.000000000 -0700
++++ linux-source-2.6.24/include/linux/security.h	2010-01-31 17:49:25.000000000 -0700
+@@ -60,6 +60,9 @@ extern int cap_inode_setxattr(struct den
+ extern int cap_inode_removexattr(struct dentry *dentry, char *name);
+ extern int cap_inode_need_killpriv(struct dentry *dentry);
+ extern int cap_inode_killpriv(struct dentry *dentry);
++extern int cap_file_mmap(struct file *file, unsigned long reqprot,
++			 unsigned long prot, unsigned long flags,
++			 unsigned long addr, unsigned long addr_only);
+ extern int cap_task_post_setuid (uid_t old_ruid, uid_t old_euid, uid_t old_suid, int flags);
+ extern void cap_task_reparent_to_init (struct task_struct *p);
+ extern int cap_task_setscheduler (struct task_struct *p, int policy, struct sched_param *lp);
+@@ -2138,9 +2141,7 @@ static inline void security_task_to_inod
+ static inline int security_ipc_permission (struct kern_ipc_perm *ipcp,
+ 					   short flag)
+ {
+-	if ((addr < mmap_min_addr) && !capable(CAP_SYS_RAWIO))
+-		return -EACCES;
+-	return 0;
++	return cap_file_mmap(file, reqprot, prot, flags, addr, addr_only);
+ }
+ 
+ static inline int security_msg_msg_alloc (struct msg_msg * msg)
+diff -urpN linux-source-2.6.24.orig/security/commoncap.c linux-source-2.6.24/security/commoncap.c
+--- linux-source-2.6.24.orig/security/commoncap.c	2009-11-04 18:42:04.000000000 -0700
++++ linux-source-2.6.24/security/commoncap.c	2010-01-31 17:48:56.000000000 -0700
+@@ -568,3 +568,31 @@ int cap_vm_enough_memory(struct mm_struc
+ 	return __vm_enough_memory(mm, pages, cap_sys_admin);
+ }
+ 
++/*
++ * cap_file_mmap - check if able to map given addr
++ * @file: unused
++ * @reqprot: unused
++ * @prot: unused
++ * @flags: unused
++ * @addr: address attempting to be mapped
++ * @addr_only: unused
++ *
++ * If the process is attempting to map memory below mmap_min_addr they need
++ * CAP_SYS_RAWIO.  The other parameters to this function are unused by the
++ * capability security module.  Returns 0 if this mapping should be allowed
++ * -EPERM if not.
++ */
++int cap_file_mmap(struct file *file, unsigned long reqprot,
++		  unsigned long prot, unsigned long flags,
++		  unsigned long addr, unsigned long addr_only)
++{
++	int ret = 0;
++
++	if (addr < dac_mmap_min_addr) {
++		ret = cap_capable(current, CAP_SYS_RAWIO);
++		/* set PF_SUPERPRIV if it turns out we allow the low mmap */
++		if (ret == 0)
++			current->flags |= PF_SUPERPRIV;
++	}
++	return ret;
++}
+diff -urpN linux-source-2.6.24.orig/security/dummy.c linux-source-2.6.24/security/dummy.c
+--- linux-source-2.6.24.orig/security/dummy.c	2008-01-24 15:58:37.000000000 -0700
++++ linux-source-2.6.24/security/dummy.c	2010-01-31 17:48:56.000000000 -0700
+@@ -426,9 +426,7 @@ static int dummy_file_mmap (struct file 
+ 			    unsigned long addr,
+ 			    unsigned long addr_only)
+ {
+-	if ((addr < mmap_min_addr) && !capable(CAP_SYS_RAWIO))
+-		return -EACCES;
+-	return 0;
++	return cap_file_mmap(file, reqprot, prot, flags, addr, addr_only);
+ }
+ 
+ static int dummy_file_mprotect (struct vm_area_struct *vma,

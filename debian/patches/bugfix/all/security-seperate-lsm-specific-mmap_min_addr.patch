@@ -1,0 +1,241 @@
+commit a2551df7ec568d87793d2eea4ca744e86318f205
+Author: Eric Paris <eparis@redhat.com>
+Date:   Fri Jul 31 12:54:11 2009 -0400
+
+    Security/SELinux: seperate lsm specific mmap_min_addr
+    
+    Currently SELinux enforcement of controls on the ability to map low memory
+    is determined by the mmap_min_addr tunable.  This patch causes SELinux to
+    ignore the tunable and instead use a seperate Kconfig option specific to how
+    much space the LSM should protect.
+    
+    The tunable will now only control the need for CAP_SYS_RAWIO and SELinux
+    permissions will always protect the amount of low memory designated by
+    CONFIG_LSM_MMAP_MIN_ADDR.
+    
+    This allows users who need to disable the mmap_min_addr controls (usual reason
+    being they run WINE as a non-root user) to do so and still have SELinux
+    controls preventing confined domains (like a web server) from being able to
+    map some area of low memory.
+    
+    Signed-off-by: Eric Paris <eparis@redhat.com>
+    Signed-off-by: James Morris <jmorris@namei.org>
+
+Backported to Debian's 2.6.24 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.24.orig/include/linux/mm.h linux-source-2.6.24/include/linux/mm.h
+--- linux-source-2.6.24.orig/include/linux/mm.h	2010-01-31 17:42:23.000000000 -0700
++++ linux-source-2.6.24/include/linux/mm.h	2010-01-31 17:51:51.000000000 -0700
+@@ -514,19 +514,6 @@ static inline void set_page_links(struct
+ }
+ 
+ /*
+- * If a hint addr is less than mmap_min_addr change hint to be as
+- * low as possible but still greater than mmap_min_addr
+- */
+-static inline unsigned long round_hint_to_min(unsigned long hint)
+-{
+-	hint &= PAGE_MASK;
+-	if (((void *)hint != NULL) &&
+-	    (hint < mmap_min_addr))
+-		return PAGE_ALIGN(mmap_min_addr);
+-	return hint;
+-}
+-
+-/*
+  * Some inline functions in vmstat.h depend on page_zone()
+  */
+ #include <linux/vmstat.h>
+diff -urpN linux-source-2.6.24.orig/include/linux/security.h linux-source-2.6.24/include/linux/security.h
+--- linux-source-2.6.24.orig/include/linux/security.h	2010-01-31 17:49:25.000000000 -0700
++++ linux-source-2.6.24/include/linux/security.h	2010-01-31 17:51:51.000000000 -0700
+@@ -28,6 +28,7 @@
+ #include <linux/resource.h>
+ #include <linux/sem.h>
+ #include <linux/shm.h>
++#include <linux/mm.h> /* PAGE_ALIGN */
+ #include <linux/msg.h>
+ #include <linux/sched.h>
+ #include <linux/key.h>
+@@ -87,6 +88,7 @@ extern int cap_netlink_send(struct sock 
+ extern int cap_netlink_recv(struct sk_buff *skb, int cap);
+ 
+ extern unsigned long mmap_min_addr;
++extern unsigned long dac_mmap_min_addr;
+ /*
+  * Values used in the task_security_ops calls
+  */
+@@ -115,6 +117,21 @@ struct request_sock;
+ 
+ #ifdef CONFIG_SECURITY
+ 
++/*
++ * If a hint addr is less than mmap_min_addr change hint to be as
++ * low as possible but still greater than mmap_min_addr
++ */
++static inline unsigned long round_hint_to_min(unsigned long hint)
++{
++	hint &= PAGE_MASK;
++	if (((void *)hint != NULL) &&
++	    (hint < mmap_min_addr))
++		return PAGE_ALIGN(mmap_min_addr);
++	return hint;
++}
++
++extern int mmap_min_addr_handler(struct ctl_table *table, int write, struct file *filp,
++				 void __user *buffer, size_t *lenp, loff_t *ppos);
+ /**
+  * struct security_operations - main security structure
+  *
+diff -urpN linux-source-2.6.24.orig/kernel/sysctl.c linux-source-2.6.24/kernel/sysctl.c
+--- linux-source-2.6.24.orig/kernel/sysctl.c	2010-01-31 17:42:23.000000000 -0700
++++ linux-source-2.6.24/kernel/sysctl.c	2010-01-31 17:51:51.000000000 -0700
+@@ -1050,10 +1050,10 @@ static struct ctl_table vm_table[] = {
+ 	{
+ 		.ctl_name	= CTL_UNNUMBERED,
+ 		.procname	= "mmap_min_addr",
+-		.data		= &mmap_min_addr,
+-		.maxlen         = sizeof(unsigned long),
++		.data		= &dac_mmap_min_addr,
++		.maxlen		= sizeof(unsigned long),
+ 		.mode		= 0644,
+-		.proc_handler	= &proc_doulongvec_minmax,
++		.proc_handler	= &mmap_min_addr_handler,
+ 	},
+ #ifdef CONFIG_NUMA
+ 	{
+diff -urpN linux-source-2.6.24.orig/mm/Kconfig linux-source-2.6.24/mm/Kconfig
+--- linux-source-2.6.24.orig/mm/Kconfig	2010-01-31 17:42:23.000000000 -0700
++++ linux-source-2.6.24/mm/Kconfig	2010-01-31 17:51:51.000000000 -0700
+@@ -205,9 +205,9 @@ config DEFAULT_MMAP_MIN_ADDR
+ 	  For most ia64, ppc64 and x86 users with lots of address space
+ 	  a value of 65536 is reasonable and should cause no problems.
+ 	  On arm and other archs it should not be higher than 32768.
+-	  Programs which use vm86 functionality would either need additional
+-	  permissions from either the LSM or the capabilities module or have
+-	  this protection disabled.
++	  Programs which use vm86 functionality or have some need to map
++	  this low address space will need CAP_SYS_RAWIO or disable this
++	  protection by setting the value to 0.
+ 
+ 	  This value can be changed after boot using the
+ 	  /proc/sys/vm/mmap_min_addr tunable.
+diff -urpN linux-source-2.6.24.orig/mm/mmap.c linux-source-2.6.24/mm/mmap.c
+--- linux-source-2.6.24.orig/mm/mmap.c	2010-01-31 17:42:23.000000000 -0700
++++ linux-source-2.6.24/mm/mmap.c	2010-01-31 17:51:51.000000000 -0700
+@@ -78,9 +78,6 @@ int sysctl_overcommit_ratio = 50;	/* def
+ int sysctl_max_map_count __read_mostly = DEFAULT_MAX_MAP_COUNT;
+ atomic_t vm_committed_space = ATOMIC_INIT(0);
+ 
+-/* amount of vm to protect from userspace access */
+-unsigned long mmap_min_addr = CONFIG_DEFAULT_MMAP_MIN_ADDR;
+-
+ /*
+  * Check that a process has enough memory to allocate a new virtual
+  * mapping. 0 means there is enough memory for the allocation to
+diff -urpN linux-source-2.6.24.orig/security/Kconfig linux-source-2.6.24/security/Kconfig
+--- linux-source-2.6.24.orig/security/Kconfig	2010-01-31 17:43:00.000000000 -0700
++++ linux-source-2.6.24/security/Kconfig	2010-01-31 17:51:51.000000000 -0700
+@@ -104,6 +104,22 @@ config SECURITY_ROOTPLUG
+ 	  If you are unsure how to answer this question, answer N.
+ 
+ 
++config LSM_MMAP_MIN_ADDR
++	int "Low address space for LSM to from user allocation"
++	depends on SECURITY && SECURITY_SELINUX
++	default 65535
++	help
++	  This is the portion of low virtual memory which should be protected
++	  from userspace allocation.  Keeping a user from writing to low pages
++	  can help reduce the impact of kernel NULL pointer bugs.
++
++	  For most ia64, ppc64 and x86 users with lots of address space
++	  a value of 65536 is reasonable and should cause no problems.
++	  On arm and other archs it should not be higher than 32768.
++	  Programs which use vm86 functionality or have some need to map
++	  this low address space will need the permission specific to the
++	  systems running LSM.
++
+ source security/selinux/Kconfig
+ 
+ endmenu
+diff -urpN linux-source-2.6.24.orig/security/Makefile linux-source-2.6.24/security/Makefile
+--- linux-source-2.6.24.orig/security/Makefile	2008-01-24 15:58:37.000000000 -0700
++++ linux-source-2.6.24/security/Makefile	2010-01-31 17:51:51.000000000 -0700
+@@ -5,10 +5,7 @@
+ obj-$(CONFIG_KEYS)			+= keys/
+ subdir-$(CONFIG_SECURITY_SELINUX)	+= selinux
+ 
+-# if we don't select a security model, use the default capabilities
+-ifneq ($(CONFIG_SECURITY),y)
+-obj-y		+= commoncap.o
+-endif
++obj-y		+= commoncap.o min_addr.o # Is it ok to enable commoncap when CONFIG_SECURITY=y? have to now that we moved cap_file_mmap there
+ 
+ # Object file lists
+ obj-$(CONFIG_SECURITY)			+= security.o dummy.o inode.o
+diff -urpN linux-source-2.6.24.orig/security/min_addr.c linux-source-2.6.24/security/min_addr.c
+--- linux-source-2.6.24.orig/security/min_addr.c	1969-12-31 17:00:00.000000000 -0700
++++ linux-source-2.6.24/security/min_addr.c	2010-01-31 17:51:51.000000000 -0700
+@@ -0,0 +1,49 @@
++#include <linux/init.h>
++#include <linux/mm.h>
++#include <linux/security.h>
++#include <linux/sysctl.h>
++
++/* amount of vm to protect from userspace access by both DAC and the LSM*/
++unsigned long mmap_min_addr;
++/* amount of vm to protect from userspace using CAP_SYS_RAWIO (DAC) */
++unsigned long dac_mmap_min_addr = CONFIG_DEFAULT_MMAP_MIN_ADDR;
++/* amount of vm to protect from userspace using the LSM = CONFIG_LSM_MMAP_MIN_ADDR */
++
++/*
++ * Update mmap_min_addr = max(dac_mmap_min_addr, CONFIG_LSM_MMAP_MIN_ADDR)
++ */
++static void update_mmap_min_addr(void)
++{
++#ifdef CONFIG_LSM_MMAP_MIN_ADDR
++	if (dac_mmap_min_addr > CONFIG_LSM_MMAP_MIN_ADDR)
++		mmap_min_addr = dac_mmap_min_addr;
++	else
++		mmap_min_addr = CONFIG_LSM_MMAP_MIN_ADDR;
++#else
++	mmap_min_addr = dac_mmap_min_addr;
++#endif
++}
++
++/*
++ * sysctl handler which just sets dac_mmap_min_addr = the new value and then
++ * calls update_mmap_min_addr() so non MAP_FIXED hints get rounded properly
++ */
++int mmap_min_addr_handler(struct ctl_table *table, int write, struct file *filp,
++			  void __user *buffer, size_t *lenp, loff_t *ppos)
++{
++	int ret;
++
++	ret = proc_doulongvec_minmax(table, write, filp, buffer, lenp, ppos);
++
++	update_mmap_min_addr();
++
++	return ret;
++}
++
++int __init init_mmap_min_addr(void)
++{
++	update_mmap_min_addr();
++
++	return 0;
++}
++pure_initcall(init_mmap_min_addr);
+diff -urpN linux-source-2.6.24.orig/security/selinux/hooks.c linux-source-2.6.24/security/selinux/hooks.c
+--- linux-source-2.6.24.orig/security/selinux/hooks.c	2010-01-31 17:47:06.000000000 -0700
++++ linux-source-2.6.24/security/selinux/hooks.c	2010-01-31 17:51:51.000000000 -0700
+@@ -2608,7 +2608,7 @@ static int selinux_file_mmap(struct file
+ 	 * at bad behaviour/exploit that we always want to get the AVC, even
+ 	 * if DAC would have also denied the operation.
+ 	 */
+-	if (addr < mmap_min_addr) {
++	if (addr < CONFIG_LSM_MMAP_MIN_ADDR) {
+ 		rc = avc_has_perm(sid, sid, SECCLASS_MEMPROTECT,
+ 				  MEMPROTECT__MMAP_ZERO, NULL);
+ 		if (rc)
