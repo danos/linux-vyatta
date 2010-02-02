@@ -1,0 +1,241 @@
+commit 221af7f87b97431e3ee21ce4b0e77d5411cf1549
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Thu Jan 28 22:14:42 2010 -0800
+
+    Split 'flush_old_exec' into two functions
+    
+    'flush_old_exec()' is the point of no return when doing an execve(), and
+    it is pretty badly misnamed.  It doesn't just flush the old executable
+    environment, it also starts up the new one.
+    
+    Which is very inconvenient for things like setting up the new
+    personality, because we want the new personality to affect the starting
+    of the new environment, but at the same time we do _not_ want the new
+    personality to take effect if flushing the old one fails.
+    
+    As a result, the x86-64 '32-bit' personality is actually done using this
+    insane "I'm going to change the ABI, but I haven't done it yet" bit
+    (TIF_ABI_PENDING), with SET_PERSONALITY() not actually setting the
+    personality, but just the "pending" bit, so that "flush_thread()" can do
+    the actual personality magic.
+    
+    This patch in no way changes any of that insanity, but it does split the
+    'flush_old_exec()' function up into a preparatory part that can fail
+    (still called flush_old_exec()), and a new part that will actually set
+    up the new exec environment (setup_new_exec()).  All callers are changed
+    to trivially comply with the new world order.
+    
+    Signed-off-by: H. Peter Anvin <hpa@zytor.com>
+    Cc: stable@kernel.org
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+Backported to Debian's 2.6.26 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.26.orig/arch/sh/kernel/process_64.c linux-source-2.6.26/arch/sh/kernel/process_64.c
+--- linux-source-2.6.26.orig/arch/sh/kernel/process_64.c	2008-07-13 15:51:29.000000000 -0600
++++ linux-source-2.6.26/arch/sh/kernel/process_64.c	2010-02-01 15:30:45.000000000 -0700
+@@ -448,7 +448,7 @@ void exit_thread(void)
+ void flush_thread(void)
+ {
+ 
+-	/* Called by fs/exec.c (flush_old_exec) to remove traces of a
++	/* Called by fs/exec.c (setup_new_exec) to remove traces of a
+ 	 * previously running executable. */
+ #ifdef CONFIG_SH_FPU
+ 	if (last_task_used_math == current) {
+diff -urpN linux-source-2.6.26.orig/arch/x86/ia32/ia32_aout.c linux-source-2.6.26/arch/x86/ia32/ia32_aout.c
+--- linux-source-2.6.26.orig/arch/x86/ia32/ia32_aout.c	2008-07-13 15:51:29.000000000 -0600
++++ linux-source-2.6.26/arch/x86/ia32/ia32_aout.c	2010-02-01 15:30:45.000000000 -0700
+@@ -306,15 +306,17 @@ static int load_aout_binary(struct linux
+ 	if (retval)
+ 		return retval;
+ 
+-	regs->cs = __USER32_CS;
+-	regs->r8 = regs->r9 = regs->r10 = regs->r11 = regs->r12 =
+-		regs->r13 = regs->r14 = regs->r15 = 0;
+-
+ 	/* OK, This is the point of no return */
+ 	set_personality(PER_LINUX);
+ 	set_thread_flag(TIF_IA32);
+ 	clear_thread_flag(TIF_ABI_PENDING);
+ 
++	setup_new_exec(bprm);
++
++	regs->cs = __USER32_CS;
++	regs->r8 = regs->r9 = regs->r10 = regs->r11 = regs->r12 =
++		regs->r13 = regs->r14 = regs->r15 = 0;
++
+ 	current->mm->end_code = ex.a_text +
+ 		(current->mm->start_code = N_TXTADDR(ex));
+ 	current->mm->end_data = ex.a_data +
+diff -urpN linux-source-2.6.26.orig/fs/binfmt_aout.c linux-source-2.6.26/fs/binfmt_aout.c
+--- linux-source-2.6.26.orig/fs/binfmt_aout.c	2008-07-13 15:51:29.000000000 -0600
++++ linux-source-2.6.26/fs/binfmt_aout.c	2010-02-01 15:30:45.000000000 -0700
+@@ -310,6 +310,7 @@ static int load_aout_binary(struct linux
+ #else
+ 	set_personality(PER_LINUX);
+ #endif
++	setup_new_exec(bprm);
+ 
+ 	current->mm->end_code = ex.a_text +
+ 		(current->mm->start_code = N_TXTADDR(ex));
+diff -urpN linux-source-2.6.26.orig/fs/binfmt_elf.c linux-source-2.6.26/fs/binfmt_elf.c
+--- linux-source-2.6.26.orig/fs/binfmt_elf.c	2008-07-13 15:51:29.000000000 -0600
++++ linux-source-2.6.26/fs/binfmt_elf.c	2010-02-01 15:32:24.000000000 -0700
+@@ -635,27 +635,6 @@ static int load_elf_binary(struct linux_
+ 			if (elf_interpreter[elf_ppnt->p_filesz - 1] != '\0')
+ 				goto out_free_interp;
+ 
+-			/*
+-			 * The early SET_PERSONALITY here is so that the lookup
+-			 * for the interpreter happens in the namespace of the 
+-			 * to-be-execed image.  SET_PERSONALITY can select an
+-			 * alternate root.
+-			 *
+-			 * However, SET_PERSONALITY is NOT allowed to switch
+-			 * this task into the new images's memory mapping
+-			 * policy - that is, TASK_SIZE must still evaluate to
+-			 * that which is appropriate to the execing application.
+-			 * This is because exit_mmap() needs to have TASK_SIZE
+-			 * evaluate to the size of the old image.
+-			 *
+-			 * So if (say) a 64-bit application is execing a 32-bit
+-			 * application it is the architecture's responsibility
+-			 * to defer changing the value of TASK_SIZE until the
+-			 * switch really is going to happen - do this in
+-			 * flush_thread().	- akpm
+-			 */
+-			SET_PERSONALITY(loc->elf_ex, 0);
+-
+ 			interpreter = open_exec(elf_interpreter);
+ 			retval = PTR_ERR(interpreter);
+ 			if (IS_ERR(interpreter))
+@@ -703,9 +682,6 @@ static int load_elf_binary(struct linux_
+ 		/* Verify the interpreter has a valid arch */
+ 		if (!elf_check_arch(&loc->interp_elf_ex))
+ 			goto out_free_dentry;
+-	} else {
+-		/* Executables without an interpreter also need a personality  */
+-		SET_PERSONALITY(loc->elf_ex, 0);
+ 	}
+ 
+ 	/* Flush all traces of the currently running executable */
+@@ -725,7 +701,8 @@ static int load_elf_binary(struct linux_
+ 
+ 	if (!(current->personality & ADDR_NO_RANDOMIZE) && randomize_va_space)
+ 		current->flags |= PF_RANDOMIZE;
+-	arch_pick_mmap_layout(current->mm);
++
++	setup_new_exec(bprm);
+ 
+ 	/* Do this so that we can load the interpreter, if need be.  We will
+ 	   change some of these later */
+diff -urpN linux-source-2.6.26.orig/fs/binfmt_elf_fdpic.c linux-source-2.6.26/fs/binfmt_elf_fdpic.c
+--- linux-source-2.6.26.orig/fs/binfmt_elf_fdpic.c	2008-07-13 15:51:29.000000000 -0600
++++ linux-source-2.6.26/fs/binfmt_elf_fdpic.c	2010-02-01 15:33:17.000000000 -0700
+@@ -315,6 +315,9 @@ static int load_elf_fdpic_binary(struct 
+ 	 * defunct, deceased, etc. after this point we have to exit via
+ 	 * error_kill */
+ 	set_personality(PER_LINUX_FDPIC);
++
++	setup_new_exec(bprm);
++
+ 	set_binfmt(&elf_fdpic_format);
+ 
+ 	current->mm->start_code = 0;
+diff -urpN linux-source-2.6.26.orig/fs/binfmt_flat.c linux-source-2.6.26/fs/binfmt_flat.c
+--- linux-source-2.6.26.orig/fs/binfmt_flat.c	2008-07-13 15:51:29.000000000 -0600
++++ linux-source-2.6.26/fs/binfmt_flat.c	2010-02-01 15:30:49.000000000 -0700
+@@ -510,6 +510,7 @@ static int load_flat_file(struct linux_b
+ 
+ 		/* OK, This is the point of no return */
+ 		set_personality(PER_LINUX_32BIT);
++		setup_new_exec(bprm);
+ 	}
+ 
+ 	/*
+diff -urpN linux-source-2.6.26.orig/fs/binfmt_som.c linux-source-2.6.26/fs/binfmt_som.c
+--- linux-source-2.6.26.orig/fs/binfmt_som.c	2008-07-13 15:51:29.000000000 -0600
++++ linux-source-2.6.26/fs/binfmt_som.c	2010-02-01 15:30:49.000000000 -0700
+@@ -234,6 +234,7 @@ load_som_binary(struct linux_binprm * bp
+ 	/* OK, This is the point of no return */
+ 	current->flags &= ~PF_FORKNOEXEC;
+ 	current->personality = PER_HPUX;
++	setup_new_exec(bprm);
+ 
+ 	/* Set the task size for HP-UX processes such that
+ 	 * the gateway page is outside the address space.
+diff -urpN linux-source-2.6.26.orig/fs/exec.c linux-source-2.6.26/fs/exec.c
+--- linux-source-2.6.26.orig/fs/exec.c	2010-01-29 17:50:35.000000000 -0700
++++ linux-source-2.6.26/fs/exec.c	2010-02-01 15:30:49.000000000 -0700
+@@ -948,9 +948,7 @@ void set_task_comm(struct task_struct *t
+ 
+ int flush_old_exec(struct linux_binprm * bprm)
+ {
+-	char * name;
+-	int i, ch, retval;
+-	char tcomm[sizeof(current->comm)];
++	int retval;
+ 
+ 	/*
+ 	 * Make sure we have a private signal table and that
+@@ -970,6 +968,20 @@ int flush_old_exec(struct linux_binprm *
+ 		goto out;
+ 
+ 	bprm->mm = NULL;		/* We're using it now */
++	return 0;
++
++out:
++	return retval;
++}
++EXPORT_SYMBOL(flush_old_exec);
++
++void setup_new_exec(struct linux_binprm * bprm)
++{
++	int i, ch;
++	char * name;
++	char tcomm[sizeof(current->comm)];
++
++	arch_pick_mmap_layout(current->mm);
+ 
+ 	/* This is the point of no return */
+ 	current->sas_ss_sp = current->sas_ss_size = 0;
+@@ -1018,14 +1030,8 @@ int flush_old_exec(struct linux_binprm *
+ 			
+ 	flush_signal_handlers(current, 0);
+ 	flush_old_files(current->files);
+-
+-	return 0;
+-
+-out:
+-	return retval;
+ }
+-
+-EXPORT_SYMBOL(flush_old_exec);
++EXPORT_SYMBOL(setup_new_exec);
+ 
+ /* 
+  * Fill the binprm structure from the inode. 
+diff -urpN linux-source-2.6.26.orig/include/linux/binfmts.h linux-source-2.6.26/include/linux/binfmts.h
+--- linux-source-2.6.26.orig/include/linux/binfmts.h	2008-07-13 15:51:29.000000000 -0600
++++ linux-source-2.6.26/include/linux/binfmts.h	2010-02-01 15:30:49.000000000 -0700
+@@ -80,6 +80,7 @@ extern int prepare_binprm(struct linux_b
+ extern int __must_check remove_arg_zero(struct linux_binprm *);
+ extern int search_binary_handler(struct linux_binprm *,struct pt_regs *);
+ extern int flush_old_exec(struct linux_binprm * bprm);
++extern void setup_new_exec(struct linux_binprm * bprm);
+ 
+ extern int suid_dumpable;
+ #define SUID_DUMP_DISABLE	0	/* No setuid dumping */
+diff -urpN linux-source-2.6.26.orig/include/linux/sched.h linux-source-2.6.26/include/linux/sched.h
+--- linux-source-2.6.26.orig/include/linux/sched.h	2010-01-29 17:50:35.000000000 -0700
++++ linux-source-2.6.26/include/linux/sched.h	2010-02-01 15:30:49.000000000 -0700
+@@ -1153,7 +1153,7 @@ struct task_struct {
+ 	char comm[TASK_COMM_LEN]; /* executable name excluding path
+ 				     - access with [gs]et_task_comm (which lock
+ 				       it with task_lock())
+-				     - initialized normally by flush_old_exec */
++				     - initialized normally by setup_new_exec */
+ /* file system info */
+ 	int link_count, total_link_count;
+ #ifdef CONFIG_SYSVIPC
