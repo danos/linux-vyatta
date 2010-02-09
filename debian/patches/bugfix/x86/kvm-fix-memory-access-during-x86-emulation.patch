@@ -1,0 +1,511 @@
+Subject: [KVM 5.5/5.4.z Embargoed 4/7 v2] KVM: fix memory
+	access during x86 emulation.
+
+Currently when x86 emulator needs to access memory, page walk is done with
+broadest permission possible, so if emulated instruction was executed
+by userspace process it can still access kernel memory. Fix that by
+providing correct memory access to page walker during emulation.
+
+Signed-off-by: Gleb Natapov <gleb@redhat.com>
+---
+ arch/x86/include/asm/kvm_host.h        |    7 ++-
+ arch/x86/include/asm/kvm_x86_emulate.h |   14 +++-
+ arch/x86/kvm/mmu.c                     |   16 ++--
+ arch/x86/kvm/mmu.h                     |    6 ++
+ arch/x86/kvm/paging_tmpl.h             |   11 ++-
+ arch/x86/kvm/x86.c                     |  131 ++++++++++++++++++++++++-------
+ arch/x86/kvm/x86_emulate.c             |    6 +-
+ 7 files changed, 143 insertions(+), 48 deletions(-)
+
+Backported to Debian's 2.6.26 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.26.orig/arch/x86/kvm/mmu.c linux-source-2.6.26/arch/x86/kvm/mmu.c
+--- linux-source-2.6.26.orig/arch/x86/kvm/mmu.c	2010-02-01 23:54:20.000000000 -0700
++++ linux-source-2.6.26/arch/x86/kvm/mmu.c	2010-02-04 21:52:09.000000000 -0700
+@@ -119,11 +119,6 @@ static int dbg = 1;
+ #define PT64_PERM_MASK (PT_PRESENT_MASK | PT_WRITABLE_MASK | PT_USER_MASK \
+ 			| PT64_NX_MASK)
+ 
+-#define PFERR_PRESENT_MASK (1U << 0)
+-#define PFERR_WRITE_MASK (1U << 1)
+-#define PFERR_USER_MASK (1U << 2)
+-#define PFERR_FETCH_MASK (1U << 4)
+-
+ #define PT_DIRECTORY_LEVEL 2
+ #define PT_PAGE_TABLE_LEVEL 1
+ 
+@@ -1007,7 +1002,7 @@ struct page *gva_to_page(struct kvm_vcpu
+ {
+ 	struct page *page;
+ 
+-	gpa_t gpa = vcpu->arch.mmu.gva_to_gpa(vcpu, gva);
++	gpa_t gpa = kvm_mmu_gva_to_gpa_read(vcpu, gva, NULL);
+ 
+ 	if (gpa == UNMAPPED_GVA)
+ 		return NULL;
+@@ -1304,8 +1299,11 @@ static void mmu_alloc_roots(struct kvm_v
+ 	vcpu->arch.mmu.root_hpa = __pa(vcpu->arch.mmu.pae_root);
+ }
+ 
+-static gpa_t nonpaging_gva_to_gpa(struct kvm_vcpu *vcpu, gva_t vaddr)
++static gpa_t nonpaging_gva_to_gpa(struct kvm_vcpu *vcpu, gva_t vaddr,
++				  u32 access, u32 *error)
+ {
++	if (error)
++		*error = 0;
+ 	return vaddr;
+ }
+ 
+@@ -1785,7 +1783,7 @@ int kvm_mmu_unprotect_page_virt(struct k
+ 	gpa_t gpa;
+ 	int r;
+ 
+-	gpa = vcpu->arch.mmu.gva_to_gpa(vcpu, gva);
++	gpa = kvm_mmu_gva_to_gpa_read(vcpu, gva, NULL);
+ 
+ 	spin_lock(&vcpu->kvm->mmu_lock);
+ 	r = kvm_mmu_unprotect_page(vcpu->kvm, gpa >> PAGE_SHIFT);
+@@ -2218,7 +2216,7 @@ static void audit_mappings_page(struct k
+ 
+ 			audit_mappings_page(vcpu, ent, va, level - 1);
+ 		} else {
+-			gpa_t gpa = vcpu->arch.mmu.gva_to_gpa(vcpu, va);
++			gpa_t gpa = kvm_mmu_gva_to_gpa_system(vcpu, va, NULL);
+ 			hpa_t hpa = (hpa_t)gpa_to_pfn(vcpu, gpa) << PAGE_SHIFT;
+ 
+ 			if (is_shadow_present_pte(ent)
+diff -urpN linux-source-2.6.26.orig/arch/x86/kvm/mmu.h linux-source-2.6.26/arch/x86/kvm/mmu.h
+--- linux-source-2.6.26.orig/arch/x86/kvm/mmu.h	2010-02-04 22:01:28.000000000 -0700
++++ linux-source-2.6.26/arch/x86/kvm/mmu.h	2010-02-04 22:01:53.000000000 -0700
+@@ -36,6 +36,12 @@
+ #define PT32_ROOT_LEVEL 2
+ #define PT32E_ROOT_LEVEL 3
+ 
++#define PFERR_PRESENT_MASK (1U << 0)
++#define PFERR_WRITE_MASK (1U << 1)
++#define PFERR_USER_MASK (1U << 2)
++#define PFERR_RSVD_MASK (1U << 3)
++#define PFERR_FETCH_MASK (1U << 4)
++
+ static inline void kvm_mmu_free_some_pages(struct kvm_vcpu *vcpu)
+ {
+ 	if (unlikely(vcpu->kvm->arch.n_free_mmu_pages < KVM_MIN_FREE_MMU_PAGES))
+diff -urpN linux-source-2.6.26.orig/arch/x86/kvm/paging_tmpl.h linux-source-2.6.26/arch/x86/kvm/paging_tmpl.h
+--- linux-source-2.6.26.orig/arch/x86/kvm/paging_tmpl.h	2010-02-01 23:54:20.000000000 -0700
++++ linux-source-2.6.26/arch/x86/kvm/paging_tmpl.h	2010-02-04 21:52:09.000000000 -0700
+@@ -441,18 +441,23 @@ static int FNAME(page_fault)(struct kvm_
+ 	return write_pt;
+ }
+ 
+-static gpa_t FNAME(gva_to_gpa)(struct kvm_vcpu *vcpu, gva_t vaddr)
++static gpa_t FNAME(gva_to_gpa)(struct kvm_vcpu *vcpu, gva_t vaddr, u32 access,
++			       u32 *error)
+ {
+ 	struct guest_walker walker;
+ 	gpa_t gpa = UNMAPPED_GVA;
+ 	int r;
+ 
+-	r = FNAME(walk_addr)(&walker, vcpu, vaddr, 0, 0, 0);
++	r = FNAME(walk_addr)(&walker, vcpu, vaddr,
++			     !!(access & PFERR_WRITE_MASK),
++			     !!(access & PFERR_USER_MASK),
++			     !!(access & PFERR_FETCH_MASK));
+ 
+ 	if (r) {
+ 		gpa = gfn_to_gpa(walker.gfn);
+ 		gpa |= vaddr & ~PAGE_MASK;
+-	}
++	} else if(error)
++		*error = walker.error_code;
+ 
+ 	return gpa;
+ }
+diff -urpN linux-source-2.6.26.orig/arch/x86/kvm/x86.c linux-source-2.6.26/arch/x86/kvm/x86.c
+--- linux-source-2.6.26.orig/arch/x86/kvm/x86.c	2010-02-04 21:49:22.000000000 -0700
++++ linux-source-2.6.26/arch/x86/kvm/x86.c	2010-02-04 21:59:53.000000000 -0700
+@@ -1807,14 +1807,41 @@ static struct kvm_io_device *vcpu_find_m
+ 	return dev;
+ }
+ 
+-int kvm_read_guest_virt(gva_t addr, void *val, unsigned int bytes,
+-			struct kvm_vcpu *vcpu)
++gpa_t kvm_mmu_gva_to_gpa_read(struct kvm_vcpu *vcpu, gva_t gva, u32 *error)
++{
++	u32 access = (kvm_x86_ops->get_cpl(vcpu) == 3) ? PFERR_USER_MASK : 0;
++	return vcpu->arch.mmu.gva_to_gpa(vcpu, gva, access, error);
++}
++
++ gpa_t kvm_mmu_gva_to_gpa_fetch(struct kvm_vcpu *vcpu, gva_t gva, u32 *error)
++{
++	u32 access = (kvm_x86_ops->get_cpl(vcpu) == 3) ? PFERR_USER_MASK : 0;
++	access |= PFERR_FETCH_MASK;
++	return vcpu->arch.mmu.gva_to_gpa(vcpu, gva, access, error);
++}
++
++gpa_t kvm_mmu_gva_to_gpa_write(struct kvm_vcpu *vcpu, gva_t gva, u32 *error)
++{
++	u32 access = (kvm_x86_ops->get_cpl(vcpu) == 3) ? PFERR_USER_MASK : 0;
++	access |= PFERR_WRITE_MASK;
++	return vcpu->arch.mmu.gva_to_gpa(vcpu, gva, access, error);
++}
++
++/* uses this to access any guet's mapped memory without checking CPL */
++gpa_t kvm_mmu_gva_to_gpa_system(struct kvm_vcpu *vcpu, gva_t gva, u32 *error)
++{
++	return vcpu->arch.mmu.gva_to_gpa(vcpu, gva, 0, error);
++}
++
++static int kvm_read_guest_virt_helper(gva_t addr, void *val, unsigned int bytes,
++				      struct kvm_vcpu *vcpu, u32 access,
++				      u32 *error)
+ {
+ 	void *data = val;
+ 	int r = X86EMUL_CONTINUE;
+ 
+ 	while (bytes) {
+-		gpa_t gpa = vcpu->arch.mmu.gva_to_gpa(vcpu, addr);
++		gpa_t gpa = vcpu->arch.mmu.gva_to_gpa(vcpu, addr, access, error);
+ 		unsigned offset = addr & (PAGE_SIZE-1);
+ 		unsigned toread = min(bytes, (unsigned)PAGE_SIZE - offset);
+ 		int ret;
+@@ -1837,14 +1864,37 @@ out:
+ 	return r;
+ }
+ 
++/* used for instruction fetching */
++static int kvm_fetch_guest_virt(gva_t addr, void *val, unsigned int bytes,
++				struct kvm_vcpu *vcpu, u32 *error)
++{
++	u32 access = (kvm_x86_ops->get_cpl(vcpu) == 3) ? PFERR_USER_MASK : 0;
++	return kvm_read_guest_virt_helper(addr, val, bytes, vcpu,
++					  access | PFERR_FETCH_MASK, error);
++}
++
++static int kvm_read_guest_virt(gva_t addr, void *val, unsigned int bytes,
++			       struct kvm_vcpu *vcpu, u32 *error)
++{
++	u32 access = (kvm_x86_ops->get_cpl(vcpu) == 3) ? PFERR_USER_MASK : 0;
++	return kvm_read_guest_virt_helper(addr, val, bytes, vcpu, access,
++					  error);
++}
++
++static int kvm_read_guest_virt_system(gva_t addr, void *val, unsigned int bytes,
++			       struct kvm_vcpu *vcpu, u32 *error)
++{
++	return kvm_read_guest_virt_helper(addr, val, bytes, vcpu, 0, error);
++}
++
+ int kvm_write_guest_virt(gva_t addr, void *val, unsigned int bytes,
+-			 struct kvm_vcpu *vcpu)
++				struct kvm_vcpu *vcpu, u32 *error)
+ {
+ 	void *data = val;
+ 	int r = X86EMUL_CONTINUE;
+ 
+ 	while (bytes) {
+-		gpa_t gpa = vcpu->arch.mmu.gva_to_gpa(vcpu, addr);
++		gpa_t gpa = kvm_mmu_gva_to_gpa_write(vcpu, addr, error);
+ 		unsigned offset = addr & (PAGE_SIZE-1);
+ 		unsigned towrite = min(bytes, (unsigned)PAGE_SIZE - offset);
+ 		int ret;
+@@ -1875,6 +1925,7 @@ static int emulator_read_emulated(unsign
+ {
+ 	struct kvm_io_device *mmio_dev;
+ 	gpa_t                 gpa;
++	u32 error_code;
+ 
+ 	if (vcpu->mmio_read_completed) {
+ 		memcpy(val, vcpu->mmio_data, bytes);
+@@ -1882,17 +1933,20 @@ static int emulator_read_emulated(unsign
+ 		return X86EMUL_CONTINUE;
+ 	}
+ 
+-	gpa = vcpu->arch.mmu.gva_to_gpa(vcpu, addr);
++	gpa = kvm_mmu_gva_to_gpa_read(vcpu, addr, &error_code);
++
++	if (gpa == UNMAPPED_GVA) {
++		kvm_inject_page_fault(vcpu, addr, error_code);
++		return X86EMUL_PROPAGATE_FAULT;
++	}
+ 
+ 	/* For APIC access vmexit */
+ 	if ((gpa & PAGE_MASK) == APIC_DEFAULT_PHYS_BASE)
+ 		goto mmio;
+ 
+-	if (kvm_read_guest_virt(addr, val, bytes, vcpu)
++	if (kvm_read_guest_virt(addr, val, bytes, vcpu, NULL)
+ 				== X86EMUL_CONTINUE)
+ 		return X86EMUL_CONTINUE;
+-	if (gpa == UNMAPPED_GVA)
+-		return X86EMUL_PROPAGATE_FAULT;
+ 
+ mmio:
+ 	/*
+@@ -1934,11 +1988,12 @@ static int emulator_write_emulated_onepa
+ {
+ 	struct kvm_io_device *mmio_dev;
+ 	gpa_t                 gpa;
++	u32 error_code;
+ 
+-	gpa = vcpu->arch.mmu.gva_to_gpa(vcpu, addr);
++	gpa = kvm_mmu_gva_to_gpa_write(vcpu, addr, &error_code);
+ 
+ 	if (gpa == UNMAPPED_GVA) {
+-		kvm_inject_page_fault(vcpu, addr, 2);
++		kvm_inject_page_fault(vcpu, addr, error_code);
+ 		return X86EMUL_PROPAGATE_FAULT;
+ 	}
+ 
+@@ -2012,7 +2067,7 @@ static int emulator_cmpxchg_emulated(uns
+ 		char *kaddr;
+ 		u64 val;
+ 
+-		gpa = vcpu->arch.mmu.gva_to_gpa(vcpu, addr);
++		gpa = kvm_mmu_gva_to_gpa_write(vcpu, addr, NULL);
+ 
+ 		if (gpa == UNMAPPED_GVA ||
+ 		   (gpa & PAGE_MASK) == APIC_DEFAULT_PHYS_BASE)
+@@ -2093,7 +2148,7 @@ void kvm_report_emulation_failure(struct
+ 	if (reported)
+ 		return;
+ 
+-	kvm_read_guest_virt(rip_linear, (void *)opcodes, 4, vcpu);
++	kvm_read_guest_virt(rip_linear, (void *)opcodes, 4, vcpu, NULL);
+ 
+ 	printk(KERN_ERR "emulation failed (%s) rip %lx %02x %02x %02x %02x\n",
+ 	       context, rip, opcodes[0], opcodes[1], opcodes[2], opcodes[3]);
+@@ -2103,6 +2158,7 @@ EXPORT_SYMBOL_GPL(kvm_report_emulation_f
+ 
+ static struct x86_emulate_ops emulate_ops = {
+ 	.read_std            = kvm_read_guest_virt,
++	.fetch               = kvm_fetch_guest_virt,
+ 	.read_emulated       = emulator_read_emulated,
+ 	.write_emulated      = emulator_write_emulated,
+ 	.cmpxchg_emulated    = emulator_cmpxchg_emulated,
+@@ -2217,12 +2273,17 @@ static int pio_copy_data(struct kvm_vcpu
+ 	gva_t q = vcpu->arch.pio.guest_gva;
+ 	unsigned bytes;
+ 	int ret;
++	u32 error_code;
+ 
+ 	bytes = vcpu->arch.pio.size * vcpu->arch.pio.cur_count;
+ 	if (vcpu->arch.pio.in)
+-		ret = kvm_write_guest_virt(q, p, bytes, vcpu);
++		ret = kvm_write_guest_virt(q, p, bytes, vcpu, &error_code);
+ 	else
+-		ret = kvm_read_guest_virt(q, p, bytes, vcpu);
++		ret = kvm_read_guest_virt(q, p, bytes, vcpu, &error_code);
++
++	if (ret == X86EMUL_PROPAGATE_FAULT)
++		kvm_inject_page_fault(vcpu, q, error_code);
++	
+ 	return ret;
+ }
+ 
+@@ -2243,7 +2304,7 @@ int complete_pio(struct kvm_vcpu *vcpu)
+ 			r = pio_copy_data(vcpu);
+ 			if (r) {
+ 				kvm_x86_ops->cache_regs(vcpu);
+-				return r;
++				goto out;
+ 			}
+ 		}
+ 
+@@ -2266,7 +2327,7 @@ int complete_pio(struct kvm_vcpu *vcpu)
+ 	}
+ 
+ 	kvm_x86_ops->decache_regs(vcpu);
+-
++	out:
+ 	io->count -= io->cur_count;
+ 	io->cur_count = 0;
+ 
+@@ -2411,10 +2472,8 @@ int kvm_emulate_pio_string(struct kvm_vc
+ 	if (!vcpu->arch.pio.in) {
+ 		/* string PIO write */
+ 		ret = pio_copy_data(vcpu);
+-		if (ret == X86EMUL_PROPAGATE_FAULT) {
+-			kvm_inject_gp(vcpu, 0);
++		if (ret == X86EMUL_PROPAGATE_FAULT)
+ 			return 1;
+-		}
+ 		if (ret == 0 && pio_dev) {
+ 			pio_string_write(pio_dev, vcpu);
+ 			complete_pio(vcpu);
+@@ -3220,7 +3279,7 @@ static int load_guest_segment_descriptor
+ 		kvm_queue_exception_e(vcpu, GP_VECTOR, selector & 0xfffc);
+ 		return 1;
+ 	}
+-	return kvm_read_guest_virt(dtable.base + index*8, seg_desc, sizeof(*seg_desc), vcpu);
++	return kvm_read_guest_virt(dtable.base + index*8, seg_desc, sizeof(*seg_desc), vcpu, NULL);
+ }
+ 
+ /* allowed just for 8 bytes segments */
+@@ -3234,10 +3293,22 @@ static int save_guest_segment_descriptor
+ 
+ 	if (dtable.limit < index * 8 + 7)
+ 		return 1;
+-	return kvm_write_guest_virt(dtable.base + index*8, seg_desc, sizeof(*seg_desc), vcpu);
++	return kvm_write_guest_virt(dtable.base + index*8, seg_desc, sizeof(*seg_desc), vcpu, NULL);
++}
++
++static gpa_t get_tss_base_addr_read(struct kvm_vcpu *vcpu,
++			     struct desc_struct *seg_desc)
++{
++	u32 base_addr;
++
++	base_addr = seg_desc->base0;
++	base_addr |= (seg_desc->base1 << 16);
++	base_addr |= (seg_desc->base2 << 24);
++
++	return kvm_mmu_gva_to_gpa_read(vcpu, base_addr, NULL);
+ }
+ 
+-static u32 get_tss_base_addr(struct kvm_vcpu *vcpu,
++static gpa_t get_tss_base_addr_write(struct kvm_vcpu *vcpu,
+ 			     struct desc_struct *seg_desc)
+ {
+ 	u32 base_addr;
+@@ -3246,7 +3317,7 @@ static u32 get_tss_base_addr(struct kvm_
+ 	base_addr |= (seg_desc->base1 << 16);
+ 	base_addr |= (seg_desc->base2 << 24);
+ 
+-	return vcpu->arch.mmu.gva_to_gpa(vcpu, base_addr);
++	return kvm_mmu_gva_to_gpa_write(vcpu, base_addr, NULL);
+ }
+ 
+ static u16 get_segment_selector(struct kvm_vcpu *vcpu, int seg)
+@@ -3422,7 +3493,7 @@ int kvm_task_switch_16(struct kvm_vcpu *
+ 			    sizeof tss_segment_16))
+ 		goto out;
+ 
+-	if (kvm_read_guest(vcpu->kvm, get_tss_base_addr(vcpu, nseg_desc),
++	if (kvm_read_guest(vcpu->kvm, get_tss_base_addr_read(vcpu, nseg_desc),
+ 			   &tss_segment_16, sizeof tss_segment_16))
+ 		goto out;
+ 
+@@ -3451,7 +3522,7 @@ int kvm_task_switch_32(struct kvm_vcpu *
+ 			    sizeof tss_segment_32))
+ 		goto out;
+ 
+-	if (kvm_read_guest(vcpu->kvm, get_tss_base_addr(vcpu, nseg_desc),
++	if (kvm_read_guest(vcpu->kvm, get_tss_base_addr_read(vcpu, nseg_desc),
+ 			   &tss_segment_32, sizeof tss_segment_32))
+ 		goto out;
+ 
+@@ -3472,7 +3543,7 @@ int kvm_task_switch(struct kvm_vcpu *vcp
+ 	u32 old_tss_base = get_segment_base(vcpu, VCPU_SREG_TR);
+ 	u16 old_tss_sel = get_segment_selector(vcpu, VCPU_SREG_TR);
+ 
+-	old_tss_base = vcpu->arch.mmu.gva_to_gpa(vcpu, old_tss_base);
++	old_tss_base = kvm_mmu_gva_to_gpa_write(vcpu, old_tss_base, NULL);
+ 
+ 	/* FIXME: Handle errors. Failure to read either TSS or their
+ 	 * descriptors should generate a pagefault.
+@@ -3666,7 +3737,7 @@ int kvm_arch_vcpu_ioctl_translate(struct
+ 
+ 	vcpu_load(vcpu);
+ 	down_read(&vcpu->kvm->slots_lock);
+-	gpa = vcpu->arch.mmu.gva_to_gpa(vcpu, vaddr);
++	gpa = kvm_mmu_gva_to_gpa_system(vcpu, vaddr, NULL);
+ 	up_read(&vcpu->kvm->slots_lock);
+ 	tr->physical_address = gpa;
+ 	tr->valid = gpa != UNMAPPED_GVA;
+diff -urpN linux-source-2.6.26.orig/arch/x86/kvm/x86_emulate.c linux-source-2.6.26/arch/x86/kvm/x86_emulate.c
+--- linux-source-2.6.26.orig/arch/x86/kvm/x86_emulate.c	2010-02-01 23:54:26.000000000 -0700
++++ linux-source-2.6.26/arch/x86/kvm/x86_emulate.c	2010-02-04 21:52:09.000000000 -0700
+@@ -528,7 +528,7 @@ static int do_fetch_insn_byte(struct x86
+ 
+ 	if (linear < fc->start || linear >= fc->end) {
+ 		size = min(15UL, PAGE_SIZE - offset_in_page(linear));
+-		rc = ops->read_std(linear, fc->data, size, ctxt->vcpu);
++		rc = ops->fetch(linear, fc->data, size, ctxt->vcpu, NULL);
+ 		if (rc)
+ 			return rc;
+ 		fc->start = linear;
+@@ -583,11 +583,11 @@ static int read_descriptor(struct x86_em
+ 		op_bytes = 3;
+ 	*address = 0;
+ 	rc = ops->read_std((unsigned long)ptr, (unsigned long *)size, 2,
+-			   ctxt->vcpu);
++			   ctxt->vcpu, NULL);
+ 	if (rc)
+ 		return rc;
+ 	rc = ops->read_std((unsigned long)ptr + 2, address, op_bytes,
+-			   ctxt->vcpu);
++			   ctxt->vcpu, NULL);
+ 	return rc;
+ }
+ 
+@@ -1137,7 +1137,7 @@ static inline int emulate_grp1a(struct x
+ 
+ 	rc = ops->read_std(register_address(c, ctxt->ss_base,
+ 					    c->regs[VCPU_REGS_RSP]),
+-			   &c->dst.val, c->dst.bytes, ctxt->vcpu);
++			   &c->dst.val, c->dst.bytes, ctxt->vcpu, NULL);
+ 	if (rc != 0)
+ 		return rc;
+ 
+@@ -1463,7 +1463,7 @@ special_insn:
+ 	pop_instruction:
+ 		if ((rc = ops->read_std(register_address(c, ctxt->ss_base,
+ 			c->regs[VCPU_REGS_RSP]), c->dst.ptr,
+-			c->op_bytes, ctxt->vcpu)) != 0)
++			c->op_bytes, ctxt->vcpu, NULL)) != 0)
+ 			goto done;
+ 
+ 		register_address_increment(c, &c->regs[VCPU_REGS_RSP],
+diff -urpN linux-source-2.6.26.orig/include/asm-x86/kvm_host.h linux-source-2.6.26/include/asm-x86/kvm_host.h
+--- linux-source-2.6.26.orig/include/asm-x86/kvm_host.h	2010-02-04 21:39:17.000000000 -0700
++++ linux-source-2.6.26/include/asm-x86/kvm_host.h	2010-02-04 21:52:49.000000000 -0700
+@@ -201,7 +201,8 @@ struct kvm_mmu {
+ 	void (*new_cr3)(struct kvm_vcpu *vcpu);
+ 	int (*page_fault)(struct kvm_vcpu *vcpu, gva_t gva, u32 err);
+ 	void (*free)(struct kvm_vcpu *vcpu);
+-	gpa_t (*gva_to_gpa)(struct kvm_vcpu *vcpu, gva_t gva);
++	gpa_t (*gva_to_gpa)(struct kvm_vcpu *vcpu, gva_t gva, u32 access,
++			    u32 *error);
+ 	void (*prefetch_page)(struct kvm_vcpu *vcpu,
+ 			      struct kvm_mmu_page *page);
+ 	hpa_t root_hpa;
+@@ -532,6 +533,11 @@ void __kvm_mmu_free_some_pages(struct kv
+ int kvm_mmu_load(struct kvm_vcpu *vcpu);
+ void kvm_mmu_unload(struct kvm_vcpu *vcpu);
+ 
++gpa_t kvm_mmu_gva_to_gpa_read(struct kvm_vcpu *vcpu, gva_t gva, u32 *error);
++gpa_t kvm_mmu_gva_to_gpa_fetch(struct kvm_vcpu *vcpu, gva_t gva, u32 *error);
++gpa_t kvm_mmu_gva_to_gpa_write(struct kvm_vcpu *vcpu, gva_t gva, u32 *error);
++gpa_t kvm_mmu_gva_to_gpa_system(struct kvm_vcpu *vcpu, gva_t gva, u32 *error);
++
+ int kvm_emulate_hypercall(struct kvm_vcpu *vcpu);
+ 
+ int kvm_fix_hypercall(struct kvm_vcpu *vcpu);
+diff -urpN linux-source-2.6.26.orig/include/asm-x86/kvm_x86_emulate.h linux-source-2.6.26/include/asm-x86/kvm_x86_emulate.h
+--- linux-source-2.6.26.orig/include/asm-x86/kvm_x86_emulate.h	2010-02-01 23:54:26.000000000 -0700
++++ linux-source-2.6.26/include/asm-x86/kvm_x86_emulate.h	2010-02-04 21:52:09.000000000 -0700
+@@ -54,13 +54,23 @@ struct x86_emulate_ctxt;
+ struct x86_emulate_ops {
+ 	/*
+ 	 * read_std: Read bytes of standard (non-emulated/special) memory.
+-	 *           Used for instruction fetch, stack operations, and others.
++	 *           Used for descriptor reading.
+ 	 *  @addr:  [IN ] Linear address from which to read.
+ 	 *  @val:   [OUT] Value read from memory, zero-extended to 'u_long'.
+ 	 *  @bytes: [IN ] Number of bytes to read from memory.
+ 	 */
+ 	int (*read_std)(unsigned long addr, void *val,
+-			unsigned int bytes, struct kvm_vcpu *vcpu);
++			unsigned int bytes, struct kvm_vcpu *vcpu, u32 *error);
++
++	/*
++	 * fetch: Read bytes of standard (non-emulated/special) memory.
++	 *        Used for instruction fetch.
++	 *  @addr:  [IN ] Linear address from which to read.
++	 *  @val:   [OUT] Value read from memory, zero-extended to 'u_long'.
++	 *  @bytes: [IN ] Number of bytes to read from memory.
++	 */
++	int (*fetch)(unsigned long addr, void *val,
++			unsigned int bytes, struct kvm_vcpu *vcpu, u32 *error);
+ 
+ 	/*
+ 	 * read_emulated: Read bytes from emulated/special memory area.

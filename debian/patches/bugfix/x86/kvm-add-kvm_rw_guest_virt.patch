@@ -1,0 +1,142 @@
+Subject: [KVM 5.5/5.4.z Embargoed 1/7 v2] KVM: introduce
+	kvm_read_guest_virt, kvm_write_guest_virt
+
+From: Izik Eidus <ieidus@redhat.com>
+
+This commit change the name of emulator_read_std into kvm_read_guest_virt,
+and add new function name kvm_write_guest_virt that allow writing into a
+guest virtual address.
+
+Signed-off-by: Izik Eidus <ieidus@redhat.com>
+Signed-off-by: Avi Kivity <avi@redhat.com>
+Signed-off-by: Gleb Natapov <gleb@redhat.com>
+---
+ arch/x86/include/asm/kvm_host.h |    4 ---
+ arch/x86/kvm/x86.c              |   56 +++++++++++++++++++++++++++++---------
+ 2 files changed, 42 insertions(+), 18 deletions(-)
+
+Adjusted to apply to Debian's 2.6.26 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.26.orig/arch/x86/kvm/x86.c linux-source-2.6.26/arch/x86/kvm/x86.c
+--- linux-source-2.6.26.orig/arch/x86/kvm/x86.c	2010-02-01 23:54:25.000000000 -0700
++++ linux-source-2.6.26/arch/x86/kvm/x86.c	2010-02-04 21:39:17.000000000 -0700
+@@ -1807,10 +1807,8 @@ static struct kvm_io_device *vcpu_find_m
+ 	return dev;
+ }
+ 
+-int emulator_read_std(unsigned long addr,
+-			     void *val,
+-			     unsigned int bytes,
+-			     struct kvm_vcpu *vcpu)
++int kvm_read_guest_virt(gva_t addr, void *val, unsigned int bytes,
++			struct kvm_vcpu *vcpu)
+ {
+ 	void *data = val;
+ 	int r = X86EMUL_CONTINUE;
+@@ -1818,27 +1816,57 @@ int emulator_read_std(unsigned long addr
+ 	while (bytes) {
+ 		gpa_t gpa = vcpu->arch.mmu.gva_to_gpa(vcpu, addr);
+ 		unsigned offset = addr & (PAGE_SIZE-1);
+-		unsigned tocopy = min(bytes, (unsigned)PAGE_SIZE - offset);
++		unsigned toread = min(bytes, (unsigned)PAGE_SIZE - offset);
+ 		int ret;
+ 
+ 		if (gpa == UNMAPPED_GVA) {
+ 			r = X86EMUL_PROPAGATE_FAULT;
+ 			goto out;
+ 		}
+-		ret = kvm_read_guest(vcpu->kvm, gpa, data, tocopy);
++		ret = kvm_read_guest(vcpu->kvm, gpa, data, toread);
+ 		if (ret < 0) {
+ 			r = X86EMUL_UNHANDLEABLE;
+ 			goto out;
+ 		}
+ 
+-		bytes -= tocopy;
+-		data += tocopy;
+-		addr += tocopy;
++		bytes -= toread;
++		data += toread;
++		addr += toread;
+ 	}
+ out:
+ 	return r;
+ }
+-EXPORT_SYMBOL_GPL(emulator_read_std);
++
++int kvm_write_guest_virt(gva_t addr, void *val, unsigned int bytes,
++			 struct kvm_vcpu *vcpu)
++{
++	void *data = val;
++	int r = X86EMUL_CONTINUE;
++
++	while (bytes) {
++		gpa_t gpa = vcpu->arch.mmu.gva_to_gpa(vcpu, addr);
++		unsigned offset = addr & (PAGE_SIZE-1);
++		unsigned towrite = min(bytes, (unsigned)PAGE_SIZE - offset);
++		int ret;
++
++		if (gpa == UNMAPPED_GVA) {
++			r = X86EMUL_PROPAGATE_FAULT;
++			goto out;
++		}
++		ret = kvm_write_guest(vcpu->kvm, gpa, data, towrite);
++		if (ret < 0) {
++			r = X86EMUL_UNHANDLEABLE;
++			goto out;
++		}
++
++		bytes -= towrite;
++		data += towrite;
++		addr += towrite;
++	}
++out:
++	return r;
++}
++
+ 
+ static int emulator_read_emulated(unsigned long addr,
+ 				  void *val,
+@@ -1860,8 +1888,8 @@ static int emulator_read_emulated(unsign
+ 	if ((gpa & PAGE_MASK) == APIC_DEFAULT_PHYS_BASE)
+ 		goto mmio;
+ 
+-	if (emulator_read_std(addr, val, bytes, vcpu)
+-			== X86EMUL_CONTINUE)
++	if (kvm_read_guest_virt(addr, val, bytes, vcpu)
++				== X86EMUL_CONTINUE)
+ 		return X86EMUL_CONTINUE;
+ 	if (gpa == UNMAPPED_GVA)
+ 		return X86EMUL_PROPAGATE_FAULT;
+@@ -2065,7 +2093,7 @@ void kvm_report_emulation_failure(struct
+ 	if (reported)
+ 		return;
+ 
+-	emulator_read_std(rip_linear, (void *)opcodes, 4, vcpu);
++	kvm_read_guest_virt(rip_linear, (void *)opcodes, 4, vcpu);
+ 
+ 	printk(KERN_ERR "emulation failed (%s) rip %lx %02x %02x %02x %02x\n",
+ 	       context, rip, opcodes[0], opcodes[1], opcodes[2], opcodes[3]);
+@@ -2074,7 +2102,7 @@ void kvm_report_emulation_failure(struct
+ EXPORT_SYMBOL_GPL(kvm_report_emulation_failure);
+ 
+ static struct x86_emulate_ops emulate_ops = {
+-	.read_std            = emulator_read_std,
++	.read_std            = kvm_read_guest_virt,
+ 	.read_emulated       = emulator_read_emulated,
+ 	.write_emulated      = emulator_write_emulated,
+ 	.cmpxchg_emulated    = emulator_cmpxchg_emulated,
+diff -urpN linux-source-2.6.26.orig/include/asm-x86/kvm_host.h linux-source-2.6.26/include/asm-x86/kvm_host.h
+--- linux-source-2.6.26.orig/include/asm-x86/kvm_host.h	2008-07-13 15:51:29.000000000 -0600
++++ linux-source-2.6.26/include/asm-x86/kvm_host.h	2010-02-04 21:39:17.000000000 -0700
+@@ -517,10 +517,6 @@ void kvm_inject_page_fault(struct kvm_vc
+ 
+ void fx_init(struct kvm_vcpu *vcpu);
+ 
+-int emulator_read_std(unsigned long addr,
+-		      void *val,
+-		      unsigned int bytes,
+-		      struct kvm_vcpu *vcpu);
+ int emulator_write_emulated(unsigned long addr,
+ 			    const void *val,
+ 			    unsigned int bytes,

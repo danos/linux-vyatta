@@ -1,0 +1,186 @@
+Subject: [KVM 5.5/5.4.z Embargoed 5/7 v2] Check IOPL level
+	during io instruction emulation.
+
+Make emulator check that vcpu is allowed to execute IN, INS, OUT,
+OUTS, CLI, STI.
+
+Signed-off-by: Gleb Natapov <gleb@redhat.com>
+---
+ arch/x86/include/asm/kvm_host.h |    1 +
+ arch/x86/kvm/x86.c              |   77 ++++++++++++++++++++++++++++++++-------
+ arch/x86/kvm/x86_emulate.c      |   18 +++++++---
+ 3 files changed, 77 insertions(+), 19 deletions(-)
+
+Backported to Debian's 2.6.26 by dann frazier <dannf@debian.org>
+
+diff -urpN a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+--- a/arch/x86/kvm/x86.c	2010-02-05 11:15:02.000000000 -0700
++++ b/arch/x86/kvm/x86.c	2010-02-05 11:19:28.000000000 -0700
+@@ -2375,11 +2375,68 @@ static struct kvm_io_device *vcpu_find_p
+ 	return kvm_io_bus_find_dev(&vcpu->kvm->pio_bus, addr);
+ }
+ 
++static void get_segment(struct kvm_vcpu *vcpu,
++			struct kvm_segment *var, int seg)
++{
++	kvm_x86_ops->get_segment(vcpu, var, seg);
++}
++
++bool kvm_check_iopl(struct kvm_vcpu *vcpu)
++{
++	int iopl;
++	if (!(vcpu->arch.cr0 & X86_CR0_PE))
++		return false;
++	if (kvm_x86_ops->get_rflags(vcpu) & X86_EFLAGS_VM)
++		return true;
++	iopl = (kvm_x86_ops->get_rflags(vcpu) & X86_EFLAGS_IOPL) >> IOPL_SHIFT;
++	return kvm_x86_ops->get_cpl(vcpu) > iopl;
++}
++
++bool kvm_check_io_port_access_allowed(struct kvm_vcpu *vcpu, u16 port, u16 len)
++{
++	struct kvm_segment tr_seg;
++	int r;
++	u16 io_bitmap_ptr;
++	u8 perm, bit_idx = port & 0x7;
++	unsigned mask = (1 << len) - 1;
++
++	get_segment(vcpu, &tr_seg, VCPU_SREG_TR);
++	if (tr_seg.unusable)
++		return false;
++	if (tr_seg.limit < 103)
++		return false;
++	r = kvm_read_guest_virt_system(tr_seg.base + 102, &io_bitmap_ptr, 2,
++				       vcpu, NULL);
++	if (r != X86EMUL_CONTINUE)
++		return false;
++	if (io_bitmap_ptr + port/8 >= tr_seg.limit)
++		return false;
++	r = kvm_read_guest_virt_system(tr_seg.base + io_bitmap_ptr + port/8,
++				       &perm, 1, vcpu, NULL);
++	if (r != X86EMUL_CONTINUE)
++		return false;
++	if ((perm >> bit_idx) & mask)
++		return false;
++	return true;
++}
++
+ int kvm_emulate_pio(struct kvm_vcpu *vcpu, struct kvm_run *run, int in,
+ 		  int size, unsigned port)
+ {
+ 	struct kvm_io_device *pio_dev;
+ 
++	if (in)
++		KVMTRACE_2D(IO_READ, vcpu, port, (u32)size, handler);
++	else
++		KVMTRACE_2D(IO_WRITE, vcpu, port, (u32)size, handler);
++
++	if (kvm_check_iopl(vcpu)) {
++		if (!kvm_check_io_port_access_allowed(vcpu, port, size)) {
++			kvm_inject_gp(vcpu, 0);
++			return 1;
++		}
++	}
++
+ 	vcpu->run->exit_reason = KVM_EXIT_IO;
+ 	vcpu->run->io.direction = in ? KVM_EXIT_IO_IN : KVM_EXIT_IO_OUT;
+ 	vcpu->run->io.size = vcpu->arch.pio.size = size;
+@@ -2391,13 +2448,6 @@ int kvm_emulate_pio(struct kvm_vcpu *vcp
+ 	vcpu->arch.pio.down = 0;
+ 	vcpu->arch.pio.rep = 0;
+ 
+-	if (vcpu->run->io.direction == KVM_EXIT_IO_IN)
+-		KVMTRACE_2D(IO_READ, vcpu, vcpu->run->io.port, (u32)size,
+-			    handler);
+-	else
+-		KVMTRACE_2D(IO_WRITE, vcpu, vcpu->run->io.port, (u32)size,
+-			    handler);
+-
+ 	kvm_x86_ops->cache_regs(vcpu);
+ 	memcpy(vcpu->arch.pio_data, &vcpu->arch.regs[VCPU_REGS_RAX], 4);
+ 	kvm_x86_ops->decache_regs(vcpu);
+@@ -2422,6 +2472,18 @@ int kvm_emulate_pio_string(struct kvm_vc
+ 	int ret = 0;
+ 	struct kvm_io_device *pio_dev;
+ 
++	if (in)
++		KVMTRACE_2D(IO_READ, vcpu, port, (u32)size, handler);
++	else
++		KVMTRACE_2D(IO_WRITE, vcpu, port, (u32)size, handler);
++
++	if (kvm_check_iopl(vcpu)) {
++		if (!kvm_check_io_port_access_allowed(vcpu, port, size)) {
++			kvm_inject_gp(vcpu, 0);
++			return 1;
++		}
++	}
++
+ 	vcpu->run->exit_reason = KVM_EXIT_IO;
+ 	vcpu->run->io.direction = in ? KVM_EXIT_IO_IN : KVM_EXIT_IO_OUT;
+ 	vcpu->run->io.size = vcpu->arch.pio.size = size;
+@@ -2433,13 +2495,6 @@ int kvm_emulate_pio_string(struct kvm_vc
+ 	vcpu->arch.pio.down = down;
+ 	vcpu->arch.pio.rep = rep;
+ 
+-	if (vcpu->run->io.direction == KVM_EXIT_IO_IN)
+-		KVMTRACE_2D(IO_READ, vcpu, vcpu->run->io.port, (u32)size,
+-			    handler);
+-	else
+-		KVMTRACE_2D(IO_WRITE, vcpu, vcpu->run->io.port, (u32)size,
+-			    handler);
+-
+ 	if (!count) {
+ 		kvm_x86_ops->skip_emulated_instruction(vcpu);
+ 		return 1;
+@@ -3129,12 +3184,6 @@ int kvm_arch_vcpu_ioctl_set_regs(struct 
+ 	return 0;
+ }
+ 
+-static void get_segment(struct kvm_vcpu *vcpu,
+-			struct kvm_segment *var, int seg)
+-{
+-	kvm_x86_ops->get_segment(vcpu, var, seg);
+-}
+-
+ void kvm_get_cs_db_l_bits(struct kvm_vcpu *vcpu, int *db, int *l)
+ {
+ 	struct kvm_segment cs;
+diff -urpN a/arch/x86/kvm/x86_emulate.c b/arch/x86/kvm/x86_emulate.c
+--- a/arch/x86/kvm/x86_emulate.c	2010-02-05 11:15:02.000000000 -0700
++++ b/arch/x86/kvm/x86_emulate.c	2010-02-05 11:17:56.000000000 -0700
+@@ -1685,12 +1685,20 @@ special_insn:
+ 		c->dst.type = OP_NONE;	/* Disable writeback. */
+ 		break;
+ 	case 0xfa: /* cli */
+-		ctxt->eflags &= ~X86_EFLAGS_IF;
+-		c->dst.type = OP_NONE;	/* Disable writeback. */
++		if (kvm_check_iopl(ctxt->vcpu))
++			kvm_inject_gp(ctxt->vcpu, 0);
++		else {
++			ctxt->eflags &= ~X86_EFLAGS_IF;
++			c->dst.type = OP_NONE;	/* Disable writeback. */
++		}
+ 		break;
+ 	case 0xfb: /* sti */
+-		ctxt->eflags |= X86_EFLAGS_IF;
+-		c->dst.type = OP_NONE;	/* Disable writeback. */
++		if (kvm_check_iopl(ctxt->vcpu))
++			kvm_inject_gp(ctxt->vcpu, 0);
++		else {
++			ctxt->eflags |= X86_EFLAGS_IF;
++			c->dst.type = OP_NONE;	/* Disable writeback. */
++		}
+ 		break;
+ 	case 0xfe ... 0xff:	/* Grp4/Grp5 */
+ 		rc = emulate_grp45(ctxt, ops);
+diff -urpN a/include/asm-x86/kvm_host.h b/include/asm-x86/kvm_host.h
+--- a/include/asm-x86/kvm_host.h	2010-02-05 11:15:02.000000000 -0700
++++ b/include/asm-x86/kvm_host.h	2010-02-05 11:17:56.000000000 -0700
+@@ -548,6 +548,7 @@ void kvm_enable_tdp(void);
+ 
+ int load_pdptrs(struct kvm_vcpu *vcpu, unsigned long cr3);
+ int complete_pio(struct kvm_vcpu *vcpu);
++bool kvm_check_iopl(struct kvm_vcpu *vcpu);
+ 
+ static inline struct kvm_mmu_page *page_header(hpa_t shadow_page)
+ {

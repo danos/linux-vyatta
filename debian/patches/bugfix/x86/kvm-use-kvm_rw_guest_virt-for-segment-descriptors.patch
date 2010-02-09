@@ -1,0 +1,57 @@
+Subject: [KVM 5.5/5.4.z Embargoed 3/7 v2] KVM: Use kvm_{read,
+	write}_guest_virt() to read and write segment descriptors
+
+From: Mikhail Ershov <Mike.Ershov@gmail.com>
+
+Segment descriptors tables can be placed on two non-contiguous pages.
+This patch makes reading segment descriptors by linear address.
+
+Signed-off-by: Mikhail Ershov <Mike.Ershov@gmail.com>
+Signed-off-by: Avi Kivity <avi@redhat.com>
+Signed-off-by: Gleb Natapov <gleb@redhat.com>
+---
+ arch/x86/kvm/x86.c |   10 ++--------
+ 1 files changed, 2 insertions(+), 8 deletions(-)
+
+Adjusted to apply to Debian's 2.6.26 by dann frazier <dannf@debian.org>
+
+diff -urpN linux-source-2.6.26.orig/arch/x86/kvm/x86.c linux-source-2.6.26/arch/x86/kvm/x86.c
+--- linux-source-2.6.26.orig/arch/x86/kvm/x86.c	2010-02-04 21:39:17.000000000 -0700
++++ linux-source-2.6.26/arch/x86/kvm/x86.c	2010-02-04 21:49:22.000000000 -0700
+@@ -3247,7 +3211,6 @@ static void get_segment_descritptor_dtab
+ static int load_guest_segment_descriptor(struct kvm_vcpu *vcpu, u16 selector,
+ 					 struct desc_struct *seg_desc)
+ {
+-	gpa_t gpa;
+ 	struct descriptor_table dtable;
+ 	u16 index = selector >> 3;
+ 
+@@ -3257,16 +3220,13 @@ static int load_guest_segment_descriptor
+ 		kvm_queue_exception_e(vcpu, GP_VECTOR, selector & 0xfffc);
+ 		return 1;
+ 	}
+-	gpa = vcpu->arch.mmu.gva_to_gpa(vcpu, dtable.base);
+-	gpa += index * 8;
+-	return kvm_read_guest(vcpu->kvm, gpa, seg_desc, 8);
++	return kvm_read_guest_virt(dtable.base + index*8, seg_desc, sizeof(*seg_desc), vcpu);
+ }
+ 
+ /* allowed just for 8 bytes segments */
+ static int save_guest_segment_descriptor(struct kvm_vcpu *vcpu, u16 selector,
+ 					 struct desc_struct *seg_desc)
+ {
+-	gpa_t gpa;
+ 	struct descriptor_table dtable;
+ 	u16 index = selector >> 3;
+ 
+@@ -3274,9 +3234,7 @@ static int save_guest_segment_descriptor
+ 
+ 	if (dtable.limit < index * 8 + 7)
+ 		return 1;
+-	gpa = vcpu->arch.mmu.gva_to_gpa(vcpu, dtable.base);
+-	gpa += index * 8;
+-	return kvm_write_guest(vcpu->kvm, gpa, seg_desc, 8);
++	return kvm_write_guest_virt(dtable.base + index*8, seg_desc, sizeof(*seg_desc), vcpu);
+ }
+ 
+ static u32 get_tss_base_addr(struct kvm_vcpu *vcpu,
