@@ -1,0 +1,53 @@
+commit 368a9bfe3c49fcfac8a6f183136d4cd11fff86b1
+Author: dann frazier <dannf@hp.com>
+Date:   Mon Feb 15 21:19:16 2010 -0700
+
+    [Adjusted to apply to Debian's 2.6.18]
+    commit 40a14deaf411592b57cb0720f0e8004293ab9865
+    Author: Jesse Brandeburg <jesse.brandeburg@intel.com>
+    Date:   Tue Jan 19 14:15:38 2010 +0000
+    
+        e1000: enhance frame fragment detection
+
+diff --git a/drivers/net/e1000/e1000.h b/drivers/net/e1000/e1000.h
+index d304297..08cc58f 100644
+--- a/drivers/net/e1000/e1000.h
++++ b/drivers/net/e1000/e1000.h
+@@ -343,6 +343,8 @@ struct e1000_adapter {
+ #endif
+ 	boolean_t smart_power_down;	/* phy smart power down */
+ 	unsigned long flags;
++
++	bool discarding;
+ };
+ 
+ enum e1000_state_t {
+diff --git a/drivers/net/e1000/e1000_main.c b/drivers/net/e1000/e1000_main.c
+index e58eaa1..4a90e58 100644
+--- a/drivers/net/e1000/e1000_main.c
++++ b/drivers/net/e1000/e1000_main.c
+@@ -3681,13 +3681,22 @@ e1000_clean_rx_irq(struct e1000_adapter *adapter,
+ 		/* adjust length to remove Ethernet CRC */
+ 		length -= 4;
+ 		/* !EOP means multiple descriptors were used to store a single
+-		 * packet, also make sure the frame isn't just CRC only */
+-		if (unlikely(!(status & E1000_RXD_STAT_EOP) || (length <= 4))) {
++		 * packet, if thats the case we need to toss it.  In fact, we
++		 * to toss every packet with the EOP bit clear and the next
++		 * frame that _does_ have the EOP bit set, as it is by
++		 * definition only a frame fragment
++		 */
++		if (unlikely(!(status & E1000_RXD_STAT_EOP)))
++			adapter->discarding = true;
++
++		if (adapter->discarding) {
+ 			/* All receives must fit into a single buffer */
+ 			E1000_DBG("%s: Receive packet consumed multiple"
+ 				  " buffers\n", netdev->name);
+ 			/* recycle */
+ 			buffer_info-> skb = skb;
++			if (status & E1000_RXD_STAT_EOP)
++				adapter->discarding = false;
+ 			goto next_desc;
+ 		}
+ 
