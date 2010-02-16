@@ -1,0 +1,61 @@
+commit 6d05a5e558374688ae02649af4e9e66113a982e8
+Author: dann frazier <dannf@hp.com>
+Date:   Mon Feb 15 18:44:49 2010 -0700
+
+    [Adjusted to apply to Debian's 2.6.18]
+    commit d953126a28f97ec965d23c69fd5795854c048f30
+    Author: Trond Myklebust <Trond.Myklebust@netapp.com>
+    Date:   Tue Jul 21 19:22:38 2009 -0400
+    
+        NFSv4: Fix a problem whereby a buggy server can oops the kernel
+
+diff --git a/fs/nfs/dir.c b/fs/nfs/dir.c
+index c63c297..6b52ffd 100644
+--- a/fs/nfs/dir.c
++++ b/fs/nfs/dir.c
+@@ -1015,12 +1015,12 @@ static struct dentry *nfs_atomic_lookup(struct inode *dir, struct dentry *dentry
+ 				res = NULL;
+ 				goto out;
+ 			/* This turned out not to be a regular file */
+-			case -EISDIR:
+ 			case -ENOTDIR:
+ 				goto no_open;
+ 			case -ELOOP:
+ 				if (!(nd->intent.open.flags & O_NOFOLLOW))
+ 					goto no_open;
++			/* case -EISDIR: */
+ 			/* case -EINVAL: */
+ 			default:
+ 				goto out;
+diff --git a/fs/nfs/nfs4proc.c b/fs/nfs/nfs4proc.c
+index c18f10f..b29f33b 100644
+--- a/fs/nfs/nfs4proc.c
++++ b/fs/nfs/nfs4proc.c
+@@ -3583,15 +3583,23 @@ nfs4_proc_lock(struct file *filp, int cmd, struct file_lock *request)
+ 	if (request->fl_start < 0 || request->fl_end < 0)
+ 		return -EINVAL;
+ 
+-	if (IS_GETLK(cmd))
+-		return nfs4_proc_getlk(state, F_GETLK, request);
++	if (IS_GETLK(cmd)) {
++		if (state != NULL)
++			return nfs4_proc_getlk(state, F_GETLK, request);
++		return 0;
++	}
+ 
+ 	if (!(IS_SETLK(cmd) || IS_SETLKW(cmd)))
+ 		return -EINVAL;
+ 
+-	if (request->fl_type == F_UNLCK)
+-		return nfs4_proc_unlck(state, cmd, request);
++	if (request->fl_type == F_UNLCK) {
++		if (state != NULL)
++			return nfs4_proc_unlck(state, cmd, request);
++		return 0;
++	}
+ 
++	if (state == NULL)
++		return -ENOLCK;
+ 	do {
+ 		status = nfs4_proc_setlk(state, cmd, request);
+ 		if ((status != -EAGAIN) || IS_SETLK(cmd))
