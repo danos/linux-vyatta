@@ -1,0 +1,112 @@
+From 405d7028fa6af97c62302143d1369114e13cd47a Mon Sep 17 00:00:00 2001
+From: Denis V. Lunev <den@openvz.org>
+Date: Mon, 30 Jun 2008 11:05:14 +0400
+Subject: [PATCH] Endless loop in __sk_stream_wait_memory.
+
+[UBC]: Endless loop in __sk_stream_wait_memory.
+
+The loop in __sk_stream_wait_memory when tcp_sendmsg asks to wait for
+TCPSNDBUF space is endless when the timeout is not specified. The only way
+out is to queue a signal for that process.
+
+Lets return a status flag from ub_sock_snd_queue_add that UB space is
+available. This is enough to make a correct decision to leave the cycle.
+
+Signed-off-by: Denis V. Lunev <den@parallels.com>
+Signed-off-by: Pavel Emelyanov <xemul@sw.ru>
+Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+---
+ include/bc/net.h  |   10 +++++-----
+ kernel/bc/net.c   |    7 ++++---
+ net/core/stream.c |    4 ++--
+ 3 files changed, 11 insertions(+), 10 deletions(-)
+
+diff --git a/include/bc/net.h b/include/bc/net.h
+index cf323fb..31e532c 100644
+--- a/include/bc/net.h
++++ b/include/bc/net.h
+@@ -50,7 +50,7 @@ UB_DECLARE_VOID_FUNC(ub_sock_uncharge(struct sock *sk))
+ /* management of queue for send space */
+ UB_DECLARE_FUNC(long, ub_sock_wait_for_space(struct sock *sk, long timeo, 
+ 			unsigned long size))
+-UB_DECLARE_VOID_FUNC(ub_sock_snd_queue_add(struct sock *sk, int resource, 
++UB_DECLARE_FUNC(int, ub_sock_snd_queue_add(struct sock *sk, int resource, 
+ 			unsigned long size))
+ UB_DECLARE_VOID_FUNC(ub_sock_sndqueuedel(struct sock *sk))
+ 
+@@ -103,14 +103,14 @@ static inline void ub_sock_retwres_tcp(struct sock *sk, unsigned long size,
+ 	ub_sock_ret_wreserv(sk, UB_TCPSNDBUF, size, ressize);
+ }
+ 
+-static inline void ub_sock_sndqueueadd_other(struct sock *sk, unsigned long sz)
++static inline int ub_sock_sndqueueadd_other(struct sock *sk, unsigned long sz)
+ {
+-	ub_sock_snd_queue_add(sk, UB_OTHERSOCKBUF, sz);
++	return ub_sock_snd_queue_add(sk, UB_OTHERSOCKBUF, sz);
+ }
+ 
+-static inline void ub_sock_sndqueueadd_tcp(struct sock *sk, unsigned long sz)
++static inline int ub_sock_sndqueueadd_tcp(struct sock *sk, unsigned long sz)
+ {
+-	ub_sock_snd_queue_add(sk, UB_TCPSNDBUF, sz);
++	return ub_sock_snd_queue_add(sk, UB_TCPSNDBUF, sz);
+ }
+ 
+ static inline int ub_tcpsndbuf_charge(struct sock *sk,
+diff --git a/kernel/bc/net.c b/kernel/bc/net.c
+index 53bbd8f..e1ffc63 100644
+--- a/kernel/bc/net.c
++++ b/kernel/bc/net.c
+@@ -226,7 +226,7 @@ static void ub_tcp_snd_wakeup(struct user_beancounter *ub)
+ 	}
+ }
+ 
+-void ub_sock_snd_queue_add(struct sock *sk, int res, unsigned long size)
++int ub_sock_snd_queue_add(struct sock *sk, int res, unsigned long size)
+ {
+ 	unsigned long flags;
+ 	struct sock_beancounter *skbc;
+@@ -234,7 +234,7 @@ void ub_sock_snd_queue_add(struct sock *sk, int res, unsigned long size)
+ 	unsigned long added_reserv;
+ 
+ 	if (!sock_has_ubc(sk))
+-		return;
++		return 0;
+ 
+ 	skbc = sock_bc(sk);
+ 	ub = top_beancounter(skbc->ub);
+@@ -253,7 +253,7 @@ void ub_sock_snd_queue_add(struct sock *sk, int res, unsigned long size)
+ 		spin_unlock_irqrestore(&ub->ub_lock, flags);
+ 		if (added_reserv)
+ 			charge_beancounter_notop(skbc->ub, res, added_reserv);
+-		return;
++		return 0;
+ 	}
+ 
+ 	ub_debug(UBD_NET_SLEEP, "Adding sk to queue\n");
+@@ -278,6 +278,7 @@ void ub_sock_snd_queue_add(struct sock *sk, int res, unsigned long size)
+ 	}
+ out:
+ 	spin_unlock_irqrestore(&ub->ub_lock, flags);
++	return -ENOMEM;
+ }
+ 
+ EXPORT_SYMBOL(ub_sock_snd_queue_add);
+diff --git a/net/core/stream.c b/net/core/stream.c
+index 5c39418..cd7c99b 100644
+--- a/net/core/stream.c
++++ b/net/core/stream.c
+@@ -139,8 +139,8 @@ int __sk_stream_wait_memory(struct sock *sk, long *timeo_p,
+ 		if (amount == 0) {
+ 			if (sk_stream_memory_free(sk) && !vm_wait)
+ 				break;
+-		} else
+-			ub_sock_sndqueueadd_tcp(sk, amount);
++		} else if (!ub_sock_sndqueueadd_tcp(sk, amount))
++			break;
+ 
+ 		set_bit(SOCK_NOSPACE, &sk->sk_socket->flags);
+ 		sk->sk_write_pending++;
+-- 
+1.6.3.3
+

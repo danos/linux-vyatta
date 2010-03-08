@@ -1,0 +1,419 @@
+commit fd59eae709565d0c294f84bc2bf3c942a561c474
+Author: Alok Kataria <akataria@vmware.com>
+Date:   Fri Jan 16 15:35:02 2009 -0800
+
+    UBUNTU: x86: Hypervisor detection and get tsc_freq from hypervisor
+    
+    Bug: #319945
+    BumpABI: yes
+    ABI changes: Adds an element to cpuinfo_x86 which modifies the hash for
+                 boot_cpu_data and per_cpu__cpu_info.
+    
+    Impact: Changes timebase calibration on Vmware.
+    
+    This patch adds function to detect if we are running under VMware.
+    The current way to check if we are on VMware is following,
+    #  check if "hypervisor present bit" is set, if so read the 0x40000000
+    cpuid leaf and check for "VMwareVMware" signature.
+    #  if the above fails, check the DMI vendors name for "VMware" string
+    if we find one we query the VMware hypervisor port to check if we are
+    under VMware.
+    
+    The DMI + "VMware hypervisor port check" is needed for older VMware products,
+    which don't implement the hypervisor signature cpuid leaf.
+    Also note that since we are checking for the DMI signature the hypervisor
+    port should never be accessed on native hardware.
+    
+    This patch also adds a hypervisor_get_tsc_freq function, instead of
+    calibrating the frequency which can be error prone in virtualized
+    environment, we ask the hypervisor for it. We get the frequency from
+    the hypervisor by accessing the hypervisor port if we are running on VMware.
+    Other hypervisors too can add code to the generic routine to get frequency on
+    their platform.
+    
+    Signed-off-by: Alok N Kataria <akataria@vmware.com>
+    Signed-off-by: Dan Hecht <dhecht@vmware.com>
+    Signed-off-by: H. Peter Anvin <hpa@zytor.com>
+    Signed-off-by: Stefan Bader <stefan.bader@canonical.com>
+    Acked-by: Tim Gardner <tim.gardner@canonical.com>
+
+Backported to Debian's 2.6.26 by dann frazier <dannf@debian.org>
+and Ben Hutchings <ben@decadent.org.uk>
+
+diff -urpN a/arch/x86/kernel/cpu/common.c b/arch/x86/kernel/cpu/common.c
+--- a/arch/x86/kernel/cpu/common.c	2008-07-13 15:51:29.000000000 -0600
++++ b/arch/x86/kernel/cpu/common.c	2009-07-19 17:05:05.000000000 -0600
+@@ -13,6 +13,7 @@
+ #include <asm/mtrr.h>
+ #include <asm/mce.h>
+ #include <asm/pat.h>
++#include <asm/hypervisor.h>
+ #ifdef CONFIG_X86_LOCAL_APIC
+ #include <asm/mpspec.h>
+ #include <asm/apic.h>
+@@ -491,6 +492,8 @@ void __cpuinit identify_cpu(struct cpuin
+ 				c->x86, c->x86_model);
+ 	}
+ 
++	init_hypervisor(c);
++
+ 	/*
+ 	 * On SMP, boot_cpu_data holds the common feature set between
+ 	 * all CPUs; so make sure that we indicate which features are
+diff -urpN a/arch/x86/kernel/cpu/hypervisor.c b/arch/x86/kernel/cpu/hypervisor.c
+--- a/arch/x86/kernel/cpu/hypervisor.c	1969-12-31 17:00:00.000000000 -0700
++++ b/arch/x86/kernel/cpu/hypervisor.c	2009-07-19 16:58:14.000000000 -0600
+@@ -0,0 +1,54 @@
++/*
++ * Common hypervisor code
++ *
++ * Copyright (C) 2008, VMware, Inc.
++ * Author : Alok N Kataria <akataria@vmware.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE, GOOD TITLE or
++ * NON INFRINGEMENT.  See the GNU General Public License for more
++ * details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ */
++
++#include <linux/init.h>
++
++#include <asm/processor.h>
++#include <asm/vmware.h>
++#include <asm/hypervisor.h>
++
++static unsigned int x86_hyper_vendor;
++
++static inline void __cpuinit
++detect_hypervisor_vendor(struct cpuinfo_x86 *c)
++{
++	if (c != &boot_cpu_data)
++		return;
++	if (vmware_platform()) {
++		x86_hyper_vendor = X86_HYPER_VENDOR_VMWARE;
++	} else {
++		x86_hyper_vendor = X86_HYPER_VENDOR_NONE;
++	}
++}
++
++unsigned long get_hypervisor_tsc_freq(void)
++{
++	if (x86_hyper_vendor == X86_HYPER_VENDOR_VMWARE)
++		return vmware_get_tsc_khz();
++	return 0;
++}
++
++void __cpuinit init_hypervisor(struct cpuinfo_x86 *c)
++{
++	detect_hypervisor_vendor(c);
++}
+diff -urpN a/arch/x86/kernel/cpu/Makefile b/arch/x86/kernel/cpu/Makefile
+--- a/arch/x86/kernel/cpu/Makefile	2008-07-13 15:51:29.000000000 -0600
++++ b/arch/x86/kernel/cpu/Makefile	2009-07-19 17:05:37.000000000 -0600
+@@ -4,6 +4,7 @@
+ 
+ obj-y			:= intel_cacheinfo.o addon_cpuid_features.o
+ obj-y			+= proc.o feature_names.o
++obj-y			+= vmware.o hypervisor.o
+ 
+ obj-$(CONFIG_X86_32)	+= common.o bugs.o
+ obj-$(CONFIG_X86_32)	+= amd.o
+diff -urpN a/arch/x86/kernel/cpu/vmware.c b/arch/x86/kernel/cpu/vmware.c
+--- a/arch/x86/kernel/cpu/vmware.c	1969-12-31 17:00:00.000000000 -0700
++++ b/arch/x86/kernel/cpu/vmware.c	2009-07-19 16:58:14.000000000 -0600
+@@ -0,0 +1,96 @@
++/*
++ * VMware Detection code.
++ *
++ * Copyright (C) 2008, VMware, Inc.
++ * Author : Alok N Kataria <akataria@vmware.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE, GOOD TITLE or
++ * NON INFRINGEMENT.  See the GNU General Public License for more
++ * details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ */
++
++#include <linux/dmi.h>
++#include <linux/init.h>
++
++#include <asm/div64.h>
++#include <asm/vmware.h>
++
++#define CPUID_VMWARE_INFO_LEAF	0x40000000
++#define VMWARE_HYPERVISOR_MAGIC	0x564D5868
++#define VMWARE_HYPERVISOR_PORT	0x5658
++
++#define VMWARE_PORT_CMD_GETVERSION	10
++#define VMWARE_PORT_CMD_GETHZ		45
++
++#define VMWARE_PORT(cmd, eax, ebx, ecx, edx)				\
++	__asm__("inl (%%dx)" :						\
++			"=a"(eax), "=c"(ecx), "=d"(edx), "=b"(ebx) :	\
++			"0"(VMWARE_HYPERVISOR_MAGIC),			\
++			"1"(VMWARE_PORT_CMD_##cmd),			\
++			"2"(VMWARE_HYPERVISOR_PORT), "3"(UINT_MAX) :	\
++			"memory");
++
++static inline int __vmware_platform(void)
++{
++	uint32_t eax, ebx, ecx, edx;
++	VMWARE_PORT(GETVERSION, eax, ebx, ecx, edx);
++	return eax != (uint32_t)-1 && ebx == VMWARE_HYPERVISOR_MAGIC;
++}
++
++static unsigned long __vmware_get_tsc_khz(void)
++{
++        uint64_t tsc_hz;
++        uint32_t eax, ebx, ecx, edx;
++
++        VMWARE_PORT(GETHZ, eax, ebx, ecx, edx);
++
++        if (ebx == UINT_MAX)
++                return 0;
++        tsc_hz = eax | (((uint64_t)ebx) << 32);
++        do_div(tsc_hz, 1000);
++        BUG_ON(tsc_hz >> 32);
++        return tsc_hz;
++}
++
++/*
++ * While checking the dmi string infomation, just checking the product
++ * serial key should be enough, as this will always have a VMware
++ * specific string when running under VMware hypervisor.
++ */
++int vmware_platform(void)
++{
++	if (cpu_has_hypervisor) {
++		unsigned int eax, ebx, ecx, edx;
++		char hyper_vendor_id[13];
++
++		cpuid(CPUID_VMWARE_INFO_LEAF, &eax, &ebx, &ecx, &edx);
++		memcpy(hyper_vendor_id + 0, &ebx, 4);
++		memcpy(hyper_vendor_id + 4, &ecx, 4);
++		memcpy(hyper_vendor_id + 8, &edx, 4);
++		hyper_vendor_id[12] = '\0';
++		if (!strcmp(hyper_vendor_id, "VMwareVMware"))
++			return 1;
++	} else if (dmi_available && dmi_name_in_serial("VMware") &&
++		   __vmware_platform())
++		return 1;
++
++	return 0;
++}
++
++unsigned long vmware_get_tsc_khz(void)
++{
++	BUG_ON(!vmware_platform());
++	return __vmware_get_tsc_khz();
++}
+diff -urpN a/arch/x86/kernel/setup_32.c b/arch/x86/kernel/setup_32.c
+--- a/arch/x86/kernel/setup_32.c	2009-07-19 16:50:37.000000000 -0600
++++ b/arch/x86/kernel/setup_32.c	2009-07-19 17:02:57.000000000 -0600
+@@ -67,6 +67,7 @@
+ #include <asm/bios_ebda.h>
+ #include <asm/cacheflush.h>
+ #include <asm/processor.h>
++#include <asm/hypervisor.h>
+ 
+ /* This value is set up by the early boot code to point to the value
+    immediately after the boot time page tables.  It contains a *physical*
+@@ -885,6 +886,12 @@ void __init setup_arch(char **cmdline_p)
+ 
+ 	dmi_scan_machine();
+ 
++	/*
++	 * VMware detection requires dmi to be available, so this
++	 * needs to be done after dmi_scan_machine, for the BP.
++	 */
++	init_hypervisor(&boot_cpu_data);
++
+ 	io_delay_init();
+ 
+ #ifdef CONFIG_X86_SMP
+diff -urpN a/arch/x86/kernel/setup_64.c b/arch/x86/kernel/setup_64.c
+--- a/arch/x86/kernel/setup_64.c	2008-07-13 15:51:29.000000000 -0600
++++ b/arch/x86/kernel/setup_64.c	2009-07-19 17:01:31.000000000 -0600
+@@ -71,6 +71,7 @@
+ #include <asm/topology.h>
+ #include <asm/trampoline.h>
+ #include <asm/pat.h>
++#include <asm/hypervisor.h>
+ 
+ #include <mach_apic.h>
+ #ifdef CONFIG_PARAVIRT
+@@ -400,6 +401,12 @@ void __init setup_arch(char **cmdline_p)
+ 
+ 	dmi_scan_machine();
+ 
++	/*
++	 * VMware detection requires dmi to be available, so this
++	 * needs to be done after dmi_scan_machine, for the BP.
++	 */
++	init_hypervisor(&boot_cpu_data);
++
+ 	io_delay_init();
+ 
+ #ifdef CONFIG_KVM_CLOCK
+@@ -1094,6 +1101,8 @@ void __cpuinit identify_cpu(struct cpuin
+ 
+ 	c->apicid = phys_pkg_id(0);
+ 
++	init_hypervisor(c);
++
+ 	/*
+ 	 * Vendor-specific initialization.  In this section we
+ 	 * canonicalize the feature flags, meaning if there are
+diff -urpN a/arch/x86/kernel/tsc_32.c b/arch/x86/kernel/tsc_32.c
+--- a/arch/x86/kernel/tsc_32.c	2008-07-13 15:51:29.000000000 -0600
++++ b/arch/x86/kernel/tsc_32.c	2009-07-19 16:58:14.000000000 -0600
+@@ -11,6 +11,7 @@
+ #include <asm/tsc.h>
+ #include <asm/io.h>
+ #include <asm/timer.h>
++#include <asm/hypervisor.h>
+ 
+ #include "mach_timer.h"
+ 
+@@ -149,11 +150,17 @@ unsigned long long sched_clock(void)
+ unsigned long native_calculate_cpu_khz(void)
+ {
+ 	unsigned long long start, end;
+-	unsigned long count;
++	unsigned long count, hypervisor_tsc_khz;
+ 	u64 delta64 = (u64)ULLONG_MAX;
+ 	int i;
+ 	unsigned long flags;
+ 
++	hypervisor_tsc_khz = get_hypervisor_tsc_freq();
++	if (hypervisor_tsc_khz) {
++		printk(KERN_INFO "TSC: Frequency read from the hypervisor\n");
++		return hypervisor_tsc_khz;
++	}
++
+ 	local_irq_save(flags);
+ 
+ 	/* run 3 times to ensure the cache is warm and to get an accurate reading */
+diff -urpN a/arch/x86/kernel/tsc_64.c b/arch/x86/kernel/tsc_64.c
+--- a/arch/x86/kernel/tsc_64.c	2008-07-13 15:51:29.000000000 -0600
++++ b/arch/x86/kernel/tsc_64.c	2009-07-19 17:02:19.000000000 -0600
+@@ -12,6 +12,7 @@
+ #include <asm/timex.h>
+ #include <asm/timer.h>
+ #include <asm/vgtod.h>
++#include <asm/hypervisor.h>
+ 
+ static int notsc __initdata = 0;
+ 
+@@ -199,8 +200,16 @@ static unsigned long __init tsc_read_ref
+ void __init tsc_calibrate(void)
+ {
+ 	unsigned long flags, tsc1, tsc2, tr1, tr2, pm1, pm2, hpet1, hpet2;
++	unsigned long hypervisor_tsc_khz;
+ 	int hpet = is_hpet_enabled(), cpu;
+ 
++	hypervisor_tsc_khz = get_hypervisor_tsc_freq();
++	if (hypervisor_tsc_khz) {
++		printk(KERN_INFO "TSC: Frequency read from the hypervisor\n");
++		tsc_khz = hypervisor_tsc_khz;
++		goto out;
++	}
++
+ 	local_irq_save(flags);
+ 
+ 	tsc1 = tsc_read_refs(&pm1, hpet ? &hpet1 : NULL);
+diff -urpN a/include/asm-x86/hypervisor.h b/include/asm-x86/hypervisor.h
+--- a/include/asm-x86/hypervisor.h	1969-12-31 17:00:00.000000000 -0700
++++ b/include/asm-x86/hypervisor.h	2009-07-19 16:58:14.000000000 -0600
+@@ -0,0 +1,26 @@
++/*
++ * Copyright (C) 2008, VMware, Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE, GOOD TITLE or
++ * NON INFRINGEMENT.  See the GNU General Public License for more
++ * details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ */
++#ifndef ASM_X86__HYPERVISOR_H
++#define ASM_X86__HYPERVISOR_H
++
++extern unsigned long get_hypervisor_tsc_freq(void);
++extern void init_hypervisor(struct cpuinfo_x86 *c);
++
++#endif
+diff -urpN a/include/asm-x86/processor.h b/include/asm-x86/processor.h
+--- a/include/asm-x86/processor.h	2008-07-13 15:51:29.000000000 -0600
++++ b/include/asm-x86/processor.h	2009-07-19 17:00:56.000000000 -0600
+@@ -122,6 +123,9 @@ struct cpuinfo_x86 {
+ 
+ #define X86_VENDOR_UNKNOWN	0xff
+ 
++#define X86_HYPER_VENDOR_NONE  0
++#define X86_HYPER_VENDOR_VMWARE 1
++
+ /*
+  * capabilities of CPUs
+  */
+diff -urpN a/include/asm-x86/vmware.h b/include/asm-x86/vmware.h
+--- a/include/asm-x86/vmware.h	1969-12-31 17:00:00.000000000 -0700
++++ b/include/asm-x86/vmware.h	2009-07-19 16:58:52.000000000 -0600
+@@ -0,0 +1,26 @@
++/*
++ * Copyright (C) 2008, VMware, Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE, GOOD TITLE or
++ * NON INFRINGEMENT.  See the GNU General Public License for more
++ * details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
++ *
++ */
++#ifndef ASM_X86__VMWARE_H
++#define ASM_X86__VMWARE_H
++
++extern unsigned long vmware_get_tsc_khz(void);
++extern int vmware_platform(void);
++
++#endif
