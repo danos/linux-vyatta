@@ -1,0 +1,88 @@
+From 20a1c695fded8a81a3cbdaf8b8a3b01ff227ae54 Mon Sep 17 00:00:00 2001
+From: dann frazier <dannf@hp.com>
+Date: Sun, 7 Mar 2010 17:21:25 -0700
+Subject: [PATCH 3/4] add 2.6.31.5/connector-removed-the-destruct_data-callback-since-it-is-always-kfree_skb.patch
+
+---
+ drivers/connector/cn_queue.c  |    4 ++--
+ drivers/connector/connector.c |   11 +++--------
+ include/linux/connector.h     |    3 ---
+ 3 files changed, 5 insertions(+), 13 deletions(-)
+
+diff --git a/drivers/connector/cn_queue.c b/drivers/connector/cn_queue.c
+index 989c1bd..54e12cf 100644
+--- a/drivers/connector/cn_queue.c
++++ b/drivers/connector/cn_queue.c
+@@ -41,8 +41,8 @@ void cn_queue_wrapper(struct work_struct *work)
+ 
+ 	d->callback(msg, nsp);
+ 
+-	d->destruct_data(d->ddata);
+-	d->ddata = NULL;
++	kfree_skb(d->skb);
++	d->skb = NULL;
+ 
+ 	kfree(d->free);
+ }
+diff --git a/drivers/connector/connector.c b/drivers/connector/connector.c
+index 1e8cd67..064b210 100644
+--- a/drivers/connector/connector.c
++++ b/drivers/connector/connector.c
+@@ -118,7 +118,7 @@ EXPORT_SYMBOL_GPL(cn_netlink_send);
+ /*
+  * Callback helper - queues work and setup destructor for given data.
+  */
+-static int cn_call_callback(struct sk_buff *skb, void (*destruct_data)(void *), void *data)
++static int cn_call_callback(struct sk_buff *skb)
+ {
+ 	struct cn_callback_entry *__cbq, *__new_cbq;
+ 	struct cn_dev *dev = &cdev;
+@@ -129,12 +129,9 @@ static int cn_call_callback(struct sk_buff *skb, void (*destruct_data)(void *),
+ 	list_for_each_entry(__cbq, &dev->cbdev->queue_list, callback_entry) {
+ 		if (cn_cb_equal(&__cbq->id.id, &msg->id)) {
+ 			if (likely(!work_pending(&__cbq->work) &&
+-					__cbq->data.ddata == NULL)) {
++					__cbq->data.skb == NULL)) {
+ 				__cbq->data.skb = skb;
+ 
+-				__cbq->data.ddata = data;
+-				__cbq->data.destruct_data = destruct_data;
+-
+ 				if (queue_work(dev->cbdev->cn_queue,
+ 							&__cbq->work))
+ 					err = 0;
+@@ -149,8 +146,6 @@ static int cn_call_callback(struct sk_buff *skb, void (*destruct_data)(void *),
+ 					d = &__new_cbq->data;
+ 					d->skb = skb;
+ 					d->callback = __cbq->data.callback;
+-					d->ddata = data;
+-					d->destruct_data = destruct_data;
+ 					d->free = __new_cbq;
+ 
+ 					INIT_WORK(&__new_cbq->work,
+@@ -196,7 +191,7 @@ static void cn_rx_skb(struct sk_buff *__skb)
+ 			return;
+ 		}
+ 
+-		err = cn_call_callback(skb, (void (*)(void *))kfree_skb, skb);
++		err = cn_call_callback(skb);
+ 		if (err < 0)
+ 			kfree_skb(skb);
+ 	}
+diff --git a/include/linux/connector.h b/include/linux/connector.h
+index 4a144f0..9e7ea3f 100644
+--- a/include/linux/connector.h
++++ b/include/linux/connector.h
+@@ -94,9 +94,6 @@ struct cn_callback_id {
+ };
+ 
+ struct cn_callback_data {
+-	void (*destruct_data) (void *);
+-	void *ddata;
+-
+ 	struct sk_buff *skb;
+ 	void (*callback) (struct cn_msg *, struct netlink_skb_parms *);
+ 
+-- 
+1.7.0
+

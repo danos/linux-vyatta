@@ -1,0 +1,65 @@
+commit b30527a4d924827faae5c2eda92d7ceaec41ae68
+Author: dann frazier <dannf@hp.com>
+Date:   Sat Feb 20 12:21:38 2010 -0700
+
+    [Backported to Debian's 2.6.26]
+    commit 60634e4b830850bb38016f1e6a7a7358eba8118c
+    Author: Oleg Nesterov <oleg@redhat.com>
+    Date:   Fri Jul 10 03:27:38 2009 +0200
+    
+        mm_for_maps: shift down_read(mmap_sem) to the caller
+    
+        commit 00f89d218523b9bf6b522349c039d5ac80aa536d upstream.
+
+diff --git a/fs/proc/base.c b/fs/proc/base.c
+index 51e7188..2d6f1c4 100644
+--- a/fs/proc/base.c
++++ b/fs/proc/base.c
+@@ -245,9 +245,8 @@ static int check_mem_permission(struct task_struct *task)
+ struct mm_struct *mm_for_maps(struct task_struct *task)
+ {
+ 	struct mm_struct *mm = get_task_mm(task);
+-	if (!mm)
+-		return NULL;
+-	if (mm != current->mm) {
++
++	if (mm && mm != current->mm) {
+ 		/*
+ 		 * task->mm can be changed before security check,
+ 		 * in that case we must notice the change after.
+@@ -255,10 +254,9 @@ struct mm_struct *mm_for_maps(struct task_struct *task)
+ 		if (!ptrace_may_attach(task) ||
+ 		    mm != task->mm) {
+ 			mmput(mm);
+-			return NULL;
++			mm = NULL;
+ 		}
+ 	}
+-	down_read(&mm->mmap_sem);
+ 	return mm;
+ }
+ 
+diff --git a/fs/proc/task_mmu.c b/fs/proc/task_mmu.c
+index 2bb6eb6..2819fcb 100644
+--- a/fs/proc/task_mmu.c
++++ b/fs/proc/task_mmu.c
+@@ -119,6 +119,7 @@ static void *m_start(struct seq_file *m, loff_t *pos)
+ 	mm = mm_for_maps(priv->task);
+ 	if (!mm)
+ 		return NULL;
++	down_read(&mm->mmap_sem);
+ 
+ 	tail_vma = get_gate_vma(priv->task);
+ 	priv->tail_vma = tail_vma;
+diff --git a/fs/proc/task_nommu.c b/fs/proc/task_nommu.c
+index 4b4f9cc..5b4a574 100644
+--- a/fs/proc/task_nommu.c
++++ b/fs/proc/task_nommu.c
+@@ -137,6 +137,7 @@ static void *m_start(struct seq_file *m, loff_t *pos)
+ 		priv->task = NULL;
+ 		return NULL;
+ 	}
++	down_read(&mm->mmap_sem);
+ 
+ 	/* start from the Nth VMA */
+ 	for (vml = mm->context.vmlist; vml; vml = vml->next)
