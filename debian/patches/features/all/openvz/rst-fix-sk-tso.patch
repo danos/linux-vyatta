@@ -1,0 +1,41 @@
+Fix "Bad throughput of TCP connection after live migration"
+
+After migration sk->sk_gso_type is set to 0. Due to this, sk_can_gso()
+returns 1, and tcp layer thinks that socket supports GSO.
+As result, some outgoing packets are TSO packets. If physical ethernet device
+doesn't support TSO, then big ethernet packet will be dropped.
+
+Notes:
+
+  A.  Big ethernet packet is dropped on the non-TSO real physical ethernet
+      device, because:
+
+      1. Packet will not be slitted on several small packets, as GSO layer
+         doesn't handle properly this packet (skb_gso_ok(skb) returns 1).
+
+      2. Total packet's length > mtu (for instanse: mtu 1500, length 2962)
+
+  B. UDP sockets don't use sk->sk_gso_type.
+
+Bug #431368
+https://bugzilla.sw.ru/show_bug.cgi?id=431368
+
+Signed-off-by: Vitaliy Gusev <vgusev@openvz.org>
+
+
+diff --git a/kernel/cpt/rst_socket_in.c b/kernel/cpt/rst_socket_in.c
+index ca97317..1491144 100644
+--- a/kernel/cpt/rst_socket_in.c
++++ b/kernel/cpt/rst_socket_in.c
+@@ -289,6 +289,11 @@ static int rst_socket_tcp(struct cpt_sock_image *si, loff_t pos, struct sock *sk
+ 		}
+ 	}
+ 
++	if (sk->sk_family == AF_INET6)
++		sk->sk_gso_type = SKB_GSO_TCPV6;
++	else
++		sk->sk_gso_type = SKB_GSO_TCPV4;
++
+ 	return 0;
+ }
+ 
