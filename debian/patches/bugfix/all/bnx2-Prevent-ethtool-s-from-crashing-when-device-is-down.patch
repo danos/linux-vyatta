@@ -1,0 +1,48 @@
+From d6b14486953d0e8d1c57db29bf6104cea198b884 Mon Sep 17 00:00:00 2001
+From: Michael Chan <mchan@broadcom.com>
+Date: Mon, 14 Jul 2008 22:37:21 -0700
+Subject: [PATCH] bnx2: Prevent ethtool -s from crashing when device is down.
+
+The device may be in D3-hot state and may crash if we try to
+configure the speed settings by accessing the registers.
+
+Signed-off-by: Michael Chan <mchan@broadcom.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/bnx2.c |   13 ++++++++++++-
+ 1 files changed, 12 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/net/bnx2.c b/drivers/net/bnx2.c
+index ad61cfd..e9cfb02 100644
+--- a/drivers/net/bnx2.c
++++ b/drivers/net/bnx2.c
+@@ -6215,6 +6215,12 @@ bnx2_set_settings(struct net_device *dev, struct ethtool_cmd *cmd)
+ 	    !(bp->phy_flags & BNX2_PHY_FLAG_REMOTE_PHY_CAP))
+ 		goto err_out_unlock;
+ 
++	/* If device is down, we can store the settings only if the user
++	 * is setting the currently active port.
++	 */
++	if (!netif_running(dev) && cmd->port != bp->phy_port)
++		goto err_out_unlock;
++
+ 	if (cmd->autoneg == AUTONEG_ENABLE) {
+ 		autoneg |= AUTONEG_SPEED;
+ 
+@@ -6272,7 +6278,12 @@ bnx2_set_settings(struct net_device *dev, struct ethtool_cmd *cmd)
+ 	bp->req_line_speed = req_line_speed;
+ 	bp->req_duplex = req_duplex;
+ 
+-	err = bnx2_setup_phy(bp, cmd->port);
++	err = 0;
++	/* If device is down, the new settings will be picked up when it is
++	 * brought up.
++	 */
++	if (netif_running(dev))
++		err = bnx2_setup_phy(bp, cmd->port);
+ 
+ err_out_unlock:
+ 	spin_unlock_bh(&bp->phy_lock);
+-- 
+1.6.6
+

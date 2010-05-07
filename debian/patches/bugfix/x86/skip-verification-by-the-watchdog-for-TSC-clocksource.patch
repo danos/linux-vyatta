@@ -1,0 +1,68 @@
+commit 0532dac67ee608e6f583549452ec07e9d2788af7
+Author: Alok Kataria <akataria@vmware.com>
+Date:   Mon Jan 26 21:00:22 2009 +0100
+
+    UBUNTU: x86: Skip verification by the watchdog for TSC clocksource.
+    
+    Bug: #319945
+    
+        Impact: Changes timekeeping on Vmware (or with tsc=reliable).
+    
+        This is achieved by resetting the CLOCKSOURCE_MUST_VERIFY flag.
+    
+        We add a tsc=reliable commandline option to enable this.
+        This enables legacy hardware without HPET, LAPIC, or ACPI timers
+        to enter high-resolution timer mode.
+    
+        Along with that have extended this to be used in virtualization environement
+        too. Now we also set this flag if the X86_FEATURE_TSC_RELIABLE bit is set.
+    
+        This is important since there is a wrap-around problem with the acpi_pm timer.
+        The acpi_pm counter is just 24bits and this can overflow in ~4 seconds. With
+        the NO_HZ kernels in virtualized environment, there can be situations when
+        the guest is descheduled for longer duration, as a result we may miss the wrap
+        of the acpi counter. When TSC is used as a clocksource and acpi_pm timer is
+        being used as the watchdog clocksource this error in acpi_pm results in TSC
+        being marked as unstable, and essentially results in time dropping in chunks
+        of 4 seconds whenever this wrap is missed. Since the virtualized TSC is
+        reliable on VMware, we should always use the TSCs clocksource on VMware, so
+        we skip the verfication at runtime, by checking for the feature bit.
+    
+        Since we reset the flag for mgeode systems too, i have combined
+        the mgeode case with the feature bit check.
+    
+        Signed-off-by: Jeff Hansen <jhansen@cardaccess-inc.com>
+        Signed-off-by: Alok N Kataria <akataria@vmware.com>
+        Signed-off-by: Dan Hecht <dhecht@vmware.com>
+        Signed-off-by: H. Peter Anvin <hpa@zytor.com>
+        Acked-by: Tim Gardner <tim.gardner@canonical.com>
+        Acked-by: Stefan Bader <stefan.bader@canonical.com>
+
+Adjusted to apply to Debian's 2.6.26 by dann frazier <dannf@debian.org>
+
+diff -urpN a/arch/x86/kernel/tsc_32.c b/arch/x86/kernel/tsc_32.c
+--- a/arch/x86/kernel/tsc_32.c	2009-07-19 16:58:14.000000000 -0600
++++ b/arch/x86/kernel/tsc_32.c	2009-07-19 17:11:35.000000000 -0600
+@@ -446,6 +446,9 @@ void __init tsc_init(void)
+ 
+ 	unsynchronized_tsc();
+ 	check_geode_tsc_reliable();
++	if (boot_cpu_has(X86_FEATURE_TSC_RELIABLE))
++		 clocksource_tsc.flags &= ~CLOCK_SOURCE_MUST_VERIFY;
++
+ 	current_tsc_khz = tsc_khz;
+ 	clocksource_tsc.mult = clocksource_khz2mult(current_tsc_khz,
+ 							clocksource_tsc.shift);
+diff -urpN a/arch/x86/kernel/tsc_64.c b/arch/x86/kernel/tsc_64.c
+--- a/arch/x86/kernel/tsc_64.c	2009-07-19 17:02:19.000000000 -0600
++++ b/arch/x86/kernel/tsc_64.c	2009-07-19 17:11:35.000000000 -0600
+@@ -357,6 +357,9 @@ EXPORT_SYMBOL_GPL(mark_tsc_unstable);
+ void __init init_tsc_clocksource(void)
+ {
+ 	if (!notsc) {
++		if (boot_cpu_has(X86_FEATURE_TSC_RELIABLE))
++			clocksource_tsc.flags &= ~CLOCK_SOURCE_MUST_VERIFY;
++
+ 		clocksource_tsc.mult = clocksource_khz2mult(tsc_khz,
+ 							clocksource_tsc.shift);
+ 		if (check_tsc_unstable())

@@ -1,0 +1,93 @@
+From 1a6d795abc130bd356b10abbd91ef63ef23f01c4 Mon Sep 17 00:00:00 2001
+From: Konstantin Khlebnikov <khlebnikov@openvz.org>
+Date: Thu, 24 Dec 2009 20:58:15 +0300
+Subject: [PATCH 88/90] cfq: unlink queues at bc destroy
+
+Unlink cfq-queues from cfq-io-contexts at cfq-bc-data destroy and
+always revalidate cached cfq-queues from cfq-io-context.
+
+Should fix pdflush oops in cfq_set_request after container stop.
+
+http://bugzilla.openvz.org/show_bug.cgi?id=1240
+
+Signed-off-by: Konstantin Khlebnikov <khlebnikov@openvz.org>
+Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+---
+ block/cfq-iosched.c |   20 +++++---------------
+ kernel/bc/io_prio.c |   11 +++++++++++
+ 2 files changed, 16 insertions(+), 15 deletions(-)
+
+diff --git a/block/cfq-iosched.c b/block/cfq-iosched.c
+index b25b442..3a9992a 100644
+--- a/block/cfq-iosched.c
++++ b/block/cfq-iosched.c
+@@ -2014,32 +2014,22 @@ cfq_set_request(struct request_queue *q, struct request *rq, gfp_t gfp_mask)
+ 	struct cfq_queue *cfqq;
+ 	unsigned long flags;
+ 	struct ub_iopriv *iopriv;
+-	struct cfq_bc_data *cfq_bc = NULL;
+ 
+ 	might_sleep_if(gfp_mask & __GFP_WAIT);
+ 
+ 	cic = cfq_get_io_context(cfqd, gfp_mask);
+ 	iopriv = cfqq_ub_iopriv(cfqd, is_sync);
+-	if (!is_sync)
+-		cfq_bc = bc_findcreate_cfq_bc(iopriv, cfqd, gfp_mask);
+ 
+ 	spin_lock_irqsave(q->queue_lock, flags);
+ 
+-	if (!cic || (!is_sync && cfq_bc == NULL))
++	if (!cic)
+ 		goto queue_fail;
+ 
+ 	cfqq = cic_to_cfqq(cic, is_sync);
+-	if (!cfqq) {
+-		cfqq = cfq_get_queue(cfqd, is_sync, cic->ioc, gfp_mask);
+-
+-		if (!cfqq)
+-			goto queue_fail;
+-
+-		cic_set_cfqq(cic, cfqq, is_sync);
+-	}
+-
+-	if (!is_sync && cfqq->cfq_bc != cfq_bc) {
+-		cfq_put_queue(cfqq);
++	if (!cfqq || cfqq->cfq_bc->ub_iopriv != iopriv) {
++		if (cfqq)
++			cfq_put_queue(cfqq);
++		cic_set_cfqq(cic, NULL, is_sync);
+ 		cfqq = cfq_get_queue(cfqd, is_sync, cic->ioc, gfp_mask);
+ 		cic_set_cfqq(cic, cfqq, is_sync);
+ 		if (!cfqq)
+diff --git a/kernel/bc/io_prio.c b/kernel/bc/io_prio.c
+index 5bb22e5..4a1ee2e 100644
+--- a/kernel/bc/io_prio.c
++++ b/kernel/bc/io_prio.c
+@@ -88,6 +88,7 @@ static void inline bc_cfq_bc_check_empty(struct cfq_bc_data *cfq_bc)
+ 
+ static void bc_release_cfq_bc(struct cfq_bc_data *cfq_bc)
+ {
++	struct cfq_io_context *cic;
+ 	struct cfq_data *cfqd;
+ 	elevator_t *eq;
+ 	int i;
+@@ -109,6 +110,16 @@ static void bc_release_cfq_bc(struct cfq_bc_data *cfq_bc)
+ 		eq->ops->put_queue(cfq_bc->async_idle_cfqq);
+ 		cfq_bc->async_idle_cfqq = NULL;
+ 	}
++	list_for_each_entry(cic, &cfqd->cic_list, queue_list) {
++		if (cic->cfqq[0] && cic->cfqq[0]->cfq_bc == cfq_bc) {
++			eq->ops->put_queue(cic->cfqq[0]);
++			cic->cfqq[0] = NULL;
++		}
++		if (cic->cfqq[1] && cic->cfqq[1]->cfq_bc == cfq_bc) {
++			eq->ops->put_queue(cic->cfqq[1]);
++			cic->cfqq[1] = NULL;
++		}
++	}
+ 	/* 
+ 	 * Note: this cfq_bc is already not in active list,
+ 	 * but can be still pointed from cfqd as active.
+-- 
+1.6.5.7
+

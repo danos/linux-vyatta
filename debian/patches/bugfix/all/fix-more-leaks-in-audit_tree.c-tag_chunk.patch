@@ -1,0 +1,55 @@
+From 6f5195525e548d474a77ce00baa927e5c7ed6976 Mon Sep 17 00:00:00 2001
+From: Al Viro <viro@ZenIV.linux.org.uk>
+Date: Sat, 19 Dec 2009 16:03:30 +0000
+Subject: [PATCH] fix more leaks in audit_tree.c tag_chunk()
+
+commit b4c30aad39805902cf5b855aa8a8b22d728ad057 upstream.
+
+Several leaks in audit_tree didn't get caught by commit
+318b6d3d7ddbcad3d6867e630711b8a705d873d7, including the leak on normal
+exit in case of multiple rules refering to the same chunk.
+
+Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+---
+ kernel/audit_tree.c |    9 ++++++---
+ 1 files changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/kernel/audit_tree.c b/kernel/audit_tree.c
+index 053ab6c..ef96b29 100644
+--- a/kernel/audit_tree.c
++++ b/kernel/audit_tree.c
+@@ -372,15 +372,17 @@ static int tag_chunk(struct inode *inode, struct audit_tree *tree)
+ 	for (n = 0; n < old->count; n++) {
+ 		if (old->owners[n].owner == tree) {
+ 			spin_unlock(&hash_lock);
+-			put_inotify_watch(watch);
++			put_inotify_watch(&old->watch);
+ 			return 0;
+ 		}
+ 	}
+ 	spin_unlock(&hash_lock);
+ 
+ 	chunk = alloc_chunk(old->count + 1);
+-	if (!chunk)
++	if (!chunk) {
++		put_inotify_watch(&old->watch);
+ 		return -ENOMEM;
++	}
+ 
+ 	mutex_lock(&inode->inotify_mutex);
+ 	if (inotify_clone_watch(&old->watch, &chunk->watch) < 0) {
+@@ -422,7 +424,8 @@ static int tag_chunk(struct inode *inode, struct audit_tree *tree)
+ 	spin_unlock(&hash_lock);
+ 	inotify_evict_watch(&old->watch);
+ 	mutex_unlock(&inode->inotify_mutex);
+-	put_inotify_watch(&old->watch);
++	put_inotify_watch(&old->watch); /* pair to inotify_find_watch */
++	put_inotify_watch(&old->watch); /* and kill it */
+ 	return 0;
+ }
+ 
+-- 
+1.6.6
+
