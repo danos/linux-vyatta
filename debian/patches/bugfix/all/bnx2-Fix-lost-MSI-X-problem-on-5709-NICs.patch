@@ -1,0 +1,43 @@
+From c441b8d2cb2194b05550a558d6d95d8944e56a84 Mon Sep 17 00:00:00 2001
+From: Michael Chan <mchan@broadcom.com>
+Date: Tue, 27 Apr 2010 11:28:09 +0000
+Subject: [PATCH] bnx2: Fix lost MSI-X problem on 5709 NICs.
+
+It has been reported that under certain heavy traffic conditions in MSI-X
+mode, the driver can lose an MSI-X vector causing all packets in the
+associated rx/tx ring pair to be dropped.  The problem is caused by
+the chip dropping the write to unmask the MSI-X vector by the kernel
+(when migrating the IRQ for example).
+
+This can be prevented by increasing the GRC timeout value for these
+register read and write operations.
+
+Thanks to Dell for helping us debug this problem.
+
+Signed-off-by: Michael Chan <mchan@broadcom.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/bnx2.c |    6 +++++-
+ 1 files changed, 5 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/net/bnx2.c b/drivers/net/bnx2.c
+index a257bab..4c1e51e 100644
+--- a/drivers/net/bnx2.c
++++ b/drivers/net/bnx2.c
+@@ -4759,8 +4759,12 @@ bnx2_reset_chip(struct bnx2 *bp, u32 reset_code)
+ 		rc = bnx2_alloc_bad_rbuf(bp);
+ 	}
+ 
+-	if (bp->flags & BNX2_FLAG_USING_MSIX)
++	if (bp->flags & BNX2_FLAG_USING_MSIX) {
+ 		bnx2_setup_msix_tbl(bp);
++		/* Prevent MSIX table reads and write from timing out */
++		REG_WR(bp, BNX2_MISC_ECO_HW_CTL,
++			BNX2_MISC_ECO_HW_CTL_LARGE_GRC_TMOUT_EN);
++	}
+ 
+ 	return rc;
+ }
+-- 
+1.7.1
+
