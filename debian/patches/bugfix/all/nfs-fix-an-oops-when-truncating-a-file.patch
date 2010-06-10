@@ -1,0 +1,51 @@
+commit e383bd6110a0192a09195326e9f5357704048d0b
+Author: Trond Myklebust <Trond.Myklebust@netapp.com>
+Date:   Wed Feb 3 08:27:22 2010 -0500
+
+    NFS: Fix an Oops when truncating a file
+    
+    The VM/VFS does not allow mapping->a_ops->invalidatepage() to fail.
+    Unfortunately, nfs_wb_page_cancel() may fail if a fatal signal occurs.
+    Since the NFS code assumes that the page stays mapped for as long as the
+    writeback is active, we can end up Oopsing (among other things).
+    
+    The only safe fix here is to convert nfs_wait_on_request(), so as to make
+    it uninterruptible (as is already the case with wait_on_page_writeback()).
+    
+    Backported to Debian's 2.6.26 by dann frazier <dannf@debian.org>
+
+diff --git a/fs/nfs/pagelist.c b/fs/nfs/pagelist.c
+index 7f07920..4a72112 100644
+--- a/fs/nfs/pagelist.c
++++ b/fs/nfs/pagelist.c
+@@ -187,6 +187,12 @@ static int nfs_wait_bit_killable(void *word)
+ 	return ret;
+ }
+ 
++static int nfs_wait_bit_uninterruptible(void *word)
++{
++	io_schedule();
++	return 0;
++}
++
+ /**
+  * nfs_wait_on_request - Wait for a request to complete.
+  * @req: request to wait upon.
+@@ -197,14 +203,9 @@ static int nfs_wait_bit_killable(void *word)
+ int
+ nfs_wait_on_request(struct nfs_page *req)
+ {
+-	int ret = 0;
+-
+-	if (!test_bit(PG_BUSY, &req->wb_flags))
+-		goto out;
+-	ret = out_of_line_wait_on_bit(&req->wb_flags, PG_BUSY,
+-			nfs_wait_bit_killable, TASK_KILLABLE);
+-out:
+-	return ret;
++	return wait_on_bit(&req->wb_flags, PG_BUSY,
++			nfs_wait_bit_uninterruptible,
++			TASK_UNINTERRUPTIBLE);
+ }
+ 
+ /**

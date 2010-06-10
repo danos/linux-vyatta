@@ -1,0 +1,54 @@
+commit f5ef7eaab6daa9eea6c2f611af743544cb0b905d
+Author: David S. Miller <davem@davemloft.net>
+Date:   Fri Feb 19 15:19:52 2010 -0800
+
+    sparc64: Fix sun4u execute bit check in TSB I-TLB load.
+    
+    [Backported to Debian's 2.6.26 by dann frazier <dannf@debian.org>]
+    
+    Thanks to testcase and report from Brad Spengler:
+    
+    --------------------
+    
+    typedef int (* _wee)(void);
+    
+    int main(void)
+    {
+            char buf[8] = { '\x81', '\xc7', '\xe0', '\x08', '\x81', '\xe8',
+                            '\x00', '\x00' };
+            _wee wee;
+            printf("%p\n", &buf);
+            wee = (_wee)&buf;
+            wee();
+    
+            return 0;
+    }
+    --------------------
+    
+    TSB I-tlb load code tries to use andcc to check the _PAGE_EXEC_4U bit,
+    but that's bit 12 so it gets sign extended all the way up to bit 63
+    and the test nearly always passes as a result.
+    
+    Use sethi to fix the bug.
+    
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/arch/sparc64/kernel/tsb.S b/arch/sparc64/kernel/tsb.S
+index c499214..a237e29 100644
+--- a/arch/sparc64/kernel/tsb.S
++++ b/arch/sparc64/kernel/tsb.S
+@@ -191,10 +191,12 @@ tsb_dtlb_load:
+ 
+ tsb_itlb_load:
+ 	/* Executable bit must be set.  */
+-661:	andcc		%g5, _PAGE_EXEC_4U, %g0
+-	.section	.sun4v_1insn_patch, "ax"
++661:	sethi		%hi(_PAGE_EXEC_4U), %g4
++	andcc		%g5, %g4, %g0
++	.section	.sun4v_2insn_patch, "ax"
+ 	.word		661b
+ 	andcc		%g5, _PAGE_EXEC_4V, %g0
++	nop
+ 	.previous
+ 
+ 	be,pn		%xcc, tsb_do_fault

@@ -1,0 +1,43 @@
+commit 611b55e2510b310b1314c914a1c3823e80caa0f1
+Author: Al Viro <viro@ZenIV.linux.org.uk>
+Date:   Tue Feb 16 18:09:36 2010 +0000
+
+    fix LOOKUP_FOLLOW on automount "symlinks"
+    
+    Make sure that automount "symlinks" are followed regardless of LOOKUP_FOLLOW;
+    it should have no effect on them.
+    
+    Backported to Debian's 2.6.26 by dann frazier <dannf@debian.org>
+
+diff --git a/fs/namei.c b/fs/namei.c
+index 2b50296..a9df272 100644
+--- a/fs/namei.c
++++ b/fs/namei.c
+@@ -868,6 +868,17 @@ fail:
+ }
+ 
+ /*
++ * This is a temporary kludge to deal with "automount" symlinks; proper
++ * solution is to trigger them on follow_mount(), so that do_lookup()
++ * would DTRT.  To be killed before 2.6.34-final.
++ */
++static inline int follow_on_final(struct inode *inode, unsigned lookup_flags)
++{
++	return inode && unlikely(inode->i_op->follow_link) &&
++		((lookup_flags & LOOKUP_FOLLOW) || S_ISDIR(inode->i_mode));
++}
++
++/*
+  * Name resolution.
+  * This is the basic name resolution function, turning a pathname into
+  * the final dentry. We expect 'base' to be positive and a directory.
+@@ -1011,8 +1022,7 @@ last_component:
+ 		if (err)
+ 			break;
+ 		inode = next.dentry->d_inode;
+-		if ((lookup_flags & LOOKUP_FOLLOW)
+-		    && inode && inode->i_op && inode->i_op->follow_link) {
++		if (follow_on_final(inode, lookup_flags)) {
+ 			err = do_follow_link(&next, nd);
+ 			if (err)
+ 				goto return_err;
