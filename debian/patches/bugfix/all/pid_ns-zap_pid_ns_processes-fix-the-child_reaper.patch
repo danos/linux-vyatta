@@ -1,0 +1,57 @@
+From: Oleg Nesterov <oleg@tv-sign.ru>
+Date: Tue, 2 Sep 2008 14:35:48 -0700
+Subject: [PATCH 1/2] pid_ns: zap_pid_ns_processes: fix the ->child_reaper changing
+
+commit add0d4dfd660e9e4fd0af3eac3cad23583c9558f upstream.
+
+zap_pid_ns_processes() sets pid_ns->child_reaper = NULL, this is wrong.
+
+Yes, we have already killed all tasks in this namespace, and sys_wait4()
+doesn't see any child.  But this doesn't mean ->children list is empty, we
+may have EXIT_DEAD tasks which are not visible to do_wait().  In that case
+the subsequent forget_original_parent() will crash the kernel because it
+will try to re-parent these tasks to the NULL reaper.
+
+Even if there are no childs, it is not good that forget_original_parent()
+uses reaper == NULL.
+
+Change the code to set ->child_reaper = init_pid_ns.child_reaper instead.
+We could use pid_ns->parent->child_reaper as well, I think this does not
+really matter.  These EXIT_DEAD tasks are not visible to the new ->parent
+after re-parenting, they will silently do release_task() eventually.
+
+Note that we must change ->child_reaper, otherwise
+forget_original_parent() will use reaper == father, and in that case we
+will hit the (correct) BUG_ON(!list_empty(&father->children)).
+
+Signed-off-by: Oleg Nesterov <oleg@tv-sign.ru>
+Acked-by: Serge Hallyn <serue@us.ibm.com>
+Acked-by: Sukadev Bhattiprolu <sukadev@linux.vnet.ibm.com>
+Acked-by: Pavel Emelyanov <xemul@openvz.org>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+[bwh: Adjust context for 2.6.26]
+---
+ kernel/pid_namespace.c |    9 ++++++---
+ 1 files changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/kernel/pid_namespace.c b/kernel/pid_namespace.c
+index ea567b7..598f1ee 100644
+--- a/kernel/pid_namespace.c
++++ b/kernel/pid_namespace.c
+@@ -182,9 +182,12 @@ void zap_pid_ns_processes(struct pid_namespace *pid_ns)
+ 		rc = sys_wait4(-1, NULL, __WALL, NULL);
+ 	} while (rc != -ECHILD);
+ 
+-
+-	/* Child reaper for the pid namespace is going away */
+-	pid_ns->child_reaper = NULL;
++	/*
++	 * We can not clear ->child_reaper or leave it alone.
++	 * There may by stealth EXIT_DEAD tasks on ->children,
++	 * forget_original_parent() must move them somewhere.
++	 */
++	pid_ns->child_reaper = init_pid_ns.child_reaper;
+ 	return;
+ }
+ 

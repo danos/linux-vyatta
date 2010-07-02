@@ -58959,6 +58959,23 @@ index 8f6185e..dcc5665 100644
  
  static void
  reparent_thread(struct task_struct *p, struct task_struct *father, int traced)
+@@ -764,7 +784,7 @@ static struct task_struct *find_new_reaper(struct task_struct *father)
+ 	struct task_struct *thread;
+ 
+ 	thread = father;
+-	while_each_thread(father, thread) {
++	while_each_thread_ve(father, thread) {
+ 		if (thread->flags & PF_EXITING)
+ 			continue;
+ 		if (unlikely(pid_ns->child_reaper == father))
+@@ -778,6 +798,7 @@ static struct task_struct *find_new_reaper(struct task_struct *father)
+ 			panic("Attempted to kill init!");
+ 
+ 		zap_pid_ns_processes(pid_ns);
++		(void)virtinfo_gencall(VIRTINFO_DOEXIT, NULL);
+ 		write_lock_irq(&tasklist_lock);
+ 		/*
+ 		 * We can not clear ->child_reaper or leave it alone.
 @@ -864,6 +884,10 @@ static void exit_notify(struct task_struct *tsk, int group_dead)
  	    !capable(CAP_KILL))
  		tsk->exit_signal = SIGCHLD;
@@ -58978,14 +58995,6 @@ index 8f6185e..dcc5665 100644
  
  	/* mt-exec, de_thread() is waiting for us */
  	if (thread_group_leader(tsk) &&
-@@ -953,6 +978,7 @@ static inline void exit_child_reaper(struct task_struct *tsk)
- 	 * perform the role of the child_reaper.
- 	 */
- 	zap_pid_ns_processes(tsk->nsproxy->pid_ns);
-+	(void)virtinfo_gencall(VIRTINFO_DOEXIT, NULL);
- }
- 
- NORET_TYPE void do_exit(long code)
 @@ -1023,12 +1049,14 @@ NORET_TYPE void do_exit(long code)
  	}
  	acct_collect(code, group_dead);
@@ -60678,15 +60687,15 @@ index 98702b4..c478b80 100644
  {
  	int nr;
 @@ -183,6 +340,9 @@ void zap_pid_ns_processes(struct pid_namespace *pid_ns)
+ 		rc = sys_wait4(-1, NULL, __WALL, NULL);
  	} while (rc != -ECHILD);
- 
  
 +#ifdef CONFIG_VE
 +	zap_ve_processes(get_exec_env());
 +#endif
- 	/* Child reaper for the pid namespace is going away */
- 	pid_ns->child_reaper = NULL;
  	return;
+ }
+ 
 diff --git a/kernel/posix-timers.c b/kernel/posix-timers.c
 index dbd8398..f331727 100644
 --- a/kernel/posix-timers.c
