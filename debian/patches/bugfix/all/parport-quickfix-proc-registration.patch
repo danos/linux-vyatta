@@ -1,0 +1,69 @@
+From: Alan Cox <alan@etchedpixels.co.uk>
+Date: Tue, 2 Jun 2009 15:58:10 +0000 (+0100)
+Subject: parport: quickfix the proc registration bug
+X-Git-Tag: v2.6.30-rc8~2
+X-Git-Url: http://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Ftorvalds%2Flinux-2.6.git;a=commitdiff_plain;h=05ad709d04799125ed85dd816fdb558258102172;hp=d3ae33efb8e2f277f9007eb060c9d0b91ab38ae1
+
+parport: quickfix the proc registration bug
+
+Ideally we should have a directory of drivers and a link to the 'active'
+driver. For now just show the first device which is effectively the existing
+semantics without a warning.
+
+This is an update on the original buggy patch that I then forgot to
+resubmit. Confusingly it was proposed by Red Hat, written by Etched Pixels
+fixed and submitted by Intel ...
+
+Resolves-Bug: http://bugzilla.kernel.org/show_bug.cgi?id=9749
+Signed-off-by: Alan Cox <alan@linux.intel.com>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+---
+
+diff --git a/drivers/parport/share.c b/drivers/parport/share.c
+index 0ebca45..dffa5d4 100644
+--- a/drivers/parport/share.c
++++ b/drivers/parport/share.c
+@@ -614,7 +614,10 @@ parport_register_device(struct parport *port, const char *name,
+ 	 * pardevice fields. -arca
+ 	 */
+ 	port->ops->init_state(tmp, tmp->state);
+-	parport_device_proc_register(tmp);
++	if (!test_and_set_bit(PARPORT_DEVPROC_REGISTERED, &port->devflags)) {
++		port->proc_device = tmp;
++		parport_device_proc_register(tmp);
++	}
+ 	return tmp;
+ 
+  out_free_all:
+@@ -646,10 +649,14 @@ void parport_unregister_device(struct pardevice *dev)
+ 	}
+ #endif
+ 
+-	parport_device_proc_unregister(dev);
+-
+ 	port = dev->port->physport;
+ 
++	if (port->proc_device == dev) {
++		port->proc_device = NULL;
++		clear_bit(PARPORT_DEVPROC_REGISTERED, &port->devflags);
++		parport_device_proc_unregister(dev);
++	}
++
+ 	if (port->cad == dev) {
+ 		printk(KERN_DEBUG "%s: %s forgot to release port\n",
+ 		       port->name, dev->name);
+diff --git a/include/linux/parport.h b/include/linux/parport.h
+index e1f83c5..38a423e 100644
+--- a/include/linux/parport.h
++++ b/include/linux/parport.h
+@@ -324,6 +324,10 @@ struct parport {
+ 	int spintime;
+ 	atomic_t ref_count;
+ 
++	unsigned long devflags;
++#define PARPORT_DEVPROC_REGISTERED	0
++	struct pardevice *proc_device;	/* Currently register proc device */
++
+ 	struct list_head full_list;
+ 	struct parport *slaves[3];
+ };
