@@ -1,0 +1,83 @@
+From: Bartlomiej Zolnierkiewicz <bzolnier@gmail.com>
+Date: Sat, 13 Feb 2010 14:35:53 +0100
+Subject: [PATCH 1/2] pata_pdc202xx_old: fix UDMA mode for Promise UDMA33 cards
+
+commit a75032e8772d13dab5e3501413d7e14a148281b4 upstream.
+
+On Monday 04 January 2010 02:30:24 pm Russell King wrote:
+
+> Found the problem - getting rid of the read of the alt status register
+> after the command has been written fixes the UDMA CRC errors on write:
+>
+> @@ -676,7 +676,8 @@ void ata_sff_exec_command(struct ata_port *ap, const struct
+> ata_taskfile *tf)
+>         DPRINTK("ata%u: cmd 0x%X\n", ap->print_id, tf->command);
+>
+>         iowrite8(tf->command, ap->ioaddr.command_addr);
+> -       ata_sff_pause(ap);
+> +       ndelay(400);
+> +//     ata_sff_pause(ap);
+>  }
+>  EXPORT_SYMBOL_GPL(ata_sff_exec_command);
+>
+>
+> This rather makes sense.  The PDC20247 handles the UDMA part of the
+> protocol.  It has no way to tell the PDC20246 to wait while it suspends
+> UDMA, so that a normal register access can take place - the 246 ploughs
+> on with the register access without any regard to the state of the 247.
+>
+> If the drive immediately starts the UDMA protocol after a write to the
+> command register (as it probably will for the DMA WRITE command), then
+> we'll be accessing the taskfile in the middle of the UDMA setup, which
+> can't be good.  It's certainly a violation of the ATA specs.
+
+Fix it by adding custom ->sff_exec_command method for UDMA33 chipsets.
+
+Debugged-by: Russell King <rmk@arm.linux.org.uk>
+Signed-off-by: Bartlomiej Zolnierkiewicz <bzolnier@gmail.com>
+Signed-off-by: Jeff Garzik <jgarzik@redhat.com>
+---
+ drivers/ata/pata_pdc202xx_old.c |   13 ++++++++++++-
+ 1 files changed, 12 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/ata/pata_pdc202xx_old.c b/drivers/ata/pata_pdc202xx_old.c
+index 2f3c9be..8d25bd5 100644
+--- a/drivers/ata/pata_pdc202xx_old.c
++++ b/drivers/ata/pata_pdc202xx_old.c
+@@ -2,7 +2,7 @@
+  * pata_pdc202xx_old.c 	- Promise PDC202xx PATA for new ATA layer
+  *			  (C) 2005 Red Hat Inc
+  *			  Alan Cox <alan@lxorguk.ukuu.org.uk>
+- *			  (C) 2007,2009 Bartlomiej Zolnierkiewicz
++ *			  (C) 2007,2009,2010 Bartlomiej Zolnierkiewicz
+  *
+  * Based in part on linux/drivers/ide/pci/pdc202xx_old.c
+  *
+@@ -35,6 +35,15 @@ static int pdc2026x_cable_detect(struct ata_port *ap)
+ 	return ATA_CBL_PATA80;
+ }
+ 
++static void pdc20246_exec_command(struct ata_port *ap,
++				  const struct ata_taskfile *tf)
++{
++	DPRINTK("ata%u: cmd 0x%X\n", ap->print_id, tf->command);
++
++	iowrite8(tf->command, ap->ioaddr.command_addr);
++	ndelay(400);
++}
++
+ /**
+  *	pdc202xx_configure_piomode	-	set chip PIO timing
+  *	@ap: ATA interface
+@@ -271,6 +280,8 @@ static struct ata_port_operations pdc2024x_port_ops = {
+ 	.cable_detect		= ata_cable_40wire,
+ 	.set_piomode		= pdc202xx_set_piomode,
+ 	.set_dmamode		= pdc202xx_set_dmamode,
++
++	.sff_exec_command	= pdc20246_exec_command,
+ };
+ 
+ static struct ata_port_operations pdc2026x_port_ops = {
+-- 
+1.7.1
+
