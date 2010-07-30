@@ -1,0 +1,398 @@
+--- a/drivers/gpu/drm/i915/i915_drv.c
++++ b/drivers/gpu/drm/i915/i915_drv.c
+@@ -328,6 +328,7 @@ int i965_reset(struct drm_device *dev, u8 flags)
+ 		}
+ 	} else {
+ 		DRM_ERROR("Error occurred. Don't know how to reset this chip.\n");
++		mutex_unlock(&dev->struct_mutex);
+ 		return -ENODEV;
+ 	}
+ 
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -2288,8 +2288,9 @@ i915_gem_object_get_pages(struct drm_gem_object *obj,
+ 	mapping = inode->i_mapping;
+ 	for (i = 0; i < page_count; i++) {
+ 		page = read_cache_page_gfp(mapping, i,
+-					   mapping_gfp_mask (mapping) |
++					   GFP_HIGHUSER |
+ 					   __GFP_COLD |
++					   __GFP_RECLAIMABLE |
+ 					   gfpmask);
+ 		if (IS_ERR(page))
+ 			goto err_pages;
+@@ -4998,6 +4999,16 @@ i915_gem_load(struct drm_device *dev)
+ 	list_add(&dev_priv->mm.shrink_list, &shrink_list);
+ 	spin_unlock(&shrink_list_lock);
+ 
++	/* On GEN3 we really need to make sure the ARB C3 LP bit is set */
++	if (IS_GEN3(dev)) {
++		u32 tmp = I915_READ(MI_ARB_STATE);
++		if (!(tmp & MI_ARB_C3_LP_WRITE_ENABLE)) {
++			/* arb state is a masked write, so set bit + bit in mask */
++			tmp = MI_ARB_C3_LP_WRITE_ENABLE | (MI_ARB_C3_LP_WRITE_ENABLE << MI_ARB_MASK_SHIFT);
++			I915_WRITE(MI_ARB_STATE, tmp);
++		}
++	}
++
+ 	/* Old X drivers will take 0-2 for front, back, depth buffers */
+ 	dev_priv->fence_reg_start = 3;
+ 
+--- a/drivers/gpu/drm/i915/i915_reg.h
++++ b/drivers/gpu/drm/i915/i915_reg.h
+@@ -326,6 +326,70 @@
+ #define LM_BURST_LENGTH     0x00000700
+ #define LM_FIFO_WATERMARK   0x0000001F
+ #define MI_ARB_STATE	0x020e4 /* 915+ only */
++#define   MI_ARB_MASK_SHIFT	  16	/* shift for enable bits */
++
++/* Make render/texture TLB fetches lower priorty than associated data
++ *   fetches. This is not turned on by default
++ */
++#define   MI_ARB_RENDER_TLB_LOW_PRIORITY	(1 << 15)
++
++/* Isoch request wait on GTT enable (Display A/B/C streams).
++ * Make isoch requests stall on the TLB update. May cause
++ * display underruns (test mode only)
++ */
++#define   MI_ARB_ISOCH_WAIT_GTT			(1 << 14)
++
++/* Block grant count for isoch requests when block count is
++ * set to a finite value.
++ */
++#define   MI_ARB_BLOCK_GRANT_MASK		(3 << 12)
++#define   MI_ARB_BLOCK_GRANT_8			(0 << 12)	/* for 3 display planes */
++#define   MI_ARB_BLOCK_GRANT_4			(1 << 12)	/* for 2 display planes */
++#define   MI_ARB_BLOCK_GRANT_2			(2 << 12)	/* for 1 display plane */
++#define   MI_ARB_BLOCK_GRANT_0			(3 << 12)	/* don't use */
++
++/* Enable render writes to complete in C2/C3/C4 power states.
++ * If this isn't enabled, render writes are prevented in low
++ * power states. That seems bad to me.
++ */
++#define   MI_ARB_C3_LP_WRITE_ENABLE		(1 << 11)
++
++/* This acknowledges an async flip immediately instead
++ * of waiting for 2TLB fetches.
++ */
++#define   MI_ARB_ASYNC_FLIP_ACK_IMMEDIATE	(1 << 10)
++
++/* Enables non-sequential data reads through arbiter
++ */
++#define   MI_ARB_DUAL_DATA_PHASE_DISABLE       	(1 << 9)
++
++/* Disable FSB snooping of cacheable write cycles from binner/render
++ * command stream
++ */
++#define   MI_ARB_CACHE_SNOOP_DISABLE		(1 << 8)
++
++/* Arbiter time slice for non-isoch streams */
++#define   MI_ARB_TIME_SLICE_MASK		(7 << 5)
++#define   MI_ARB_TIME_SLICE_1			(0 << 5)
++#define   MI_ARB_TIME_SLICE_2			(1 << 5)
++#define   MI_ARB_TIME_SLICE_4			(2 << 5)
++#define   MI_ARB_TIME_SLICE_6			(3 << 5)
++#define   MI_ARB_TIME_SLICE_8			(4 << 5)
++#define   MI_ARB_TIME_SLICE_10			(5 << 5)
++#define   MI_ARB_TIME_SLICE_14			(6 << 5)
++#define   MI_ARB_TIME_SLICE_16			(7 << 5)
++
++/* Low priority grace period page size */
++#define   MI_ARB_LOW_PRIORITY_GRACE_4KB		(0 << 4)	/* default */
++#define   MI_ARB_LOW_PRIORITY_GRACE_8KB		(1 << 4)
++
++/* Disable display A/B trickle feed */
++#define   MI_ARB_DISPLAY_TRICKLE_FEED_DISABLE	(1 << 2)
++
++/* Set display plane priority */
++#define   MI_ARB_DISPLAY_PRIORITY_A_B		(0 << 0)	/* display A > display B */
++#define   MI_ARB_DISPLAY_PRIORITY_B_A		(1 << 0)	/* display B > display A */
++
+ #define CACHE_MODE_0	0x02120 /* 915+ only */
+ #define   CM0_MASK_SHIFT          16
+ #define   CM0_IZ_OPT_DISABLE      (1<<6)
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -879,8 +879,8 @@ intel_g4x_find_best_PLL(const intel_limit_t *limit, struct drm_crtc *crtc,
+ 	intel_clock_t clock;
+ 	int max_n;
+ 	bool found;
+-	/* approximately equals target * 0.00488 */
+-	int err_most = (target >> 8) + (target >> 10);
++	/* approximately equals target * 0.00585 */
++	int err_most = (target >> 8) + (target >> 9);
+ 	found = false;
+ 
+ 	if (intel_pipe_has_type(crtc, INTEL_OUTPUT_LVDS)) {
+--- a/drivers/gpu/drm/radeon/r100.c
++++ b/drivers/gpu/drm/radeon/r100.c
+@@ -1384,6 +1384,7 @@ static int r100_packet0_check(struct radeon_cs_parser *p,
+ 		case RADEON_TXFORMAT_RGB332:
+ 		case RADEON_TXFORMAT_Y8:
+ 			track->textures[i].cpp = 1;
++			track->textures[i].compress_format = R100_TRACK_COMP_NONE;
+ 			break;
+ 		case RADEON_TXFORMAT_AI88:
+ 		case RADEON_TXFORMAT_ARGB1555:
+@@ -1395,12 +1396,14 @@ static int r100_packet0_check(struct radeon_cs_parser *p,
+ 		case RADEON_TXFORMAT_LDUDV655:
+ 		case RADEON_TXFORMAT_DUDV88:
+ 			track->textures[i].cpp = 2;
++			track->textures[i].compress_format = R100_TRACK_COMP_NONE;
+ 			break;
+ 		case RADEON_TXFORMAT_ARGB8888:
+ 		case RADEON_TXFORMAT_RGBA8888:
+ 		case RADEON_TXFORMAT_SHADOW32:
+ 		case RADEON_TXFORMAT_LDUDUV8888:
+ 			track->textures[i].cpp = 4;
++			track->textures[i].compress_format = R100_TRACK_COMP_NONE;
+ 			break;
+ 		case RADEON_TXFORMAT_DXT1:
+ 			track->textures[i].cpp = 1;
+@@ -2750,33 +2753,6 @@ static inline void r100_cs_track_texture_print(struct r100_cs_track_texture *t)
+ 	DRM_ERROR("compress format            %d\n", t->compress_format);
+ }
+ 
+-static int r100_cs_track_cube(struct radeon_device *rdev,
+-			      struct r100_cs_track *track, unsigned idx)
+-{
+-	unsigned face, w, h;
+-	struct radeon_bo *cube_robj;
+-	unsigned long size;
+-
+-	for (face = 0; face < 5; face++) {
+-		cube_robj = track->textures[idx].cube_info[face].robj;
+-		w = track->textures[idx].cube_info[face].width;
+-		h = track->textures[idx].cube_info[face].height;
+-
+-		size = w * h;
+-		size *= track->textures[idx].cpp;
+-
+-		size += track->textures[idx].cube_info[face].offset;
+-
+-		if (size > radeon_bo_size(cube_robj)) {
+-			DRM_ERROR("Cube texture offset greater than object size %lu %lu\n",
+-				  size, radeon_bo_size(cube_robj));
+-			r100_cs_track_texture_print(&track->textures[idx]);
+-			return -1;
+-		}
+-	}
+-	return 0;
+-}
+-
+ static int r100_track_compress_size(int compress_format, int w, int h)
+ {
+ 	int block_width, block_height, block_bytes;
+@@ -2807,6 +2783,37 @@ static int r100_track_compress_size(int compress_format, int w, int h)
+ 	return sz;
+ }
+ 
++static int r100_cs_track_cube(struct radeon_device *rdev,
++			      struct r100_cs_track *track, unsigned idx)
++{
++	unsigned face, w, h;
++	struct radeon_bo *cube_robj;
++	unsigned long size;
++	unsigned compress_format = track->textures[idx].compress_format;
++
++	for (face = 0; face < 5; face++) {
++		cube_robj = track->textures[idx].cube_info[face].robj;
++		w = track->textures[idx].cube_info[face].width;
++		h = track->textures[idx].cube_info[face].height;
++
++		if (compress_format) {
++			size = r100_track_compress_size(compress_format, w, h);
++		} else
++			size = w * h;
++		size *= track->textures[idx].cpp;
++
++		size += track->textures[idx].cube_info[face].offset;
++
++		if (size > radeon_bo_size(cube_robj)) {
++			DRM_ERROR("Cube texture offset greater than object size %lu %lu\n",
++				  size, radeon_bo_size(cube_robj));
++			r100_cs_track_texture_print(&track->textures[idx]);
++			return -1;
++		}
++	}
++	return 0;
++}
++
+ static int r100_cs_track_texture_check(struct radeon_device *rdev,
+ 				       struct r100_cs_track *track)
+ {
+--- a/drivers/gpu/drm/radeon/r200.c
++++ b/drivers/gpu/drm/radeon/r200.c
+@@ -368,6 +368,8 @@ int r200_packet0_check(struct radeon_cs_parser *p,
+ 		/* 2D, 3D, CUBE */
+ 		switch (tmp) {
+ 		case 0:
++		case 3:
++		case 4:
+ 		case 5:
+ 		case 6:
+ 		case 7:
+@@ -403,6 +405,7 @@ int r200_packet0_check(struct radeon_cs_parser *p,
+ 		case R200_TXFORMAT_RGB332:
+ 		case R200_TXFORMAT_Y8:
+ 			track->textures[i].cpp = 1;
++			track->textures[i].compress_format = R100_TRACK_COMP_NONE;
+ 			break;
+ 		case R200_TXFORMAT_AI88:
+ 		case R200_TXFORMAT_ARGB1555:
+@@ -414,6 +417,7 @@ int r200_packet0_check(struct radeon_cs_parser *p,
+ 		case R200_TXFORMAT_DVDU88:
+ 		case R200_TXFORMAT_AVYU4444:
+ 			track->textures[i].cpp = 2;
++			track->textures[i].compress_format = R100_TRACK_COMP_NONE;
+ 			break;
+ 		case R200_TXFORMAT_ARGB8888:
+ 		case R200_TXFORMAT_RGBA8888:
+@@ -421,6 +425,7 @@ int r200_packet0_check(struct radeon_cs_parser *p,
+ 		case R200_TXFORMAT_BGR111110:
+ 		case R200_TXFORMAT_LDVDU8888:
+ 			track->textures[i].cpp = 4;
++			track->textures[i].compress_format = R100_TRACK_COMP_NONE;
+ 			break;
+ 		case R200_TXFORMAT_DXT1:
+ 			track->textures[i].cpp = 1;
+--- a/drivers/gpu/drm/radeon/r300.c
++++ b/drivers/gpu/drm/radeon/r300.c
+@@ -870,6 +870,7 @@ static int r300_packet0_check(struct radeon_cs_parser *p,
+ 		case R300_TX_FORMAT_Y4X4:
+ 		case R300_TX_FORMAT_Z3Y3X2:
+ 			track->textures[i].cpp = 1;
++			track->textures[i].compress_format = R100_TRACK_COMP_NONE;
+ 			break;
+ 		case R300_TX_FORMAT_X16:
+ 		case R300_TX_FORMAT_Y8X8:
+@@ -881,6 +882,7 @@ static int r300_packet0_check(struct radeon_cs_parser *p,
+ 		case R300_TX_FORMAT_B8G8_B8G8:
+ 		case R300_TX_FORMAT_G8R8_G8B8:
+ 			track->textures[i].cpp = 2;
++			track->textures[i].compress_format = R100_TRACK_COMP_NONE;
+ 			break;
+ 		case R300_TX_FORMAT_Y16X16:
+ 		case R300_TX_FORMAT_Z11Y11X10:
+@@ -891,14 +893,17 @@ static int r300_packet0_check(struct radeon_cs_parser *p,
+ 		case R300_TX_FORMAT_FL_I32:
+ 		case 0x1e:
+ 			track->textures[i].cpp = 4;
++			track->textures[i].compress_format = R100_TRACK_COMP_NONE;
+ 			break;
+ 		case R300_TX_FORMAT_W16Z16Y16X16:
+ 		case R300_TX_FORMAT_FL_R16G16B16A16:
+ 		case R300_TX_FORMAT_FL_I32A32:
+ 			track->textures[i].cpp = 8;
++			track->textures[i].compress_format = R100_TRACK_COMP_NONE;
+ 			break;
+ 		case R300_TX_FORMAT_FL_R32G32B32A32:
+ 			track->textures[i].cpp = 16;
++			track->textures[i].compress_format = R100_TRACK_COMP_NONE;
+ 			break;
+ 		case R300_TX_FORMAT_DXT1:
+ 			track->textures[i].cpp = 1;
+--- a/drivers/gpu/drm/radeon/radeon_atombios.c
++++ b/drivers/gpu/drm/radeon/radeon_atombios.c
+@@ -268,6 +268,15 @@ static bool radeon_atom_apply_quirks(struct drm_device *dev,
+ 		}
+ 	}
+ 
++	/* ASUS HD 3600 board lists the DVI port as HDMI */
++	if ((dev->pdev->device == 0x9598) &&
++	    (dev->pdev->subsystem_vendor == 0x1043) &&
++	    (dev->pdev->subsystem_device == 0x01e4)) {
++		if (*connector_type == DRM_MODE_CONNECTOR_HDMIA) {
++			*connector_type = DRM_MODE_CONNECTOR_DVII;
++		}
++	}
++
+ 	/* ASUS HD 3450 board lists the DVI port as HDMI */
+ 	if ((dev->pdev->device == 0x95C5) &&
+ 	    (dev->pdev->subsystem_vendor == 0x1043) &&
+@@ -977,8 +986,15 @@ bool radeon_atombios_sideport_present(struct radeon_device *rdev)
+ 	if (igp_info) {
+ 		switch (crev) {
+ 		case 1:
+-			if (igp_info->info.ucMemoryType & 0xf0)
+-				return true;
++			/* AMD IGPS */
++			if ((rdev->family == CHIP_RS690) ||
++			    (rdev->family == CHIP_RS740)) {
++				if (igp_info->info.ulBootUpMemoryClock)
++					return true;
++			} else {
++				if (igp_info->info.ucMemoryType & 0xf0)
++					return true;
++			}
+ 			break;
+ 		case 2:
+ 			if (igp_info->info_2.ucMemoryType & 0x0f)
+--- a/drivers/gpu/drm/radeon/radeon_connectors.c
++++ b/drivers/gpu/drm/radeon/radeon_connectors.c
+@@ -779,30 +779,27 @@ static enum drm_connector_status radeon_dvi_detect(struct drm_connector *connect
+ 			} else
+ 				ret = connector_status_connected;
+ 
+-			/* multiple connectors on the same encoder with the same ddc line
+-			 * This tends to be HDMI and DVI on the same encoder with the
+-			 * same ddc line.  If the edid says HDMI, consider the HDMI port
+-			 * connected and the DVI port disconnected.  If the edid doesn't
+-			 * say HDMI, vice versa.
++			/* This gets complicated.  We have boards with VGA + HDMI with a
++			 * shared DDC line and we have boards with DVI-D + HDMI with a shared
++			 * DDC line.  The latter is more complex because with DVI<->HDMI adapters
++			 * you don't really know what's connected to which port as both are digital.
+ 			 */
+ 			if (radeon_connector->shared_ddc && (ret == connector_status_connected)) {
+ 				struct drm_device *dev = connector->dev;
++				struct radeon_device *rdev = dev->dev_private;
+ 				struct drm_connector *list_connector;
+ 				struct radeon_connector *list_radeon_connector;
+ 				list_for_each_entry(list_connector, &dev->mode_config.connector_list, head) {
+ 					if (connector == list_connector)
+ 						continue;
+ 					list_radeon_connector = to_radeon_connector(list_connector);
+-					if (radeon_connector->devices == list_radeon_connector->devices) {
+-						if (drm_detect_hdmi_monitor(radeon_connector->edid)) {
+-							if (connector->connector_type == DRM_MODE_CONNECTOR_DVID) {
+-								kfree(radeon_connector->edid);
+-								radeon_connector->edid = NULL;
+-								ret = connector_status_disconnected;
+-							}
+-						} else {
+-							if ((connector->connector_type == DRM_MODE_CONNECTOR_HDMIA) ||
+-							    (connector->connector_type == DRM_MODE_CONNECTOR_HDMIB)) {
++					if (list_radeon_connector->shared_ddc &&
++					    (list_radeon_connector->ddc_bus->rec.i2c_id ==
++					     radeon_connector->ddc_bus->rec.i2c_id)) {
++						/* cases where both connectors are digital */
++						if (list_connector->connector_type != DRM_MODE_CONNECTOR_VGA) {
++							/* hpd is our only option in this case */
++							if (!radeon_hpd_sense(rdev, radeon_connector->hpd.hpd)) {
+ 								kfree(radeon_connector->edid);
+ 								radeon_connector->edid = NULL;
+ 								ret = connector_status_disconnected;
+--- a/drivers/gpu/drm/radeon/radeon_legacy_encoders.c
++++ b/drivers/gpu/drm/radeon/radeon_legacy_encoders.c
+@@ -108,6 +108,7 @@ static void radeon_legacy_lvds_dpms(struct drm_encoder *encoder, int mode)
+ 		udelay(panel_pwr_delay * 1000);
+ 		WREG32(RADEON_LVDS_GEN_CNTL, lvds_gen_cntl);
+ 		WREG32_PLL(RADEON_PIXCLKS_CNTL, pixclks_cntl);
++		udelay(panel_pwr_delay * 1000);
+ 		break;
+ 	}
+ 
+--- a/drivers/gpu/drm/radeon/radeon_legacy_tv.c
++++ b/drivers/gpu/drm/radeon/radeon_legacy_tv.c
+@@ -642,8 +642,8 @@ void radeon_legacy_tv_mode_set(struct drm_encoder *encoder,
+ 	}
+ 	flicker_removal = (tmp + 500) / 1000;
+ 
+-	if (flicker_removal < 2)
+-		flicker_removal = 2;
++	if (flicker_removal < 3)
++		flicker_removal = 3;
+ 	for (i = 0; i < ARRAY_SIZE(SLOPE_limit); ++i) {
+ 		if (flicker_removal == SLOPE_limit[i])
+ 			break;
