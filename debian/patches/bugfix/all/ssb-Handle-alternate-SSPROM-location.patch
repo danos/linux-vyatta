@@ -1,0 +1,67 @@
+From 9d1ac34ec3a67713308ae0883c3359c557f14d17 Mon Sep 17 00:00:00 2001
+From: Larry Finger <Larry.Finger@lwfinger.net>
+Date: Fri, 14 May 2010 22:08:58 -0500
+Subject: [PATCH] ssb: Handle alternate SSPROM location
+
+In kernel Bugzilla #15825 (2 users), in a wireless mailing list thread
+(http://lists.infradead.org/pipermail/b43-dev/2010-May/000124.html), and on a
+netbook owned by John Linville
+(http://marc.info/?l=linux-wireless&m=127230751408818&w=4), there are reports
+of ssb failing to detect an SPROM at the normal location. After studying the
+MMIO trace dump for the Broadcom wl driver, it was determined that the affected
+boxes had a relocated SPROM.
+
+This patch fixes all systems that have reported this problem.
+
+Signed-off-by: Larry Finger <Larry.Finger@lwfinger.net>
+Cc: Stable <stable@kernel.org>
+Signed-off-by: John W. Linville <linville@tuxdriver.com>
+---
+ drivers/ssb/driver_chipcommon.c |    1 +
+ drivers/ssb/pci.c               |   15 +++++++++++++--
+ 2 files changed, 14 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/ssb/driver_chipcommon.c b/drivers/ssb/driver_chipcommon.c
+index bda8514..7c031fd 100644
+--- a/drivers/ssb/driver_chipcommon.c
++++ b/drivers/ssb/driver_chipcommon.c
+@@ -259,6 +259,7 @@ void ssb_chipcommon_init(struct ssb_chipcommon *cc)
+ 		return; /* We don't have a ChipCommon */
+ 	if (cc->dev->id.revision >= 11)
+ 		cc->status = chipco_read32(cc, SSB_CHIPCO_CHIPSTAT);
++	ssb_dprintk(KERN_INFO PFX "chipcommon status is 0x%x\n", cc->status);
+ 	ssb_pmu_init(cc);
+ 	chipco_powercontrol_init(cc);
+ 	ssb_chipco_set_clockmode(cc, SSB_CLKMODE_FAST);
+diff --git a/drivers/ssb/pci.c b/drivers/ssb/pci.c
+index 6dcda86..6e88d2b 100644
+--- a/drivers/ssb/pci.c
++++ b/drivers/ssb/pci.c
+@@ -626,11 +626,22 @@ static int ssb_pci_sprom_get(struct ssb_bus *bus,
+ 		return -ENODEV;
+ 	}
+ 	if (bus->chipco.dev) {	/* can be unavailible! */
+-		bus->sprom_offset = (bus->chipco.dev->id.revision < 31) ?
+-			SSB_SPROM_BASE1 : SSB_SPROM_BASE31;
++		/*
++		 * get SPROM offset: SSB_SPROM_BASE1 except for
++		 * chipcommon rev >= 31 or chip ID is 0x4312 and
++		 * chipcommon status & 3 == 2
++		 */
++		if (bus->chipco.dev->id.revision >= 31)
++			bus->sprom_offset = SSB_SPROM_BASE31;
++		else if (bus->chip_id == 0x4312 &&
++			 (bus->chipco.status & 0x03) == 2)
++			bus->sprom_offset = SSB_SPROM_BASE31;
++		else
++			bus->sprom_offset = SSB_SPROM_BASE1;
+ 	} else {
+ 		bus->sprom_offset = SSB_SPROM_BASE1;
+ 	}
++	ssb_dprintk(KERN_INFO PFX "SPROM offset is 0x%x\n", bus->sprom_offset);
+ 
+ 	buf = kcalloc(SSB_SPROMSIZE_WORDS_R123, sizeof(u16), GFP_KERNEL);
+ 	if (!buf)
+-- 
+1.7.1
+
