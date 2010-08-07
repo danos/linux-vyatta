@@ -1,0 +1,858 @@
+diff --git a/arch/arm/plat-mxc/gpio.c b/arch/arm/plat-mxc/gpio.c
+index cfc4a8b..c47aa88 100644
+--- a/arch/arm/plat-mxc/gpio.c
++++ b/arch/arm/plat-mxc/gpio.c
+@@ -223,13 +223,16 @@ static void _set_gpio_direction(struct gpio_chip *chip, unsigned offset,
+ 	struct mxc_gpio_port *port =
+ 		container_of(chip, struct mxc_gpio_port, chip);
+ 	u32 l;
++	unsigned long flags;
+ 
++	spin_lock_irqsave(&port->lock, flags);
+ 	l = __raw_readl(port->base + GPIO_GDIR);
+ 	if (dir)
+ 		l |= 1 << offset;
+ 	else
+ 		l &= ~(1 << offset);
+ 	__raw_writel(l, port->base + GPIO_GDIR);
++	spin_unlock_irqrestore(&port->lock, flags);
+ }
+ 
+ static void mxc_gpio_set(struct gpio_chip *chip, unsigned offset, int value)
+@@ -238,9 +241,12 @@ static void mxc_gpio_set(struct gpio_chip *chip, unsigned offset, int value)
+ 		container_of(chip, struct mxc_gpio_port, chip);
+ 	void __iomem *reg = port->base + GPIO_DR;
+ 	u32 l;
++	unsigned long flags;
+ 
++	spin_lock_irqsave(&port->lock, flags);
+ 	l = (__raw_readl(reg) & (~(1 << offset))) | (value << offset);
+ 	__raw_writel(l, reg);
++	spin_unlock_irqrestore(&port->lock, flags);
+ }
+ 
+ static int mxc_gpio_get(struct gpio_chip *chip, unsigned offset)
+@@ -294,6 +300,8 @@ int __init mxc_gpio_init(struct mxc_gpio_port *port, int cnt)
+ 		port[i].chip.base = i * 32;
+ 		port[i].chip.ngpio = 32;
+ 
++		spin_lock_init(&port[i].lock);
++
+ 		/* its a serious configuration bug when it fails */
+ 		BUG_ON( gpiochip_add(&port[i].chip) < 0 );
+ 
+diff --git a/arch/arm/plat-mxc/include/mach/gpio.h b/arch/arm/plat-mxc/include/mach/gpio.h
+index 894d2f8..6bd932c 100644
+--- a/arch/arm/plat-mxc/include/mach/gpio.h
++++ b/arch/arm/plat-mxc/include/mach/gpio.h
+@@ -36,6 +36,7 @@ struct mxc_gpio_port {
+ 	int virtual_irq_start;
+ 	struct gpio_chip chip;
+ 	u32 both_edges;
++	spinlock_t lock;
+ };
+ 
+ int mxc_gpio_init(struct mxc_gpio_port*, int);
+diff --git a/arch/parisc/kernel/firmware.c b/arch/parisc/kernel/firmware.c
+index 4c247e0..df971fa 100644
+--- a/arch/parisc/kernel/firmware.c
++++ b/arch/parisc/kernel/firmware.c
+@@ -1123,7 +1123,6 @@ static char __attribute__((aligned(64))) iodc_dbuf[4096];
+  */
+ int pdc_iodc_print(const unsigned char *str, unsigned count)
+ {
+-	static int posx;        /* for simple TAB-Simulation... */
+ 	unsigned int i;
+ 	unsigned long flags;
+ 
+@@ -1133,19 +1132,12 @@ int pdc_iodc_print(const unsigned char *str, unsigned count)
+ 			iodc_dbuf[i+0] = '\r';
+ 			iodc_dbuf[i+1] = '\n';
+ 			i += 2;
+-			posx = 0;
+ 			goto print;
+-		case '\t':
+-			while (posx & 7) {
+-				iodc_dbuf[i] = ' ';
+-				i++, posx++;
+-			}
+-			break;
+ 		case '\b':	/* BS */
+-			posx -= 2;
++			i--; /* overwrite last */
+ 		default:
+ 			iodc_dbuf[i] = str[i];
+-			i++, posx++;
++			i++;
+ 			break;
+ 		}
+ 	}
+diff --git a/arch/x86/xen/enlighten.c b/arch/x86/xen/enlighten.c
+index 3578688..942ccf1 100644
+--- a/arch/x86/xen/enlighten.c
++++ b/arch/x86/xen/enlighten.c
+@@ -924,7 +924,7 @@ static const struct pv_init_ops xen_init_ops __initdata = {
+ };
+ 
+ static const struct pv_time_ops xen_time_ops __initdata = {
+-	.sched_clock = xen_sched_clock,
++	.sched_clock = xen_clocksource_read,
+ };
+ 
+ static const struct pv_cpu_ops xen_cpu_ops __initdata = {
+diff --git a/arch/x86/xen/time.c b/arch/x86/xen/time.c
+index 9d1f853..8e04980 100644
+--- a/arch/x86/xen/time.c
++++ b/arch/x86/xen/time.c
+@@ -154,45 +154,6 @@ static void do_stolen_accounting(void)
+ 	account_idle_ticks(ticks);
+ }
+ 
+-/*
+- * Xen sched_clock implementation.  Returns the number of unstolen
+- * nanoseconds, which is nanoseconds the VCPU spent in RUNNING+BLOCKED
+- * states.
+- */
+-unsigned long long xen_sched_clock(void)
+-{
+-	struct vcpu_runstate_info state;
+-	cycle_t now;
+-	u64 ret;
+-	s64 offset;
+-
+-	/*
+-	 * Ideally sched_clock should be called on a per-cpu basis
+-	 * anyway, so preempt should already be disabled, but that's
+-	 * not current practice at the moment.
+-	 */
+-	preempt_disable();
+-
+-	now = xen_clocksource_read();
+-
+-	get_runstate_snapshot(&state);
+-
+-	WARN_ON(state.state != RUNSTATE_running);
+-
+-	offset = now - state.state_entry_time;
+-	if (offset < 0)
+-		offset = 0;
+-
+-	ret = state.time[RUNSTATE_blocked] +
+-		state.time[RUNSTATE_running] +
+-		offset;
+-
+-	preempt_enable();
+-
+-	return ret;
+-}
+-
+-
+ /* Get the TSC speed from Xen */
+ unsigned long xen_tsc_khz(void)
+ {
+diff --git a/drivers/edac/amd64_edac.c b/drivers/edac/amd64_edac.c
+index 01bc8e2..2aa339e 100644
+--- a/drivers/edac/amd64_edac.c
++++ b/drivers/edac/amd64_edac.c
+@@ -156,7 +156,7 @@ static int amd64_set_scrub_rate(struct mem_ctl_info *mci, u32 *bandwidth)
+ 
+ 	default:
+ 		amd64_printk(KERN_ERR, "Unsupported family!\n");
+-		break;
++		return -EINVAL;
+ 	}
+ 	return amd64_search_set_scrub_rate(pvt->misc_f3_ctl, *bandwidth,
+ 			min_scrubrate);
+@@ -1491,7 +1491,7 @@ static inline u64 f10_get_base_addr_offset(u64 sys_addr, int hi_range_sel,
+ 	u64 chan_off;
+ 
+ 	if (hi_range_sel) {
+-		if (!(dct_sel_base_addr & 0xFFFFF800) &&
++		if (!(dct_sel_base_addr & 0xFFFF0000) &&
+ 		   hole_valid && (sys_addr >= 0x100000000ULL))
+ 			chan_off = hole_off << 16;
+ 		else
+diff --git a/drivers/gpu/drm/i915/i915_dma.c b/drivers/gpu/drm/i915/i915_dma.c
+index eaa1893..2680db7 100644
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index aafbef7..97163f7 100644
+diff --git a/drivers/gpu/drm/i915/intel_bios.c b/drivers/gpu/drm/i915/intel_bios.c
+index 97169ea..d4b5b18 100644
+diff --git a/drivers/gpu/drm/i915/intel_bios.h b/drivers/gpu/drm/i915/intel_bios.h
+index 0f8e5f6..425ac9d 100644
+diff --git a/drivers/gpu/drm/i915/intel_lvds.c b/drivers/gpu/drm/i915/intel_lvds.c
+index bf05762..d5b7361 100644
+diff --git a/drivers/misc/enclosure.c b/drivers/misc/enclosure.c
+index 1eac626..68e4cd7 100644
+--- a/drivers/misc/enclosure.c
++++ b/drivers/misc/enclosure.c
+@@ -284,8 +284,11 @@ enclosure_component_register(struct enclosure_device *edev,
+ 	cdev->groups = enclosure_groups;
+ 
+ 	err = device_register(cdev);
+-	if (err)
+-		ERR_PTR(err);
++	if (err) {
++		ecomp->number = -1;
++		put_device(cdev);
++		return ERR_PTR(err);
++	}
+ 
+ 	return ecomp;
+ }
+diff --git a/drivers/net/e1000e/hw.h b/drivers/net/e1000e/hw.h
+index e8e87a7..11f3b7c 100644
+--- a/drivers/net/e1000e/hw.h
++++ b/drivers/net/e1000e/hw.h
+@@ -304,7 +304,7 @@ enum e1e_registers {
+ #define E1000_KMRNCTRLSTA_DIAG_OFFSET	0x3    /* Kumeran Diagnostic */
+ #define E1000_KMRNCTRLSTA_DIAG_NELPBK	0x1000 /* Nearend Loopback mode */
+ #define E1000_KMRNCTRLSTA_K1_CONFIG	0x7
+-#define E1000_KMRNCTRLSTA_K1_ENABLE	0x140E
++#define E1000_KMRNCTRLSTA_K1_ENABLE	0x0002
+ #define E1000_KMRNCTRLSTA_K1_DISABLE	0x1400
+ 
+ #define IFE_PHY_EXTENDED_STATUS_CONTROL	0x10
+diff --git a/drivers/net/e1000e/netdev.c b/drivers/net/e1000e/netdev.c
+index 433f4dd..d177a02 100644
+--- a/drivers/net/e1000e/netdev.c
++++ b/drivers/net/e1000e/netdev.c
+@@ -3073,13 +3073,18 @@ static int e1000_test_msi(struct e1000_adapter *adapter)
+ 
+ 	/* disable SERR in case the MSI write causes a master abort */
+ 	pci_read_config_word(adapter->pdev, PCI_COMMAND, &pci_cmd);
+-	pci_write_config_word(adapter->pdev, PCI_COMMAND,
+-			      pci_cmd & ~PCI_COMMAND_SERR);
++	if (pci_cmd & PCI_COMMAND_SERR)
++		pci_write_config_word(adapter->pdev, PCI_COMMAND,
++				      pci_cmd & ~PCI_COMMAND_SERR);
+ 
+ 	err = e1000_test_msi_interrupt(adapter);
+ 
+-	/* restore previous setting of command word */
+-	pci_write_config_word(adapter->pdev, PCI_COMMAND, pci_cmd);
++	/* re-enable SERR */
++	if (pci_cmd & PCI_COMMAND_SERR) {
++		pci_read_config_word(adapter->pdev, PCI_COMMAND, &pci_cmd);
++		pci_cmd |= PCI_COMMAND_SERR;
++		pci_write_config_word(adapter->pdev, PCI_COMMAND, pci_cmd);
++	}
+ 
+ 	/* success ! */
+ 	if (!err)
+diff --git a/drivers/net/wireless/ath/ath9k/eeprom_def.c b/drivers/net/wireless/ath/ath9k/eeprom_def.c
+index 4071fc9..9510578 100644
+--- a/drivers/net/wireless/ath/ath9k/eeprom_def.c
++++ b/drivers/net/wireless/ath/ath9k/eeprom_def.c
+@@ -714,7 +714,7 @@ static void ath9k_hw_get_def_gain_boundaries_pdadcs(struct ath_hw *ah,
+ 				    vpdTableI[i][sizeCurrVpdTable - 2]);
+ 		vpdStep = (int16_t)((vpdStep < 1) ? 1 : vpdStep);
+ 
+-		if (tgtIndex > maxIndex) {
++		if (tgtIndex >= maxIndex) {
+ 			while ((ss <= tgtIndex) &&
+ 			       (k < (AR5416_NUM_PDADC_VALUES - 1))) {
+ 				tmpVal = (int16_t)((vpdTableI[i][sizeCurrVpdTable - 1] +
+diff --git a/drivers/net/wireless/ath/ath9k/hw.c b/drivers/net/wireless/ath/ath9k/hw.c
+index 2185f97..aed75eb 100644
+--- a/drivers/net/wireless/ath/ath9k/hw.c
++++ b/drivers/net/wireless/ath/ath9k/hw.c
+@@ -929,7 +929,8 @@ int ath9k_hw_init(struct ath_hw *ah)
+ 
+ 	if (ah->config.serialize_regmode == SER_REG_MODE_AUTO) {
+ 		if (ah->hw_version.macVersion == AR_SREV_VERSION_5416_PCI ||
+-		    (AR_SREV_9280(ah) && !ah->is_pciexpress)) {
++		    ((AR_SREV_9160(ah) || AR_SREV_9280(ah)) &&
++		     !ah->is_pciexpress)) {
+ 			ah->config.serialize_regmode =
+ 				SER_REG_MODE_ON;
+ 		} else {
+@@ -2402,7 +2403,8 @@ int ath9k_hw_reset(struct ath_hw *ah, struct ath9k_channel *chan,
+ 	macStaId1 = REG_READ(ah, AR_STA_ID1) & AR_STA_ID1_BASE_RATE_11B;
+ 
+ 	/* For chips on which RTC reset is done, save TSF before it gets cleared */
+-	if (AR_SREV_9280(ah) && ah->eep_ops->get_eeprom(ah, EEP_OL_PWRCTRL))
++	if (AR_SREV_9100(ah) ||
++	    (AR_SREV_9280(ah) && ah->eep_ops->get_eeprom(ah, EEP_OL_PWRCTRL)))
+ 		tsf = ath9k_hw_gettsf64(ah);
+ 
+ 	saveLedState = REG_READ(ah, AR_CFG_LED) &
+@@ -2432,7 +2434,7 @@ int ath9k_hw_reset(struct ath_hw *ah, struct ath9k_channel *chan,
+ 	}
+ 
+ 	/* Restore TSF */
+-	if (tsf && AR_SREV_9280(ah) && ah->eep_ops->get_eeprom(ah, EEP_OL_PWRCTRL))
++	if (tsf)
+ 		ath9k_hw_settsf64(ah, tsf);
+ 
+ 	if (AR_SREV_9280_10_OR_LATER(ah))
+@@ -2452,6 +2454,17 @@ int ath9k_hw_reset(struct ath_hw *ah, struct ath9k_channel *chan,
+ 	if (r)
+ 		return r;
+ 
++	/*
++	 * Some AR91xx SoC devices frequently fail to accept TSF writes
++	 * right after the chip reset. When that happens, write a new
++	 * value after the initvals have been applied, with an offset
++	 * based on measured time difference
++	 */
++	if (AR_SREV_9100(ah) && (ath9k_hw_gettsf64(ah) < tsf)) {
++		tsf += 1500;
++		ath9k_hw_settsf64(ah, tsf);
++	}
++
+ 	/* Setup MFP options for CCMP */
+ 	if (AR_SREV_9280_20_OR_LATER(ah)) {
+ 		/* Mask Retry(b11), PwrMgt(b12), MoreData(b13) to 0 in mgmt
+diff --git a/drivers/net/wireless/ath/ath9k/xmit.c b/drivers/net/wireless/ath/ath9k/xmit.c
+index e499fb6..6a04681 100644
+--- a/drivers/net/wireless/ath/ath9k/xmit.c
++++ b/drivers/net/wireless/ath/ath9k/xmit.c
+@@ -423,6 +423,14 @@ static void ath_tx_complete_aggr(struct ath_softc *sc, struct ath_txq *txq,
+ 		bf = bf_next;
+ 	}
+ 
++	/* prepend un-acked frames to the beginning of the pending frame queue */
++	if (!list_empty(&bf_pending)) {
++		spin_lock_bh(&txq->axq_lock);
++		list_splice(&bf_pending, &tid->buf_q);
++		ath_tx_queue_tid(txq, tid);
++		spin_unlock_bh(&txq->axq_lock);
++	}
++
+ 	if (tid->state & AGGR_CLEANUP) {
+ 		if (tid->baw_head == tid->baw_tail) {
+ 			tid->state &= ~AGGR_ADDBA_COMPLETE;
+@@ -435,14 +443,6 @@ static void ath_tx_complete_aggr(struct ath_softc *sc, struct ath_txq *txq,
+ 		return;
+ 	}
+ 
+-	/* prepend un-acked frames to the beginning of the pending frame queue */
+-	if (!list_empty(&bf_pending)) {
+-		spin_lock_bh(&txq->axq_lock);
+-		list_splice(&bf_pending, &tid->buf_q);
+-		ath_tx_queue_tid(txq, tid);
+-		spin_unlock_bh(&txq->axq_lock);
+-	}
+-
+ 	rcu_read_unlock();
+ 
+ 	if (needreset)
+diff --git a/drivers/net/wireless/iwlwifi/iwl-scan.c b/drivers/net/wireless/iwlwifi/iwl-scan.c
+index db2946e..faa286f 100644
+--- a/drivers/net/wireless/iwlwifi/iwl-scan.c
++++ b/drivers/net/wireless/iwlwifi/iwl-scan.c
+@@ -497,11 +497,10 @@ void iwl_bg_scan_check(struct work_struct *data)
+ 		return;
+ 
+ 	mutex_lock(&priv->mutex);
+-	if (test_bit(STATUS_SCANNING, &priv->status) ||
+-	    test_bit(STATUS_SCAN_ABORTING, &priv->status)) {
+-		IWL_DEBUG_SCAN(priv, "Scan completion watchdog resetting "
+-			"adapter (%dms)\n",
+-			jiffies_to_msecs(IWL_SCAN_CHECK_WATCHDOG));
++	if (test_bit(STATUS_SCANNING, &priv->status) &&
++	    !test_bit(STATUS_SCAN_ABORTING, &priv->status)) {
++		IWL_DEBUG_SCAN(priv, "Scan completion watchdog (%dms)\n",
++			       jiffies_to_msecs(IWL_SCAN_CHECK_WATCHDOG));
+ 
+ 		if (!test_bit(STATUS_EXIT_PENDING, &priv->status))
+ 			iwl_send_scan_abort(priv);
+@@ -797,12 +796,11 @@ void iwl_bg_abort_scan(struct work_struct *work)
+ 	    !test_bit(STATUS_GEO_CONFIGURED, &priv->status))
+ 		return;
+ 
+-	mutex_lock(&priv->mutex);
+-
+-	cancel_delayed_work_sync(&priv->scan_check);
+-	set_bit(STATUS_SCAN_ABORTING, &priv->status);
+-	iwl_send_scan_abort(priv);
++	cancel_delayed_work(&priv->scan_check);
+ 
++	mutex_lock(&priv->mutex);
++	if (test_bit(STATUS_SCAN_ABORTING, &priv->status))
++		iwl_send_scan_abort(priv);
+ 	mutex_unlock(&priv->mutex);
+ }
+ EXPORT_SYMBOL(iwl_bg_abort_scan);
+diff --git a/drivers/parisc/led.c b/drivers/parisc/led.c
+index 9581d36..cc31baa 100644
+--- a/drivers/parisc/led.c
++++ b/drivers/parisc/led.c
+@@ -182,16 +182,18 @@ static int led_proc_read(char *page, char **start, off_t off, int count,
+ static int led_proc_write(struct file *file, const char *buf, 
+ 	unsigned long count, void *data)
+ {
+-	char *cur, lbuf[count + 1];
++	char *cur, lbuf[32];
+ 	int d;
+ 
+ 	if (!capable(CAP_SYS_ADMIN))
+ 		return -EACCES;
+ 
+-	memset(lbuf, 0, count + 1);
++	if (count >= sizeof(lbuf))
++		count = sizeof(lbuf)-1;
+ 
+ 	if (copy_from_user(lbuf, buf, count))
+ 		return -EFAULT;
++	lbuf[count] = 0;
+ 
+ 	cur = lbuf;
+ 
+diff --git a/drivers/ssb/driver_chipcommon_pmu.c b/drivers/ssb/driver_chipcommon_pmu.c
+index 8e194d5..64abd11 100644
+--- a/drivers/ssb/driver_chipcommon_pmu.c
++++ b/drivers/ssb/driver_chipcommon_pmu.c
+@@ -495,9 +495,9 @@ static void ssb_pmu_resources_init(struct ssb_chipcommon *cc)
+ 		chipco_write32(cc, SSB_CHIPCO_PMU_MAXRES_MSK, max_msk);
+ }
+ 
+-/* http://bcm-v4.sipsolutions.net/802.11/SSB/PmuInit */
+ void ssb_pmu_init(struct ssb_chipcommon *cc)
+ {
++	struct ssb_bus *bus = cc->dev->bus;
+ 	u32 pmucap;
+ 
+ 	if (!(cc->capabilities & SSB_CHIPCO_CAP_PMU))
+@@ -509,12 +509,15 @@ void ssb_pmu_init(struct ssb_chipcommon *cc)
+ 	ssb_dprintk(KERN_DEBUG PFX "Found rev %u PMU (capabilities 0x%08X)\n",
+ 		    cc->pmu.rev, pmucap);
+ 
+-	if (cc->pmu.rev == 1)
+-		chipco_mask32(cc, SSB_CHIPCO_PMU_CTL,
+-			      ~SSB_CHIPCO_PMU_CTL_NOILPONW);
+-	else
+-		chipco_set32(cc, SSB_CHIPCO_PMU_CTL,
+-			     SSB_CHIPCO_PMU_CTL_NOILPONW);
++	if (cc->pmu.rev >= 1) {
++		if ((bus->chip_id == 0x4325) && (bus->chip_rev < 2)) {
++			chipco_mask32(cc, SSB_CHIPCO_PMU_CTL,
++				      ~SSB_CHIPCO_PMU_CTL_NOILPONW);
++		} else {
++			chipco_set32(cc, SSB_CHIPCO_PMU_CTL,
++				     SSB_CHIPCO_PMU_CTL_NOILPONW);
++		}
++	}
+ 	ssb_pmu_pll_init(cc);
+ 	ssb_pmu_resources_init(cc);
+ }
+diff --git a/drivers/ssb/pci.c b/drivers/ssb/pci.c
+index 17a1781..321d9ef 100644
+--- a/drivers/ssb/pci.c
++++ b/drivers/ssb/pci.c
+@@ -22,7 +22,6 @@
+ 
+ #include "ssb_private.h"
+ 
+-bool ssb_is_sprom_available(struct ssb_bus *bus);
+ 
+ /* Define the following to 1 to enable a printk on each coreswitch. */
+ #define SSB_VERBOSE_PCICORESWITCH_DEBUG		0
+@@ -168,7 +167,7 @@ err_pci:
+ }
+ 
+ /* Get the word-offset for a SSB_SPROM_XXX define. */
+-#define SPOFF(offset)	((offset) / sizeof(u16))
++#define SPOFF(offset)	(((offset) - SSB_SPROM_BASE1) / sizeof(u16))
+ /* Helper to extract some _offset, which is one of the SSB_SPROM_XXX defines. */
+ #define SPEX16(_outvar, _offset, _mask, _shift)	\
+ 	out->_outvar = ((in[SPOFF(_offset)] & (_mask)) >> (_shift))
+@@ -253,11 +252,6 @@ static int sprom_do_read(struct ssb_bus *bus, u16 *sprom)
+ {
+ 	int i;
+ 
+-	/* Check if SPROM can be read */
+-	if (ioread16(bus->mmio + bus->sprom_offset) == 0xFFFF) {
+-		ssb_printk(KERN_ERR PFX "Unable to read SPROM\n");
+-		return -ENODEV;
+-	}
+ 	for (i = 0; i < bus->sprom_size; i++)
+ 		sprom[i] = ioread16(bus->mmio + bus->sprom_offset + (i * 2));
+ 
+@@ -652,23 +646,17 @@ static int ssb_pci_sprom_get(struct ssb_bus *bus,
+ 	if (!buf)
+ 		goto out;
+ 	bus->sprom_size = SSB_SPROMSIZE_WORDS_R123;
+-	err = sprom_do_read(bus, buf);
+-	if (err)
+-		goto out_free;
++	sprom_do_read(bus, buf);
+ 	err = sprom_check_crc(buf, bus->sprom_size);
+ 	if (err) {
+ 		/* try for a 440 byte SPROM - revision 4 and higher */
+ 		kfree(buf);
+ 		buf = kcalloc(SSB_SPROMSIZE_WORDS_R4, sizeof(u16),
+ 			      GFP_KERNEL);
+-		if (!buf) {
+-			err = -ENOMEM;
++		if (!buf)
+ 			goto out;
+-		}
+ 		bus->sprom_size = SSB_SPROMSIZE_WORDS_R4;
+-		err = sprom_do_read(bus, buf);
+-		if (err)
+-			goto out_free;
++		sprom_do_read(bus, buf);
+ 		err = sprom_check_crc(buf, bus->sprom_size);
+ 		if (err) {
+ 			/* All CRC attempts failed.
+diff --git a/drivers/staging/comedi/Kconfig b/drivers/staging/comedi/Kconfig
+index d63c889..1d6834d 100644
+--- a/drivers/staging/comedi/Kconfig
++++ b/drivers/staging/comedi/Kconfig
+@@ -16,6 +16,7 @@ config COMEDI_DEBUG
+ config COMEDI_PCI_DRIVERS
+ 	tristate "Comedi PCI drivers"
+ 	depends on COMEDI && PCI
++	select COMEDI_8255
+ 	default N
+ 	---help---
+ 	  Enable lots of comedi PCI drivers to be built
+@@ -23,6 +24,7 @@ config COMEDI_PCI_DRIVERS
+ config COMEDI_PCMCIA_DRIVERS
+ 	tristate "Comedi PCMCIA drivers"
+ 	depends on COMEDI && PCMCIA && PCCARD
++	select COMEDI_8255
+ 	default N
+ 	---help---
+ 	  Enable lots of comedi PCMCIA and PCCARD drivers to be built
+@@ -33,3 +35,6 @@ config COMEDI_USB_DRIVERS
+ 	default N
+ 	---help---
+ 	  Enable lots of comedi USB drivers to be built
++
++config COMEDI_8255
++	tristate
+diff --git a/drivers/staging/comedi/drivers/Makefile b/drivers/staging/comedi/drivers/Makefile
+index df2854d..33b1d52 100644
+--- a/drivers/staging/comedi/drivers/Makefile
++++ b/drivers/staging/comedi/drivers/Makefile
+@@ -8,8 +8,10 @@ obj-$(CONFIG_COMEDI)			+= comedi_test.o
+ obj-$(CONFIG_COMEDI)			+= comedi_parport.o
+ obj-$(CONFIG_COMEDI)			+= pcm_common.o
+ 
++# Comedi 8255 module
++obj-$(CONFIG_COMEDI_8255)		+= 8255.o
++
+ # Comedi PCI drivers
+-obj-$(CONFIG_COMEDI_PCI_DRIVERS)	+= 8255.o
+ obj-$(CONFIG_COMEDI_PCI_DRIVERS)	+= acl7225b.o
+ obj-$(CONFIG_COMEDI_PCI_DRIVERS)	+= addi_apci_035.o
+ obj-$(CONFIG_COMEDI_PCI_DRIVERS)	+= addi_apci_1032.o
+diff --git a/fs/cifs/dns_resolve.c b/fs/cifs/dns_resolve.c
+index 16f31c1..31da21f 100644
+--- a/fs/cifs/dns_resolve.c
++++ b/fs/cifs/dns_resolve.c
+@@ -226,7 +226,7 @@ failed_put_cred:
+ 	return ret;
+ }
+ 
+-void __exit cifs_exit_dns_resolver(void)
++void cifs_exit_dns_resolver(void)
+ {
+ 	key_revoke(dns_resolver_cache->thread_keyring);
+ 	unregister_key_type(&key_type_dns_resolver);
+diff --git a/fs/cifs/dns_resolve.h b/fs/cifs/dns_resolve.h
+index 26b9eaa..763237a 100644
+--- a/fs/cifs/dns_resolve.h
++++ b/fs/cifs/dns_resolve.h
+@@ -24,8 +24,10 @@
+ #define _DNS_RESOLVE_H
+ 
+ #ifdef __KERNEL__
++#include <linux/module.h>
++
+ extern int __init cifs_init_dns_resolver(void);
+-extern void __exit cifs_exit_dns_resolver(void);
++extern void cifs_exit_dns_resolver(void);
+ extern int dns_resolve_server_name_to_ip(const char *unc, char **ip_addr);
+ #endif /* KERNEL */
+ 
+diff --git a/fs/gfs2/dir.c b/fs/gfs2/dir.c
+index 297d7e5..0bb3129 100644
+--- a/fs/gfs2/dir.c
++++ b/fs/gfs2/dir.c
+@@ -392,7 +392,7 @@ static int gfs2_dirent_find_space(const struct gfs2_dirent *dent,
+ 	unsigned totlen = be16_to_cpu(dent->de_rec_len);
+ 
+ 	if (gfs2_dirent_sentinel(dent))
+-		actual = GFS2_DIRENT_SIZE(0);
++		actual = 0;
+ 	if (totlen - actual >= required)
+ 		return 1;
+ 	return 0;
+diff --git a/fs/nfs/file.c b/fs/nfs/file.c
+index 61b3bf5..9f83d9f 100644
+--- a/fs/nfs/file.c
++++ b/fs/nfs/file.c
+@@ -27,6 +27,8 @@
+ #include <linux/slab.h>
+ #include <linux/pagemap.h>
+ #include <linux/aio.h>
++#include <linux/gfp.h>
++#include <linux/swap.h>
+ 
+ #include <asm/uaccess.h>
+ #include <asm/system.h>
+@@ -484,11 +486,19 @@ static void nfs_invalidate_page(struct page *page, unsigned long offset)
+  */
+ static int nfs_release_page(struct page *page, gfp_t gfp)
+ {
++	struct address_space *mapping = page->mapping;
++
+ 	dfprintk(PAGECACHE, "NFS: release_page(%p)\n", page);
+ 
+ 	/* Only do I/O if gfp is a superset of GFP_KERNEL */
+-	if ((gfp & GFP_KERNEL) == GFP_KERNEL)
+-		nfs_wb_page(page->mapping->host, page);
++	if (mapping && (gfp & GFP_KERNEL) == GFP_KERNEL) {
++		int how = FLUSH_SYNC;
++
++		/* Don't let kswapd deadlock waiting for OOM RPC calls */
++		if (current_is_kswapd())
++			how = 0;
++		nfs_commit_inode(mapping->host, how);
++	}
+ 	/* If PagePrivate() is set, then the page is not freeable */
+ 	if (PagePrivate(page))
+ 		return 0;
+diff --git a/fs/nfs/nfs4xdr.c b/fs/nfs/nfs4xdr.c
+index 5ec74cd..e81b2bf 100644
+--- a/fs/nfs/nfs4xdr.c
++++ b/fs/nfs/nfs4xdr.c
+@@ -2096,7 +2096,7 @@ nfs4_xdr_enc_getacl(struct rpc_rqst *req, __be32 *p,
+ 	encode_compound_hdr(&xdr, req, &hdr);
+ 	encode_sequence(&xdr, &args->seq_args, &hdr);
+ 	encode_putfh(&xdr, args->fh, &hdr);
+-	replen = hdr.replen + nfs4_fattr_bitmap_maxsz + 1;
++	replen = hdr.replen + op_decode_hdr_maxsz + nfs4_fattr_bitmap_maxsz + 1;
+ 	encode_getattr_two(&xdr, FATTR4_WORD0_ACL, 0, &hdr);
+ 
+ 	xdr_inline_pages(&req->rq_rcv_buf, replen << 2,
+diff --git a/fs/xfs/xfs_dfrag.c b/fs/xfs/xfs_dfrag.c
+index 73c2227..e4ccd9f 100644
+--- a/fs/xfs/xfs_dfrag.c
++++ b/fs/xfs/xfs_dfrag.c
+@@ -62,7 +62,9 @@ xfs_swapext(
+ 		goto out;
+ 	}
+ 
+-	if (!(file->f_mode & FMODE_WRITE) || (file->f_flags & O_APPEND)) {
++	if (!(file->f_mode & FMODE_WRITE) ||
++	    !(file->f_mode & FMODE_READ) ||
++	    (file->f_flags & O_APPEND)) {
+ 		error = XFS_ERROR(EBADF);
+ 		goto out_put_file;
+ 	}
+@@ -74,6 +76,7 @@ xfs_swapext(
+ 	}
+ 
+ 	if (!(target_file->f_mode & FMODE_WRITE) ||
++	    !(target_file->f_mode & FMODE_READ) ||
+ 	    (target_file->f_flags & O_APPEND)) {
+ 		error = XFS_ERROR(EBADF);
+ 		goto out_put_target_file;
+diff --git a/include/linux/ssb/ssb.h b/include/linux/ssb/ssb.h
+index a28c37d..3cbf483 100644
+--- a/include/linux/ssb/ssb.h
++++ b/include/linux/ssb/ssb.h
+@@ -301,8 +301,8 @@ struct ssb_bus {
+ 	/* ID information about the Chip. */
+ 	u16 chip_id;
+ 	u16 chip_rev;
+-	u16 sprom_size;		/* number of words in sprom */
+ 	u16 sprom_offset;
++	u16 sprom_size;		/* number of words in sprom */
+ 	u8 chip_package;
+ 
+ 	/* List of devices (cores) on the backplane. */
+@@ -391,6 +391,9 @@ extern int ssb_bus_sdiobus_register(struct ssb_bus *bus,
+ 
+ extern void ssb_bus_unregister(struct ssb_bus *bus);
+ 
++/* Does the device have an SPROM? */
++extern bool ssb_is_sprom_available(struct ssb_bus *bus);
++
+ /* Set a fallback SPROM.
+  * See kdoc at the function definition for complete documentation. */
+ extern int ssb_arch_set_fallback_sprom(const struct ssb_sprom *sprom);
+diff --git a/include/linux/ssb/ssb_driver_chipcommon.h b/include/linux/ssb/ssb_driver_chipcommon.h
+index 7600f38..2cdf249 100644
+--- a/include/linux/ssb/ssb_driver_chipcommon.h
++++ b/include/linux/ssb/ssb_driver_chipcommon.h
+@@ -46,7 +46,6 @@
+ #define   SSB_PLLTYPE_7			0x00038000	/* 25Mhz, 4 dividers */
+ #define  SSB_CHIPCO_CAP_PCTL		0x00040000	/* Power Control */
+ #define  SSB_CHIPCO_CAP_OTPS		0x00380000	/* OTP size */
+-#define  SSB_CHIPCO_CAP_SPROM		0x40000000	/* SPROM present */
+ #define  SSB_CHIPCO_CAP_OTPS_SHIFT	19
+ #define  SSB_CHIPCO_CAP_OTPS_BASE	5
+ #define  SSB_CHIPCO_CAP_JTAGM		0x00400000	/* JTAG master present */
+@@ -54,6 +53,7 @@
+ #define  SSB_CHIPCO_CAP_64BIT		0x08000000	/* 64-bit Backplane */
+ #define  SSB_CHIPCO_CAP_PMU		0x10000000	/* PMU available (rev >= 20) */
+ #define  SSB_CHIPCO_CAP_ECI		0x20000000	/* ECI available (rev >= 20) */
++#define  SSB_CHIPCO_CAP_SPROM		0x40000000	/* SPROM present */
+ #define SSB_CHIPCO_CORECTL		0x0008
+ #define  SSB_CHIPCO_CORECTL_UARTCLK0	0x00000001	/* Drive UART with internal clock */
+ #define	 SSB_CHIPCO_CORECTL_SE		0x00000002	/* sync clk out enable (corerev >= 3) */
+@@ -386,6 +386,7 @@
+ 
+ 
+ /** Chip specific Chip-Status register contents. */
++#define SSB_CHIPCO_CHST_4322_SPROM_EXISTS	0x00000040 /* SPROM present */
+ #define SSB_CHIPCO_CHST_4325_SPROM_OTP_SEL	0x00000003
+ #define SSB_CHIPCO_CHST_4325_DEFCIS_SEL		0 /* OTP is powered up, use def. CIS, no SPROM */
+ #define SSB_CHIPCO_CHST_4325_SPROM_SEL		1 /* OTP is powered up, SPROM is present */
+@@ -399,6 +400,18 @@
+ #define SSB_CHIPCO_CHST_4325_RCAL_VALUE_SHIFT	4
+ #define SSB_CHIPCO_CHST_4325_PMUTOP_2B 		0x00000200 /* 1 for 2b, 0 for to 2a */
+ 
++/** Macros to determine SPROM presence based on Chip-Status register. */
++#define SSB_CHIPCO_CHST_4312_SPROM_PRESENT(status) \
++	((status & SSB_CHIPCO_CHST_4325_SPROM_OTP_SEL) != \
++		SSB_CHIPCO_CHST_4325_OTP_SEL)
++#define SSB_CHIPCO_CHST_4322_SPROM_PRESENT(status) \
++	(status & SSB_CHIPCO_CHST_4322_SPROM_EXISTS)
++#define SSB_CHIPCO_CHST_4325_SPROM_PRESENT(status) \
++	(((status & SSB_CHIPCO_CHST_4325_SPROM_OTP_SEL) != \
++		SSB_CHIPCO_CHST_4325_DEFCIS_SEL) && \
++	 ((status & SSB_CHIPCO_CHST_4325_SPROM_OTP_SEL) != \
++		SSB_CHIPCO_CHST_4325_OTP_SEL))
++
+ 
+ 
+ /** Clockcontrol masks and values **/
+diff --git a/kernel/sched.c b/kernel/sched.c
+index a0157c7..d0958da 100644
+--- a/kernel/sched.c
++++ b/kernel/sched.c
+@@ -1623,7 +1623,7 @@ static void update_group_shares_cpu(struct task_group *tg, int cpu,
+  */
+ static int tg_shares_up(struct task_group *tg, void *data)
+ {
+-	unsigned long weight, rq_weight = 0, shares = 0;
++	unsigned long weight, rq_weight = 0, sum_weight = 0, shares = 0;
+ 	unsigned long *usd_rq_weight;
+ 	struct sched_domain *sd = data;
+ 	unsigned long flags;
+@@ -1639,6 +1639,7 @@ static int tg_shares_up(struct task_group *tg, void *data)
+ 		weight = tg->cfs_rq[i]->load.weight;
+ 		usd_rq_weight[i] = weight;
+ 
++		rq_weight += weight;
+ 		/*
+ 		 * If there are currently no tasks on the cpu pretend there
+ 		 * is one of average load so that when a new task gets to
+@@ -1647,10 +1648,13 @@ static int tg_shares_up(struct task_group *tg, void *data)
+ 		if (!weight)
+ 			weight = NICE_0_LOAD;
+ 
+-		rq_weight += weight;
++		sum_weight += weight;
+ 		shares += tg->cfs_rq[i]->shares;
+ 	}
+ 
++	if (!rq_weight)
++		rq_weight = sum_weight;
++
+ 	if ((!shares && rq_weight) || shares > tg->shares)
+ 		shares = tg->shares;
+ 
+diff --git a/kernel/slow-work.c b/kernel/slow-work.c
+index 00889bd..3514c44 100644
+--- a/kernel/slow-work.c
++++ b/kernel/slow-work.c
+@@ -640,7 +640,7 @@ int delayed_slow_work_enqueue(struct delayed_slow_work *dwork,
+ 			goto cancelled;
+ 
+ 		/* the timer holds a reference whilst it is pending */
+-		ret = work->ops->get_ref(work);
++		ret = slow_work_get_ref(work);
+ 		if (ret < 0)
+ 			goto cant_get_ref;
+ 
+diff --git a/mm/memory.c b/mm/memory.c
+index 4e59455..348e206 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -1282,10 +1282,20 @@ int __get_user_pages(struct task_struct *tsk, struct mm_struct *mm,
+ 				return i ? : -EFAULT;
+ 			}
+ 			if (pages) {
+-				struct page *page = vm_normal_page(gate_vma, start, *pte);
++				struct page *page;
++
++				page = vm_normal_page(gate_vma, start, *pte);
++				if (!page) {
++					if (!(gup_flags & FOLL_DUMP) &&
++					     is_zero_pfn(pte_pfn(*pte)))
++						page = pte_page(*pte);
++					else {
++						pte_unmap(pte);
++						return i ? : -EFAULT;
++					}
++				}
+ 				pages[i] = page;
+-				if (page)
+-					get_page(page);
++				get_page(page);
+ 			}
+ 			pte_unmap(pte);
+ 			if (vmas)
+diff --git a/net/9p/trans_fd.c b/net/9p/trans_fd.c
+index 8d934dd..a2d2984 100644
+--- a/net/9p/trans_fd.c
++++ b/net/9p/trans_fd.c
+@@ -948,7 +948,7 @@ p9_fd_create_unix(struct p9_client *client, const char *addr, char *args)
+ 
+ 	csocket = NULL;
+ 
+-	if (strlen(addr) > UNIX_PATH_MAX) {
++	if (strlen(addr) >= UNIX_PATH_MAX) {
+ 		P9_EPRINTK(KERN_ERR, "p9_trans_unix: address too long: %s\n",
+ 			addr);
+ 		err = -ENAMETOOLONG;
+diff --git a/net/wireless/mlme.c b/net/wireless/mlme.c
+index 0d86248..ec9a9d4 100644
+--- a/net/wireless/mlme.c
++++ b/net/wireless/mlme.c
+@@ -43,10 +43,10 @@ void cfg80211_send_rx_auth(struct net_device *dev, const u8 *buf, size_t len)
+ 		}
+ 	}
+ 
+-	WARN_ON(!done);
+-
+-	nl80211_send_rx_auth(rdev, dev, buf, len, GFP_KERNEL);
+-	cfg80211_sme_rx_auth(dev, buf, len);
++	if (done) {
++		nl80211_send_rx_auth(rdev, dev, buf, len, GFP_KERNEL);
++		cfg80211_sme_rx_auth(dev, buf, len);
++	}
+ 
+ 	wdev_unlock(wdev);
+ }
+diff --git a/net/wireless/scan.c b/net/wireless/scan.c
+index e5f92ee..91ec925 100644
+--- a/net/wireless/scan.c
++++ b/net/wireless/scan.c
+@@ -270,6 +270,7 @@ struct cfg80211_bss *cfg80211_get_bss(struct wiphy *wiphy,
+ {
+ 	struct cfg80211_registered_device *dev = wiphy_to_dev(wiphy);
+ 	struct cfg80211_internal_bss *bss, *res = NULL;
++	unsigned long now = jiffies;
+ 
+ 	spin_lock_bh(&dev->bss_lock);
+ 
+@@ -278,6 +279,10 @@ struct cfg80211_bss *cfg80211_get_bss(struct wiphy *wiphy,
+ 			continue;
+ 		if (channel && bss->pub.channel != channel)
+ 			continue;
++		/* Don't get expired BSS structs */
++		if (time_after(now, bss->ts + IEEE80211_SCAN_RESULT_EXPIRE) &&
++		    !atomic_read(&bss->hold))
++			continue;
+ 		if (is_bss(&bss->pub, bssid, ssid, ssid_len)) {
+ 			res = bss;
+ 			kref_get(&res->ref);
