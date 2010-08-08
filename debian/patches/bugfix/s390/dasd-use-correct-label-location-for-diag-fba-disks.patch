@@ -1,0 +1,66 @@
+From df12aa28eb11ec64887a6a2b834d8fe3f0b68e2c Mon Sep 17 00:00:00 2001
+From: Peter Oberparleiter <peter.oberparleiter@de.ibm.com>
+Date: Mon, 19 Jul 2010 09:22:35 +0200
+Subject: [PATCH] [S390] dasd: use correct label location for diag fba disks
+
+commit cffab6bc5511cd6f67a60bf16b62de4267b68c4c upstream.
+
+Partition boundary calculation fails for DASD FBA disks under the
+following conditions:
+- disk is formatted with CMS FORMAT with a blocksize of more than
+  512 bytes
+- all of the disk is reserved to a single CMS file using CMS RESERVE
+- the disk is accessed using the DIAG mode of the DASD driver
+
+Under these circumstances, the partition detection code tries to
+read the CMS label block containing partition-relevant information
+from logical block offset 1, while it is in fact located at physical
+block offset 1.
+
+Fix this problem by using the correct CMS label block location
+depending on the device type as determined by the DASD SENSE ID
+information.
+
+Signed-off-by: Peter Oberparleiter <peter.oberparleiter@de.ibm.com>
+Signed-off-by: Martin Schwidefsky <schwidefsky@de.ibm.com>
+[bwh: Adjust for 2.6.32]
+---
+ fs/partitions/ibm.c |   13 ++++++++++++-
+ 1 files changed, 12 insertions(+), 1 deletions(-)
+
+diff --git a/fs/partitions/ibm.c b/fs/partitions/ibm.c
+index fc71aab..bae725b 100644
+--- a/fs/partitions/ibm.c
++++ b/fs/partitions/ibm.c
+@@ -74,6 +74,7 @@ ibm_partition(struct parsed_partitions *state, struct block_device *bdev)
+ 	} *label;
+ 	unsigned char *data;
+ 	Sector sect;
++	sector_t labelsect;
+ 
+ 	res = 0;
+ 	blocksize = bdev_logical_block_size(bdev);
+@@ -98,9 +99,19 @@ ibm_partition(struct parsed_partitions *state, struct block_device *bdev)
+ 		goto out_freeall;
+ 
+ 	/*
++	 * Special case for FBA disks: label sector does not depend on
++	 * blocksize.
++	 */
++	if ((info->cu_type == 0x6310 && info->dev_type == 0x9336) ||
++	    (info->cu_type == 0x3880 && info->dev_type == 0x3370))
++		labelsect = info->label_block;
++	else
++		labelsect = info->label_block * (blocksize >> 9);
++
++	/*
+ 	 * Get volume label, extract name and type.
+ 	 */
+-	data = read_dev_sector(bdev, info->label_block*(blocksize/512), &sect);
++	data = read_dev_sector(bdev, labelsect, &sect);
+ 	if (data == NULL)
+ 		goto out_readerr;
+ 
+-- 
+1.7.1
+
