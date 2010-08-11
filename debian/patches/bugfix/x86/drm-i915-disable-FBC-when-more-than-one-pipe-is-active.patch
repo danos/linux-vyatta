@@ -1,0 +1,61 @@
+From ea8cac7f796172f56ba7a73ea2c84850d314d755 Mon Sep 17 00:00:00 2001
+From: Jesse Barnes <jbarnes@virtuousgeek.org>
+Date: Fri, 23 Jul 2010 15:20:00 -0700
+Subject: [PATCH] drm/i915: disable FBC when more than one pipe is active
+
+commit 9c928d168d4030a230a7a5ee1764721d173f1153 upstream.
+
+We're really supposed to do this to avoid trouble with underflows when
+multiple planes are active.
+
+Fixes https://bugs.freedesktop.org/show_bug.cgi?id=26987.
+
+Signed-off-by: Jesse Barnes <jbarnes@virtuousgeek.org>
+Tested-by: fangxun <xunx.fang@intel.com>
+Signed-off-by: Eric Anholt <eric@anholt.net>
+[bwh: Backport to DRM 2.6.33 - drop debugfs integration.]
+---
+ drivers/gpu/drm/i915/intel_display.c |   14 ++++++++++++++
+ 1 files changed, 14 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
+index 26e7d22..1a671b7 100644
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -1160,8 +1160,12 @@ static void intel_update_fbc(struct drm_crtc *crtc,
+ 	struct drm_framebuffer *fb = crtc->fb;
+ 	struct intel_framebuffer *intel_fb;
+ 	struct drm_i915_gem_object *obj_priv;
++	struct drm_crtc *tmp_crtc;
+ 	struct intel_crtc *intel_crtc = to_intel_crtc(crtc);
+ 	int plane = intel_crtc->plane;
++	int crtcs_enabled = 0;
++
++	DRM_DEBUG_KMS("\n");
+ 
+ 	if (!i915_powersave)
+ 		return;
+@@ -1181,10 +1185,20 @@ static void intel_update_fbc(struct drm_crtc *crtc,
+ 	 * If FBC is already on, we just have to verify that we can
+ 	 * keep it that way...
+ 	 * Need to disable if:
++	 *   - more than one pipe is active
+ 	 *   - changing FBC params (stride, fence, mode)
+ 	 *   - new fb is too large to fit in compressed buffer
+ 	 *   - going to an unsupported config (interlace, pixel multiply, etc.)
+ 	 */
++	list_for_each_entry(tmp_crtc, &dev->mode_config.crtc_list, head) {
++		if (tmp_crtc->enabled)
++			crtcs_enabled++;
++	}
++	DRM_DEBUG_KMS("%d pipes active\n", crtcs_enabled);
++	if (crtcs_enabled > 1) {
++		DRM_DEBUG_KMS("more than one pipe active, disabling compression\n");
++		goto out_disable;
++	}
+ 	if (intel_fb->obj->size > dev_priv->cfb_size) {
+ 		DRM_DEBUG_KMS("framebuffer too large, disabling "
+ 				"compression\n");
+-- 
+1.7.1
+
