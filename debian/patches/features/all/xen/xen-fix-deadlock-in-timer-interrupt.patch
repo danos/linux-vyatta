@@ -1,0 +1,34 @@
+From: Zdenek Salvet <salvet@ics.muni.cz>
+Subject: linux-image-2.6.26-2-xen-686: domU hang and are unresponsive (was #534880)
+Date: Mon, 2 Aug 2010 15:03:41 +0200
+
+Bug #534880 in not yet fixed in lenny :-(
+I found root cause of the problem; after I added following fix to lenny 
+xen kernel, none of 56 domU froze again in one week of testing:
+
+--- a/arch/x86/kernel/time_32-xen.c
++++ b/arch/x86/kernel/time_32-xen.c
+@@ -466,6 +466,7 @@
+ {
+ 	s64 delta, delta_cpu, stolen, blocked;
+ 	unsigned int i, cpu = smp_processor_id();
++	int schedule_clock_was_set_work = 0;
+ 	struct shadow_time_info *shadow = &per_cpu(shadow_time, cpu);
+ 	struct vcpu_runstate_info runstate;
+ 
+@@ -525,12 +526,13 @@
+ 
+ 	if (shadow_tv_version != HYPERVISOR_shared_info->wc_version) {
+ 		update_wallclock();
+-		if (keventd_up())
+-			schedule_work(&clock_was_set_work);
++		schedule_clock_was_set_work = 1;
+ 	}
+ 
+ 	write_sequnlock(&xtime_lock);
+ 
++	if (schedule_clock_was_set_work && keventd_up())
++		schedule_work(&clock_was_set_work);
+ 	/*
+ 	 * Account stolen ticks.
+ 	 * HACK: Passing NULL to account_steal_time()
