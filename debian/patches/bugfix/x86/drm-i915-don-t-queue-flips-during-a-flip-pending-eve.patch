@@ -1,0 +1,54 @@
+From e2407f4f5e49d9a471df0500be4847d42f7e35ae Mon Sep 17 00:00:00 2001
+From: Jesse Barnes <jbarnes@virtuousgeek.org>
+Date: Mon, 5 Apr 2010 14:03:51 -0700
+Subject: [PATCH 3/8] drm/i915: don't queue flips during a flip pending event
+
+commit 83f7fd055eb3f1e843803cd906179d309553967b upstream.
+
+Hardware will set the flip pending ISR bit as soon as it receives the
+flip instruction, and (supposedly) clear it once the flip completes
+(e.g. at the next vblank).  If we try to send down a flip instruction
+while the ISR bit is set, the hardware can become very confused, and we
+may never receive the corresponding flip pending interrupt, effectively
+hanging the chip.
+
+Signed-off-by: Jesse Barnes <jbarnes@virtuousgeek.org>
+Signed-off-by: Eric Anholt <eric@anholt.net>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+Signed-off-by: Stefan Bader <stefan.bader@canonical.com>
+---
+ drivers/gpu/drm/i915/intel_display.c |   11 +++++++++++
+ 1 files changed, 11 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
+index f4018fc..622e747 100644
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -4201,6 +4201,7 @@ static int intel_crtc_page_flip(struct drm_crtc *crtc,
+ 	unsigned long flags;
+ 	int pipesrc_reg = (intel_crtc->pipe == 0) ? PIPEASRC : PIPEBSRC;
+ 	int ret, pipesrc;
++	u32 flip_mask;
+ 	RING_LOCALS;
+ 
+ 	work = kzalloc(sizeof *work, GFP_KERNEL);
+@@ -4251,6 +4252,16 @@ static int intel_crtc_page_flip(struct drm_crtc *crtc,
+ 	atomic_inc(&obj_priv->pending_flip);
+ 	work->pending_flip_obj = obj;
+ 
++	if (intel_crtc->plane)
++		flip_mask = I915_DISPLAY_PLANE_B_FLIP_PENDING_INTERRUPT;
++	else
++		flip_mask = I915_DISPLAY_PLANE_A_FLIP_PENDING_INTERRUPT;
++
++	/* Wait for any previous flip to finish */
++	if (IS_GEN3(dev))
++		while (I915_READ(ISR) & flip_mask)
++			;
++
+ 	BEGIN_LP_RING(4);
+ 	if (IS_I965G(dev)) {
+ 		OUT_RING(MI_DISPLAY_FLIP |
+-- 
+1.7.1
+

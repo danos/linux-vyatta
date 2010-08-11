@@ -1,0 +1,66 @@
+From 10956a262d3d548f9d908f5f4742e44bc36a36d5 Mon Sep 17 00:00:00 2001
+From: Jesse Barnes <jbarnes@virtuousgeek.org>
+Date: Fri, 23 Jul 2010 12:03:37 -0700
+Subject: [PATCH 5/8] drm/i915: handle shared framebuffers when flipping
+
+commit be9a3dbf65a69933b06011f049b1e2fdfa6bc8b9 upstream.
+
+If a framebuffer is shared across CRTCs, the x,y position of one of them
+is likely to be something other than the origin (e.g. for extended
+desktop configs).  So calculate the offset at flip time so such
+configurations can work.
+
+Fixes https://bugs.freedesktop.org/show_bug.cgi?id=28518.
+
+Signed-off-by: Jesse Barnes <jbarnes@virtuousgeek.org>
+Tested-by: Thomas M. <tmezzadra@gmail.com>
+Tested-by: fangxun <xunx.fang@intel.com>
+Signed-off-by: Eric Anholt <eric@anholt.net>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+Signed-off-by: Stefan Bader <stefan.bader@canonical.com>
+---
+ drivers/gpu/drm/i915/intel_display.c |   10 +++++++---
+ 1 files changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
+index eb5a13b..52896ba 100644
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -4198,7 +4198,7 @@ static int intel_crtc_page_flip(struct drm_crtc *crtc,
+ 	struct drm_gem_object *obj;
+ 	struct intel_crtc *intel_crtc = to_intel_crtc(crtc);
+ 	struct intel_unpin_work *work;
+-	unsigned long flags;
++	unsigned long flags, offset;
+ 	int pipesrc_reg = (intel_crtc->pipe == 0) ? PIPEASRC : PIPEBSRC;
+ 	int ret, pipesrc;
+ 	u32 flip_mask;
+@@ -4266,19 +4266,23 @@ static int intel_crtc_page_flip(struct drm_crtc *crtc,
+ 		while (I915_READ(ISR) & flip_mask)
+ 			;
+ 
++	/* Offset into the new buffer for cases of shared fbs between CRTCs */
++	offset = obj_priv->gtt_offset;
++	offset += (crtc->y * fb->pitch) + (crtc->x * (fb->bits_per_pixel) / 8);
++
+ 	BEGIN_LP_RING(4);
+ 	if (IS_I965G(dev)) {
+ 		OUT_RING(MI_DISPLAY_FLIP |
+ 			 MI_DISPLAY_FLIP_PLANE(intel_crtc->plane));
+ 		OUT_RING(fb->pitch);
+-		OUT_RING(obj_priv->gtt_offset | obj_priv->tiling_mode);
++		OUT_RING(offset | obj_priv->tiling_mode);
+ 		pipesrc = I915_READ(pipesrc_reg); 
+ 		OUT_RING(pipesrc & 0x0fff0fff);
+ 	} else {
+ 		OUT_RING(MI_DISPLAY_FLIP_I915 |
+ 			 MI_DISPLAY_FLIP_PLANE(intel_crtc->plane));
+ 		OUT_RING(fb->pitch);
+-		OUT_RING(obj_priv->gtt_offset);
++		OUT_RING(offset);
+ 		OUT_RING(MI_NOOP);
+ 	}
+ 	ADVANCE_LP_RING();
+-- 
+1.7.1
+

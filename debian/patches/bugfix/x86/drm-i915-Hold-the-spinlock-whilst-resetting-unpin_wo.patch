@@ -1,0 +1,77 @@
+From 737b7d33a27fa18a977c7fa8fff9e6ab63e24250 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Thu, 27 May 2010 13:18:13 +0100
+Subject: [PATCH 4/8] drm/i915: Hold the spinlock whilst resetting unpin_work along error path
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+commit 468f0b44ce4b002ca7d9260f802a341854752c02 upstream.
+
+Delay taking the mutex until we need to and ensure that we hold the
+spinlock when resetting unpin_work on the error path. Also defer the
+debugging print messages until after we have released the spinlock.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Jesse Barnes <jbarnes@virtuousgeek.org>
+Cc: Kristian Høgsberg <krh@bitplanet.net>
+Reviewed-by: Jesse Barnes <jbarnes@virtuousgeek.org>
+Signed-off-by: Eric Anholt <eric@anholt.net>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+Signed-off-by: Stefan Bader <stefan.bader@canonical.com>
+---
+ drivers/gpu/drm/i915/intel_display.c |   18 +++++++++++-------
+ 1 files changed, 11 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
+index 622e747..eb5a13b 100644
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -4208,8 +4208,6 @@ static int intel_crtc_page_flip(struct drm_crtc *crtc,
+ 	if (work == NULL)
+ 		return -ENOMEM;
+ 
+-	mutex_lock(&dev->struct_mutex);
+-
+ 	work->event = event;
+ 	work->dev = crtc->dev;
+ 	intel_fb = to_intel_framebuffer(crtc->fb);
+@@ -4219,10 +4217,10 @@ static int intel_crtc_page_flip(struct drm_crtc *crtc,
+ 	/* We borrow the event spin lock for protecting unpin_work */
+ 	spin_lock_irqsave(&dev->event_lock, flags);
+ 	if (intel_crtc->unpin_work) {
+-		DRM_DEBUG_DRIVER("flip queue: crtc already busy\n");
+ 		spin_unlock_irqrestore(&dev->event_lock, flags);
+ 		kfree(work);
+-		mutex_unlock(&dev->struct_mutex);
++
++		DRM_DEBUG_DRIVER("flip queue: crtc already busy\n");
+ 		return -EBUSY;
+ 	}
+ 	intel_crtc->unpin_work = work;
+@@ -4231,13 +4229,19 @@ static int intel_crtc_page_flip(struct drm_crtc *crtc,
+ 	intel_fb = to_intel_framebuffer(fb);
+ 	obj = intel_fb->obj;
+ 
++	mutex_lock(&dev->struct_mutex);
+ 	ret = intel_pin_and_fence_fb_obj(dev, obj);
+ 	if (ret != 0) {
++		mutex_unlock(&dev->struct_mutex);
++
++		spin_lock_irqsave(&dev->event_lock, flags);
++		intel_crtc->unpin_work = NULL;
++		spin_unlock_irqrestore(&dev->event_lock, flags);
++
++		kfree(work);
++
+ 		DRM_DEBUG_DRIVER("flip queue: %p pin & fence failed\n",
+ 			  obj->driver_private);
+-		kfree(work);
+-		intel_crtc->unpin_work = NULL;
+-		mutex_unlock(&dev->struct_mutex);
+ 		return ret;
+ 	}
+ 
+-- 
+1.7.1
+

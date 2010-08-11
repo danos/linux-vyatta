@@ -1,0 +1,106 @@
+From 6e834f6fca690a64df1a2f7e6857067e06408558 Mon Sep 17 00:00:00 2001
+From: Jesse Barnes <jbarnes@virtuousgeek.org>
+Date: Thu, 22 Jul 2010 13:18:19 -0700
+Subject: [PATCH 7/8] drm/i915: make sure eDP panel is turned on
+
+commit 9934c132989d5c488d2e15188220ce240960ce96 upstream.
+
+When enabling the eDP port, we need to make sure the panel is turned on
+after training the link.  If we don't, it likely won't come back after
+suspend or may not come up at all.
+
+For unknown reasons, unlocking the panel regs before initiating a power
+on sequence is necessary.  There are known bugs in the PCH panel
+sequencing logic, apparently this is one possible workaround.
+
+Fixes https://bugs.freedesktop.org/show_bug.cgi?id=28739.
+
+Signed-off-by: Jesse Barnes <jbarnes@virtuousgeek.org>
+Tested-by: "Paulo J. S. Silva" <pjssilva@gmail.com>
+Signed-off-by: Eric Anholt <eric@anholt.net>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+Signed-off-by: Stefan Bader <stefan.bader@canonical.com>
+---
+ drivers/gpu/drm/i915/intel_dp.c |   53 +++++++++++++++++++++++++++++++++++++-
+ 1 files changed, 51 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/intel_dp.c b/drivers/gpu/drm/i915/intel_dp.c
+index 439506c..40ca37a 100644
+--- a/drivers/gpu/drm/i915/intel_dp.c
++++ b/drivers/gpu/drm/i915/intel_dp.c
+@@ -676,6 +676,51 @@ intel_dp_mode_set(struct drm_encoder *encoder, struct drm_display_mode *mode,
+ 	}
+ }
+ 
++static void ironlake_edp_panel_on (struct drm_device *dev)
++{
++	struct drm_i915_private *dev_priv = dev->dev_private;
++	unsigned long timeout = jiffies + msecs_to_jiffies(5000);
++	u32 pp, pp_status;
++
++	pp_status = I915_READ(PCH_PP_STATUS);
++	if (pp_status & PP_ON)
++		return;
++
++	pp = I915_READ(PCH_PP_CONTROL);
++	pp |= PANEL_UNLOCK_REGS | POWER_TARGET_ON;
++	I915_WRITE(PCH_PP_CONTROL, pp);
++	do {
++		pp_status = I915_READ(PCH_PP_STATUS);
++	} while (((pp_status & PP_ON) == 0) && !time_after(jiffies, timeout));
++
++	if (time_after(jiffies, timeout))
++		DRM_DEBUG_KMS("panel on wait timed out: 0x%08x\n", pp_status);
++
++	pp &= ~(PANEL_UNLOCK_REGS | EDP_FORCE_VDD);
++	I915_WRITE(PCH_PP_CONTROL, pp);
++}
++
++static void ironlake_edp_panel_off (struct drm_device *dev)
++{
++	struct drm_i915_private *dev_priv = dev->dev_private;
++	unsigned long timeout = jiffies + msecs_to_jiffies(5000);
++	u32 pp, pp_status;
++
++	pp = I915_READ(PCH_PP_CONTROL);
++	pp &= ~POWER_TARGET_ON;
++	I915_WRITE(PCH_PP_CONTROL, pp);
++	do {
++		pp_status = I915_READ(PCH_PP_STATUS);
++	} while ((pp_status & PP_ON) && !time_after(jiffies, timeout));
++
++	if (time_after(jiffies, timeout))
++		DRM_DEBUG_KMS("panel off wait timed out\n");
++
++	/* Make sure VDD is enabled so DP AUX will work */
++	pp |= EDP_FORCE_VDD;
++	I915_WRITE(PCH_PP_CONTROL, pp);
++}
++
+ static void ironlake_edp_backlight_on (struct drm_device *dev)
+ {
+ 	struct drm_i915_private *dev_priv = dev->dev_private;
+@@ -710,14 +755,18 @@ intel_dp_dpms(struct drm_encoder *encoder, int mode)
+ 	if (mode != DRM_MODE_DPMS_ON) {
+ 		if (dp_reg & DP_PORT_EN) {
+ 			intel_dp_link_down(intel_output, dp_priv->DP);
+-			if (IS_eDP(intel_output))
++			if (IS_eDP(intel_output)) {
+ 				ironlake_edp_backlight_off(dev);
++				ironlake_edp_backlight_off(dev);
++			}
+ 		}
+ 	} else {
+ 		if (!(dp_reg & DP_PORT_EN)) {
+ 			intel_dp_link_train(intel_output, dp_priv->DP, dp_priv->link_configuration);
+-			if (IS_eDP(intel_output))
++			if (IS_eDP(intel_output)) {
++				ironlake_edp_panel_on(dev);
+ 				ironlake_edp_backlight_on(dev);
++			}
+ 		}
+ 	}
+ 	dp_priv->dpms_mode = mode;
+-- 
+1.7.1
+

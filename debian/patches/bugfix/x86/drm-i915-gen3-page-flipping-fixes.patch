@@ -1,0 +1,192 @@
+From 4754f69f0396f6c859d3b59b1dc848c8a46fea5b Mon Sep 17 00:00:00 2001
+From: Jesse Barnes <jbarnes@virtuousgeek.org>
+Date: Fri, 26 Mar 2010 10:35:20 -0700
+Subject: [PATCH 2/8] drm/i915: gen3 page flipping fixes
+
+commit 1afe3e9d4335bf3bc5615e37243dc8fef65dac8f upstream.
+
+Gen3 chips have slightly different flip commands, and also contain a bit
+that indicates whether a "flip pending" interrupt means the flip has
+been queued or has been completed.
+
+So implement support for the gen3 flip command, and make sure we use the
+flip pending interrupt correctly depending on the value of ECOSKPD bit
+0.
+
+Signed-off-by: Jesse Barnes <jbarnes@virtuousgeek.org>
+Signed-off-by: Eric Anholt <eric@anholt.net>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+Signed-off-by: Stefan Bader <stefan.bader@canonical.com>
+---
+ drivers/gpu/drm/i915/i915_dma.c      |    4 ++++
+ drivers/gpu/drm/i915/i915_drv.h      |    1 +
+ drivers/gpu/drm/i915/i915_irq.c      |   16 ++++++++++++----
+ drivers/gpu/drm/i915/i915_reg.h      |    4 ++++
+ drivers/gpu/drm/i915/intel_display.c |   29 ++++++++++++++++++++++++-----
+ drivers/gpu/drm/i915/intel_drv.h     |    1 +
+ 6 files changed, 46 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_dma.c b/drivers/gpu/drm/i915/i915_dma.c
+index d642efd..2918fbc 100644
+--- a/drivers/gpu/drm/i915/i915_dma.c
++++ b/drivers/gpu/drm/i915/i915_dma.c
+@@ -1266,6 +1266,10 @@ static int i915_load_modeset_init(struct drm_device *dev,
+ 	if (ret)
+ 		goto destroy_ringbuffer;
+ 
++	/* IIR "flip pending" bit means done if this bit is set */
++	if (IS_GEN3(dev) && (I915_READ(ECOSKPD) & ECO_FLIP_DONE))
++		dev_priv->flip_pending_is_done = true;
++
+ 	intel_modeset_init(dev);
+ 
+ 	ret = drm_irq_install(dev);
+diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
+index 6679741..b26d0ed 100644
+--- a/drivers/gpu/drm/i915/i915_drv.h
++++ b/drivers/gpu/drm/i915/i915_drv.h
+@@ -581,6 +581,7 @@ typedef struct drm_i915_private {
+ 	struct drm_crtc *plane_to_crtc_mapping[2];
+ 	struct drm_crtc *pipe_to_crtc_mapping[2];
+ 	wait_queue_head_t pending_flip_queue;
++	bool flip_pending_is_done;
+ 
+ 	/* Reclocking support */
+ 	bool render_reclock_avail;
+diff --git a/drivers/gpu/drm/i915/i915_irq.c b/drivers/gpu/drm/i915/i915_irq.c
+index d6466d5..345b60f 100644
+--- a/drivers/gpu/drm/i915/i915_irq.c
++++ b/drivers/gpu/drm/i915/i915_irq.c
+@@ -661,22 +661,30 @@ irqreturn_t i915_driver_irq_handler(DRM_IRQ_ARGS)
+ 			mod_timer(&dev_priv->hangcheck_timer, jiffies + DRM_I915_HANGCHECK_PERIOD);
+ 		}
+ 
+-		if (iir & I915_DISPLAY_PLANE_A_FLIP_PENDING_INTERRUPT)
++		if (iir & I915_DISPLAY_PLANE_A_FLIP_PENDING_INTERRUPT) {
+ 			intel_prepare_page_flip(dev, 0);
++			if (dev_priv->flip_pending_is_done)
++				intel_finish_page_flip_plane(dev, 0);
++		}
+ 
+-		if (iir & I915_DISPLAY_PLANE_B_FLIP_PENDING_INTERRUPT)
++		if (iir & I915_DISPLAY_PLANE_B_FLIP_PENDING_INTERRUPT) {
++			if (dev_priv->flip_pending_is_done)
++				intel_finish_page_flip_plane(dev, 1);
+ 			intel_prepare_page_flip(dev, 1);
++		}
+ 
+ 		if (pipea_stats & vblank_status) {
+ 			vblank++;
+ 			drm_handle_vblank(dev, 0);
+-			intel_finish_page_flip(dev, 0);
++			if (!dev_priv->flip_pending_is_done)
++				intel_finish_page_flip(dev, 0);
+ 		}
+ 
+ 		if (pipeb_stats & vblank_status) {
+ 			vblank++;
+ 			drm_handle_vblank(dev, 1);
+-			intel_finish_page_flip(dev, 1);
++			if (!dev_priv->flip_pending_is_done)
++				intel_finish_page_flip(dev, 1);
+ 		}
+ 
+ 		if ((pipeb_stats & I915_LEGACY_BLC_EVENT_STATUS) ||
+diff --git a/drivers/gpu/drm/i915/i915_reg.h b/drivers/gpu/drm/i915/i915_reg.h
+index 635d349..5acc4ca 100644
+--- a/drivers/gpu/drm/i915/i915_reg.h
++++ b/drivers/gpu/drm/i915/i915_reg.h
+@@ -158,6 +158,7 @@
+ #define   MI_OVERLAY_OFF	(0x2<<21)
+ #define MI_LOAD_SCAN_LINES_INCL MI_INSTR(0x12, 0)
+ #define MI_DISPLAY_FLIP		MI_INSTR(0x14, 2)
++#define MI_DISPLAY_FLIP_I915	MI_INSTR(0x14, 1)
+ #define   MI_DISPLAY_FLIP_PLANE(n) ((n) << 20)
+ #define MI_STORE_DWORD_IMM	MI_INSTR(0x20, 1)
+ #define   MI_MEM_VIRTUAL	(1 << 22) /* 965+ only */
+@@ -399,6 +400,9 @@
+ #define   CM0_DEPTH_WRITE_DISABLE (1<<1)
+ #define   CM0_RC_OP_FLUSH_DISABLE (1<<0)
+ #define GFX_FLSH_CNTL	0x02170 /* 915+ only */
++#define ECOSKPD		0x021d0
++#define   ECO_GATING_CX_ONLY	(1<<3)
++#define   ECO_FLIP_DONE		(1<<0)
+ 
+ 
+ /*
+diff --git a/drivers/gpu/drm/i915/intel_display.c b/drivers/gpu/drm/i915/intel_display.c
+index 9502353..f4018fc 100644
+--- a/drivers/gpu/drm/i915/intel_display.c
++++ b/drivers/gpu/drm/i915/intel_display.c
+@@ -4102,10 +4102,10 @@ static void intel_unpin_work_fn(struct work_struct *__work)
+ 	kfree(work);
+ }
+ 
+-void intel_finish_page_flip(struct drm_device *dev, int pipe)
++static void do_intel_finish_page_flip(struct drm_device *dev,
++				      struct drm_crtc *crtc)
+ {
+ 	drm_i915_private_t *dev_priv = dev->dev_private;
+-	struct drm_crtc *crtc = dev_priv->pipe_to_crtc_mapping[pipe];
+ 	struct intel_crtc *intel_crtc = to_intel_crtc(crtc);
+ 	struct intel_unpin_work *work;
+ 	struct drm_i915_gem_object *obj_priv;
+@@ -4155,6 +4155,22 @@ void intel_finish_page_flip(struct drm_device *dev, int pipe)
+ 	schedule_work(&work->work);
+ }
+ 
++void intel_finish_page_flip(struct drm_device *dev, int pipe)
++{
++	drm_i915_private_t *dev_priv = dev->dev_private;
++	struct drm_crtc *crtc = dev_priv->pipe_to_crtc_mapping[pipe];
++
++	do_intel_finish_page_flip(dev, crtc);
++}
++
++void intel_finish_page_flip_plane(struct drm_device *dev, int plane)
++{
++	drm_i915_private_t *dev_priv = dev->dev_private;
++	struct drm_crtc *crtc = dev_priv->plane_to_crtc_mapping[plane];
++
++	do_intel_finish_page_flip(dev, crtc);
++}
++
+ void intel_prepare_page_flip(struct drm_device *dev, int plane)
+ {
+ 	drm_i915_private_t *dev_priv = dev->dev_private;
+@@ -4236,14 +4252,17 @@ static int intel_crtc_page_flip(struct drm_crtc *crtc,
+ 	work->pending_flip_obj = obj;
+ 
+ 	BEGIN_LP_RING(4);
+-	OUT_RING(MI_DISPLAY_FLIP |
+-		 MI_DISPLAY_FLIP_PLANE(intel_crtc->plane));
+-	OUT_RING(fb->pitch);
+ 	if (IS_I965G(dev)) {
++		OUT_RING(MI_DISPLAY_FLIP |
++			 MI_DISPLAY_FLIP_PLANE(intel_crtc->plane));
++		OUT_RING(fb->pitch);
+ 		OUT_RING(obj_priv->gtt_offset | obj_priv->tiling_mode);
+ 		pipesrc = I915_READ(pipesrc_reg); 
+ 		OUT_RING(pipesrc & 0x0fff0fff);
+ 	} else {
++		OUT_RING(MI_DISPLAY_FLIP_I915 |
++			 MI_DISPLAY_FLIP_PLANE(intel_crtc->plane));
++		OUT_RING(fb->pitch);
+ 		OUT_RING(obj_priv->gtt_offset);
+ 		OUT_RING(MI_NOOP);
+ 	}
+diff --git a/drivers/gpu/drm/i915/intel_drv.h b/drivers/gpu/drm/i915/intel_drv.h
+index a51573d..46034dc 100644
+--- a/drivers/gpu/drm/i915/intel_drv.h
++++ b/drivers/gpu/drm/i915/intel_drv.h
+@@ -217,6 +217,7 @@ extern int intel_framebuffer_create(struct drm_device *dev,
+ 
+ extern void intel_prepare_page_flip(struct drm_device *dev, int plane);
+ extern void intel_finish_page_flip(struct drm_device *dev, int pipe);
++extern void intel_finish_page_flip_plane(struct drm_device *dev, int plane);
+ 
+ extern void intel_setup_overlay(struct drm_device *dev);
+ extern void intel_cleanup_overlay(struct drm_device *dev);
+-- 
+1.7.1
+
