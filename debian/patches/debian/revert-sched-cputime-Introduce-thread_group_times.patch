@@ -1,0 +1,238 @@
+From da275351d6167de9c929e7138a8edf1571e83fb0 Mon Sep 17 00:00:00 2001
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Fri, 13 Aug 2010 03:59:33 +0100
+Subject: [PATCH 2/2] Revert "sched, cputime: Introduce thread_group_times()"
+
+This reverts commit 0cf55e1ec08bb5a22e068309e2d8ba1180ab4239
+which causes an ABI change.
+---
+ fs/proc/array.c       |    5 ++++-
+ include/linux/sched.h |    4 ----
+ kernel/exit.c         |   20 ++++++++------------
+ kernel/fork.c         |    3 ---
+ kernel/sched.c        |   41 -----------------------------------------
+ kernel/sys.c          |   18 ++++++++++--------
+ 6 files changed, 22 insertions(+), 69 deletions(-)
+
+diff --git a/fs/proc/array.c b/fs/proc/array.c
+index 42fdc76..725a650 100644
+--- a/fs/proc/array.c
++++ b/fs/proc/array.c
+@@ -405,6 +405,7 @@ static int do_task_stat(struct seq_file *m, struct pid_namespace *ns,
+ 
+ 		/* add up live thread stats at the group level */
+ 		if (whole) {
++			struct task_cputime cputime;
+ 			struct task_struct *t = task;
+ 			do {
+ 				min_flt += t->min_flt;
+@@ -415,7 +416,9 @@ static int do_task_stat(struct seq_file *m, struct pid_namespace *ns,
+ 
+ 			min_flt += sig->min_flt;
+ 			maj_flt += sig->maj_flt;
+-			thread_group_times(task, &utime, &stime);
++			thread_group_cputime(task, &cputime);
++			utime = cputime.utime;
++			stime = cputime.stime;
+ 			gtime = cputime_add(gtime, sig->gtime);
+ 		}
+ 
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index cc24beb..b253434 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -628,9 +628,6 @@ struct signal_struct {
+ 	cputime_t utime, stime, cutime, cstime;
+ 	cputime_t gtime;
+ 	cputime_t cgtime;
+-#ifndef CONFIG_VIRT_CPU_ACCOUNTING
+-	cputime_t prev_utime, prev_stime;
+-#endif
+ 	unsigned long nvcsw, nivcsw, cnvcsw, cnivcsw;
+ 	unsigned long min_flt, maj_flt, cmin_flt, cmaj_flt;
+ 	unsigned long inblock, oublock, cinblock, coublock;
+@@ -1728,7 +1725,6 @@ static inline void put_task_struct(struct task_struct *t)
+ extern cputime_t task_utime(struct task_struct *p);
+ extern cputime_t task_stime(struct task_struct *p);
+ extern cputime_t task_gtime(struct task_struct *p);
+-extern void thread_group_times(struct task_struct *p, cputime_t *ut, cputime_t *st);
+ 
+ /*
+  * Per process flags
+diff --git a/kernel/exit.c b/kernel/exit.c
+index 4a0e062..f7864ac 100644
+--- a/kernel/exit.c
++++ b/kernel/exit.c
+@@ -110,8 +110,8 @@ static void __exit_signal(struct task_struct *tsk)
+ 		 * We won't ever get here for the group leader, since it
+ 		 * will have been the last reference on the signal_struct.
+ 		 */
+-		sig->utime = cputime_add(sig->utime, tsk->utime);
+-		sig->stime = cputime_add(sig->stime, tsk->stime);
++		sig->utime = cputime_add(sig->utime, task_utime(tsk));
++		sig->stime = cputime_add(sig->stime, task_stime(tsk));
+ 		sig->gtime = cputime_add(sig->gtime, task_gtime(tsk));
+ 		sig->min_flt += tsk->min_flt;
+ 		sig->maj_flt += tsk->maj_flt;
+@@ -1205,7 +1205,6 @@ static int wait_task_zombie(struct wait_opts *wo, struct task_struct *p)
+ 		struct signal_struct *psig;
+ 		struct signal_struct *sig;
+ 		unsigned long maxrss;
+-		cputime_t tgutime, tgstime;
+ 
+ 		/*
+ 		 * The resource counters for the group leader are in its
+@@ -1221,23 +1220,20 @@ static int wait_task_zombie(struct wait_opts *wo, struct task_struct *p)
+ 		 * need to protect the access to parent->signal fields,
+ 		 * as other threads in the parent group can be right
+ 		 * here reaping other children at the same time.
+-		 *
+-		 * We use thread_group_times() to get times for the thread
+-		 * group, which consolidates times for all threads in the
+-		 * group including the group leader.
+ 		 */
+-		thread_group_times(p, &tgutime, &tgstime);
+ 		spin_lock_irq(&p->real_parent->sighand->siglock);
+ 		psig = p->real_parent->signal;
+ 		sig = p->signal;
+ 		psig->cutime =
+ 			cputime_add(psig->cutime,
+-			cputime_add(tgutime,
+-				    sig->cutime));
++			cputime_add(p->utime,
++			cputime_add(sig->utime,
++				    sig->cutime)));
+ 		psig->cstime =
+ 			cputime_add(psig->cstime,
+-			cputime_add(tgstime,
+-				    sig->cstime));
++			cputime_add(p->stime,
++			cputime_add(sig->stime,
++				    sig->cstime)));
+ 		psig->cgtime =
+ 			cputime_add(psig->cgtime,
+ 			cputime_add(p->gtime,
+diff --git a/kernel/fork.c b/kernel/fork.c
+index ce2f585..28b4874 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -884,9 +884,6 @@ static int copy_signal(unsigned long clone_flags, struct task_struct *tsk)
+ 	sig->utime = sig->stime = sig->cutime = sig->cstime = cputime_zero;
+ 	sig->gtime = cputime_zero;
+ 	sig->cgtime = cputime_zero;
+-#ifndef CONFIG_VIRT_CPU_ACCOUNTING
+-	sig->prev_utime = sig->prev_stime = cputime_zero;
+-#endif
+ 	sig->nvcsw = sig->nivcsw = sig->cnvcsw = sig->cnivcsw = 0;
+ 	sig->min_flt = sig->maj_flt = sig->cmin_flt = sig->cmaj_flt = 0;
+ 	sig->inblock = sig->oublock = sig->cinblock = sig->coublock = 0;
+diff --git a/kernel/sched.c b/kernel/sched.c
+index 9990074..389ac4d 100644
+--- a/kernel/sched.c
++++ b/kernel/sched.c
+@@ -5215,16 +5215,6 @@ cputime_t task_stime(struct task_struct *p)
+ {
+ 	return p->stime;
+ }
+-
+-void thread_group_times(struct task_struct *p, cputime_t *ut, cputime_t *st)
+-{
+-	struct task_cputime cputime;
+-
+-	thread_group_cputime(p, &cputime);
+-
+-	*ut = cputime.utime;
+-	*st = cputime.stime;
+-}
+ #else
+ 
+ #ifndef nsecs_to_cputime
+@@ -5268,37 +5258,6 @@ cputime_t task_stime(struct task_struct *p)
+ 
+ 	return p->prev_stime;
+ }
+-
+-/*
+- * Must be called with siglock held.
+- */
+-void thread_group_times(struct task_struct *p, cputime_t *ut, cputime_t *st)
+-{
+-	struct signal_struct *sig = p->signal;
+-	struct task_cputime cputime;
+-	cputime_t rtime, utime, total;
+-
+-	thread_group_cputime(p, &cputime);
+-
+-	total = cputime_add(cputime.utime, cputime.stime);
+-	rtime = nsecs_to_cputime(cputime.sum_exec_runtime);
+-
+-	if (total) {
+-		u64 temp;
+-
+-		temp = (u64)(rtime * cputime.utime);
+-		do_div(temp, total);
+-		utime = (cputime_t)temp;
+-	} else
+-		utime = rtime;
+-
+-	sig->prev_utime = max(sig->prev_utime, utime);
+-	sig->prev_stime = max(sig->prev_stime,
+-			      cputime_sub(rtime, sig->prev_utime));
+-
+-	*ut = sig->prev_utime;
+-	*st = sig->prev_stime;
+-}
+ #endif
+ 
+ inline cputime_t task_gtime(struct task_struct *p)
+diff --git a/kernel/sys.c b/kernel/sys.c
+index 26e4b8a..ce17760 100644
+--- a/kernel/sys.c
++++ b/kernel/sys.c
+@@ -911,15 +911,16 @@ change_okay:
+ 
+ void do_sys_times(struct tms *tms)
+ {
+-	cputime_t tgutime, tgstime, cutime, cstime;
++	struct task_cputime cputime;
++	cputime_t cutime, cstime;
+ 
++	thread_group_cputime(current, &cputime);
+ 	spin_lock_irq(&current->sighand->siglock);
+-	thread_group_times(current, &tgutime, &tgstime);
+ 	cutime = current->signal->cutime;
+ 	cstime = current->signal->cstime;
+ 	spin_unlock_irq(&current->sighand->siglock);
+-	tms->tms_utime = cputime_to_clock_t(tgutime);
+-	tms->tms_stime = cputime_to_clock_t(tgstime);
++	tms->tms_utime = cputime_to_clock_t(cputime.utime);
++	tms->tms_stime = cputime_to_clock_t(cputime.stime);
+ 	tms->tms_cutime = cputime_to_clock_t(cutime);
+ 	tms->tms_cstime = cputime_to_clock_t(cstime);
+ }
+@@ -1337,7 +1338,8 @@ static void k_getrusage(struct task_struct *p, int who, struct rusage *r)
+ {
+ 	struct task_struct *t;
+ 	unsigned long flags;
+-	cputime_t tgutime, tgstime, utime, stime;
++	cputime_t utime, stime;
++	struct task_cputime cputime;
+ 	unsigned long maxrss = 0;
+ 
+ 	memset((char *) r, 0, sizeof *r);
+@@ -1371,9 +1373,9 @@ static void k_getrusage(struct task_struct *p, int who, struct rusage *r)
+ 				break;
+ 
+ 		case RUSAGE_SELF:
+-			thread_group_times(p, &tgutime, &tgstime);
+-			utime = cputime_add(utime, tgutime);
+-			stime = cputime_add(stime, tgstime);
++			thread_group_cputime(p, &cputime);
++			utime = cputime_add(utime, cputime.utime);
++			stime = cputime_add(stime, cputime.stime);
+ 			r->ru_nvcsw += p->signal->nvcsw;
+ 			r->ru_nivcsw += p->signal->nivcsw;
+ 			r->ru_minflt += p->signal->min_flt;
+-- 
+1.7.1
+
