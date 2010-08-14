@@ -1,0 +1,35 @@
+commit dd1a3004ef4eda44a464c36f88a52b58a6a55806
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Fri Aug 13 09:49:20 2010 -0700
+
+    [Backported to Debian's 2.6.26 by dann frazier <dannf@debian.org>]
+    
+    x86: don't send SIGBUS for kernel page faults
+    
+    It's wrong for several reasons, but the most direct one is that the
+    fault may be for the stack accesses to set up a previous SIGBUS.  When
+    we have a kernel exception, the kernel exception handler does all the
+    fixups, not some user-level signal handler.
+    
+    Even apart from the nested SIGBUS issue, it's also wrong to give out
+    kernel fault addresses in the signal handler info block, or to send a
+    SIGBUS when a system call already returns EFAULT.
+    
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/arch/x86/mm/fault.c b/arch/x86/mm/fault.c
+index 8bcb6f4..f48d1bc 100644
+--- a/arch/x86/mm/fault.c
++++ b/arch/x86/mm/fault.c
+@@ -896,8 +896,10 @@ do_sigbus:
+ 	up_read(&mm->mmap_sem);
+ 
+ 	/* Kernel mode? Handle exceptions or die */
+-	if (!(error_code & PF_USER))
++	if (!(error_code & PF_USER)) {
+ 		goto no_context;
++		return;
++	}
+ #ifdef CONFIG_X86_32
+ 	/* User space => ok to do another page fault */
+ 	if (is_prefetch(regs, address, error_code))
