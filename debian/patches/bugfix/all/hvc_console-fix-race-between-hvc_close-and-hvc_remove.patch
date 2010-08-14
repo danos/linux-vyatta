@@ -1,4 +1,50 @@
-commit d3da819481b648303db11a3f90dc00f156d36ad5
+[2 changesets backported to Debian's 2.6.26 by dann frazier <dannf@debian.org>]
+
+commit 3852796343ee752d0ea3e3278a1cb57106e850d9
+Author: Amit Shah <amit.shah@redhat.com>
+Date:   Fri Mar 12 11:53:15 2010 +0530
+
+    hvc_console: Fix race between hvc_close and hvc_remove
+    
+    Alan pointed out a race in the code where hvc_remove is invoked. The
+    recent virtio_console work is the first user of hvc_remove().
+    
+    Alan describes it thus:
+    
+    The hvc_console assumes that a close and remove call can't occur at the
+    same time.
+    
+    In addition tty_hangup(tty) is problematic as tty_hangup is asynchronous
+    itself....
+    
+    So this can happen
+    
+            hvc_close                               hvc_remove
+            hung up ? - no
+                                                    lock
+                                                    tty = hp->tty
+                                                    unlock
+            lock
+            hp->tty = NULL
+            unlock
+            notify del
+            kref_put the hvc struct
+            close completes
+            tty is destroyed
+                                                    tty_hangup dead tty
+                                                    tty->ops will be NULL
+                                                    NULL->...
+    
+    This patch adds some tty krefs and also converts to using tty_vhangup().
+    
+    Reported-by: Alan Cox <alan@lxorguk.ukuu.org.uk>
+    Signed-off-by: Amit Shah <amit.shah@redhat.com>
+    CC: Alan Cox <alan@lxorguk.ukuu.org.uk>
+    CC: linuxppc-dev@ozlabs.org
+    CC: Rusty Russell <rusty@rustcorp.com.au>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+
+commit 320718ee074acce5ffced6506cb51af1388942aa
 Author: Anton Blanchard <anton@samba.org>
 Date:   Tue Apr 6 21:42:38 2010 +1000
 
@@ -42,27 +88,109 @@ Date:   Tue Apr 6 21:42:38 2010 +1000
     Signed-off-by: Anton Blanchard <anton@samba.org>
     Acked-by: Amit Shah <amit.shah@redhat.com>
     Signed-off-by: Rusty Russell <rusty@rustcorp.com.au>
-    Debian-backport-by: dann frazier <dannf@debian.org>
 
 diff --git a/drivers/char/hvc_console.c b/drivers/char/hvc_console.c
-index ea04857..beb5a47 100644
+index 44160d5..beb5a47 100644
 --- a/drivers/char/hvc_console.c
 +++ b/drivers/char/hvc_console.c
-@@ -405,7 +405,6 @@ static void hvc_close(struct tty_struct *tty, struct file * filp)
- 	hp = tty->driver_data;
- 
+@@ -343,6 +343,7 @@ static int hvc_open(struct tty_struct *tty, struct file * filp)
  	spin_lock_irqsave(&hp->lock, flags);
--	tty_kref_get(tty);
+ 	/* Check and then increment for fast path open. */
+ 	if (hp->count++ > 0) {
++		tty_kref_get(tty);
+ 		spin_unlock_irqrestore(&hp->lock, flags);
+ 		hvc_kick();
+ 		return 0;
+@@ -351,7 +352,7 @@ static int hvc_open(struct tty_struct *tty, struct file * filp)
+ 	tty->driver_data = hp;
+ 	tty->low_latency = 1; /* Makes flushes to ldisc synchronous. */
+ 
+-	hp->tty = tty;
++	hp->tty = tty_kref_get(tty);
+ 	/* Save for request_irq outside of spin_lock. */
+ 	irq = hp->irq;
+ 	if (irq)
+@@ -373,6 +374,7 @@ static int hvc_open(struct tty_struct *tty, struct file * filp)
+ 		hp->tty = NULL;
+ 		hp->irq_requested = 0;
+ 		spin_unlock_irqrestore(&hp->lock, flags);
++		tty_kref_put(tty);
+ 		tty->driver_data = NULL;
+ 		kref_put(&hp->kref, destroy_hvc_struct);
+ 		printk(KERN_ERR "hvc_open: request_irq failed with rc %d.\n", rc);
+@@ -401,6 +403,7 @@ static void hvc_close(struct tty_struct *tty, struct file * filp)
+ 		return;
+ 
+ 	hp = tty->driver_data;
++
+ 	spin_lock_irqsave(&hp->lock, flags);
  
  	if (--hp->count == 0) {
- 		if (hp->irq_requested)
-@@ -416,9 +415,6 @@ static void hvc_close(struct tty_struct *tty, struct file * filp)
- 		hp->tty = NULL;
+@@ -429,6 +432,7 @@ static void hvc_close(struct tty_struct *tty, struct file * filp)
  		spin_unlock_irqrestore(&hp->lock, flags);
+ 	}
  
--		/* Put the ref obtained in hvc_open() */
--		tty_kref_put(tty);
--
- 		/*
- 		 * Chain calls chars_in_buffer() and returns immediately if
- 		 * there is no buffered data otherwise sleeps on a wait queue
++	tty_kref_put(tty);
+ 	kref_put(&hp->kref, destroy_hvc_struct);
+ }
+ 
+@@ -467,6 +471,7 @@ static void hvc_hangup(struct tty_struct *tty)
+ 		free_irq(irq, hp);
+ 	while(temp_open_count) {
+ 		--temp_open_count;
++		tty_kref_put(tty);
+ 		kref_put(&hp->kref, destroy_hvc_struct);
+ 	}
+ }
+@@ -594,7 +599,7 @@ static int hvc_poll(struct hvc_struct *hp)
+ 		poll_mask |= HVC_POLL_WRITE;
+ 
+ 	/* No tty attached, just skip */
+-	tty = hp->tty;
++	tty = tty_kref_get(hp->tty);
+ 	if (tty == NULL)
+ 		goto bail;
+ 
+@@ -671,6 +676,8 @@ static int hvc_poll(struct hvc_struct *hp)
+ 
+ 		tty_flip_buffer_push(tty);
+ 	}
++	if (tty)
++		tty_kref_put(tty);
+ 
+ 	return poll_mask;
+ }
+@@ -797,7 +804,7 @@ int __devexit hvc_remove(struct hvc_struct *hp)
+ 	struct tty_struct *tty;
+ 
+ 	spin_lock_irqsave(&hp->lock, flags);
+-	tty = hp->tty;
++	tty = tty_kref_get(hp->tty);
+ 
+ 	if (hp->index < MAX_NR_HVC_CONSOLES)
+ 		vtermnos[hp->index] = -1;
+@@ -809,18 +816,18 @@ int __devexit hvc_remove(struct hvc_struct *hp)
+ 	/*
+ 	 * We 'put' the instance that was grabbed when the kref instance
+ 	 * was initialized using kref_init().  Let the last holder of this
+-	 * kref cause it to be removed, which will probably be the tty_hangup
++	 * kref cause it to be removed, which will probably be the tty_vhangup
+ 	 * below.
+ 	 */
+ 	kref_put(&hp->kref, destroy_hvc_struct);
+ 
+ 	/*
+-	 * This function call will auto chain call hvc_hangup.  The tty should
+-	 * always be valid at this time unless a simultaneous tty close already
+-	 * cleaned up the hvc_struct.
++	 * This function call will auto chain call hvc_hangup.
+ 	 */
+-	if (tty)
+-		tty_hangup(tty);
++	if (tty) {
++		tty_vhangup(tty);
++		tty_kref_put(tty);
++	}
+ 	return 0;
+ }
+ 
