@@ -1,0 +1,78 @@
+From f863718750a155259bcccbf10b12d8282a0f538f Mon Sep 17 00:00:00 2001
+From: dann frazier <dannf@hp.com>
+Date: Wed, 18 Aug 2010 17:04:23 -0600
+Subject: [PATCH 2/2] From: Linus Torvalds <torvalds@linux-foundation.org>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+[Backported to Debian's 2.6.26 by dann frazier <dannf@debian.org>]
+
+commit d7824370e26325c881b665350ce64fb0a4fde24a upstream.
+
+This commit makes the stack guard page somewhat less visible to user
+space. It does this by:
+
+ - not showing the guard page in /proc/<pid>/maps
+
+   It looks like lvm-tools will actually read /proc/self/maps to figure
+   out where all its mappings are, and effectively do a specialized
+   "mlockall()" in user space.  By not showing the guard page as part of
+   the mapping (by just adding PAGE_SIZE to the start for grows-up
+   pages), lvm-tools ends up not being aware of it.
+
+ - by also teaching the _real_ mlock() functionality not to try to lock
+   the guard page.
+
+   That would just expand the mapping down to create a new guard page,
+   so there really is no point in trying to lock it in place.
+
+It would perhaps be nice to show the guard page specially in
+/proc/<pid>/maps (or at least mark grow-down segments some way), but
+let's not open ourselves up to more breakage by user space from programs
+that depends on the exact deails of the 'maps' file.
+
+Special thanks to Henrique de Moraes Holschuh for diving into lvm-tools
+source code to see what was going on with the whole new warning.
+
+[Note, for .27, only the /proc change is done, mlock is not modified
+here. - gregkh]
+
+Reported-and-tested-by: François Valenduc <francois.valenduc@tvcablenet.be
+Reported-by: Henrique de Moraes Holschuh <hmh@hmh.eng.br>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+---
+ fs/proc/task_mmu.c |    8 +++++++-
+ 1 files changed, 7 insertions(+), 1 deletions(-)
+
+diff --git a/fs/proc/task_mmu.c b/fs/proc/task_mmu.c
+index 0b2d836..1c0abfa 100644
+--- a/fs/proc/task_mmu.c
++++ b/fs/proc/task_mmu.c
+@@ -205,6 +205,7 @@ static void show_map_vma(struct seq_file *m, struct vm_area_struct *vma)
+ 	struct file *file = vma->vm_file;
+ 	int flags = vma->vm_flags;
+ 	unsigned long ino = 0;
++	unsigned long start;
+ 	dev_t dev = 0;
+ 	int len;
+ 
+@@ -214,8 +215,13 @@ static void show_map_vma(struct seq_file *m, struct vm_area_struct *vma)
+ 		ino = inode->i_ino;
+ 	}
+ 
++	/* We don't show the stack guard page in /proc/maps */
++	start = vma->vm_start;
++	if (vma->vm_flags & VM_GROWSDOWN)
++		start += PAGE_SIZE;
++
+ 	seq_printf(m, "%08lx-%08lx %c%c%c%c %08lx %02x:%02x %lu %n",
+-			vma->vm_start,
++			start,
+ 			vma->vm_end,
+ 			flags & VM_READ ? 'r' : '-',
+ 			flags & VM_WRITE ? 'w' : '-',
+-- 
+1.7.1
+
