@@ -7,41 +7,13 @@ The following commit were reverted:
 To regenerate:
 
 $ git checkout -b debian-base v2.6.32.19
+$ git pull git://xenbits.xensource.com/people/ianc/linux-2.6.git debian/squeeze/pvhvm
 
 $ git checkout -b debian-pvops e73f4955a821f850f5b88c32d12a81714523a95f
 $ git revert -m 1 bcf16b6b4f34fb40a7aaf637947c7d3bce0be671
 
 $ git diff debian-base..debian-pvops
 
-diff --git a/Documentation/kernel-parameters.txt b/Documentation/kernel-parameters.txt
-index 5f6aa11..3e30e60 100644
---- a/Documentation/kernel-parameters.txt
-+++ b/Documentation/kernel-parameters.txt
-@@ -113,6 +113,7 @@ parameter is applicable:
- 			More X86-64 boot options can be found in
- 			Documentation/x86/x86_64/boot-options.txt .
- 	X86	Either 32bit or 64bit x86 (same as X86-32+X86-64)
-+	XEN	Xen support is enabled
- 
- In addition, the following text indicates that the option:
- 
-@@ -2760,6 +2761,16 @@ and is between 256 and 4096 characters. It is defined in the file
- 	xd=		[HW,XT] Original XT pre-IDE (RLL encoded) disks.
- 	xd_geo=		See header of drivers/block/xd.c.
- 
-+	xen_emul_unplug=		[HW,X86,XEN]
-+			Unplug Xen emulated devices
-+			Format: [unplug0,][unplug1]
-+			ide-disks -- unplug primary master IDE devices
-+			aux-ide-disks -- unplug non-primary-master IDE devices
-+			nics -- unplug network devices
-+			all -- unplug all emulated devices (NICs and IDE disks)
-+			ignore -- continue loading the Xen platform PCI driver even
-+				if the version check failed
-+
- 	xirc2ps_cs=	[NET,PCMCIA]
- 			Format:
- 			<irq>,<irq_mask>,<io>,<full_duplex>,<do_sound>,<lockup_hack>[,<irq2>[,<irq3>[,<irq4>]]]
 diff --git a/Documentation/x86/x86_64/boot-options.txt b/Documentation/x86/x86_64/boot-options.txt
 index 29a6ff8..81f9b94 100644
 --- a/Documentation/x86/x86_64/boot-options.txt
@@ -431,23 +403,22 @@ index fd6d21b..345c99c 100644
  extern int force_iommu, no_iommu;
  extern int iommu_detected;
 diff --git a/arch/x86/include/asm/irq_vectors.h b/arch/x86/include/asm/irq_vectors.h
-index 6e90a04..ba4dc7b 100644
+index 893179f..ba4dc7b 100644
 --- a/arch/x86/include/asm/irq_vectors.h
 +++ b/arch/x86/include/asm/irq_vectors.h
-@@ -120,6 +120,12 @@
+@@ -120,8 +120,11 @@
   */
  #define MCE_SELF_VECTOR			0xeb
  
 +#ifdef CONFIG_XEN
-+/* Xen vector callback to receive events in a HVM domain */
-+#define XEN_HVM_EVTCHN_CALLBACK		0xe9
+ /* Xen vector callback to receive events in a HVM domain */
+ #define XEN_HVM_EVTCHN_CALLBACK		0xe9
 +#endif
 +
-+
+ 
  /*
   * First APIC vector available to drivers: (vectors 0x30-0xee) we
-  * start at 0x31(0x41) to spread out vectors evenly between priority
-@@ -157,6 +163,14 @@ static inline int invalid_vm86_irq(int irq)
+@@ -160,6 +163,14 @@ static inline int invalid_vm86_irq(int irq)
  #define CPU_VECTOR_LIMIT		(  8 * NR_CPUS      )
  #define IO_APIC_VECTOR_LIMIT		( 32 * MAX_IO_APICS )
  
@@ -462,7 +433,7 @@ index 6e90a04..ba4dc7b 100644
  #ifdef CONFIG_X86_IO_APIC
  # ifdef CONFIG_SPARSE_IRQ
  #  define NR_IRQS					\
-@@ -165,13 +179,13 @@ static inline int invalid_vm86_irq(int irq)
+@@ -168,13 +179,13 @@ static inline int invalid_vm86_irq(int irq)
  		(NR_VECTORS + IO_APIC_VECTOR_LIMIT))
  # else
  #  if NR_CPUS < MAX_IO_APICS
@@ -727,6 +698,19 @@ index 13b1885..0aac25a 100644
  #endif /* CONFIG_PARAVIRT */
  
  /*
+diff --git a/arch/x86/include/asm/setup.h b/arch/x86/include/asm/setup.h
+index fee81d0..18e496c 100644
+--- a/arch/x86/include/asm/setup.h
++++ b/arch/x86/include/asm/setup.h
+@@ -84,7 +84,7 @@ void *extend_brk(size_t size, size_t align);
+  * executable.)
+  */
+ #define RESERVE_BRK(name,sz)						\
+-	static void __section(.discard.text) __used			\
++	static void __section(.discard) __used				\
+ 	__brk_reservation_fn_##name##__(void) {				\
+ 		asm volatile (						\
+ 			".pushsection .brk_reservation,\"aw\",@nobits;" \
 diff --git a/arch/x86/include/asm/swiotlb.h b/arch/x86/include/asm/swiotlb.h
 index b9e4e20..8085277 100644
 --- a/arch/x86/include/asm/swiotlb.h
@@ -841,7 +825,7 @@ index 2c756fd..d8e7145 100644
  
  extern struct x86_init_ops x86_init;
 diff --git a/arch/x86/include/asm/xen/hypercall.h b/arch/x86/include/asm/xen/hypercall.h
-index 9c371e4..41c4be0 100644
+index 7fda040..41c4be0 100644
 --- a/arch/x86/include/asm/xen/hypercall.h
 +++ b/arch/x86/include/asm/xen/hypercall.h
 @@ -45,6 +45,8 @@
@@ -898,20 +882,7 @@ index 9c371e4..41c4be0 100644
  HYPERVISOR_set_debugreg(int reg, unsigned long value)
  {
  	return _hypercall2(int, set_debugreg, reg, value);
-@@ -417,6 +450,12 @@ HYPERVISOR_nmi_op(unsigned long op, unsigned long arg)
- 	return _hypercall2(int, nmi_op, op, arg);
- }
- 
-+static inline unsigned long __must_check
-+HYPERVISOR_hvm_op(int op, void *arg)
-+{
-+       return _hypercall2(unsigned long, hvm_op, op, arg);
-+}
-+
- static inline void
- MULTI_fpu_taskswitch(struct multicall_entry *mcl, int set)
- {
-@@ -424,6 +463,14 @@ MULTI_fpu_taskswitch(struct multicall_entry *mcl, int set)
+@@ -430,6 +463,14 @@ MULTI_fpu_taskswitch(struct multicall_entry *mcl, int set)
  	mcl->args[0] = set;
  }
  
@@ -926,7 +897,7 @@ index 9c371e4..41c4be0 100644
  static inline void
  MULTI_update_va_mapping(struct multicall_entry *mcl, unsigned long va,
  			pte_t new_val, unsigned long flags)
-@@ -432,12 +479,11 @@ MULTI_update_va_mapping(struct multicall_entry *mcl, unsigned long va,
+@@ -438,12 +479,11 @@ MULTI_update_va_mapping(struct multicall_entry *mcl, unsigned long va,
  	mcl->args[0] = va;
  	if (sizeof(new_val) == sizeof(long)) {
  		mcl->args[1] = new_val.pte;
@@ -941,10 +912,10 @@ index 9c371e4..41c4be0 100644
  
  static inline void
 diff --git a/arch/x86/include/asm/xen/hypervisor.h b/arch/x86/include/asm/xen/hypervisor.h
-index d5b7e90..396ff4c 100644
+index 5d298fd..396ff4c 100644
 --- a/arch/x86/include/asm/xen/hypervisor.h
 +++ b/arch/x86/include/asm/xen/hypervisor.h
-@@ -37,31 +37,4 @@
+@@ -37,33 +37,4 @@
  extern struct shared_info *HYPERVISOR_shared_info;
  extern struct start_info *xen_start_info;
  
@@ -956,8 +927,10 @@ index d5b7e90..396ff4c 100644
 -
 -#ifdef CONFIG_XEN
 -extern enum xen_domain_type xen_domain_type;
+-extern void __init xen_hvm_guest_init(void);
 -#else
 -#define xen_domain_type		XEN_NATIVE
+-#define xen_hvm_guest_init() do { } while (0)
 -#endif
 -
 -#define xen_domain()		(xen_domain_type != XEN_NATIVE)
@@ -2005,32 +1978,32 @@ index ff95824..ebd4c51 100644
  
  static void kdump_nmi_callback(int cpu, struct die_args *args)
 diff --git a/arch/x86/kernel/entry_32.S b/arch/x86/kernel/entry_32.S
-index c097e7d..21feb03 100644
+index 7764118..21feb03 100644
 --- a/arch/x86/kernel/entry_32.S
 +++ b/arch/x86/kernel/entry_32.S
-@@ -1088,6 +1088,8 @@ ENTRY(xen_failsafe_callback)
+@@ -1088,8 +1088,7 @@ ENTRY(xen_failsafe_callback)
  .previous
  ENDPROC(xen_failsafe_callback)
  
+-BUILD_INTERRUPT3(xen_hvm_callback_vector, XEN_HVM_EVTCHN_CALLBACK,
+-		xen_evtchn_do_upcall)
 +BUILD_INTERRUPT(xen_hvm_callback_vector, XEN_HVM_EVTCHN_CALLBACK)
-+
+ 
  #endif	/* CONFIG_XEN */
  
- #ifdef CONFIG_FUNCTION_TRACER
 diff --git a/arch/x86/kernel/entry_64.S b/arch/x86/kernel/entry_64.S
-index b5c061f..1bf0911 100644
+index a626344..1bf0911 100644
 --- a/arch/x86/kernel/entry_64.S
 +++ b/arch/x86/kernel/entry_64.S
-@@ -1364,6 +1364,9 @@ ENTRY(xen_failsafe_callback)
- 	CFI_ENDPROC
+@@ -1365,7 +1365,7 @@ ENTRY(xen_failsafe_callback)
  END(xen_failsafe_callback)
  
-+apicinterrupt XEN_HVM_EVTCHN_CALLBACK \
+ apicinterrupt XEN_HVM_EVTCHN_CALLBACK \
+-	xen_hvm_callback_vector xen_evtchn_do_upcall
 +	xen_hvm_callback_vector smp_xen_hvm_callback_vector
-+
+ 
  #endif /* CONFIG_XEN */
  
- /*
 diff --git a/arch/x86/kernel/hpet.c b/arch/x86/kernel/hpet.c
 index 19528ef..40e47cd 100644
 --- a/arch/x86/kernel/hpet.c
@@ -2931,7 +2904,7 @@ index 269c2a3..8e1aac8 100644
  }
  
 diff --git a/arch/x86/kernel/setup.c b/arch/x86/kernel/setup.c
-index d7a0888..594e324 100644
+index c852868..594e324 100644
 --- a/arch/x86/kernel/setup.c
 +++ b/arch/x86/kernel/setup.c
 @@ -70,6 +70,7 @@
@@ -2950,7 +2923,15 @@ index d7a0888..594e324 100644
  
  #include <asm/system.h>
  #include <asm/vsyscall.h>
-@@ -966,6 +968,9 @@ void __init setup_arch(char **cmdline_p)
+@@ -102,7 +104,6 @@
+ 
+ #include <asm/paravirt.h>
+ #include <asm/hypervisor.h>
+-#include <asm/xen/hypervisor.h>
+ 
+ #include <asm/percpu.h>
+ #include <asm/topology.h>
+@@ -967,6 +968,9 @@ void __init setup_arch(char **cmdline_p)
  
  	initmem_init(0, max_pfn);
  
@@ -2960,14 +2941,6 @@ index d7a0888..594e324 100644
  #ifdef CONFIG_ACPI_SLEEP
  	/*
  	 * Reserve low memory region for sleep support.
-@@ -1034,6 +1039,7 @@ void __init setup_arch(char **cmdline_p)
- 	probe_nr_irqs_gsi();
- 
- 	kvm_guest_init();
-+	xen_hvm_guest_init();
- 
- 	e820_reserve_resources();
- 	e820_mark_nosave_regions(max_low_pfn);
 diff --git a/arch/x86/kernel/x86_init.c b/arch/x86/kernel/x86_init.c
 index 4449a4a..d11c5ff 100644
 --- a/arch/x86/kernel/x86_init.c
@@ -3426,10 +3399,22 @@ index 0000000..67fa926
 +}
 +
 diff --git a/arch/x86/xen/Kconfig b/arch/x86/xen/Kconfig
-index b83e119..7675f9b 100644
+index 68128a1..7675f9b 100644
 --- a/arch/x86/xen/Kconfig
 +++ b/arch/x86/xen/Kconfig
-@@ -36,3 +36,40 @@ config XEN_DEBUG_FS
+@@ -13,11 +13,6 @@ config XEN
+ 	  kernel to boot in a paravirtualized environment under the
+ 	  Xen hypervisor.
+ 
+-config XEN_PVHVM
+-	def_bool y
+-	depends on XEN
+-	depends on X86_LOCAL_APIC
+-
+ config XEN_MAX_DOMAIN_MEMORY
+        int "Maximum allowed size of a domain in gigabytes"
+        default 8 if X86_32
+@@ -41,3 +36,40 @@ config XEN_DEBUG_FS
  	help
  	  Enable statistics output and various tuning options in debugfs.
  	  Enabling this option may incur a significant performance overhead.
@@ -3471,16 +3456,10 @@ index b83e119..7675f9b 100644
 +         Enable support for passing PCI devices through to
 +	 unprivileged domains. (COMPLETELY UNTESTED)
 diff --git a/arch/x86/xen/Makefile b/arch/x86/xen/Makefile
-index 3bb4fc2..13ca65c 100644
+index 9309546..13ca65c 100644
 --- a/arch/x86/xen/Makefile
 +++ b/arch/x86/xen/Makefile
-@@ -12,9 +12,12 @@ CFLAGS_mmu.o			:= $(nostackp)
- 
- obj-y		:= enlighten.o setup.o multicalls.o mmu.o irq.o \
- 			time.o xen-asm.o xen-asm_$(BITS).o \
--			grant-table.o suspend.o
-+			grant-table.o suspend.o platform-pci-unplug.o
- 
+@@ -17,4 +17,7 @@ obj-y		:= enlighten.o setup.o multicalls.o mmu.o irq.o \
  obj-$(CONFIG_SMP)		+= smp.o
  obj-$(CONFIG_PARAVIRT_SPINLOCKS)+= spinlock.o
  obj-$(CONFIG_XEN_DEBUG_FS)	+= debugfs.o
@@ -3530,18 +3509,10 @@ index 0000000..21a3089
 +#endif
 +}
 diff --git a/arch/x86/xen/enlighten.c b/arch/x86/xen/enlighten.c
-index 942ccf1..56b85d2 100644
+index 50fbf65..56b85d2 100644
 --- a/arch/x86/xen/enlighten.c
 +++ b/arch/x86/xen/enlighten.c
-@@ -11,6 +11,7 @@
-  * Jeremy Fitzhardinge <jeremy@xensource.com>, XenSource Inc, 2007
-  */
- 
-+#include <linux/cpu.h>
- #include <linux/kernel.h>
- #include <linux/init.h>
- #include <linux/smp.h>
-@@ -28,12 +29,15 @@
+@@ -29,6 +29,7 @@
  #include <linux/highmem.h>
  #include <linux/console.h>
  
@@ -3549,23 +3520,15 @@ index 942ccf1..56b85d2 100644
  #include <xen/interface/xen.h>
  #include <xen/interface/version.h>
  #include <xen/interface/physdev.h>
- #include <xen/interface/vcpu.h>
-+#include <xen/interface/memory.h>
- #include <xen/features.h>
- #include <xen/page.h>
-+#include <xen/hvm.h>
- #include <xen/hvc-console.h>
- 
- #include <asm/paravirt.h>
-@@ -53,6 +57,7 @@
+@@ -55,7 +56,6 @@
+ #include <asm/pgtable.h>
  #include <asm/tlbflush.h>
  #include <asm/reboot.h>
+-#include <asm/setup.h>
  #include <asm/stackprotector.h>
-+#include <asm/hypervisor.h>
+ #include <asm/hypervisor.h>
  
- #include "xen-ops.h"
- #include "mmu.h"
-@@ -66,6 +71,11 @@ DEFINE_PER_CPU(struct vcpu_info, xen_vcpu_info);
+@@ -71,6 +71,11 @@ DEFINE_PER_CPU(struct vcpu_info, xen_vcpu_info);
  enum xen_domain_type xen_domain_type = XEN_NATIVE;
  EXPORT_SYMBOL_GPL(xen_domain_type);
  
@@ -3577,17 +3540,7 @@ index 942ccf1..56b85d2 100644
  struct start_info *xen_start_info;
  EXPORT_SYMBOL_GPL(xen_start_info);
  
-@@ -73,6 +83,9 @@ struct shared_info xen_dummy_shared_info;
- 
- void *xen_initial_gdt;
- 
-+__read_mostly int xen_have_vector_callback;
-+EXPORT_SYMBOL_GPL(xen_have_vector_callback);
-+
- /*
-  * Point at some empty memory to start with. We map the real shared_info
-  * page as soon as fixmap is up and running.
-@@ -94,6 +107,14 @@ struct shared_info *HYPERVISOR_shared_info = (void *)&xen_dummy_shared_info;
+@@ -102,6 +107,14 @@ struct shared_info *HYPERVISOR_shared_info = (void *)&xen_dummy_shared_info;
   */
  static int have_vcpu_info_placement = 1;
  
@@ -3602,7 +3555,7 @@ index 942ccf1..56b85d2 100644
  static void xen_vcpu_setup(int cpu)
  {
  	struct vcpu_register_vcpu_info info;
-@@ -101,13 +122,17 @@ static void xen_vcpu_setup(int cpu)
+@@ -109,13 +122,17 @@ static void xen_vcpu_setup(int cpu)
  	struct vcpu_info *vcpup;
  
  	BUG_ON(HYPERVISOR_shared_info == &xen_dummy_shared_info);
@@ -3624,7 +3577,7 @@ index 942ccf1..56b85d2 100644
  	info.mfn = arbitrary_virt_to_mfn(vcpup);
  	info.offset = offset_in_page(vcpup);
  
-@@ -122,6 +147,7 @@ static void xen_vcpu_setup(int cpu)
+@@ -130,6 +147,7 @@ static void xen_vcpu_setup(int cpu)
  	if (err) {
  		printk(KERN_DEBUG "register_vcpu_info failed: err=%d\n", err);
  		have_vcpu_info_placement = 0;
@@ -3632,7 +3585,7 @@ index 942ccf1..56b85d2 100644
  	} else {
  		/* This cpu is using the registered vcpu info, even if
  		   later ones fail to. */
-@@ -167,13 +193,16 @@ static void __init xen_banner(void)
+@@ -175,13 +193,16 @@ static void __init xen_banner(void)
  
  	printk(KERN_INFO "Booting paravirtualized kernel on %s\n",
  	       pv_info.name);
@@ -3651,7 +3604,7 @@ index 942ccf1..56b85d2 100644
  
  static void xen_cpuid(unsigned int *ax, unsigned int *bx,
  		      unsigned int *cx, unsigned int *dx)
-@@ -187,7 +216,7 @@ static void xen_cpuid(unsigned int *ax, unsigned int *bx,
+@@ -195,7 +216,7 @@ static void xen_cpuid(unsigned int *ax, unsigned int *bx,
  	 * unsupported kernel subsystems as possible.
  	 */
  	switch (*ax) {
@@ -3660,7 +3613,7 @@ index 942ccf1..56b85d2 100644
  		maskecx = cpuid_leaf1_ecx_mask;
  		maskedx = cpuid_leaf1_edx_mask;
  		break;
-@@ -196,6 +225,10 @@ static void xen_cpuid(unsigned int *ax, unsigned int *bx,
+@@ -204,6 +225,10 @@ static void xen_cpuid(unsigned int *ax, unsigned int *bx,
  		/* Suppress extended topology stuff */
  		maskebx = 0;
  		break;
@@ -3671,7 +3624,7 @@ index 942ccf1..56b85d2 100644
  	}
  
  	asm(XEN_EMULATE_PREFIX "cpuid"
-@@ -215,13 +248,15 @@ static __init void xen_init_cpuid_mask(void)
+@@ -223,13 +248,15 @@ static __init void xen_init_cpuid_mask(void)
  	unsigned int ax, bx, cx, dx;
  
  	cpuid_leaf1_edx_mask =
@@ -3691,7 +3644,7 @@ index 942ccf1..56b85d2 100644
  			  (1 << X86_FEATURE_ACPI));  /* disable ACPI */
  
  	ax = 1;
-@@ -406,7 +441,7 @@ static __init void xen_load_gdt_boot(const struct desc_ptr *dtr)
+@@ -414,7 +441,7 @@ static __init void xen_load_gdt_boot(const struct desc_ptr *dtr)
  
  		pte = pfn_pte(pfn, PAGE_KERNEL_RO);
  
@@ -3700,7 +3653,7 @@ index 942ccf1..56b85d2 100644
  			BUG();
  
  		frames[f] = mfn;
-@@ -517,13 +552,13 @@ static int cvt_gate_to_trap(int vector, const gate_desc *val,
+@@ -525,13 +552,13 @@ static int cvt_gate_to_trap(int vector, const gate_desc *val,
  		return 0;
  #ifdef CONFIG_X86_MCE
  	} else if (addr == (unsigned long)machine_check) {
@@ -3720,7 +3673,7 @@ index 942ccf1..56b85d2 100644
  #endif	/* CONFIG_X86_64 */
  	info->address = addr;
  
-@@ -679,6 +714,18 @@ static void xen_set_iopl_mask(unsigned mask)
+@@ -687,6 +714,18 @@ static void xen_set_iopl_mask(unsigned mask)
  	HYPERVISOR_physdev_op(PHYSDEVOP_set_iopl, &set_iopl);
  }
  
@@ -3739,7 +3692,7 @@ index 942ccf1..56b85d2 100644
  static void xen_io_delay(void)
  {
  }
-@@ -716,7 +763,7 @@ static u32 xen_safe_apic_wait_icr_idle(void)
+@@ -724,7 +763,7 @@ static u32 xen_safe_apic_wait_icr_idle(void)
          return 0;
  }
  
@@ -3748,7 +3701,7 @@ index 942ccf1..56b85d2 100644
  {
  	apic->read = xen_apic_read;
  	apic->write = xen_apic_write;
-@@ -728,7 +775,6 @@ static void set_xen_basic_apic_ops(void)
+@@ -736,7 +775,6 @@ static void set_xen_basic_apic_ops(void)
  
  #endif
  
@@ -3756,7 +3709,7 @@ index 942ccf1..56b85d2 100644
  static void xen_clts(void)
  {
  	struct multicall_space mcs;
-@@ -811,6 +857,11 @@ static int xen_write_msr_safe(unsigned int msr, unsigned low, unsigned high)
+@@ -819,6 +857,11 @@ static int xen_write_msr_safe(unsigned int msr, unsigned low, unsigned high)
  		   Xen console noise. */
  		break;
  
@@ -3768,18 +3721,7 @@ index 942ccf1..56b85d2 100644
  	default:
  		ret = native_write_msr_safe(msr, low, high);
  	}
-@@ -923,10 +974,6 @@ static const struct pv_init_ops xen_init_ops __initdata = {
- 	.patch = xen_patch,
- };
- 
--static const struct pv_time_ops xen_time_ops __initdata = {
--	.sched_clock = xen_clocksource_read,
--};
--
- static const struct pv_cpu_ops xen_cpu_ops __initdata = {
- 	.cpuid = xen_cpuid,
- 
-@@ -978,6 +1025,7 @@ static const struct pv_cpu_ops xen_cpu_ops __initdata = {
+@@ -982,6 +1025,7 @@ static const struct pv_cpu_ops xen_cpu_ops __initdata = {
  	.load_sp0 = xen_load_sp0,
  
  	.set_iopl_mask = xen_set_iopl_mask,
@@ -3787,7 +3729,7 @@ index 942ccf1..56b85d2 100644
  	.io_delay = xen_io_delay,
  
  	/* Xen takes care of %gs when switching to usermode for us */
-@@ -1020,15 +1068,40 @@ static void xen_machine_halt(void)
+@@ -1024,15 +1068,40 @@ static void xen_machine_halt(void)
  	xen_reboot(SHUTDOWN_poweroff);
  }
  
@@ -3829,7 +3771,7 @@ index 942ccf1..56b85d2 100644
  	.shutdown = xen_machine_halt,
  	.crash_shutdown = xen_crash_shutdown,
  	.emergency_restart = xen_emergency_restart,
-@@ -1061,10 +1134,11 @@ asmlinkage void __init xen_start_kernel(void)
+@@ -1065,6 +1134,8 @@ asmlinkage void __init xen_start_kernel(void)
  
  	xen_domain_type = XEN_PV_DOMAIN;
  
@@ -3838,26 +3780,7 @@ index 942ccf1..56b85d2 100644
  	/* Install Xen paravirt ops */
  	pv_info = xen_info;
  	pv_init_ops = xen_init_ops;
--	pv_time_ops = xen_time_ops;
- 	pv_cpu_ops = xen_cpu_ops;
- 	pv_apic_ops = xen_apic_ops;
- 
-@@ -1072,13 +1146,7 @@ asmlinkage void __init xen_start_kernel(void)
- 	x86_init.oem.arch_setup = xen_arch_setup;
- 	x86_init.oem.banner = xen_banner;
- 
--	x86_init.timers.timer_init = xen_time_init;
--	x86_init.timers.setup_percpu_clockev = x86_init_noop;
--	x86_cpuinit.setup_percpu_clockev = x86_init_noop;
--
--	x86_platform.calibrate_tsc = xen_tsc_khz;
--	x86_platform.get_wallclock = xen_get_wallclock;
--	x86_platform.set_wallclock = xen_set_wallclock;
-+	xen_init_time_ops();
- 
- 	/*
- 	 * Set up some pagetable state before starting to set any ptes.
-@@ -1116,6 +1184,10 @@ asmlinkage void __init xen_start_kernel(void)
+@@ -1113,6 +1184,10 @@ asmlinkage void __init xen_start_kernel(void)
  	 */
  	xen_setup_stackprotector();
  
@@ -3868,7 +3791,7 @@ index 942ccf1..56b85d2 100644
  	xen_init_irq_ops();
  	xen_init_cpuid_mask();
  
-@@ -1144,6 +1216,8 @@ asmlinkage void __init xen_start_kernel(void)
+@@ -1141,6 +1216,8 @@ asmlinkage void __init xen_start_kernel(void)
  
  	pgd = (pgd_t *)xen_start_info->pt_base;
  
@@ -3877,7 +3800,7 @@ index 942ccf1..56b85d2 100644
  	/* Don't do the full vcpu_info placement stuff until we have a
  	   possible map and a non-dummy shared_info. */
  	per_cpu(xen_vcpu, 0) = &HYPERVISOR_shared_info->vcpu_info[0];
-@@ -1153,6 +1227,7 @@ asmlinkage void __init xen_start_kernel(void)
+@@ -1150,6 +1227,7 @@ asmlinkage void __init xen_start_kernel(void)
  
  	xen_raw_console_write("mapping kernel into physical memory\n");
  	pgd = xen_setup_kernel_pagetable(pgd, xen_start_info->nr_pages);
@@ -3885,7 +3808,7 @@ index 942ccf1..56b85d2 100644
  
  	init_mm.pgd = pgd;
  
-@@ -1162,6 +1237,14 @@ asmlinkage void __init xen_start_kernel(void)
+@@ -1159,6 +1237,14 @@ asmlinkage void __init xen_start_kernel(void)
  	if (xen_feature(XENFEAT_supervisor_mode_kernel))
  		pv_info.kernel_rpl = 0;
  
@@ -3900,7 +3823,7 @@ index 942ccf1..56b85d2 100644
  	/* set the limit of our address space */
  	xen_reserve_top();
  
-@@ -1184,6 +1267,16 @@ asmlinkage void __init xen_start_kernel(void)
+@@ -1181,6 +1267,16 @@ asmlinkage void __init xen_start_kernel(void)
  		add_preferred_console("xenboot", 0, NULL);
  		add_preferred_console("tty", 0, NULL);
  		add_preferred_console("hvc", 0, NULL);
@@ -3917,133 +3840,39 @@ index 942ccf1..56b85d2 100644
  	}
  
  	xen_raw_console_write("about to get started...\n");
-@@ -1197,3 +1290,124 @@ asmlinkage void __init xen_start_kernel(void)
- 	x86_64_start_reservations((char *)__pa_symbol(&boot_params));
- #endif
- }
-+
-+static uint32_t xen_cpuid_base(void)
-+{
-+	uint32_t base, eax, ebx, ecx, edx;
-+	char signature[13];
-+
-+	for (base = 0x40000000; base < 0x40010000; base += 0x100) {
-+		cpuid(base, &eax, &ebx, &ecx, &edx);
-+		*(uint32_t *)(signature + 0) = ebx;
-+		*(uint32_t *)(signature + 4) = ecx;
-+		*(uint32_t *)(signature + 8) = edx;
-+		signature[12] = 0;
-+
-+		if (!strcmp("XenVMMXenVMM", signature) && ((eax - base) >= 2))
-+			return base;
-+	}
-+
-+	return 0;
-+}
-+
-+static int init_hvm_pv_info(int *major, int *minor)
-+{
-+	uint32_t eax, ebx, ecx, edx, pages, msr, base;
-+	u64 pfn;
-+
-+	base = xen_cpuid_base();
+@@ -1220,6 +1316,9 @@ static int init_hvm_pv_info(int *major, int *minor)
+ 	u64 pfn;
+ 
+ 	base = xen_cpuid_base();
 +	if (!base)
 +		return -EINVAL;
 +
-+	cpuid(base + 1, &eax, &ebx, &ecx, &edx);
-+
-+	*major = eax >> 16;
-+	*minor = eax & 0xffff;
-+	printk(KERN_INFO "Xen version %d.%d.\n", *major, *minor);
-+
-+	cpuid(base + 2, &pages, &msr, &ecx, &edx);
-+
-+	pfn = __pa(hypercall_page);
-+	wrmsr_safe(msr, (u32)pfn, (u32)(pfn >> 32));
-+
-+	xen_setup_features();
-+
-+	pv_info = xen_info;
-+	pv_info.kernel_rpl = 0;
-+
-+	xen_domain_type = XEN_HVM_DOMAIN;
-+
-+	return 0;
-+}
-+
-+void xen_hvm_init_shared_info(void)
-+{
-+	int cpu;
-+	struct xen_add_to_physmap xatp;
-+	static struct shared_info *shared_info_page = 0;
-+
-+	if (!shared_info_page)
-+		shared_info_page = (struct shared_info *) alloc_bootmem_pages(PAGE_SIZE);
-+	xatp.domid = DOMID_SELF;
-+	xatp.idx = 0;
-+	xatp.space = XENMAPSPACE_shared_info;
-+	xatp.gpfn = __pa(shared_info_page) >> PAGE_SHIFT;
-+	if (HYPERVISOR_memory_op(XENMEM_add_to_physmap, &xatp))
-+		BUG();
-+
-+	HYPERVISOR_shared_info = (struct shared_info *)shared_info_page;
-+
-+	/* xen_vcpu is a pointer to the vcpu_info struct in the shared_info
-+	 * page, we use it in the event channel upcall and in some pvclock
-+	 * related functions. We don't need the vcpu_info placement
-+	 * optimizations because we don't use any pv_mmu or pv_irq op on
-+	 * HVM.
-+	 * When xen_hvm_init_shared_info is run at boot time only vcpu 0 is
-+	 * online but xen_hvm_init_shared_info is run at resume time too and
-+	 * in that case multiple vcpus might be online. */
-+	for_each_online_cpu(cpu) {
-+		per_cpu(xen_vcpu, cpu) = &HYPERVISOR_shared_info->vcpu_info[cpu];
-+	}
-+}
-+
-+static int __cpuinit xen_hvm_cpu_notify(struct notifier_block *self,
-+				    unsigned long action, void *hcpu)
-+{
-+	int cpu = (long)hcpu;
-+	switch (action) {
-+	case CPU_UP_PREPARE:
-+		per_cpu(xen_vcpu, cpu) = &HYPERVISOR_shared_info->vcpu_info[cpu];
-+		break;
-+	default:
-+		break;
-+	}
-+	return NOTIFY_OK;
-+}
-+
-+static struct notifier_block __cpuinitdata xen_hvm_cpu_notifier = {
-+	.notifier_call	= xen_hvm_cpu_notify,
-+};
-+
-+void __init xen_hvm_guest_init(void)
-+{
-+	int r;
-+	int major, minor;
-+
-+	if (xen_pv_domain())
-+		return;
-+
-+	r = init_hvm_pv_info(&major, &minor);
-+	if (r < 0)
-+		return;
-+
-+	xen_hvm_init_shared_info();
-+
-+	if (xen_feature(XENFEAT_hvm_callback_vector))
-+		xen_have_vector_callback = 1;
-+	register_cpu_notifier(&xen_hvm_cpu_notifier);
-+	xen_unplug_emulated_devices();
-+	have_vcpu_info_placement = 0;
-+	x86_init.irqs.intr_init = xen_init_IRQ;
-+	xen_hvm_init_time_ops();
-+	xen_hvm_init_mmu_ops();
-+}
+ 	cpuid(base + 1, &eax, &ebx, &ecx, &edx);
+ 
+ 	*major = eax >> 16;
+@@ -1249,7 +1348,6 @@ void xen_hvm_init_shared_info(void)
+ 
+ 	if (!shared_info_page)
+ 		shared_info_page = (struct shared_info *) alloc_bootmem_pages(PAGE_SIZE);
+-
+ 	xatp.domid = DOMID_SELF;
+ 	xatp.idx = 0;
+ 	xatp.space = XENMAPSPACE_shared_info;
+@@ -1272,7 +1370,6 @@ void xen_hvm_init_shared_info(void)
+ 	}
+ }
+ 
+-#ifdef CONFIG_XEN_PVHVM
+ static int __cpuinit xen_hvm_cpu_notify(struct notifier_block *self,
+ 				    unsigned long action, void *hcpu)
+ {
+@@ -1314,4 +1411,3 @@ void __init xen_hvm_guest_init(void)
+ 	xen_hvm_init_time_ops();
+ 	xen_hvm_init_mmu_ops();
+ }
+-#endif
 diff --git a/arch/x86/xen/mmu.c b/arch/x86/xen/mmu.c
-index 350a3de..74e284f 100644
+index 971a405..74e284f 100644
 --- a/arch/x86/xen/mmu.c
 +++ b/arch/x86/xen/mmu.c
 @@ -42,6 +42,7 @@
@@ -4054,7 +3883,7 @@ index 350a3de..74e284f 100644
  #include <linux/module.h>
  
  #include <asm/pgtable.h>
-@@ -50,14 +51,19 @@
+@@ -50,7 +51,10 @@
  #include <asm/mmu_context.h>
  #include <asm/setup.h>
  #include <asm/paravirt.h>
@@ -4065,16 +3894,15 @@ index 350a3de..74e284f 100644
  
  #include <asm/xen/hypercall.h>
  #include <asm/xen/hypervisor.h>
- 
- #include <xen/page.h>
+@@ -59,6 +63,7 @@
  #include <xen/interface/xen.h>
-+#include <xen/interface/hvm/hvm_op.h>
+ #include <xen/interface/hvm/hvm_op.h>
  #include <xen/interface/version.h>
 +#include <xen/interface/memory.h>
  #include <xen/hvc-console.h>
  
  #include "multicalls.h"
-@@ -66,6 +72,13 @@
+@@ -67,6 +72,13 @@
  
  #define MMU_UPDATE_HISTO	30
  
@@ -4088,7 +3916,7 @@ index 350a3de..74e284f 100644
  #ifdef CONFIG_XEN_DEBUG_FS
  
  static struct {
-@@ -184,6 +197,26 @@ static inline unsigned p2m_index(unsigned long pfn)
+@@ -185,6 +197,26 @@ static inline unsigned p2m_index(unsigned long pfn)
  	return pfn % P2M_ENTRIES_PER_PAGE;
  }
  
@@ -4115,7 +3943,7 @@ index 350a3de..74e284f 100644
  /* Build the parallel p2m_top_mfn structures */
  void xen_build_mfn_list_list(void)
  {
-@@ -315,6 +348,7 @@ unsigned long arbitrary_virt_to_mfn(void *vaddr)
+@@ -316,6 +348,7 @@ unsigned long arbitrary_virt_to_mfn(void *vaddr)
  
  	return PFN_DOWN(maddr.maddr);
  }
@@ -4123,7 +3951,7 @@ index 350a3de..74e284f 100644
  
  xmaddr_t arbitrary_virt_to_machine(void *vaddr)
  {
-@@ -376,6 +410,34 @@ static bool xen_page_pinned(void *ptr)
+@@ -377,6 +410,34 @@ static bool xen_page_pinned(void *ptr)
  	return PagePinned(page);
  }
  
@@ -4158,7 +3986,7 @@ index 350a3de..74e284f 100644
  static void xen_extend_mmu_update(const struct mmu_update *update)
  {
  	struct multicall_space mcs;
-@@ -452,6 +514,11 @@ void set_pte_mfn(unsigned long vaddr, unsigned long mfn, pgprot_t flags)
+@@ -453,6 +514,11 @@ void set_pte_mfn(unsigned long vaddr, unsigned long mfn, pgprot_t flags)
  void xen_set_pte_at(struct mm_struct *mm, unsigned long addr,
  		    pte_t *ptep, pte_t pteval)
  {
@@ -4170,7 +3998,7 @@ index 350a3de..74e284f 100644
  	ADD_STATS(set_pte_at, 1);
  //	ADD_STATS(set_pte_at_pinned, xen_page_pinned(ptep));
  	ADD_STATS(set_pte_at_current, mm == current->mm);
-@@ -522,9 +589,34 @@ static pteval_t pte_pfn_to_mfn(pteval_t val)
+@@ -523,9 +589,34 @@ static pteval_t pte_pfn_to_mfn(pteval_t val)
  	return val;
  }
  
@@ -4206,7 +4034,7 @@ index 350a3de..74e284f 100644
  }
  PV_CALLEE_SAVE_REGS_THUNK(xen_pte_val);
  
-@@ -534,9 +626,62 @@ pgdval_t xen_pgd_val(pgd_t pgd)
+@@ -535,9 +626,62 @@ pgdval_t xen_pgd_val(pgd_t pgd)
  }
  PV_CALLEE_SAVE_REGS_THUNK(xen_pgd_val);
  
@@ -4270,7 +4098,7 @@ index 350a3de..74e284f 100644
  	return native_make_pte(pte);
  }
  PV_CALLEE_SAVE_REGS_THUNK(xen_make_pte);
-@@ -592,6 +737,11 @@ void xen_set_pud(pud_t *ptr, pud_t val)
+@@ -593,6 +737,11 @@ void xen_set_pud(pud_t *ptr, pud_t val)
  
  void xen_set_pte(pte_t *ptep, pte_t pte)
  {
@@ -4282,7 +4110,7 @@ index 350a3de..74e284f 100644
  	ADD_STATS(pte_update, 1);
  //	ADD_STATS(pte_update_pinned, xen_page_pinned(ptep));
  	ADD_STATS(pte_update_batched, paravirt_get_lazy_mode() == PARAVIRT_LAZY_MMU);
-@@ -608,6 +758,11 @@ void xen_set_pte(pte_t *ptep, pte_t pte)
+@@ -609,6 +758,11 @@ void xen_set_pte(pte_t *ptep, pte_t pte)
  #ifdef CONFIG_X86_PAE
  void xen_set_pte_atomic(pte_t *ptep, pte_t pte)
  {
@@ -4294,7 +4122,7 @@ index 350a3de..74e284f 100644
  	set_64bit((u64 *)ptep, native_pte_val(pte));
  }
  
-@@ -934,8 +1089,6 @@ static int xen_pin_page(struct mm_struct *mm, struct page *page,
+@@ -935,8 +1089,6 @@ static int xen_pin_page(struct mm_struct *mm, struct page *page,
     read-only, and can be pinned. */
  static void __xen_pgd_pin(struct mm_struct *mm, pgd_t *pgd)
  {
@@ -4303,7 +4131,7 @@ index 350a3de..74e284f 100644
  	xen_mc_batch();
  
  	if (__xen_pgd_walk(mm, pgd, xen_pin_page, USER_LIMIT)) {
-@@ -1219,7 +1372,7 @@ void xen_exit_mmap(struct mm_struct *mm)
+@@ -1220,7 +1372,7 @@ void xen_exit_mmap(struct mm_struct *mm)
  	spin_lock(&mm->page_table_lock);
  
  	/* pgd may not be pinned in the error exit path of execve */
@@ -4312,7 +4140,7 @@ index 350a3de..74e284f 100644
  		xen_pgd_unpin(mm);
  
  	spin_unlock(&mm->page_table_lock);
-@@ -1288,12 +1441,19 @@ static void xen_flush_tlb_single(unsigned long addr)
+@@ -1289,12 +1441,19 @@ static void xen_flush_tlb_single(unsigned long addr)
  	preempt_enable();
  }
  
@@ -4333,7 +4161,7 @@ index 350a3de..74e284f 100644
  	} *args;
  	struct multicall_space mcs;
  
-@@ -1417,6 +1577,13 @@ static int xen_pgd_alloc(struct mm_struct *mm)
+@@ -1418,6 +1577,13 @@ static int xen_pgd_alloc(struct mm_struct *mm)
  	return ret;
  }
  
@@ -4347,7 +4175,7 @@ index 350a3de..74e284f 100644
  static void xen_pgd_free(struct mm_struct *mm, pgd_t *pgd)
  {
  #ifdef CONFIG_X86_64
-@@ -1448,10 +1615,17 @@ static void *xen_kmap_atomic_pte(struct page *page, enum km_type type)
+@@ -1449,10 +1615,17 @@ static void *xen_kmap_atomic_pte(struct page *page, enum km_type type)
  #ifdef CONFIG_X86_32
  static __init pte_t mask_rw_pte(pte_t *ptep, pte_t pte)
  {
@@ -4367,7 +4195,7 @@ index 350a3de..74e284f 100644
  
  	return pte;
  }
-@@ -1517,7 +1691,6 @@ static void xen_alloc_ptpage(struct mm_struct *mm, unsigned long pfn, unsigned l
+@@ -1518,7 +1691,6 @@ static void xen_alloc_ptpage(struct mm_struct *mm, unsigned long pfn, unsigned l
  	if (PagePinned(virt_to_page(mm->pgd))) {
  		SetPagePinned(page);
  
@@ -4375,7 +4203,7 @@ index 350a3de..74e284f 100644
  		if (!PageHighMem(page)) {
  			make_lowmem_page_readonly(__va(PFN_PHYS((unsigned long)pfn)));
  			if (level == PT_PTE && USE_SPLIT_PTLOCKS)
-@@ -1620,6 +1793,7 @@ static void *m2v(phys_addr_t maddr)
+@@ -1621,6 +1793,7 @@ static void *m2v(phys_addr_t maddr)
  	return __ka(m2p(maddr));
  }
  
@@ -4383,7 +4211,7 @@ index 350a3de..74e284f 100644
  static void set_page_prot(void *addr, pgprot_t prot)
  {
  	unsigned long pfn = __pa(addr) >> PAGE_SHIFT;
-@@ -1675,6 +1849,20 @@ static __init void xen_map_identity_early(pmd_t *pmd, unsigned long max_pfn)
+@@ -1676,6 +1849,20 @@ static __init void xen_map_identity_early(pmd_t *pmd, unsigned long max_pfn)
  	set_page_prot(pmd, PAGE_KERNEL_RO);
  }
  
@@ -4404,7 +4232,7 @@ index 350a3de..74e284f 100644
  #ifdef CONFIG_X86_64
  static void convert_pfn_mfn(void *v)
  {
-@@ -1766,6 +1954,7 @@ __init pgd_t *xen_setup_kernel_pagetable(pgd_t *pgd,
+@@ -1767,6 +1954,7 @@ __init pgd_t *xen_setup_kernel_pagetable(pgd_t *pgd,
  					 unsigned long max_pfn)
  {
  	pmd_t *kernel_pmd;
@@ -4412,7 +4240,7 @@ index 350a3de..74e284f 100644
  
  	max_pfn_mapped = PFN_DOWN(__pa(xen_start_info->pt_base) +
  				  xen_start_info->nr_pt_frames * PAGE_SIZE +
-@@ -1777,6 +1966,20 @@ __init pgd_t *xen_setup_kernel_pagetable(pgd_t *pgd,
+@@ -1778,6 +1966,20 @@ __init pgd_t *xen_setup_kernel_pagetable(pgd_t *pgd,
  	xen_map_identity_early(level2_kernel_pgt, max_pfn);
  
  	memcpy(swapper_pg_dir, pgd, sizeof(pgd_t) * PTRS_PER_PGD);
@@ -4433,7 +4261,7 @@ index 350a3de..74e284f 100644
  	set_pgd(&swapper_pg_dir[KERNEL_PGD_BOUNDARY],
  			__pgd(__pa(level2_kernel_pgt) | _PAGE_PRESENT));
  
-@@ -1799,6 +2002,8 @@ __init pgd_t *xen_setup_kernel_pagetable(pgd_t *pgd,
+@@ -1800,6 +2002,8 @@ __init pgd_t *xen_setup_kernel_pagetable(pgd_t *pgd,
  }
  #endif	/* CONFIG_X86_64 */
  
@@ -4442,7 +4270,7 @@ index 350a3de..74e284f 100644
  static void xen_set_fixmap(unsigned idx, phys_addr_t phys, pgprot_t prot)
  {
  	pte_t pte;
-@@ -1828,9 +2033,26 @@ static void xen_set_fixmap(unsigned idx, phys_addr_t phys, pgprot_t prot)
+@@ -1829,9 +2033,26 @@ static void xen_set_fixmap(unsigned idx, phys_addr_t phys, pgprot_t prot)
  		pte = pfn_pte(phys, prot);
  		break;
  
@@ -4470,7 +4298,7 @@ index 350a3de..74e284f 100644
  	}
  
  	__native_set_fixmap(idx, pte);
-@@ -1845,6 +2067,29 @@ static void xen_set_fixmap(unsigned idx, phys_addr_t phys, pgprot_t prot)
+@@ -1846,6 +2067,29 @@ static void xen_set_fixmap(unsigned idx, phys_addr_t phys, pgprot_t prot)
  #endif
  }
  
@@ -4500,7 +4328,7 @@ index 350a3de..74e284f 100644
  static __init void xen_post_allocator_init(void)
  {
  	pv_mmu_ops.set_pte = xen_set_pte;
-@@ -1960,6 +2205,301 @@ void __init xen_init_mmu_ops(void)
+@@ -1961,9 +2205,271 @@ void __init xen_init_mmu_ops(void)
  	x86_init.paging.pagetable_setup_start = xen_pagetable_setup_start;
  	x86_init.paging.pagetable_setup_done = xen_pagetable_setup_done;
  	pv_mmu_ops = xen_mmu_ops;
@@ -4700,7 +4528,7 @@ index 350a3de..74e284f 100644
 +		xen_remap_exchanged_ptes(vstart, order, NULL, in_frame);
 +
 +	spin_unlock_irqrestore(&xen_reservation_lock, flags);
-+}
+ }
 +EXPORT_SYMBOL_GPL(xen_destroy_contiguous_region);
 +
 +#define REMAP_BATCH_SIZE 16
@@ -4768,50 +4596,19 @@ index 350a3de..74e284f 100644
 +	return err;
 +}
 +EXPORT_SYMBOL_GPL(xen_remap_domain_mfn_range);
-+
-+static void xen_hvm_exit_mmap(struct mm_struct *mm)
-+{
-+	struct xen_hvm_pagetable_dying a;
-+	int rc;
-+
-+	a.domid = DOMID_SELF;
-+	a.gpa = __pa(mm->pgd);
-+	rc = HYPERVISOR_hvm_op(HVMOP_pagetable_dying, &a);
-+	WARN_ON_ONCE(rc < 0);
-+}
-+
-+static int is_pagetable_dying_supported(void)
-+{
-+	struct xen_hvm_pagetable_dying a;
-+	int rc = 0;
-+
-+	a.domid = DOMID_SELF;
-+	a.gpa = 0x00;
-+	rc = HYPERVISOR_hvm_op(HVMOP_pagetable_dying, &a);
-+	if (rc < 0) {
-+		printk(KERN_DEBUG "HVMOP_pagetable_dying not supported\n");
-+		return 0;
-+	}
-+	return 1;
-+}
-+
-+void __init xen_hvm_init_mmu_ops(void)
-+{
-+	if (is_pagetable_dying_supported())
-+		pv_mmu_ops.exit_mmap = xen_hvm_exit_mmap;
+ 
+-#ifdef CONFIG_XEN_PVHVM
+ static void xen_hvm_exit_mmap(struct mm_struct *mm)
+ {
+ 	struct xen_hvm_pagetable_dying a;
+@@ -1995,7 +2501,6 @@ void __init xen_hvm_init_mmu_ops(void)
+ 	if (is_pagetable_dying_supported())
+ 		pv_mmu_ops.exit_mmap = xen_hvm_exit_mmap;
  }
+-#endif
  
  #ifdef CONFIG_XEN_DEBUG_FS
-diff --git a/arch/x86/xen/mmu.h b/arch/x86/xen/mmu.h
-index 5fe6bc7..fa938c4 100644
---- a/arch/x86/xen/mmu.h
-+++ b/arch/x86/xen/mmu.h
-@@ -60,4 +60,5 @@ void  xen_ptep_modify_prot_commit(struct mm_struct *mm, unsigned long addr,
- unsigned long xen_read_cr2_direct(void);
  
- extern void xen_init_mmu_ops(void);
-+extern void xen_hvm_init_mmu_ops(void);
- #endif	/* _XEN_MMU_H */
 diff --git a/arch/x86/xen/pci-swiotlb-xen.c b/arch/x86/xen/pci-swiotlb-xen.c
 new file mode 100644
 index 0000000..4d55524
@@ -5173,146 +4970,22 @@ index 0000000..8ca31f1
 +}
 +EXPORT_SYMBOL(xen_unregister_device_domain_owner);
 diff --git a/arch/x86/xen/platform-pci-unplug.c b/arch/x86/xen/platform-pci-unplug.c
-new file mode 100644
-index 0000000..2f7f3fb
---- /dev/null
+index 554c002..2f7f3fb 100644
+--- a/arch/x86/xen/platform-pci-unplug.c
 +++ b/arch/x86/xen/platform-pci-unplug.c
-@@ -0,0 +1,135 @@
-+/******************************************************************************
-+ * platform-pci-unplug.c
-+ *
-+ * Xen platform PCI device driver
-+ * Copyright (c) 2010, Citrix
-+ *
-+ * This program is free software; you can redistribute it and/or modify it
-+ * under the terms and conditions of the GNU General Public License,
-+ * version 2, as published by the Free Software Foundation.
-+ *
-+ * This program is distributed in the hope it will be useful, but WITHOUT
-+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
-+ * more details.
-+ *
-+ * You should have received a copy of the GNU General Public License along with
-+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
-+ * Place - Suite 330, Boston, MA 02111-1307 USA.
-+ *
-+ */
-+
-+#include <linux/init.h>
-+#include <linux/io.h>
-+#include <linux/module.h>
-+
-+#include <xen/platform_pci.h>
-+
-+#define XEN_PLATFORM_ERR_MAGIC -1
-+#define XEN_PLATFORM_ERR_PROTOCOL -2
-+#define XEN_PLATFORM_ERR_BLACKLIST -3
-+
-+/* store the value of xen_emul_unplug after the unplug is done */
-+int xen_platform_pci_unplug;
-+EXPORT_SYMBOL_GPL(xen_platform_pci_unplug);
-+static int xen_emul_unplug;
-+
-+static int __init check_platform_magic(void)
-+{
-+	short magic;
-+	char protocol;
-+
-+	magic = inw(XEN_IOPORT_MAGIC);
-+	if (magic != XEN_IOPORT_MAGIC_VAL) {
-+		printk(KERN_ERR "Xen Platform PCI: unrecognised magic value\n");
-+		return XEN_PLATFORM_ERR_MAGIC;
-+	}
-+
-+	protocol = inb(XEN_IOPORT_PROTOVER);
-+
-+	printk(KERN_DEBUG "Xen Platform PCI: I/O protocol version %d\n",
-+			protocol);
-+
-+	switch (protocol) {
-+	case 1:
-+		outw(XEN_IOPORT_LINUX_PRODNUM, XEN_IOPORT_PRODNUM);
-+		outl(XEN_IOPORT_LINUX_DRVVER, XEN_IOPORT_DRVVER);
-+		if (inw(XEN_IOPORT_MAGIC) != XEN_IOPORT_MAGIC_VAL) {
-+			printk(KERN_ERR "Xen Platform: blacklisted by host\n");
-+			return XEN_PLATFORM_ERR_BLACKLIST;
-+		}
-+		break;
-+	default:
-+		printk(KERN_WARNING "Xen Platform PCI: unknown I/O protocol version");
-+		return XEN_PLATFORM_ERR_PROTOCOL;
-+	}
-+
-+	return 0;
-+}
-+
-+void __init xen_unplug_emulated_devices(void)
-+{
-+	int r;
-+
-+	/* check the version of the xen platform PCI device */
-+	r = check_platform_magic();
-+	/* If the version matches enable the Xen platform PCI driver.
-+	 * Also enable the Xen platform PCI driver if the version is really old
-+	 * and the user told us to ignore it. */
-+	if (r && !(r == XEN_PLATFORM_ERR_MAGIC &&
-+			(xen_emul_unplug & XEN_UNPLUG_IGNORE)))
-+		return;
-+	/* Set the default value of xen_emul_unplug depending on whether or
-+	 * not the Xen PV frontends and the Xen platform PCI driver have
-+	 * been compiled for this kernel (modules or built-in are both OK). */
-+	if (!xen_emul_unplug) {
-+		if (xen_must_unplug_nics()) {
-+			printk(KERN_INFO "Netfront and the Xen platform PCI driver have "
-+					"been compiled for this kernel: unplug emulated NICs.\n");
-+			xen_emul_unplug |= XEN_UNPLUG_ALL_NICS;
-+		}
-+		if (xen_must_unplug_disks()) {
-+			printk(KERN_INFO "Blkfront and the Xen platform PCI driver have "
-+					"been compiled for this kernel: unplug emulated disks.\n"
-+					"You might have to change the root device\n"
-+					"from /dev/hd[a-d] to /dev/xvd[a-d]\n"
-+					"in your root= kernel command line option\n");
-+			xen_emul_unplug |= XEN_UNPLUG_ALL_IDE_DISKS;
-+		}
-+	}
-+	/* Now unplug the emulated devices */
-+	if (!(xen_emul_unplug & XEN_UNPLUG_IGNORE))
-+		outw(xen_emul_unplug, XEN_IOPORT_UNPLUG);
-+	xen_platform_pci_unplug = xen_emul_unplug;
-+}
-+
-+static int __init parse_xen_emul_unplug(char *arg)
-+{
-+	char *p, *q;
-+	int l;
-+
-+	for (p = arg; p; p = q) {
-+		q = strchr(p, ',');
-+		if (q) {
-+			l = q - p;
-+			q++;
-+		} else {
-+			l = strlen(p);
-+		}
-+		if (!strncmp(p, "all", l))
-+			xen_emul_unplug |= XEN_UNPLUG_ALL;
-+		else if (!strncmp(p, "ide-disks", l))
-+			xen_emul_unplug |= XEN_UNPLUG_ALL_IDE_DISKS;
-+		else if (!strncmp(p, "aux-ide-disks", l))
-+			xen_emul_unplug |= XEN_UNPLUG_AUX_IDE_DISKS;
-+		else if (!strncmp(p, "nics", l))
-+			xen_emul_unplug |= XEN_UNPLUG_ALL_NICS;
-+		else if (!strncmp(p, "ignore", l))
-+			xen_emul_unplug |= XEN_UNPLUG_IGNORE;
-+		else
-+			printk(KERN_WARNING "unrecognised option '%s' "
-+				 "in parameter 'xen_emul_unplug'\n", p);
-+	}
-+	return 0;
-+}
-+early_param("xen_emul_unplug", parse_xen_emul_unplug);
+@@ -32,7 +32,6 @@
+ /* store the value of xen_emul_unplug after the unplug is done */
+ int xen_platform_pci_unplug;
+ EXPORT_SYMBOL_GPL(xen_platform_pci_unplug);
+-#ifdef CONFIG_XEN_PVHVM
+ static int xen_emul_unplug;
+ 
+ static int __init check_platform_magic(void)
+@@ -134,4 +133,3 @@ static int __init parse_xen_emul_unplug(char *arg)
+ 	return 0;
+ }
+ early_param("xen_emul_unplug", parse_xen_emul_unplug);
+-#endif
 diff --git a/arch/x86/xen/setup.c b/arch/x86/xen/setup.c
 index ad0047f..804815c 100644
 --- a/arch/x86/xen/setup.c
@@ -5549,65 +5222,13 @@ index 360f8d8..8a390dc 100644
  	HYPERVISOR_vcpu_op(VCPUOP_down, cpu, NULL);
  	BUG();
  }
-diff --git a/arch/x86/xen/suspend.c b/arch/x86/xen/suspend.c
-index a9c6611..1d789d5 100644
---- a/arch/x86/xen/suspend.c
-+++ b/arch/x86/xen/suspend.c
-@@ -26,6 +26,18 @@ void xen_pre_suspend(void)
- 		BUG();
- }
- 
-+void xen_hvm_post_suspend(int suspend_cancelled)
-+{
-+	int cpu;
-+	xen_hvm_init_shared_info();
-+	xen_callback_vector();
-+	if (xen_feature(XENFEAT_hvm_safe_pvclock)) {
-+		for_each_online_cpu(cpu) {
-+			xen_setup_runstate_info(cpu);
-+		}
-+	}
-+}
-+
- void xen_post_suspend(int suspend_cancelled)
- {
- 	xen_build_mfn_list_list();
 diff --git a/arch/x86/xen/time.c b/arch/x86/xen/time.c
-index 8e04980..68feb40 100644
+index 094c70a..68feb40 100644
 --- a/arch/x86/xen/time.c
 +++ b/arch/x86/xen/time.c
-@@ -19,6 +19,7 @@
- #include <asm/xen/hypercall.h>
+@@ -201,8 +201,22 @@ static unsigned long xen_get_wallclock(void)
  
- #include <xen/events.h>
-+#include <xen/features.h>
- #include <xen/interface/xen.h>
- #include <xen/interface/vcpu.h>
- 
-@@ -155,7 +156,7 @@ static void do_stolen_accounting(void)
- }
- 
- /* Get the TSC speed from Xen */
--unsigned long xen_tsc_khz(void)
-+static unsigned long xen_tsc_khz(void)
- {
- 	struct pvclock_vcpu_time_info *info =
- 		&HYPERVISOR_shared_info->vcpu_info[0].time;
-@@ -190,7 +191,7 @@ static void xen_read_wallclock(struct timespec *ts)
- 	put_cpu_var(xen_vcpu);
- }
- 
--unsigned long xen_get_wallclock(void)
-+static unsigned long xen_get_wallclock(void)
- {
- 	struct timespec ts;
- 
-@@ -198,10 +199,24 @@ unsigned long xen_get_wallclock(void)
- 	return ts.tv_sec;
- }
- 
--int xen_set_wallclock(unsigned long now)
-+static int xen_set_wallclock(unsigned long now)
+ static int xen_set_wallclock(unsigned long now)
  {
 +	struct xen_platform_op op;
 +	int rc;
@@ -5629,7 +5250,7 @@ index 8e04980..68feb40 100644
  }
  
  static struct clocksource xen_clocksource __read_mostly = {
-@@ -403,6 +418,8 @@ void xen_setup_timer(int cpu)
+@@ -404,6 +418,8 @@ void xen_setup_timer(int cpu)
  
  	evt->cpumask = cpumask_of(cpu);
  	evt->irq = irq;
@@ -5638,65 +5259,41 @@ index 8e04980..68feb40 100644
  }
  
  void xen_teardown_timer(int cpu)
-@@ -433,7 +450,7 @@ void xen_timer_resume(void)
+@@ -434,10 +450,6 @@ void xen_timer_resume(void)
  	}
  }
  
--__init void xen_time_init(void)
-+static __init void xen_time_init(void)
+-static const struct pv_time_ops xen_time_ops __initdata = {
+-	.sched_clock = xen_clocksource_read,
+-};
+-
+ static __init void xen_time_init(void)
  {
  	int cpu = smp_processor_id();
- 
-@@ -457,3 +474,49 @@ __init void xen_time_init(void)
- 	xen_setup_timer(cpu);
+@@ -463,6 +475,10 @@ static __init void xen_time_init(void)
  	xen_setup_cpu_clockevents();
  }
-+
+ 
 +static const struct pv_time_ops xen_time_ops __initdata = {
 +       .sched_clock = xen_clocksource_read,
 +};
 +
-+__init void xen_init_time_ops(void)
-+{
-+	pv_time_ops = xen_time_ops;
-+
-+	x86_init.timers.timer_init = xen_time_init;
-+	x86_init.timers.setup_percpu_clockev = x86_init_noop;
-+	x86_cpuinit.setup_percpu_clockev = x86_init_noop;
-+
-+	x86_platform.calibrate_tsc = xen_tsc_khz;
-+	x86_platform.get_wallclock = xen_get_wallclock;
-+	x86_platform.set_wallclock = xen_set_wallclock;
-+}
-+
-+static void xen_hvm_setup_cpu_clockevents(void)
-+{
-+	int cpu = smp_processor_id();
-+	xen_setup_runstate_info(cpu);
-+	xen_setup_timer(cpu);
-+	xen_setup_cpu_clockevents();
-+}
-+
-+__init void xen_hvm_init_time_ops(void)
-+{
-+	/* vector callback is needed otherwise we cannot receive interrupts
-+	 * on cpu > 0 */
-+	if (!xen_have_vector_callback && num_present_cpus() > 1)
-+		return;
-+	if (!xen_feature(XENFEAT_hvm_safe_pvclock)) {
-+		printk(KERN_INFO "Xen doesn't support pvclock on HVM,"
-+				"disable pv timer\n");
-+		return;
-+	}
-+
-+	pv_time_ops = xen_time_ops;
-+	x86_init.timers.setup_percpu_clockev = xen_time_init;
-+	x86_cpuinit.setup_percpu_clockev = xen_hvm_setup_cpu_clockevents;
-+
-+	x86_platform.calibrate_tsc = xen_tsc_khz;
-+	x86_platform.get_wallclock = xen_get_wallclock;
-+	x86_platform.set_wallclock = xen_set_wallclock;
-+}
+ __init void xen_init_time_ops(void)
+ {
+ 	pv_time_ops = xen_time_ops;
+@@ -476,7 +492,6 @@ __init void xen_init_time_ops(void)
+ 	x86_platform.set_wallclock = xen_set_wallclock;
+ }
+ 
+-#ifdef CONFIG_XEN_PVHVM
+ static void xen_hvm_setup_cpu_clockevents(void)
+ {
+ 	int cpu = smp_processor_id();
+@@ -505,4 +520,3 @@ __init void xen_hvm_init_time_ops(void)
+ 	x86_platform.get_wallclock = xen_get_wallclock;
+ 	x86_platform.set_wallclock = xen_set_wallclock;
+ }
+-#endif
 diff --git a/arch/x86/xen/vga.c b/arch/x86/xen/vga.c
 new file mode 100644
 index 0000000..1cd7f4d
@@ -5771,7 +5368,7 @@ index 0000000..1cd7f4d
 +	}
 +}
 diff --git a/arch/x86/xen/xen-ops.h b/arch/x86/xen/xen-ops.h
-index f9153a3..3bcdbed 100644
+index ed77694..3bcdbed 100644
 --- a/arch/x86/xen/xen-ops.h
 +++ b/arch/x86/xen/xen-ops.h
 @@ -30,6 +30,9 @@ void xen_setup_machphys_mapping(void);
@@ -5784,32 +5381,7 @@ index f9153a3..3bcdbed 100644
  
  char * __init xen_memory_setup(void);
  void __init xen_arch_setup(void);
-@@ -38,6 +41,10 @@ void xen_enable_sysenter(void);
- void xen_enable_syscall(void);
- void xen_vcpu_restore(void);
- 
-+void xen_callback_vector(void);
-+void xen_hvm_init_shared_info(void);
-+void __init xen_unplug_emulated_devices(void);
-+
- void __init xen_build_dynamic_phys_to_machine(void);
- 
- void xen_init_irq_ops(void);
-@@ -46,11 +53,8 @@ void xen_setup_runstate_info(int cpu);
- void xen_teardown_timer(int cpu);
- cycle_t xen_clocksource_read(void);
- void xen_setup_cpu_clockevents(void);
--unsigned long xen_tsc_khz(void);
--void __init xen_time_init(void);
--unsigned long xen_get_wallclock(void);
--int xen_set_wallclock(unsigned long time);
--unsigned long long xen_sched_clock(void);
-+void __init xen_init_time_ops(void);
-+void __init xen_hvm_init_time_ops(void);
- 
- irqreturn_t xen_debug_interrupt(int irq, void *dev_id);
- 
-@@ -82,6 +86,23 @@ static inline void xen_uninit_lock_cpu(int cpu)
+@@ -83,6 +86,23 @@ static inline void xen_uninit_lock_cpu(int cpu)
  }
  #endif
  
@@ -5833,7 +5405,7 @@ index f9153a3..3bcdbed 100644
  /* Declare an asm function, along with symbols needed to make it
     inlineable */
  #define DECL_ASM(ret, name, ...)		\
-@@ -101,4 +122,6 @@ void xen_sysret32(void);
+@@ -102,4 +122,6 @@ void xen_sysret32(void);
  void xen_sysret64(void);
  void xen_adjust_exception_frame(void);
  
@@ -6829,10 +6401,10 @@ index 1d886e0..f4a2b10 100644
  	  This driver implements the front-end of the Xen virtual
  	  block device driver.  It communicates with a back-end driver
 diff --git a/drivers/block/xen-blkfront.c b/drivers/block/xen-blkfront.c
-index b8578bb..89adac5 100644
+index ac692c5..89adac5 100644
 --- a/drivers/block/xen-blkfront.c
 +++ b/drivers/block/xen-blkfront.c
-@@ -42,10 +42,12 @@
+@@ -42,6 +42,7 @@
  #include <linux/module.h>
  #include <linux/scatterlist.h>
  
@@ -6840,12 +6412,7 @@ index b8578bb..89adac5 100644
  #include <xen/xenbus.h>
  #include <xen/grant_table.h>
  #include <xen/events.h>
- #include <xen/page.h>
-+#include <xen/platform_pci.h>
- 
- #include <xen/interface/grant_table.h>
- #include <xen/interface/io/blkif.h>
-@@ -76,6 +78,7 @@ static const struct block_device_operations xlvbd_block_fops;
+@@ -77,6 +78,7 @@ static const struct block_device_operations xlvbd_block_fops;
   */
  struct blkfront_info
  {
@@ -6853,7 +6420,7 @@ index b8578bb..89adac5 100644
  	struct xenbus_device *xbdev;
  	struct gendisk *gd;
  	int vdevice;
-@@ -92,16 +95,14 @@ struct blkfront_info
+@@ -93,16 +95,14 @@ struct blkfront_info
  	unsigned long shadow_free;
  	int feature_barrier;
  	int is_ready;
@@ -6874,7 +6441,7 @@ index b8578bb..89adac5 100644
  #define MAXIMUM_OUTSTANDING_BLOCK_REQS \
  	(BLKIF_MAX_SEGMENTS_PER_REQUEST * BLK_RING_SIZE)
  #define GRANT_INVALID_REF	0
-@@ -136,6 +137,55 @@ static void add_id_to_freelist(struct blkfront_info *info,
+@@ -137,6 +137,55 @@ static void add_id_to_freelist(struct blkfront_info *info,
  	info->shadow_free = id;
  }
  
@@ -6930,7 +6497,7 @@ index b8578bb..89adac5 100644
  static void blkif_restart_queue_callback(void *arg)
  {
  	struct blkfront_info *info = (struct blkfront_info *)arg;
-@@ -416,9 +466,14 @@ static int xlvbd_alloc_gendisk(blkif_sector_t capacity,
+@@ -417,9 +466,14 @@ static int xlvbd_alloc_gendisk(blkif_sector_t capacity,
  	if ((minor % nr_parts) == 0)
  		nr_minors = nr_parts;
  
@@ -6946,7 +6513,7 @@ index b8578bb..89adac5 100644
  
  	offset = minor / nr_parts;
  
-@@ -449,7 +504,7 @@ static int xlvbd_alloc_gendisk(blkif_sector_t capacity,
+@@ -450,7 +504,7 @@ static int xlvbd_alloc_gendisk(blkif_sector_t capacity,
  
  	if (xlvbd_init_blk_queue(gd, sector_size)) {
  		del_gendisk(gd);
@@ -6955,7 +6522,7 @@ index b8578bb..89adac5 100644
  	}
  
  	info->rq = gd->queue;
-@@ -469,10 +524,45 @@ static int xlvbd_alloc_gendisk(blkif_sector_t capacity,
+@@ -470,10 +524,45 @@ static int xlvbd_alloc_gendisk(blkif_sector_t capacity,
  
  	return 0;
  
@@ -7001,7 +6568,7 @@ index b8578bb..89adac5 100644
  static void kick_pending_request_queues(struct blkfront_info *info)
  {
  	if (!RING_FULL(&info->ring)) {
-@@ -650,7 +740,7 @@ fail:
+@@ -651,7 +740,7 @@ fail:
  
  
  /* Common code used when first setting up, and when resuming. */
@@ -7010,7 +6577,7 @@ index b8578bb..89adac5 100644
  			   struct blkfront_info *info)
  {
  	const char *message = NULL;
-@@ -710,7 +800,6 @@ again:
+@@ -711,7 +800,6 @@ again:
  	return err;
  }
  
@@ -7018,10 +6585,35 @@ index b8578bb..89adac5 100644
  /**
   * Entry point to this code when a new device is created.  Allocate the basic
   * structures and the ring buffer for communication with the backend, and
-@@ -736,12 +825,29 @@ static int blkfront_probe(struct xenbus_device *dev,
+@@ -737,34 +825,21 @@ static int blkfront_probe(struct xenbus_device *dev,
  		}
  	}
  
+-	if (xen_hvm_domain()) {
+-		char *type;
+-		int len;
+-		/* no unplug has been done: do not hook devices != xen vbds */
+-		if (xen_platform_pci_unplug & XEN_UNPLUG_IGNORE) {
+-			int major;
+-
+-			if (!VDEV_IS_EXTENDED(vdevice))
+-				major = BLKIF_MAJOR(vdevice);
+-			else
+-				major = XENVBD_MAJOR;
+-
+-			if (major != XENVBD_MAJOR) {
+-				printk(KERN_INFO
+-						"%s: HVM does not support vbd %d as xen block device\n",
+-						__FUNCTION__, vdevice);
+-				return -ENODEV;
+-			}
+-		}
+-		/* do not create a PV cdrom device if we are an HVM guest */
+-		type = xenbus_read(XBT_NIL, dev->nodename, "device-type", &len);
+-		if (IS_ERR(type))
+-			return -ENODEV;
+-		if (strncmp(type, "cdrom", 5) == 0) {
+-			kfree(type);
 +	/* no unplug has been done: do not hook devices != xen vbds */
 +	if (xen_hvm_domain() && (xen_platform_pci_unplug & XEN_UNPLUG_IGNORE)) {
 +		int major;
@@ -7035,12 +6627,13 @@ index b8578bb..89adac5 100644
 +			printk(KERN_INFO
 +					"%s: HVM does not support vbd %d as xen block device\n",
 +					__FUNCTION__, vdevice);
-+			return -ENODEV;
-+		}
-+	}
+ 			return -ENODEV;
+ 		}
+-		kfree(type);
+ 	}
  	info = kzalloc(sizeof(*info), GFP_KERNEL);
  	if (!info) {
- 		xenbus_dev_fatal(dev, -ENOMEM, "allocating info structure");
+@@ -772,6 +847,7 @@ static int blkfront_probe(struct xenbus_device *dev,
  		return -ENOMEM;
  	}
  
@@ -7048,7 +6641,7 @@ index b8578bb..89adac5 100644
  	info->xbdev = dev;
  	info->vdevice = vdevice;
  	info->connected = BLKIF_STATE_DISCONNECTED;
-@@ -755,7 +861,7 @@ static int blkfront_probe(struct xenbus_device *dev,
+@@ -785,7 +861,7 @@ static int blkfront_probe(struct xenbus_device *dev,
  	info->handle = simple_strtoul(strrchr(dev->nodename, '/')+1, NULL, 0);
  	dev_set_drvdata(&dev->dev, info);
  
@@ -7057,7 +6650,7 @@ index b8578bb..89adac5 100644
  	if (err) {
  		kfree(info);
  		dev_set_drvdata(&dev->dev, NULL);
-@@ -850,13 +956,50 @@ static int blkfront_resume(struct xenbus_device *dev)
+@@ -880,13 +956,50 @@ static int blkfront_resume(struct xenbus_device *dev)
  
  	blkif_free(info, info->connected == BLKIF_STATE_CONNECTED);
  
@@ -7109,7 +6702,7 @@ index b8578bb..89adac5 100644
  
  /*
   * Invoked when the backend is finally 'ready' (and has told produced
-@@ -869,10 +1012,29 @@ static void blkfront_connect(struct blkfront_info *info)
+@@ -899,10 +1012,29 @@ static void blkfront_connect(struct blkfront_info *info)
  	unsigned int binfo;
  	int err;
  
@@ -7141,7 +6734,7 @@ index b8578bb..89adac5 100644
  	dev_dbg(&info->xbdev->dev, "%s:%s.\n",
  		__func__, info->xbdev->otherend);
  
-@@ -915,57 +1077,21 @@ static void blkfront_connect(struct blkfront_info *info)
+@@ -945,57 +1077,21 @@ static void blkfront_connect(struct blkfront_info *info)
  }
  
  /**
@@ -7203,7 +6796,7 @@ index b8578bb..89adac5 100644
  	case XenbusStateUnknown:
  	case XenbusStateClosed:
  		break;
-@@ -975,35 +1101,56 @@ static void backend_changed(struct xenbus_device *dev,
+@@ -1005,35 +1101,56 @@ static void backend_changed(struct xenbus_device *dev,
  		break;
  
  	case XenbusStateClosing:
@@ -7280,7 +6873,7 @@ index b8578bb..89adac5 100644
  
  	return 0;
  }
-@@ -1012,30 +1159,68 @@ static int blkfront_is_ready(struct xenbus_device *dev)
+@@ -1042,30 +1159,68 @@ static int blkfront_is_ready(struct xenbus_device *dev)
  {
  	struct blkfront_info *info = dev_get_drvdata(&dev->dev);
  
@@ -7363,7 +6956,7 @@ index b8578bb..89adac5 100644
  	return 0;
  }
  
-@@ -1061,7 +1246,7 @@ static struct xenbus_driver blkfront = {
+@@ -1091,7 +1246,7 @@ static struct xenbus_driver blkfront = {
  	.probe = blkfront_probe,
  	.remove = blkfront_remove,
  	.resume = blkfront_resume,
@@ -7786,7 +7379,7 @@ index 1c040d0..3dc8d6b 100644
  }
  EXPORT_SYMBOL(ttm_fbdev_mmap);
 diff --git a/drivers/input/xen-kbdfront.c b/drivers/input/xen-kbdfront.c
-index b115726..80a072e 100644
+index 8ec2201..80a072e 100644
 --- a/drivers/input/xen-kbdfront.c
 +++ b/drivers/input/xen-kbdfront.c
 @@ -21,7 +21,10 @@
@@ -7813,7 +7406,7 @@ index b115726..80a072e 100644
  
  static int __init xenkbd_init(void)
  {
--	if (!xen_domain())
+-	if (!xen_pv_domain())
 +	if (!xen_domain() || xen_hvm_domain())
  		return -ENODEV;
  
@@ -9767,7 +9360,7 @@ index df1f757..661bfd2 100644
  	info->fbdefio = &metronomefb_defio;
  	fb_deferred_io_init(info);
 diff --git a/drivers/video/xen-fbfront.c b/drivers/video/xen-fbfront.c
-index 54cd916..dc72563 100644
+index 450f958..dc72563 100644
 --- a/drivers/video/xen-fbfront.c
 +++ b/drivers/video/xen-fbfront.c
 @@ -25,7 +25,10 @@
@@ -9803,13 +9396,13 @@ index 54cd916..dc72563 100644
  
  static int __init xenfb_init(void)
  {
--	if (!xen_domain())
+-	if (!xen_pv_domain())
 +	if (!xen_domain() || xen_hvm_domain())
  		return -ENODEV;
  
  	/* Nothing to do if running in dom0. */
 diff --git a/drivers/xen/Kconfig b/drivers/xen/Kconfig
-index cab100a..a3e1923 100644
+index 96572e2..a3e1923 100644
 --- a/drivers/xen/Kconfig
 +++ b/drivers/xen/Kconfig
 @@ -28,6 +28,110 @@ config XEN_DEV_EVTCHN
@@ -9923,14 +9516,10 @@ index cab100a..a3e1923 100644
  config XENFS
  	tristate "Xen filesystem"
  	depends on XEN
-@@ -60,4 +164,37 @@ config XEN_SYS_HYPERVISOR
-          Create entries under /sys/hypervisor describing the Xen
- 	 hypervisor environment.  When running native or in another
+@@ -62,9 +166,32 @@ config XEN_SYS_HYPERVISOR
  	 virtual environment, /sys/hypervisor will still be present,
--	 but will have no xen contents.
-\ No newline at end of file
-+	 but will have no xen contents.
-+
+ 	 but will have no xen contents.
+ 
 +config XEN_MCE
 +       def_bool y
 +       depends on XEN_DOM0 && X86_64 && X86_MCE_INTEL
@@ -9954,20 +9543,18 @@ index cab100a..a3e1923 100644
 +	   depends on XEN_DOM0 && ACPI_PROCESSOR && CPU_FREQ
 +	   default y
 +
-+config XEN_PLATFORM_PCI
-+	tristate "xen platform pci device driver"
+ config XEN_PLATFORM_PCI
+ 	tristate "xen platform pci device driver"
+-	depends on XEN_PVHVM
 +	depends on XEN
-+	default m
-+	help
-+	  Driver for the Xen PCI Platform device: it is responsible for
-+	  initializing xenbus and grant_table when running in a Xen HVM
-+	  domain. As a consequence this driver is required to run any Xen PV
-+	  frontend on Xen HVM.
+ 	default m
+ 	help
+ 	  Driver for the Xen PCI Platform device: it is responsible for
 diff --git a/drivers/xen/Makefile b/drivers/xen/Makefile
-index 7c28434..ef1ea63 100644
+index e392fb7..ef1ea63 100644
 --- a/drivers/xen/Makefile
 +++ b/drivers/xen/Makefile
-@@ -1,12 +1,27 @@
+@@ -1,13 +1,27 @@
 -obj-y	+= grant-table.o features.o events.o manage.o
 +obj-y	+= grant-table.o features.o events.o manage.o biomerge.o pcpu.o
  obj-y	+= xenbus/
@@ -9980,8 +9567,6 @@ index 7c28434..ef1ea63 100644
 -obj-$(CONFIG_XEN_BALLOON)	+= balloon.o
 -obj-$(CONFIG_XEN_DEV_EVTCHN)	+= evtchn.o
 -obj-$(CONFIG_XENFS)		+= xenfs/
--obj-$(CONFIG_XEN_SYS_HYPERVISOR)	+= sys-hypervisor.o
-\ No newline at end of file
 +obj-$(CONFIG_PCI)			+= pci.o
 +obj-$(CONFIG_HOTPLUG_CPU)		+= cpu_hotplug.o
 +obj-$(CONFIG_XEN_XENCOMM)		+= xencomm.o
@@ -9993,13 +9578,13 @@ index 7c28434..ef1ea63 100644
 +obj-$(CONFIG_XEN_BLKDEV_TAP)            += blktap/
 +obj-$(CONFIG_XEN_NETDEV_BACKEND)	+= netback/
 +obj-$(CONFIG_XENFS)			+= xenfs/
-+obj-$(CONFIG_XEN_SYS_HYPERVISOR)	+= sys-hypervisor.o
+ obj-$(CONFIG_XEN_SYS_HYPERVISOR)	+= sys-hypervisor.o
 +obj-$(CONFIG_XEN_MCE)		+= mce.o
 +
 +obj-$(CONFIG_XEN_S3)           += acpi.o
 +obj-$(CONFIG_ACPI_PROCESSOR_XEN) += acpi_processor.o
 +obj-$(CONFIG_ACPI_HOTPLUG_MEMORY)  += xen_acpi_memhotplug.o
-+obj-$(CONFIG_XEN_PLATFORM_PCI)	+= platform-pci.o
+ obj-$(CONFIG_XEN_PLATFORM_PCI)	+= platform-pci.o
 +
 +xen-evtchn-y				:= evtchn.o
 +xen-gntdev-y				:= gntdev.o
@@ -15399,7 +14984,7 @@ index bdfd584..6625ffe 100644
  
  #include <asm/xen/hypervisor.h>
 diff --git a/drivers/xen/events.c b/drivers/xen/events.c
-index 30e0467..b4a00bf 100644
+index 5d25cdf..b4a00bf 100644
 --- a/drivers/xen/events.c
 +++ b/drivers/xen/events.c
 @@ -16,7 +16,7 @@
@@ -15411,7 +14996,7 @@ index 30e0467..b4a00bf 100644
   *
   * Jeremy Fitzhardinge <jeremy@xensource.com>, XenSource Inc, 2007
   */
-@@ -27,18 +27,31 @@
+@@ -27,15 +27,22 @@
  #include <linux/module.h>
  #include <linux/string.h>
  #include <linux/bootmem.h>
@@ -15420,7 +15005,7 @@ index 30e0467..b4a00bf 100644
 +#include <linux/pci.h>
 +#include <linux/msi.h>
  
-+#include <asm/desc.h>
+ #include <asm/desc.h>
  #include <asm/ptrace.h>
  #include <asm/irq.h>
  #include <asm/idle.h>
@@ -15431,19 +15016,19 @@ index 30e0467..b4a00bf 100644
 +#include <asm/xen/pci.h>
  
 +#include <xen/xen.h>
-+#include <xen/hvm.h>
+ #include <xen/hvm.h>
  #include <xen/xen-ops.h>
  #include <xen/events.h>
- #include <xen/interface/xen.h>
- #include <xen/interface/event_channel.h>
-+#include <xen/interface/hvm/hvm_op.h>
-+#include <xen/interface/hvm/params.h>
-+
-+#include "../pci/msi.h"
+@@ -44,6 +51,8 @@
+ #include <xen/interface/hvm/hvm_op.h>
+ #include <xen/interface/hvm/params.h>
  
++#include "../pci/msi.h"
++
  /*
   * This lock protects updates to the following mapping and reference-count
-@@ -67,7 +80,7 @@ enum xen_irq_type {
+  * arrays. The lock does not need to be acquired to read the mapping tables.
+@@ -71,7 +80,7 @@ enum xen_irq_type {
   * event channel - irq->event channel mapping
   * cpu - cpu this event channel is bound to
   * index - type-specific information:
@@ -15452,7 +15037,7 @@ index 30e0467..b4a00bf 100644
   *    VIRQ - virq number
   *    IPI - IPI vector
   *    EVTCHN -
-@@ -83,20 +96,27 @@ struct irq_info
+@@ -87,20 +96,27 @@ struct irq_info
  		enum ipi_vector ipi;
  		struct {
  			unsigned short gsi;
@@ -15486,7 +15071,7 @@ index 30e0467..b4a00bf 100644
  static inline unsigned long *cpu_evtchn_mask(int cpu)
  {
  	return cpu_evtchn_mask_p[cpu].bits;
-@@ -106,6 +126,7 @@ static inline unsigned long *cpu_evtchn_mask(int cpu)
+@@ -110,6 +126,7 @@ static inline unsigned long *cpu_evtchn_mask(int cpu)
  #define VALID_EVTCHN(chn)	((chn) != 0)
  
  static struct irq_chip xen_dynamic_chip;
@@ -15494,7 +15079,7 @@ index 30e0467..b4a00bf 100644
  
  /* Constructor for packed IRQ information. */
  static struct irq_info mk_unbound_info(void)
-@@ -135,7 +156,8 @@ static struct irq_info mk_pirq_info(unsigned short evtchn,
+@@ -139,7 +156,8 @@ static struct irq_info mk_pirq_info(unsigned short evtchn,
  				    unsigned short gsi, unsigned short vector)
  {
  	return (struct irq_info) { .type = IRQT_PIRQ, .evtchn = evtchn,
@@ -15504,7 +15089,7 @@ index 30e0467..b4a00bf 100644
  }
  
  /*
-@@ -218,6 +240,15 @@ static unsigned int cpu_from_evtchn(unsigned int evtchn)
+@@ -222,6 +240,15 @@ static unsigned int cpu_from_evtchn(unsigned int evtchn)
  	return ret;
  }
  
@@ -15520,7 +15105,7 @@ index 30e0467..b4a00bf 100644
  static inline unsigned long active_evtchns(unsigned int cpu,
  					   struct shared_info *sh,
  					   unsigned int idx)
-@@ -329,27 +360,372 @@ static void unmask_evtchn(int port)
+@@ -333,12 +360,29 @@ static void unmask_evtchn(int port)
  	put_cpu();
  }
  
@@ -15542,23 +15127,18 @@ index 30e0467..b4a00bf 100644
 +	int start = get_nr_hw_irqs();
 +	void *chip_data;
  
--	for (irq = 0; irq < nr_irqs; irq++)
+-	for (irq = 0; irq < nr_irqs; irq++) {
 +	if (start == nr_irqs)
 +		goto no_irqs;
 +
 +	/* nr_irqs is a magic value. Must not use it.*/
 +	for (irq = nr_irqs-1; irq > start; irq--) {
-+		desc = irq_to_desc(irq);
-+		/* only 0->15 have init'd desc; handle irq > 16 */
-+		if (desc == NULL)
-+			break;
-+		if (desc->chip == &no_irq_chip)
-+			break;
-+		if (desc->chip != &xen_dynamic_chip)
-+			continue;
- 		if (irq_info[irq].type == IRQT_UNBOUND)
+ 		desc = irq_to_desc(irq);
+ 		/* only 0->15 have init'd desc; handle irq > 16 */
+ 		if (desc == NULL)
+@@ -351,18 +395,337 @@ static int find_unbound_irq(void)
  			break;
-+	}
+ 	}
  
 -	if (irq == nr_irqs)
 -		panic("No available IRQ to bind to: increase nr_irqs!\n");
@@ -15569,9 +15149,10 @@ index 30e0467..b4a00bf 100644
  	if (WARN_ON(desc == NULL))
  		return -1;
  
+-	dynamic_irq_init_keep_chip_data(irq);
 +	/* save and restore chip_data */
 +	chip_data = desc->chip_data;
- 	dynamic_irq_init(irq);
++	dynamic_irq_init(irq);
 +	desc->chip_data = chip_data;
  
  	return irq;
@@ -15584,8 +15165,8 @@ index 30e0467..b4a00bf 100644
 +{
 +	/* identity map all the hardware irqs */
 +	return irq < get_nr_hw_irqs();
- }
- 
++}
++
 +static void pirq_unmask_notify(int irq)
 +{
 +	struct irq_info *info = info_for_irq(irq);
@@ -15595,8 +15176,8 @@ index 30e0467..b4a00bf 100644
 +		int rc = HYPERVISOR_physdev_op(PHYSDEVOP_eoi, &eoi);
 +		WARN_ON(rc);
 +	}
-+}
-+
+ }
+ 
 +static void pirq_query_unmask(int irq)
 +{
 +	struct physdev_irq_status_query irq_status;
@@ -15896,7 +15477,7 @@ index 30e0467..b4a00bf 100644
  int bind_evtchn_to_irq(unsigned int evtchn)
  {
  	int irq;
-@@ -409,8 +785,23 @@ static int bind_ipi_to_irq(unsigned int ipi, unsigned int cpu)
+@@ -422,8 +785,23 @@ static int bind_ipi_to_irq(unsigned int ipi, unsigned int cpu)
  	return irq;
  }
  
@@ -15908,20 +15489,20 @@ index 30e0467..b4a00bf 100644
 +
 +        bind_interdomain.remote_dom  = remote_domain;
 +        bind_interdomain.remote_port = remote_port;
-+
+ 
+-static int bind_virq_to_irq(unsigned int virq, unsigned int cpu)
 +        err = HYPERVISOR_event_channel_op(EVTCHNOP_bind_interdomain,
 +                                          &bind_interdomain);
 +
 +        return err ? : bind_evtchn_to_irq(bind_interdomain.local_port);
 +}
 +
- 
--static int bind_virq_to_irq(unsigned int virq, unsigned int cpu)
++
 +int bind_virq_to_irq(unsigned int virq, unsigned int cpu)
  {
  	struct evtchn_bind_virq bind_virq;
  	int evtchn, irq;
-@@ -504,6 +895,29 @@ int bind_evtchn_to_irqhandler(unsigned int evtchn,
+@@ -517,6 +895,29 @@ int bind_evtchn_to_irqhandler(unsigned int evtchn,
  }
  EXPORT_SYMBOL_GPL(bind_evtchn_to_irqhandler);
  
@@ -15951,26 +15532,7 @@ index 30e0467..b4a00bf 100644
  int bind_virq_to_irqhandler(unsigned int virq, unsigned int cpu,
  			    irq_handler_t handler,
  			    unsigned long irqflags, const char *devname, void *dev_id)
-@@ -617,17 +1031,13 @@ static DEFINE_PER_CPU(unsigned, xed_nesting_count);
-  * a bitset of words which contain pending event bits.  The second
-  * level is a bitset of pending events themselves.
-  */
--void xen_evtchn_do_upcall(struct pt_regs *regs)
-+static void __xen_evtchn_do_upcall(struct pt_regs *regs)
- {
- 	int cpu = get_cpu();
--	struct pt_regs *old_regs = set_irq_regs(regs);
- 	struct shared_info *s = HYPERVISOR_shared_info;
- 	struct vcpu_info *vcpu_info = __get_cpu_var(xen_vcpu);
-  	unsigned count;
- 
--	exit_idle();
--	irq_enter();
--
- 	do {
- 		unsigned long pending_words;
- 
-@@ -650,9 +1060,13 @@ void xen_evtchn_do_upcall(struct pt_regs *regs)
+@@ -659,9 +1060,13 @@ static void __xen_evtchn_do_upcall(struct pt_regs *regs)
  				int bit_idx = __ffs(pending_bits);
  				int port = (word_idx * BITS_PER_LONG) + bit_idx;
  				int irq = evtchn_to_irq[port];
@@ -15986,54 +15548,17 @@ index 30e0467..b4a00bf 100644
  			}
  		}
  
-@@ -660,14 +1074,32 @@ void xen_evtchn_do_upcall(struct pt_regs *regs)
+@@ -691,7 +1096,8 @@ void xen_evtchn_do_upcall(struct pt_regs *regs)
  
- 		count = __get_cpu_var(xed_nesting_count);
- 		__get_cpu_var(xed_nesting_count) = 0;
--	} while(count != 1);
-+	} while (count != 1 || vcpu_info->evtchn_upcall_pending);
- 
- out:
-+
-+	put_cpu();
-+}
-+
-+void xen_evtchn_do_upcall(struct pt_regs *regs)
-+{
-+	struct pt_regs *old_regs = set_irq_regs(regs);
-+
-+	exit_idle();
-+	irq_enter();
-+
-+	__xen_evtchn_do_upcall(regs);
-+
- 	irq_exit();
- 	set_irq_regs(old_regs);
-+}
- 
--	put_cpu();
-+void xen_hvm_evtchn_do_upcall(void)
-+{
+ void xen_hvm_evtchn_do_upcall(void)
+ {
+-	__xen_evtchn_do_upcall(get_irq_regs());
 +	struct pt_regs *regs = get_irq_regs();
 +	__xen_evtchn_do_upcall(regs);
  }
-+EXPORT_SYMBOL_GPL(xen_hvm_evtchn_do_upcall);
+ EXPORT_SYMBOL_GPL(xen_hvm_evtchn_do_upcall);
  
- /* Rebind a new event channel to an existing irq. */
- void rebind_evtchn_irq(int evtchn, int irq)
-@@ -704,7 +1136,10 @@ static int rebind_irq_to_cpu(unsigned irq, unsigned tcpu)
- 	struct evtchn_bind_vcpu bind_vcpu;
- 	int evtchn = evtchn_from_irq(irq);
- 
--	if (!VALID_EVTCHN(evtchn))
-+	/* events delivered via platform PCI interrupts are always
-+	 * routed to vcpu 0 */
-+	if (!VALID_EVTCHN(evtchn) ||
-+		(xen_hvm_domain() && !xen_have_vector_callback))
- 		return -1;
- 
- 	/* Send future instances of this interrupt to other vcpu. */
-@@ -856,7 +1291,7 @@ void xen_clear_irq_pending(int irq)
+@@ -885,7 +1291,7 @@ void xen_clear_irq_pending(int irq)
  	if (VALID_EVTCHN(evtchn))
  		clear_evtchn(evtchn);
  }
@@ -16042,7 +15567,7 @@ index 30e0467..b4a00bf 100644
  void xen_set_irq_pending(int irq)
  {
  	int evtchn = evtchn_from_irq(irq);
-@@ -876,9 +1311,9 @@ bool xen_test_irq_pending(int irq)
+@@ -905,9 +1311,9 @@ bool xen_test_irq_pending(int irq)
  	return ret;
  }
  
@@ -16054,7 +15579,7 @@ index 30e0467..b4a00bf 100644
  {
  	evtchn_port_t evtchn = evtchn_from_irq(irq);
  
-@@ -886,13 +1321,33 @@ void xen_poll_irq(int irq)
+@@ -915,13 +1321,33 @@ void xen_poll_irq(int irq)
  		struct sched_poll poll;
  
  		poll.nr_ports = 1;
@@ -16089,7 +15614,7 @@ index 30e0467..b4a00bf 100644
  
  void xen_irq_resume(void)
  {
-@@ -929,13 +1384,85 @@ static struct irq_chip xen_dynamic_chip __read_mostly = {
+@@ -958,6 +1384,26 @@ static struct irq_chip xen_dynamic_chip __read_mostly = {
  	.retrigger	= retrigger_dynirq,
  };
  
@@ -16113,16 +15638,14 @@ index 30e0467..b4a00bf 100644
 +	.retrigger	= retrigger_dynirq,
 +};
 +
-+int xen_set_callback_via(uint64_t via)
-+{
-+	struct xen_hvm_param a;
-+	a.domid = DOMID_SELF;
-+	a.index = HVM_PARAM_CALLBACK_IRQ;
-+	a.value = via;
-+	return HYPERVISOR_hvm_op(HVMOP_set_param, &a);
-+}
-+EXPORT_SYMBOL_GPL(xen_set_callback_via);
-+
+ int xen_set_callback_via(uint64_t via)
+ {
+ 	struct xen_hvm_param a;
+@@ -968,7 +1414,21 @@ int xen_set_callback_via(uint64_t via)
+ }
+ EXPORT_SYMBOL_GPL(xen_set_callback_via);
+ 
+-#ifdef CONFIG_XEN_PVHVM
 +void smp_xen_hvm_callback_vector(struct pt_regs *regs)
 +{
 +	struct pt_regs *old_regs = set_irq_regs(regs);
@@ -16138,31 +15661,26 @@ index 30e0467..b4a00bf 100644
 +	set_irq_regs(old_regs);
 +}
 +
-+/* Vector callbacks are better than PCI interrupts to receive event
-+ * channel notifications because we can receive vector callbacks on any
-+ * vcpu and we don't need PCI support or APIC interactions. */
-+void xen_callback_vector(void)
-+{
-+	int rc;
-+	uint64_t callback_via;
-+	if (xen_have_vector_callback) {
-+		callback_via = HVM_CALLBACK_VECTOR(XEN_HVM_EVTCHN_CALLBACK);
-+		rc = xen_set_callback_via(callback_via);
-+		if (rc) {
-+			printk(KERN_ERR "Request for Xen HVM callback vector"
-+					" failed.\n");
-+			xen_have_vector_callback = 0;
-+			return;
-+		}
-+		printk(KERN_INFO "Xen HVM callback vector for event delivery is "
-+				"enabled\n");
+ /* Vector callbacks are better than PCI interrupts to receive event
+  * channel notifications because we can receive vector callbacks on any
+  * vcpu and we don't need PCI support or APIC interactions. */
+@@ -987,14 +1447,9 @@ void xen_callback_vector(void)
+ 		}
+ 		printk(KERN_INFO "Xen HVM callback vector for event delivery is "
+ 				"enabled\n");
+-		/* in the restore case the vector has already been allocated */
+-		if (!test_bit(XEN_HVM_EVTCHN_CALLBACK, used_vectors))
+-			alloc_intr_gate(XEN_HVM_EVTCHN_CALLBACK, xen_hvm_callback_vector);
 +		alloc_intr_gate(XEN_HVM_EVTCHN_CALLBACK, xen_hvm_callback_vector);
-+	}
-+}
-+
+ 	}
+ }
+-#else
+-void xen_callback_vector(void) {}
+-#endif
+ 
  void __init xen_init_IRQ(void)
  {
- 	int i;
+@@ -1002,7 +1457,12 @@ void __init xen_init_IRQ(void)
  
  	cpu_evtchn_mask_p = kcalloc(nr_cpu_ids, sizeof(struct cpu_evtchn_s),
  				    GFP_KERNEL);
@@ -16176,18 +15694,12 @@ index 30e0467..b4a00bf 100644
  
  	init_evtchn_cpu_bindings();
  
-@@ -943,5 +1470,11 @@ void __init xen_init_IRQ(void)
- 	for (i = 0; i < NR_EVENT_CHANNELS; i++)
- 		mask_evtchn(i);
- 
--	irq_ctx_init(smp_processor_id());
-+	if (xen_hvm_domain()) {
-+		xen_callback_vector();
-+		native_init_IRQ();
-+	} else {
-+		irq_ctx_init(smp_processor_id());
+@@ -1015,5 +1475,6 @@ void __init xen_init_IRQ(void)
+ 		native_init_IRQ();
+ 	} else {
+ 		irq_ctx_init(smp_processor_id());
 +		xen_setup_pirqs();
-+	}
+ 	}
  }
 diff --git a/drivers/xen/evtchn.c b/drivers/xen/evtchn.c
 index 79bedba..b82666a 100644
@@ -17064,90 +16576,18 @@ index 0000000..a33e443
 +
 +/* ------------------------------------------------------------------ */
 diff --git a/drivers/xen/grant-table.c b/drivers/xen/grant-table.c
-index 7d8f531..5a8ad45 100644
+index 6652ce9..5a8ad45 100644
 --- a/drivers/xen/grant-table.c
 +++ b/drivers/xen/grant-table.c
-@@ -36,10 +36,13 @@
- #include <linux/mm.h>
- #include <linux/vmalloc.h>
+@@ -38,6 +38,7 @@
  #include <linux/uaccess.h>
-+#include <linux/io.h>
+ #include <linux/io.h>
  
 +#include <xen/xen.h>
  #include <xen/interface/xen.h>
  #include <xen/page.h>
  #include <xen/grant_table.h>
-+#include <xen/interface/memory.h>
- #include <asm/xen/hypercall.h>
- 
- #include <asm/pgtable.h>
-@@ -57,6 +60,8 @@ static unsigned int boot_max_nr_grant_frames;
- static int gnttab_free_count;
- static grant_ref_t gnttab_free_head;
- static DEFINE_SPINLOCK(gnttab_list_lock);
-+unsigned long xen_hvm_resume_frames;
-+EXPORT_SYMBOL_GPL(xen_hvm_resume_frames);
- 
- static struct grant_entry *shared;
- 
-@@ -431,7 +436,7 @@ static unsigned int __max_nr_grant_frames(void)
- 	return query.max_nr_frames;
- }
- 
--static inline unsigned int max_nr_grant_frames(void)
-+unsigned int gnttab_max_grant_frames(void)
- {
- 	unsigned int xen_max = __max_nr_grant_frames();
- 
-@@ -439,6 +444,7 @@ static inline unsigned int max_nr_grant_frames(void)
- 		return boot_max_nr_grant_frames;
- 	return xen_max;
- }
-+EXPORT_SYMBOL_GPL(gnttab_max_grant_frames);
- 
- static int gnttab_map(unsigned int start_idx, unsigned int end_idx)
- {
-@@ -447,6 +453,30 @@ static int gnttab_map(unsigned int start_idx, unsigned int end_idx)
- 	unsigned int nr_gframes = end_idx + 1;
- 	int rc;
- 
-+	if (xen_hvm_domain()) {
-+		struct xen_add_to_physmap xatp;
-+		unsigned int i = end_idx;
-+		rc = 0;
-+		/*
-+		 * Loop backwards, so that the first hypercall has the largest
-+		 * index, ensuring that the table will grow only once.
-+		 */
-+		do {
-+			xatp.domid = DOMID_SELF;
-+			xatp.idx = i;
-+			xatp.space = XENMAPSPACE_grant_table;
-+			xatp.gpfn = (xen_hvm_resume_frames >> PAGE_SHIFT) + i;
-+			rc = HYPERVISOR_memory_op(XENMEM_add_to_physmap, &xatp);
-+			if (rc != 0) {
-+				printk(KERN_WARNING
-+						"grant table add_to_physmap failed, err=%d\n", rc);
-+				break;
-+			}
-+		} while (i-- > start_idx);
-+
-+		return rc;
-+	}
-+
- 	frames = kmalloc(nr_gframes * sizeof(unsigned long), GFP_ATOMIC);
- 	if (!frames)
- 		return -ENOMEM;
-@@ -463,7 +493,7 @@ static int gnttab_map(unsigned int start_idx, unsigned int end_idx)
- 
- 	BUG_ON(rc || setup.status);
- 
--	rc = arch_gnttab_map_shared(frames, nr_gframes, max_nr_grant_frames(),
-+	rc = arch_gnttab_map_shared(frames, nr_gframes, gnttab_max_grant_frames(),
- 				    &shared);
- 	BUG_ON(rc);
- 
-@@ -472,11 +502,134 @@ static int gnttab_map(unsigned int start_idx, unsigned int end_idx)
+@@ -501,6 +502,111 @@ static int gnttab_map(unsigned int start_idx, unsigned int end_idx)
  	return 0;
  }
  
@@ -17258,80 +16698,9 @@ index 7d8f531..5a8ad45 100644
 +
  int gnttab_resume(void)
  {
--	if (max_nr_grant_frames() < nr_grant_frames)
-+	unsigned int max_nr_gframes;
-+
-+	max_nr_gframes = gnttab_max_grant_frames();
-+	if (max_nr_gframes < nr_grant_frames)
- 		return -ENOSYS;
--	return gnttab_map(0, nr_grant_frames - 1);
-+
-+	if (xen_pv_domain())
-+		return gnttab_map(0, nr_grant_frames - 1);
-+
-+	if (!shared) {
-+		shared = ioremap(xen_hvm_resume_frames, PAGE_SIZE * max_nr_gframes);
-+		if (shared == NULL) {
-+			printk(KERN_WARNING
-+					"Failed to ioremap gnttab share frames!");
-+			return -ENOMEM;
-+		}
-+	}
-+
-+	gnttab_map(0, nr_grant_frames - 1);
-+
-+	return 0;
- }
- 
- int gnttab_suspend(void)
-@@ -493,7 +646,7 @@ static int gnttab_expand(unsigned int req_entries)
- 	cur = nr_grant_frames;
- 	extra = ((req_entries + (GREFS_PER_GRANT_FRAME-1)) /
- 		 GREFS_PER_GRANT_FRAME);
--	if (cur + extra > max_nr_grant_frames())
-+	if (cur + extra > gnttab_max_grant_frames())
- 		return -ENOSPC;
- 
- 	rc = gnttab_map(cur, cur + extra - 1);
-@@ -503,15 +656,12 @@ static int gnttab_expand(unsigned int req_entries)
- 	return rc;
- }
- 
--static int __devinit gnttab_init(void)
-+int gnttab_init(void)
- {
- 	int i;
- 	unsigned int max_nr_glist_frames, nr_glist_frames;
- 	unsigned int nr_init_grefs;
- 
--	if (!xen_domain())
--		return -ENODEV;
--
- 	nr_grant_frames = 1;
- 	boot_max_nr_grant_frames = __max_nr_grant_frames();
- 
-@@ -554,5 +704,18 @@ static int __devinit gnttab_init(void)
- 	kfree(gnttab_list);
- 	return -ENOMEM;
- }
-+EXPORT_SYMBOL_GPL(gnttab_init);
-+
-+static int __devinit __gnttab_init(void)
-+{
-+	/* Delay grant-table initialization in the PV on HVM case */
-+	if (xen_hvm_domain())
-+		return 0;
-+
-+	if (!xen_pv_domain())
-+		return -ENODEV;
-+
-+	return gnttab_init();
-+}
- 
--core_initcall(gnttab_init);
-+core_initcall(__gnttab_init);
+ 	unsigned int max_nr_gframes;
 diff --git a/drivers/xen/manage.c b/drivers/xen/manage.c
-index 5d42d55..0b50906 100644
+index aee1f59..0b50906 100644
 --- a/drivers/xen/manage.c
 +++ b/drivers/xen/manage.c
 @@ -8,6 +8,7 @@
@@ -17342,79 +16711,14 @@ index 5d42d55..0b50906 100644
  #include <xen/xenbus.h>
  #include <xen/grant_table.h>
  #include <xen/events.h>
-@@ -32,10 +33,30 @@ enum shutdown_state {
- static enum shutdown_state shutting_down = SHUTDOWN_INVALID;
+@@ -16,7 +17,6 @@
  
- #ifdef CONFIG_PM_SLEEP
--static int xen_suspend(void *data)
-+static int xen_hvm_suspend(void *data)
- {
-+	struct sched_shutdown r = { .reason = SHUTDOWN_suspend };
- 	int *cancelled = data;
-+
-+	BUG_ON(!irqs_disabled());
-+
-+	*cancelled = HYPERVISOR_sched_op(SCHEDOP_shutdown, &r);
-+
-+	xen_hvm_post_suspend(*cancelled);
-+	gnttab_resume();
-+
-+	if (!*cancelled) {
-+		xen_irq_resume();
-+		xen_timer_resume();
-+	}
-+
-+	return 0;
-+}
-+
-+static int xen_suspend(void *data)
-+{
- 	int err;
-+	int *cancelled = data;
+ #include <asm/xen/hypercall.h>
+ #include <asm/xen/page.h>
+-#include <asm/xen/hypervisor.h>
  
- 	BUG_ON(!irqs_disabled());
- 
-@@ -111,7 +132,10 @@ static void do_suspend(void)
- 		goto out_resume;
- 	}
- 
--	err = stop_machine(xen_suspend, &cancelled, cpumask_of(0));
-+	if (xen_hvm_domain())
-+		err = stop_machine(xen_hvm_suspend, &cancelled, cpumask_of(0));
-+	else
-+		err = stop_machine(xen_suspend, &cancelled, cpumask_of(0));
- 
- 	dpm_resume_noirq(PMSG_RESUME);
- 
-@@ -260,7 +284,19 @@ static int shutdown_event(struct notifier_block *notifier,
- 	return NOTIFY_DONE;
- }
- 
--static int __init setup_shutdown_event(void)
-+static int __init __setup_shutdown_event(void)
-+{
-+	/* Delay initialization in the PV on HVM case */
-+	if (xen_hvm_domain())
-+		return 0;
-+
-+	if (!xen_pv_domain())
-+		return -ENODEV;
-+
-+	return xen_setup_shutdown_event();
-+}
-+
-+int xen_setup_shutdown_event(void)
- {
- 	static struct notifier_block xenstore_notifier = {
- 		.notifier_call = shutdown_event
-@@ -269,5 +305,6 @@ static int __init setup_shutdown_event(void)
- 
- 	return 0;
- }
-+EXPORT_SYMBOL_GPL(xen_setup_shutdown_event);
- 
--subsys_initcall(setup_shutdown_event);
-+subsys_initcall(__setup_shutdown_event);
+ enum shutdown_state {
+ 	SHUTDOWN_INVALID = -1,
 diff --git a/drivers/xen/mce.c b/drivers/xen/mce.c
 new file mode 100644
 index 0000000..da566a5
@@ -26573,219 +25877,6 @@ index 0000000..6450c17
 +}
 +
 +subsys_initcall(xen_pcpu_init);
-diff --git a/drivers/xen/platform-pci.c b/drivers/xen/platform-pci.c
-new file mode 100644
-index 0000000..c01b5dd
---- /dev/null
-+++ b/drivers/xen/platform-pci.c
-@@ -0,0 +1,207 @@
-+/******************************************************************************
-+ * platform-pci.c
-+ *
-+ * Xen platform PCI device driver
-+ * Copyright (c) 2005, Intel Corporation.
-+ * Copyright (c) 2007, XenSource Inc.
-+ * Copyright (c) 2010, Citrix
-+ *
-+ * This program is free software; you can redistribute it and/or modify it
-+ * under the terms and conditions of the GNU General Public License,
-+ * version 2, as published by the Free Software Foundation.
-+ *
-+ * This program is distributed in the hope it will be useful, but WITHOUT
-+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
-+ * more details.
-+ *
-+ * You should have received a copy of the GNU General Public License along with
-+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
-+ * Place - Suite 330, Boston, MA 02111-1307 USA.
-+ *
-+ */
-+
-+
-+#include <linux/interrupt.h>
-+#include <linux/io.h>
-+#include <linux/module.h>
-+#include <linux/pci.h>
-+
-+#include <xen/platform_pci.h>
-+#include <xen/grant_table.h>
-+#include <xen/xenbus.h>
-+#include <xen/events.h>
-+#include <xen/hvm.h>
-+#include <xen/xen-ops.h>
-+
-+#define DRV_NAME    "xen-platform-pci"
-+
-+MODULE_AUTHOR("ssmith@xensource.com and stefano.stabellini@eu.citrix.com");
-+MODULE_DESCRIPTION("Xen platform PCI device");
-+MODULE_LICENSE("GPL");
-+
-+static unsigned long platform_mmio;
-+static unsigned long platform_mmio_alloc;
-+static unsigned long platform_mmiolen;
-+static uint64_t callback_via;
-+
-+unsigned long alloc_xen_mmio(unsigned long len)
-+{
-+	unsigned long addr;
-+
-+	addr = platform_mmio + platform_mmio_alloc;
-+	platform_mmio_alloc += len;
-+	BUG_ON(platform_mmio_alloc > platform_mmiolen);
-+
-+	return addr;
-+}
-+
-+static uint64_t get_callback_via(struct pci_dev *pdev)
-+{
-+	u8 pin;
-+	int irq;
-+
-+	irq = pdev->irq;
-+	if (irq < 16)
-+		return irq; /* ISA IRQ */
-+
-+	pin = pdev->pin;
-+
-+	/* We don't know the GSI. Specify the PCI INTx line instead. */
-+	return ((uint64_t)0x01 << 56) | /* PCI INTx identifier */
-+		((uint64_t)pci_domain_nr(pdev->bus) << 32) |
-+		((uint64_t)pdev->bus->number << 16) |
-+		((uint64_t)(pdev->devfn & 0xff) << 8) |
-+		((uint64_t)(pin - 1) & 3);
-+}
-+
-+static irqreturn_t do_hvm_evtchn_intr(int irq, void *dev_id)
-+{
-+	xen_hvm_evtchn_do_upcall();
-+	return IRQ_HANDLED;
-+}
-+
-+static int xen_allocate_irq(struct pci_dev *pdev)
-+{
-+	return request_irq(pdev->irq, do_hvm_evtchn_intr,
-+			IRQF_DISABLED | IRQF_NOBALANCING | IRQF_TRIGGER_RISING,
-+			"xen-platform-pci", pdev);
-+}
-+
-+static int platform_pci_resume(struct pci_dev *pdev)
-+{
-+	int err;
-+	if (xen_have_vector_callback)
-+		return 0;
-+	err = xen_set_callback_via(callback_via);
-+	if (err) {
-+		dev_err(&pdev->dev, "platform_pci_resume failure!\n");
-+		return err;
-+	}
-+	return 0;
-+}
-+
-+static int __devinit platform_pci_init(struct pci_dev *pdev,
-+				       const struct pci_device_id *ent)
-+{
-+	int i, ret;
-+	long ioaddr, iolen;
-+	long mmio_addr, mmio_len;
-+	unsigned int max_nr_gframes;
-+
-+	i = pci_enable_device(pdev);
-+	if (i)
-+		return i;
-+
-+	ioaddr = pci_resource_start(pdev, 0);
-+	iolen = pci_resource_len(pdev, 0);
-+
-+	mmio_addr = pci_resource_start(pdev, 1);
-+	mmio_len = pci_resource_len(pdev, 1);
-+
-+	if (mmio_addr == 0 || ioaddr == 0) {
-+		dev_err(&pdev->dev, "no resources found\n");
-+		ret = -ENOENT;
-+		goto pci_out;
-+	}
-+
-+	if (request_mem_region(mmio_addr, mmio_len, DRV_NAME) == NULL) {
-+		dev_err(&pdev->dev, "MEM I/O resource 0x%lx @ 0x%lx busy\n",
-+		       mmio_addr, mmio_len);
-+		ret = -EBUSY;
-+		goto pci_out;
-+	}
-+
-+	if (request_region(ioaddr, iolen, DRV_NAME) == NULL) {
-+		dev_err(&pdev->dev, "I/O resource 0x%lx @ 0x%lx busy\n",
-+		       iolen, ioaddr);
-+		ret = -EBUSY;
-+		goto mem_out;
-+	}
-+
-+	platform_mmio = mmio_addr;
-+	platform_mmiolen = mmio_len;
-+
-+	if (!xen_have_vector_callback) {
-+		ret = xen_allocate_irq(pdev);
-+		if (ret) {
-+			dev_warn(&pdev->dev, "request_irq failed err=%d\n", ret);
-+			goto out;
-+		}
-+		callback_via = get_callback_via(pdev);
-+		ret = xen_set_callback_via(callback_via);
-+		if (ret) {
-+			dev_warn(&pdev->dev, "Unable to set the evtchn callback "
-+					 "err=%d\n", ret);
-+			goto out;
-+		}
-+	}
-+
-+	max_nr_gframes = gnttab_max_grant_frames();
-+	xen_hvm_resume_frames = alloc_xen_mmio(PAGE_SIZE * max_nr_gframes);
-+	ret = gnttab_init();
-+	if (ret)
-+		goto out;
-+	xenbus_probe(NULL);
-+	ret = xen_setup_shutdown_event();
-+	if (ret)
-+		goto out;
-+	return 0;
-+
-+out:
-+	release_region(ioaddr, iolen);
-+mem_out:
-+	release_mem_region(mmio_addr, mmio_len);
-+pci_out:
-+	pci_disable_device(pdev);
-+	return ret;
-+}
-+
-+static struct pci_device_id platform_pci_tbl[] __devinitdata = {
-+	{PCI_VENDOR_ID_XEN, PCI_DEVICE_ID_XEN_PLATFORM,
-+		PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
-+	{0,}
-+};
-+
-+MODULE_DEVICE_TABLE(pci, platform_pci_tbl);
-+
-+static struct pci_driver platform_driver = {
-+	.name =           DRV_NAME,
-+	.probe =          platform_pci_init,
-+	.id_table =       platform_pci_tbl,
-+#ifdef CONFIG_PM
-+	.resume_early =   platform_pci_resume,
-+#endif
-+};
-+
-+static int __init platform_pci_module_init(void)
-+{
-+	/* no unplug has been done, IGNORE hasn't been specified: just
-+	 * return now */
-+	if (!xen_platform_pci_unplug)
-+		return -ENODEV;
-+
-+	return pci_register_driver(&platform_driver);
-+}
-+
-+module_init(platform_pci_module_init);
 diff --git a/drivers/xen/sys-hypervisor.c b/drivers/xen/sys-hypervisor.c
 index 88a60e0..ae5cb05 100644
 --- a/drivers/xen/sys-hypervisor.c
@@ -27167,10 +26258,10 @@ index 92a1ef8..89f2e42 100644
   * @dev: xenbus device
   * @ring_mfn: mfn of ring to grant
 diff --git a/drivers/xen/xenbus/xenbus_probe.c b/drivers/xen/xenbus/xenbus_probe.c
-index 649fcdf..3a83ba2 100644
+index f52baf3..3a83ba2 100644
 --- a/drivers/xen/xenbus/xenbus_probe.c
 +++ b/drivers/xen/xenbus/xenbus_probe.c
-@@ -49,31 +49,29 @@
+@@ -49,6 +49,8 @@
  #include <asm/page.h>
  #include <asm/pgtable.h>
  #include <asm/xen/hypervisor.h>
@@ -27179,12 +26270,7 @@ index 649fcdf..3a83ba2 100644
  #include <xen/xenbus.h>
  #include <xen/events.h>
  #include <xen/page.h>
- 
-+#include <xen/platform_pci.h>
-+#include <xen/hvm.h>
-+
- #include "xenbus_comms.h"
- #include "xenbus_probe.h"
+@@ -61,22 +63,15 @@
  
  
  int xen_store_evtchn;
@@ -27210,7 +26296,7 @@ index 649fcdf..3a83ba2 100644
  /* If something in array of ids matches this device, return it. */
  static const struct xenbus_device_id *
  match_device(const struct xenbus_device_id *arr, struct xenbus_device *dev)
-@@ -94,34 +92,7 @@ int xenbus_match(struct device *_dev, struct device_driver *_drv)
+@@ -97,34 +92,7 @@ int xenbus_match(struct device *_dev, struct device_driver *_drv)
  
  	return match_device(drv->ids, to_xenbus_device(_dev)) != NULL;
  }
@@ -27246,7 +26332,7 @@ index 649fcdf..3a83ba2 100644
  
  
  static void free_otherend_details(struct xenbus_device *dev)
-@@ -141,7 +112,28 @@ static void free_otherend_watch(struct xenbus_device *dev)
+@@ -144,7 +112,28 @@ static void free_otherend_watch(struct xenbus_device *dev)
  }
  
  
@@ -27276,7 +26362,7 @@ index 649fcdf..3a83ba2 100644
  				 char *id_node, char *path_node)
  {
  	int err = xenbus_gather(XBT_NIL, xendev->nodename,
-@@ -166,39 +158,11 @@ int read_otherend_details(struct xenbus_device *xendev,
+@@ -169,39 +158,11 @@ int read_otherend_details(struct xenbus_device *xendev,
  
  	return 0;
  }
@@ -27320,7 +26406,7 @@ index 649fcdf..3a83ba2 100644
  {
  	struct xenbus_device *dev =
  		container_of(watch, struct xenbus_device, otherend_watch);
-@@ -226,11 +190,7 @@ static void otherend_changed(struct xenbus_watch *watch,
+@@ -229,11 +190,7 @@ static void otherend_changed(struct xenbus_watch *watch,
  	 * work that can fail e.g., when the rootfs is gone.
  	 */
  	if (system_state > SYSTEM_RUNNING) {
@@ -27333,7 +26419,7 @@ index 649fcdf..3a83ba2 100644
  			xenbus_frontend_closed(dev);
  		return;
  	}
-@@ -238,25 +198,7 @@ static void otherend_changed(struct xenbus_watch *watch,
+@@ -241,25 +198,7 @@ static void otherend_changed(struct xenbus_watch *watch,
  	if (drv->otherend_changed)
  		drv->otherend_changed(dev, state);
  }
@@ -27360,7 +26446,7 @@ index 649fcdf..3a83ba2 100644
  
  int xenbus_dev_probe(struct device *_dev)
  {
-@@ -300,8 +242,9 @@ int xenbus_dev_probe(struct device *_dev)
+@@ -303,8 +242,9 @@ int xenbus_dev_probe(struct device *_dev)
  fail:
  	xenbus_dev_error(dev, err, "xenbus_dev_probe on %s", dev->nodename);
  	xenbus_switch_state(dev, XenbusStateClosed);
@@ -27371,7 +26457,7 @@ index 649fcdf..3a83ba2 100644
  
  int xenbus_dev_remove(struct device *_dev)
  {
-@@ -319,8 +262,9 @@ int xenbus_dev_remove(struct device *_dev)
+@@ -322,8 +262,9 @@ int xenbus_dev_remove(struct device *_dev)
  	xenbus_switch_state(dev, XenbusStateClosed);
  	return 0;
  }
@@ -27382,7 +26468,7 @@ index 649fcdf..3a83ba2 100644
  {
  	struct xenbus_device *dev = to_xenbus_device(_dev);
  	unsigned long timeout = 5*HZ;
-@@ -341,6 +285,7 @@ static void xenbus_dev_shutdown(struct device *_dev)
+@@ -344,6 +285,7 @@ static void xenbus_dev_shutdown(struct device *_dev)
   out:
  	put_device(&dev->dev);
  }
@@ -27390,7 +26476,7 @@ index 649fcdf..3a83ba2 100644
  
  int xenbus_register_driver_common(struct xenbus_driver *drv,
  				  struct xen_bus_type *bus,
-@@ -354,25 +299,7 @@ int xenbus_register_driver_common(struct xenbus_driver *drv,
+@@ -357,25 +299,7 @@ int xenbus_register_driver_common(struct xenbus_driver *drv,
  
  	return driver_register(&drv->driver);
  }
@@ -27417,7 +26503,7 @@ index 649fcdf..3a83ba2 100644
  
  void xenbus_unregister_driver(struct xenbus_driver *drv)
  {
-@@ -543,24 +470,7 @@ fail:
+@@ -546,24 +470,7 @@ fail:
  	kfree(xendev);
  	return err;
  }
@@ -27443,7 +26529,7 @@ index 649fcdf..3a83ba2 100644
  
  static int xenbus_probe_device_type(struct xen_bus_type *bus, const char *type)
  {
-@@ -574,10 +484,11 @@ static int xenbus_probe_device_type(struct xen_bus_type *bus, const char *type)
+@@ -577,10 +484,11 @@ static int xenbus_probe_device_type(struct xen_bus_type *bus, const char *type)
  		return PTR_ERR(dir);
  
  	for (i = 0; i < dir_n; i++) {
@@ -27456,7 +26542,7 @@ index 649fcdf..3a83ba2 100644
  	kfree(dir);
  	return err;
  }
-@@ -597,9 +508,11 @@ int xenbus_probe_devices(struct xen_bus_type *bus)
+@@ -600,9 +508,11 @@ int xenbus_probe_devices(struct xen_bus_type *bus)
  		if (err)
  			break;
  	}
@@ -27468,7 +26554,7 @@ index 649fcdf..3a83ba2 100644
  
  static unsigned int char_count(const char *str, char c)
  {
-@@ -662,32 +575,17 @@ void xenbus_dev_changed(const char *node, struct xen_bus_type *bus)
+@@ -665,32 +575,17 @@ void xenbus_dev_changed(const char *node, struct xen_bus_type *bus)
  }
  EXPORT_SYMBOL_GPL(xenbus_dev_changed);
  
@@ -27504,7 +26590,7 @@ index 649fcdf..3a83ba2 100644
  	if (drv->suspend)
  		err = drv->suspend(xdev, state);
  	if (err)
-@@ -695,21 +593,19 @@ static int xenbus_dev_suspend(struct device *dev, pm_message_t state)
+@@ -698,21 +593,19 @@ static int xenbus_dev_suspend(struct device *dev, pm_message_t state)
  		       "xenbus: suspend %s failed: %i\n", dev_name(dev), err);
  	return 0;
  }
@@ -27530,7 +26616,7 @@ index 649fcdf..3a83ba2 100644
  	err = talk_to_otherend(xdev);
  	if (err) {
  		printk(KERN_WARNING
-@@ -740,6 +636,7 @@ static int xenbus_dev_resume(struct device *dev)
+@@ -743,6 +636,7 @@ static int xenbus_dev_resume(struct device *dev)
  
  	return 0;
  }
@@ -27538,19 +26624,7 @@ index 649fcdf..3a83ba2 100644
  
  /* A flag to determine if xenstored is 'ready' (i.e. has started) */
  int xenstored_ready = 0;
-@@ -749,10 +646,7 @@ int register_xenstore_notifier(struct notifier_block *nb)
- {
- 	int ret = 0;
- 
--	if (xenstored_ready > 0)
--		ret = nb->notifier_call(nb, 0, NULL);
--	else
--		blocking_notifier_chain_register(&xenstore_chain, nb);
-+	blocking_notifier_chain_register(&xenstore_chain, nb);
- 
- 	return ret;
- }
-@@ -768,57 +662,93 @@ void xenbus_probe(struct work_struct *unused)
+@@ -768,11 +662,6 @@ void xenbus_probe(struct work_struct *unused)
  {
  	BUG_ON((xenstored_ready <= 0));
  
@@ -27562,24 +26636,8 @@ index 649fcdf..3a83ba2 100644
  	/* Notify others that xenstore is up */
  	blocking_notifier_call_chain(&xenstore_chain, 0, NULL);
  }
-+EXPORT_SYMBOL_GPL(xenbus_probe);
-+
-+static int __init xenbus_probe_initcall(void)
-+{
-+	if (!xen_domain())
-+		return -ENODEV;
-+
-+	if (xen_initial_domain() || xen_hvm_domain())
-+		return 0;
-+
-+	xenbus_probe(NULL);
-+	return 0;
-+}
-+
-+device_initcall(xenbus_probe_initcall);
- 
--static int __init xenbus_probe_init(void)
-+static int __init xenbus_init(void)
+@@ -795,28 +684,45 @@ device_initcall(xenbus_probe_initcall);
+ static int __init xenbus_init(void)
  {
  	int err = 0;
 +	unsigned long page = 0;
@@ -27631,30 +26689,19 @@ index 649fcdf..3a83ba2 100644
 +
 +		xen_store_interface = mfn_to_virt(xen_store_mfn);
  	} else {
- 		xenstored_ready = 1;
--		xen_store_evtchn = xen_start_info->store_evtchn;
--		xen_store_mfn = xen_start_info->store_mfn;
-+		if (xen_hvm_domain()) {
-+			uint64_t v = 0;
-+			err = hvm_get_parameter(HVM_PARAM_STORE_EVTCHN, &v);
-+			if (err)
-+				goto out_error;
-+			xen_store_evtchn = (int)v;
-+			err = hvm_get_parameter(HVM_PARAM_STORE_PFN, &v);
-+			if (err)
-+				goto out_error;
-+			xen_store_mfn = (unsigned long)v;
-+			xen_store_interface = ioremap(xen_store_mfn << PAGE_SHIFT, PAGE_SIZE);
-+		} else {
-+			xen_store_evtchn = xen_start_info->store_evtchn;
-+			xen_store_mfn = xen_start_info->store_mfn;
-+			xen_store_interface = mfn_to_virt(xen_store_mfn);
-+		}
++		xenstored_ready = 1;
+ 		if (xen_hvm_domain()) {
+ 			uint64_t v = 0;
+ 			err = hvm_get_parameter(HVM_PARAM_STORE_EVTCHN, &v);
+@@ -833,7 +739,6 @@ static int __init xenbus_init(void)
+ 			xen_store_mfn = xen_start_info->store_mfn;
+ 			xen_store_interface = mfn_to_virt(xen_store_mfn);
+ 		}
+-		xenstored_ready = 1;
  	}
--	xen_store_interface = mfn_to_virt(xen_store_mfn);
  
  	/* Initialize the interface to xenstore. */
- 	err = xs_init();
+@@ -841,7 +746,7 @@ static int __init xenbus_init(void)
  	if (err) {
  		printk(KERN_WARNING
  		       "XENBUS: Error initializing xenstore comms: %i\n", err);
@@ -27662,13 +26709,8 @@ index 649fcdf..3a83ba2 100644
 +		goto out_error;
  	}
  
--	if (!xen_initial_domain())
--		xenbus_probe(NULL);
--
  #ifdef CONFIG_XEN_COMPAT_XENFS
- 	/*
- 	 * Create xenfs mountpoint in /proc for compatibility with
-@@ -829,128 +759,13 @@ static int __init xenbus_probe_init(void)
+@@ -854,131 +759,13 @@ static int __init xenbus_init(void)
  
  	return 0;
  
@@ -27685,8 +26727,7 @@ index 649fcdf..3a83ba2 100644
  	return err;
  }
  
--postcore_initcall(xenbus_probe_init);
-+postcore_initcall(xenbus_init);
+ postcore_initcall(xenbus_init);
  
  MODULE_LICENSE("GPL");
 -
@@ -27794,6 +26835,9 @@ index 649fcdf..3a83ba2 100644
 -#ifndef MODULE
 -static int __init boot_wait_for_devices(void)
 -{
+-	if (xen_hvm_domain() && !xen_platform_pci_unplug)
+-		return -ENODEV;
+-
 -	ready_to_wait_for_devices = 1;
 -	wait_for_devices(NULL);
 -	return 0;
@@ -29012,7 +28056,7 @@ index 0000000..f80be7f
 +	.mmap = privcmd_mmap,
 +};
 diff --git a/drivers/xen/xenfs/super.c b/drivers/xen/xenfs/super.c
-index 6559e0c..229c831 100644
+index 6c16685..229c831 100644
 --- a/drivers/xen/xenfs/super.c
 +++ b/drivers/xen/xenfs/super.c
 @@ -12,6 +12,10 @@
@@ -29114,11 +28158,11 @@ index 6559e0c..229c831 100644
  }
  
  static int xenfs_get_sb(struct file_system_type *fs_type,
-@@ -63,11 +137,25 @@ static struct file_system_type xenfs_type = {
+@@ -63,16 +137,30 @@ static struct file_system_type xenfs_type = {
  
  static int __init xenfs_init(void)
  {
--	if (xen_pv_domain())
+-	if (xen_domain())
 -		return register_filesystem(&xenfs_type);
 +	int err;
 +	if (!xen_pv_domain()) {
@@ -29144,6 +28188,12 @@ index 6559e0c..229c831 100644
  }
  
  static void __exit xenfs_exit(void)
+ {
+-	if (xen_domain())
++	if (xen_pv_domain())
+ 		unregister_filesystem(&xenfs_type);
+ }
+ 
 diff --git a/drivers/xen/xenfs/xenbus.c b/drivers/xen/xenfs/xenbus.c
 index 6c4269b..64b3be4 100644
 --- a/drivers/xen/xenfs/xenbus.c
@@ -29334,6 +28384,18 @@ index 26373cf..9fb4270 100644
  #ifndef HAVE_ARCH_PCI_GET_LEGACY_IDE_IRQ
  static inline int pci_get_legacy_ide_irq(struct pci_dev *dev, int channel)
  {
+diff --git a/include/asm-generic/vmlinux.lds.h b/include/asm-generic/vmlinux.lds.h
+index ca060ce..b6e818f 100644
+--- a/include/asm-generic/vmlinux.lds.h
++++ b/include/asm-generic/vmlinux.lds.h
+@@ -639,7 +639,6 @@
+ 	EXIT_DATA							\
+ 	EXIT_CALL							\
+ 	*(.discard)							\
+-	*(.discard.*)							\
+ 	}
+ 
+ /**
 diff --git a/include/drm/drmP.h b/include/drm/drmP.h
 index 7ad3faa..cf9ddce 100644
 --- a/include/drm/drmP.h
@@ -29609,17 +28671,6 @@ index e07d194..ca28e46 100644
  #endif
  
  #if defined(CONFIG_HOTPLUG_PCI) || defined(CONFIG_HOTPLUG_PCI_MODULE)
-diff --git a/include/linux/pci_ids.h b/include/linux/pci_ids.h
-index 67325bf..c398cc3 100644
---- a/include/linux/pci_ids.h
-+++ b/include/linux/pci_ids.h
-@@ -2712,3 +2712,6 @@
- #define PCI_DEVICE_ID_RME_DIGI32	0x9896
- #define PCI_DEVICE_ID_RME_DIGI32_PRO	0x9897
- #define PCI_DEVICE_ID_RME_DIGI32_8	0x9898
-+
-+#define PCI_VENDOR_ID_XEN		0x5853
-+#define PCI_DEVICE_ID_XEN_PLATFORM	0x0001
 diff --git a/include/linux/swiotlb.h b/include/linux/swiotlb.h
 index 73b1f1c..113585a 100644
 --- a/include/linux/swiotlb.h
@@ -30034,7 +29085,7 @@ index 0000000..7172081
 +
 +#endif /* __XEN_BLKIF_H__ */
 diff --git a/include/xen/events.h b/include/xen/events.h
-index e68d59a..7e17e2a 100644
+index a15d932..7e17e2a 100644
 --- a/include/xen/events.h
 +++ b/include/xen/events.h
 @@ -12,6 +12,8 @@ int bind_evtchn_to_irqhandler(unsigned int evtchn,
@@ -30059,7 +29110,7 @@ index e68d59a..7e17e2a 100644
  
  /*
   * Common unbind function for all event sources. Takes IRQ to unbind from.
-@@ -53,7 +61,42 @@ bool xen_test_irq_pending(int irq);
+@@ -53,9 +61,37 @@ bool xen_test_irq_pending(int irq);
     irq will be disabled so it won't deliver an interrupt. */
  void xen_poll_irq(int irq);
  
@@ -30094,14 +29145,9 @@ index e68d59a..7e17e2a 100644
 +
 +/* Determine whether to ignore this IRQ if passed to a guest. */
 +int xen_ignore_irq(int irq);
-+/* Xen HVM evtchn vector callback */
-+extern void xen_hvm_callback_vector(void);
-+extern int xen_have_vector_callback;
-+int xen_set_callback_via(uint64_t via);
-+void xen_evtchn_do_upcall(struct pt_regs *regs);
-+void xen_hvm_evtchn_do_upcall(void);
-+
- #endif	/* _XEN_EVENTS_H */
+ /* Xen HVM evtchn vector callback */
+ extern void xen_hvm_callback_vector(void);
+ extern int xen_have_vector_callback;
 diff --git a/include/xen/gntdev.h b/include/xen/gntdev.h
 new file mode 100644
 index 0000000..8bd1467
@@ -30228,7 +29274,7 @@ index 0000000..8bd1467
 +
 +#endif /* __LINUX_PUBLIC_GNTDEV_H__ */
 diff --git a/include/xen/grant_table.h b/include/xen/grant_table.h
-index a40f1cd..871b553 100644
+index 9a73170..871b553 100644
 --- a/include/xen/grant_table.h
 +++ b/include/xen/grant_table.h
 @@ -37,10 +37,16 @@
@@ -30249,17 +29295,16 @@ index a40f1cd..871b553 100644
  /* NR_GRANT_FRAMES must be less than or equal to that configured in Xen */
  #define NR_GRANT_FRAMES 4
  
-@@ -51,6 +57,9 @@ struct gnttab_free_callback {
+@@ -51,6 +57,8 @@ struct gnttab_free_callback {
  	u16 count;
  };
  
 +void gnttab_reset_grant_page(struct page *page);
 +
-+int gnttab_init(void);
+ int gnttab_init(void);
  int gnttab_suspend(void);
  int gnttab_resume(void);
- 
-@@ -80,6 +89,8 @@ unsigned long gnttab_end_foreign_transfer(grant_ref_t ref);
+@@ -81,6 +89,8 @@ unsigned long gnttab_end_foreign_transfer(grant_ref_t ref);
  
  int gnttab_query_foreign_access(grant_ref_t ref);
  
@@ -30268,7 +29313,7 @@ index a40f1cd..871b553 100644
  /*
   * operations on reserved batches of grant references
   */
-@@ -106,12 +117,46 @@ void gnttab_grant_foreign_access_ref(grant_ref_t ref, domid_t domid,
+@@ -107,6 +117,37 @@ void gnttab_grant_foreign_access_ref(grant_ref_t ref, domid_t domid,
  void gnttab_grant_foreign_transfer_ref(grant_ref_t, domid_t domid,
  				       unsigned long pfn);
  
@@ -30306,81 +29351,11 @@ index a40f1cd..871b553 100644
  int arch_gnttab_map_shared(unsigned long *frames, unsigned long nr_gframes,
  			   unsigned long max_nr_gframes,
  			   struct grant_entry **__shared);
- void arch_gnttab_unmap_shared(struct grant_entry *shared,
- 			      unsigned long nr_gframes);
- 
-+extern unsigned long xen_hvm_resume_frames;
-+unsigned int gnttab_max_grant_frames(void);
-+
- #define gnttab_map_vaddr(map) ((void *)(map.host_virt_addr))
- 
- #endif /* __ASM_GNTTAB_H__ */
-diff --git a/include/xen/hvm.h b/include/xen/hvm.h
-new file mode 100644
-index 0000000..b193fa2
---- /dev/null
-+++ b/include/xen/hvm.h
-@@ -0,0 +1,30 @@
-+/* Simple wrappers around HVM functions */
-+#ifndef XEN_HVM_H__
-+#define XEN_HVM_H__
-+
-+#include <xen/interface/hvm/params.h>
-+#include <asm/xen/hypercall.h>
-+
-+static inline int hvm_get_parameter(int idx, uint64_t *value)
-+{
-+	struct xen_hvm_param xhv;
-+	int r;
-+
-+	xhv.domid = DOMID_SELF;
-+	xhv.index = idx;
-+	r = HYPERVISOR_hvm_op(HVMOP_get_param, &xhv);
-+	if (r < 0) {
-+		printk(KERN_ERR "Cannot get hvm parameter %d: %d!\n",
-+			idx, r);
-+		return r;
-+	}
-+	*value = xhv.value;
-+	return r;
-+}
-+
-+#define HVM_CALLBACK_VIA_TYPE_VECTOR 0x2
-+#define HVM_CALLBACK_VIA_TYPE_SHIFT 56
-+#define HVM_CALLBACK_VECTOR(x) (((uint64_t)HVM_CALLBACK_VIA_TYPE_VECTOR)<<\
-+		HVM_CALLBACK_VIA_TYPE_SHIFT | (x))
-+
-+#endif /* XEN_HVM_H__ */
-diff --git a/include/xen/interface/features.h b/include/xen/interface/features.h
-index f51b641..70d2563 100644
---- a/include/xen/interface/features.h
-+++ b/include/xen/interface/features.h
-@@ -41,6 +41,12 @@
- /* x86: Does this Xen host support the MMU_PT_UPDATE_PRESERVE_AD hypercall? */
- #define XENFEAT_mmu_pt_update_preserve_ad  5
- 
-+/* x86: Does this Xen host support the HVM callback vector type? */
-+#define XENFEAT_hvm_callback_vector        8
-+
-+/* x86: pvclock algorithm is safe to use on HVM */
-+#define XENFEAT_hvm_safe_pvclock           9
-+
- #define XENFEAT_NR_SUBMAPS 1
- 
- #endif /* __XEN_PUBLIC_FEATURES_H__ */
 diff --git a/include/xen/interface/grant_table.h b/include/xen/interface/grant_table.h
-index 39da93c..c704fe5 100644
+index 39e5717..c704fe5 100644
 --- a/include/xen/interface/grant_table.h
 +++ b/include/xen/interface/grant_table.h
-@@ -28,6 +28,7 @@
- #ifndef __XEN_PUBLIC_GRANT_TABLE_H__
- #define __XEN_PUBLIC_GRANT_TABLE_H__
- 
-+#include <xen/interface/xen.h>
- 
- /***********************************
-  * GRANT TABLE REPRESENTATION
-@@ -321,6 +322,28 @@ struct gnttab_query_size {
+@@ -322,6 +322,28 @@ struct gnttab_query_size {
  DEFINE_GUEST_HANDLE_STRUCT(gnttab_query_size);
  
  /*
@@ -30409,159 +29384,6 @@ index 39da93c..c704fe5 100644
   * Bitfield values for update_pin_status.flags.
   */
   /* Map the grant entry for access by I/O devices. */
-diff --git a/include/xen/interface/hvm/hvm_op.h b/include/xen/interface/hvm/hvm_op.h
-new file mode 100644
-index 0000000..a4827f4
---- /dev/null
-+++ b/include/xen/interface/hvm/hvm_op.h
-@@ -0,0 +1,46 @@
-+/*
-+ * Permission is hereby granted, free of charge, to any person obtaining a copy
-+ * of this software and associated documentation files (the "Software"), to
-+ * deal in the Software without restriction, including without limitation the
-+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
-+ * sell copies of the Software, and to permit persons to whom the Software is
-+ * furnished to do so, subject to the following conditions:
-+ *
-+ * The above copyright notice and this permission notice shall be included in
-+ * all copies or substantial portions of the Software.
-+ *
-+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-+ * DEALINGS IN THE SOFTWARE.
-+ */
-+
-+#ifndef __XEN_PUBLIC_HVM_HVM_OP_H__
-+#define __XEN_PUBLIC_HVM_HVM_OP_H__
-+
-+/* Get/set subcommands: the second argument of the hypercall is a
-+ * pointer to a xen_hvm_param struct. */
-+#define HVMOP_set_param           0
-+#define HVMOP_get_param           1
-+struct xen_hvm_param {
-+    domid_t  domid;    /* IN */
-+    uint32_t index;    /* IN */
-+    uint64_t value;    /* IN/OUT */
-+};
-+DEFINE_GUEST_HANDLE_STRUCT(xen_hvm_param);
-+
-+/* Hint from PV drivers for pagetable destruction. */
-+#define HVMOP_pagetable_dying       9
-+struct xen_hvm_pagetable_dying {
-+    /* Domain with a pagetable about to be destroyed. */
-+    domid_t  domid;
-+    /* guest physical address of the toplevel pagetable dying */
-+    aligned_u64 gpa;
-+};
-+typedef struct xen_hvm_pagetable_dying xen_hvm_pagetable_dying_t;
-+DEFINE_GUEST_HANDLE_STRUCT(xen_hvm_pagetable_dying_t);
-+ 
-+#endif /* __XEN_PUBLIC_HVM_HVM_OP_H__ */
-diff --git a/include/xen/interface/hvm/params.h b/include/xen/interface/hvm/params.h
-new file mode 100644
-index 0000000..1888d8c
---- /dev/null
-+++ b/include/xen/interface/hvm/params.h
-@@ -0,0 +1,95 @@
-+/*
-+ * Permission is hereby granted, free of charge, to any person obtaining a copy
-+ * of this software and associated documentation files (the "Software"), to
-+ * deal in the Software without restriction, including without limitation the
-+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
-+ * sell copies of the Software, and to permit persons to whom the Software is
-+ * furnished to do so, subject to the following conditions:
-+ *
-+ * The above copyright notice and this permission notice shall be included in
-+ * all copies or substantial portions of the Software.
-+ *
-+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-+ * DEALINGS IN THE SOFTWARE.
-+ */
-+
-+#ifndef __XEN_PUBLIC_HVM_PARAMS_H__
-+#define __XEN_PUBLIC_HVM_PARAMS_H__
-+
-+#include "hvm_op.h"
-+
-+/*
-+ * Parameter space for HVMOP_{set,get}_param.
-+ */
-+
-+/*
-+ * How should CPU0 event-channel notifications be delivered?
-+ * val[63:56] == 0: val[55:0] is a delivery GSI (Global System Interrupt).
-+ * val[63:56] == 1: val[55:0] is a delivery PCI INTx line, as follows:
-+ *                  Domain = val[47:32], Bus  = val[31:16],
-+ *                  DevFn  = val[15: 8], IntX = val[ 1: 0]
-+ * val[63:56] == 2: val[7:0] is a vector number.
-+ * If val == 0 then CPU0 event-channel notifications are not delivered.
-+ */
-+#define HVM_PARAM_CALLBACK_IRQ 0
-+
-+#define HVM_PARAM_STORE_PFN    1
-+#define HVM_PARAM_STORE_EVTCHN 2
-+
-+#define HVM_PARAM_PAE_ENABLED  4
-+
-+#define HVM_PARAM_IOREQ_PFN    5
-+
-+#define HVM_PARAM_BUFIOREQ_PFN 6
-+
-+/*
-+ * Set mode for virtual timers (currently x86 only):
-+ *  delay_for_missed_ticks (default):
-+ *   Do not advance a vcpu's time beyond the correct delivery time for
-+ *   interrupts that have been missed due to preemption. Deliver missed
-+ *   interrupts when the vcpu is rescheduled and advance the vcpu's virtual
-+ *   time stepwise for each one.
-+ *  no_delay_for_missed_ticks:
-+ *   As above, missed interrupts are delivered, but guest time always tracks
-+ *   wallclock (i.e., real) time while doing so.
-+ *  no_missed_ticks_pending:
-+ *   No missed interrupts are held pending. Instead, to ensure ticks are
-+ *   delivered at some non-zero rate, if we detect missed ticks then the
-+ *   internal tick alarm is not disabled if the VCPU is preempted during the
-+ *   next tick period.
-+ *  one_missed_tick_pending:
-+ *   Missed interrupts are collapsed together and delivered as one 'late tick'.
-+ *   Guest time always tracks wallclock (i.e., real) time.
-+ */
-+#define HVM_PARAM_TIMER_MODE   10
-+#define HVMPTM_delay_for_missed_ticks    0
-+#define HVMPTM_no_delay_for_missed_ticks 1
-+#define HVMPTM_no_missed_ticks_pending   2
-+#define HVMPTM_one_missed_tick_pending   3
-+
-+/* Boolean: Enable virtual HPET (high-precision event timer)? (x86-only) */
-+#define HVM_PARAM_HPET_ENABLED 11
-+
-+/* Identity-map page directory used by Intel EPT when CR0.PG=0. */
-+#define HVM_PARAM_IDENT_PT     12
-+
-+/* Device Model domain, defaults to 0. */
-+#define HVM_PARAM_DM_DOMAIN    13
-+
-+/* ACPI S state: currently support S0 and S3 on x86. */
-+#define HVM_PARAM_ACPI_S_STATE 14
-+
-+/* TSS used on Intel when CR0.PE=0. */
-+#define HVM_PARAM_VM86_TSS     15
-+
-+/* Boolean: Enable aligning all periodic vpts to reduce interrupts */
-+#define HVM_PARAM_VPT_ALIGN    16
-+
-+#define HVM_NR_PARAMS          17
-+
-+#endif /* __XEN_PUBLIC_HVM_PARAMS_H__ */
 diff --git a/include/xen/interface/io/netif.h b/include/xen/interface/io/netif.h
 index 518481c..8309344 100644
 --- a/include/xen/interface/io/netif.h
@@ -31895,61 +30717,6 @@ index 0000000..fb2bf6b
 +
 +extern void unregister_xen_pcpu_notifier(struct notifier_block *nb);
 +#endif
-diff --git a/include/xen/platform_pci.h b/include/xen/platform_pci.h
-new file mode 100644
-index 0000000..ce9d671
---- /dev/null
-+++ b/include/xen/platform_pci.h
-@@ -0,0 +1,49 @@
-+#ifndef _XEN_PLATFORM_PCI_H
-+#define _XEN_PLATFORM_PCI_H
-+
-+#define XEN_IOPORT_MAGIC_VAL 0x49d2
-+#define XEN_IOPORT_LINUX_PRODNUM 0x0003
-+#define XEN_IOPORT_LINUX_DRVVER  0x0001
-+
-+#define XEN_IOPORT_BASE 0x10
-+
-+#define XEN_IOPORT_PLATFLAGS	(XEN_IOPORT_BASE + 0) /* 1 byte access (R/W) */
-+#define XEN_IOPORT_MAGIC	(XEN_IOPORT_BASE + 0) /* 2 byte access (R) */
-+#define XEN_IOPORT_UNPLUG	(XEN_IOPORT_BASE + 0) /* 2 byte access (W) */
-+#define XEN_IOPORT_DRVVER	(XEN_IOPORT_BASE + 0) /* 4 byte access (W) */
-+
-+#define XEN_IOPORT_SYSLOG	(XEN_IOPORT_BASE + 2) /* 1 byte access (W) */
-+#define XEN_IOPORT_PROTOVER	(XEN_IOPORT_BASE + 2) /* 1 byte access (R) */
-+#define XEN_IOPORT_PRODNUM	(XEN_IOPORT_BASE + 2) /* 2 byte access (W) */
-+
-+#define XEN_UNPLUG_ALL_IDE_DISKS 1
-+#define XEN_UNPLUG_ALL_NICS 2
-+#define XEN_UNPLUG_AUX_IDE_DISKS 4
-+#define XEN_UNPLUG_ALL 7
-+#define XEN_UNPLUG_IGNORE 8
-+
-+static inline int xen_must_unplug_nics(void) {
-+#if (defined(CONFIG_XEN_NETDEV_FRONTEND) || \
-+		defined(CONFIG_XEN_NETDEV_FRONTEND_MODULE)) && \
-+		(defined(CONFIG_XEN_PLATFORM_PCI) || \
-+		 defined(CONFIG_XEN_PLATFORM_PCI_MODULE))
-+        return 1;
-+#else
-+        return 0;
-+#endif
-+}
-+
-+static inline int xen_must_unplug_disks(void) {
-+#if (defined(CONFIG_XEN_BLKDEV_FRONTEND) || \
-+		defined(CONFIG_XEN_BLKDEV_FRONTEND_MODULE)) && \
-+		(defined(CONFIG_XEN_PLATFORM_PCI) || \
-+		 defined(CONFIG_XEN_PLATFORM_PCI_MODULE))
-+        return 1;
-+#else
-+        return 0;
-+#endif
-+}
-+
-+extern int xen_platform_pci_unplug;
-+
-+#endif /* _XEN_PLATFORM_PCI_H */
 diff --git a/include/xen/privcmd.h b/include/xen/privcmd.h
 new file mode 100644
 index 0000000..b42cdfd
@@ -32037,18 +30804,10 @@ index 0000000..b42cdfd
 +
 +#endif /* __LINUX_PUBLIC_PRIVCMD_H__ */
 diff --git a/include/xen/xen-ops.h b/include/xen/xen-ops.h
-index 883a21b..7058f8a 100644
+index 46bc81e..7058f8a 100644
 --- a/include/xen/xen-ops.h
 +++ b/include/xen/xen-ops.h
-@@ -7,6 +7,7 @@ DECLARE_PER_CPU(struct vcpu_info *, xen_vcpu);
- 
- void xen_pre_suspend(void);
- void xen_post_suspend(int suspend_cancelled);
-+void xen_hvm_post_suspend(int suspend_cancelled);
- 
- void xen_mm_pin_all(void);
- void xen_mm_unpin_all(void);
-@@ -14,4 +15,16 @@ void xen_mm_unpin_all(void);
+@@ -15,6 +15,16 @@ void xen_mm_unpin_all(void);
  void xen_timer_resume(void);
  void xen_arch_resume(void);
  
@@ -32062,8 +30821,8 @@ index 883a21b..7058f8a 100644
 +				unsigned int address_bits);
 +
 +void xen_destroy_contiguous_region(unsigned long vstart, unsigned int order);
-+int xen_setup_shutdown_event(void);
-+
+ int xen_setup_shutdown_event(void);
+ 
  #endif /* INCLUDE_XEN_OPS_H */
 diff --git a/include/xen/xen.h b/include/xen/xen.h
 new file mode 100644

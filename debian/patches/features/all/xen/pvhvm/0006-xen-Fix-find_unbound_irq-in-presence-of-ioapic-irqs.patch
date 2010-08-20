@@ -1,0 +1,55 @@
+From 26f6c2b5b7b31e4a93aca248361ac2b07789ce25 Mon Sep 17 00:00:00 2001
+From: Stefano Stabellini <stefano.stabellini@eu.citrix.com>
+Date: Fri, 14 May 2010 12:41:20 +0100
+Subject: [PATCH] xen: Fix find_unbound_irq in presence of ioapic irqs.
+
+Don't break the assumption that the first 16 irqs are ISA irqs;
+make sure that the irq is actually free before using it.
+
+Use dynamic_irq_init_keep_chip_data instead of
+dynamic_irq_init so that chip_data is not NULL (a NULL chip_data breaks
+setup_vector_irq).
+
+Signed-off-by: Stefano Stabellini <stefano.stabellini@eu.citrix.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+(cherry picked from commit 99ad198c4978036bb9f7ebd11618b225b77046da)
+---
+ drivers/xen/events.c |   13 +++++++++++--
+ 1 files changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/xen/events.c b/drivers/xen/events.c
+index 9d99c9a..da01209 100644
+--- a/drivers/xen/events.c
++++ b/drivers/xen/events.c
+@@ -338,9 +338,18 @@ static int find_unbound_irq(void)
+ 	int irq;
+ 	struct irq_desc *desc;
+ 
+-	for (irq = 0; irq < nr_irqs; irq++)
++	for (irq = 0; irq < nr_irqs; irq++) {
++		desc = irq_to_desc(irq);
++		/* only 0->15 have init'd desc; handle irq > 16 */
++		if (desc == NULL)
++			break;
++		if (desc->chip == &no_irq_chip)
++			break;
++		if (desc->chip != &xen_dynamic_chip)
++			continue;
+ 		if (irq_info[irq].type == IRQT_UNBOUND)
+ 			break;
++	}
+ 
+ 	if (irq == nr_irqs)
+ 		panic("No available IRQ to bind to: increase nr_irqs!\n");
+@@ -349,7 +358,7 @@ static int find_unbound_irq(void)
+ 	if (WARN_ON(desc == NULL))
+ 		return -1;
+ 
+-	dynamic_irq_init(irq);
++	dynamic_irq_init_keep_chip_data(irq);
+ 
+ 	return irq;
+ }
+-- 
+1.5.6.5
+

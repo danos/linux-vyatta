@@ -1,0 +1,245 @@
+From 79bec05f7773879d51ff89e221713c86c2311c6c Mon Sep 17 00:00:00 2001
+From: Sheng Yang <sheng@linux.intel.com>
+Date: Fri, 14 May 2010 12:39:33 +0100
+Subject: [PATCH] x86: early PV on HVM features initialization.
+
+Initialize basic pv on hvm features in xen_hvm_guest_init.
+
+Don't try to initialize xen-kbdfront and xen-fbfront when running on HVM
+because the backends are not available.
+
+Signed-off-by: Stefano Stabellini <stefano.stabellini@eu.citrix.com>
+Signed-off-by: Sheng Yang <sheng@linux.intel.com>
+Signed-off-by: Yaozu (Eddie) Dong <eddie.dong@intel.com>
+(cherry picked from commit bee6ab53e652a414af20392899879b58cd80d033 and
+adjusted to not use the generic hypervisor detection routines which are not in
+this kernel)
+---
+ arch/x86/include/asm/xen/hypervisor.h |    2 +
+ arch/x86/kernel/setup.c               |    2 +
+ arch/x86/xen/enlighten.c              |   85 +++++++++++++++++++++++++++++++++
+ drivers/input/xen-kbdfront.c          |    2 +-
+ drivers/video/xen-fbfront.c           |    2 +-
+ drivers/xen/xenbus/xenbus_probe.c     |   21 +++++++-
+ 6 files changed, 109 insertions(+), 5 deletions(-)
+
+diff --git a/arch/x86/include/asm/xen/hypervisor.h b/arch/x86/include/asm/xen/hypervisor.h
+index d5b7e90..5d298fd 100644
+--- a/arch/x86/include/asm/xen/hypervisor.h
++++ b/arch/x86/include/asm/xen/hypervisor.h
+@@ -45,8 +45,10 @@ enum xen_domain_type {
+ 
+ #ifdef CONFIG_XEN
+ extern enum xen_domain_type xen_domain_type;
++extern void __init xen_hvm_guest_init(void);
+ #else
+ #define xen_domain_type		XEN_NATIVE
++#define xen_hvm_guest_init() do { } while (0)
+ #endif
+ 
+ #define xen_domain()		(xen_domain_type != XEN_NATIVE)
+diff --git a/arch/x86/kernel/setup.c b/arch/x86/kernel/setup.c
+index d7a0888..c852868 100644
+--- a/arch/x86/kernel/setup.c
++++ b/arch/x86/kernel/setup.c
+@@ -102,6 +102,7 @@
+ 
+ #include <asm/paravirt.h>
+ #include <asm/hypervisor.h>
++#include <asm/xen/hypervisor.h>
+ 
+ #include <asm/percpu.h>
+ #include <asm/topology.h>
+@@ -1034,6 +1035,7 @@ void __init setup_arch(char **cmdline_p)
+ 	probe_nr_irqs_gsi();
+ 
+ 	kvm_guest_init();
++	xen_hvm_guest_init();
+ 
+ 	e820_reserve_resources();
+ 	e820_mark_nosave_regions(max_low_pfn);
+diff --git a/arch/x86/xen/enlighten.c b/arch/x86/xen/enlighten.c
+index 942ccf1..6bfbd45 100644
+--- a/arch/x86/xen/enlighten.c
++++ b/arch/x86/xen/enlighten.c
+@@ -32,6 +32,7 @@
+ #include <xen/interface/version.h>
+ #include <xen/interface/physdev.h>
+ #include <xen/interface/vcpu.h>
++#include <xen/interface/memory.h>
+ #include <xen/features.h>
+ #include <xen/page.h>
+ #include <xen/hvc-console.h>
+@@ -52,7 +53,9 @@
+ #include <asm/pgtable.h>
+ #include <asm/tlbflush.h>
+ #include <asm/reboot.h>
++#include <asm/setup.h>
+ #include <asm/stackprotector.h>
++#include <asm/hypervisor.h>
+ 
+ #include "xen-ops.h"
+ #include "mmu.h"
+@@ -73,6 +76,8 @@ struct shared_info xen_dummy_shared_info;
+ 
+ void *xen_initial_gdt;
+ 
++RESERVE_BRK(shared_info_page_brk, PAGE_SIZE);
++
+ /*
+  * Point at some empty memory to start with. We map the real shared_info
+  * page as soon as fixmap is up and running.
+@@ -1197,3 +1202,83 @@ asmlinkage void __init xen_start_kernel(void)
+ 	x86_64_start_reservations((char *)__pa_symbol(&boot_params));
+ #endif
+ }
++
++static uint32_t xen_cpuid_base(void)
++{
++	uint32_t base, eax, ebx, ecx, edx;
++	char signature[13];
++
++	for (base = 0x40000000; base < 0x40010000; base += 0x100) {
++		cpuid(base, &eax, &ebx, &ecx, &edx);
++		*(uint32_t *)(signature + 0) = ebx;
++		*(uint32_t *)(signature + 4) = ecx;
++		*(uint32_t *)(signature + 8) = edx;
++		signature[12] = 0;
++
++		if (!strcmp("XenVMMXenVMM", signature) && ((eax - base) >= 2))
++			return base;
++	}
++
++	return 0;
++}
++
++static int init_hvm_pv_info(int *major, int *minor)
++{
++	uint32_t eax, ebx, ecx, edx, pages, msr, base;
++	u64 pfn;
++
++	base = xen_cpuid_base();
++	cpuid(base + 1, &eax, &ebx, &ecx, &edx);
++
++	*major = eax >> 16;
++	*minor = eax & 0xffff;
++	printk(KERN_INFO "Xen version %d.%d.\n", *major, *minor);
++
++	cpuid(base + 2, &pages, &msr, &ecx, &edx);
++
++	pfn = __pa(hypercall_page);
++	wrmsr_safe(msr, (u32)pfn, (u32)(pfn >> 32));
++
++	xen_setup_features();
++
++	pv_info = xen_info;
++	pv_info.kernel_rpl = 0;
++
++	xen_domain_type = XEN_HVM_DOMAIN;
++
++	return 0;
++}
++
++static void __init init_shared_info(void)
++{
++	struct xen_add_to_physmap xatp;
++	struct shared_info *shared_info_page;
++
++	shared_info_page = (struct shared_info *)
++		extend_brk(PAGE_SIZE, PAGE_SIZE);
++	xatp.domid = DOMID_SELF;
++	xatp.idx = 0;
++	xatp.space = XENMAPSPACE_shared_info;
++	xatp.gpfn = __pa(shared_info_page) >> PAGE_SHIFT;
++	if (HYPERVISOR_memory_op(XENMEM_add_to_physmap, &xatp))
++		BUG();
++
++	HYPERVISOR_shared_info = (struct shared_info *)shared_info_page;
++
++	per_cpu(xen_vcpu, 0) = &HYPERVISOR_shared_info->vcpu_info[0];
++}
++
++void __init xen_hvm_guest_init(void)
++{
++	int r;
++	int major, minor;
++
++	if (xen_pv_domain())
++		return;
++
++	r = init_hvm_pv_info(&major, &minor);
++	if (r < 0)
++		return;
++
++	init_shared_info();
++}
+diff --git a/drivers/input/xen-kbdfront.c b/drivers/input/xen-kbdfront.c
+index b115726..8ec2201 100644
+--- a/drivers/input/xen-kbdfront.c
++++ b/drivers/input/xen-kbdfront.c
+@@ -335,7 +335,7 @@ static struct xenbus_driver xenkbd_driver = {
+ 
+ static int __init xenkbd_init(void)
+ {
+-	if (!xen_domain())
++	if (!xen_pv_domain())
+ 		return -ENODEV;
+ 
+ 	/* Nothing to do if running in dom0. */
+diff --git a/drivers/video/xen-fbfront.c b/drivers/video/xen-fbfront.c
+index 54cd916..450f958 100644
+--- a/drivers/video/xen-fbfront.c
++++ b/drivers/video/xen-fbfront.c
+@@ -680,7 +680,7 @@ static struct xenbus_driver xenfb_driver = {
+ 
+ static int __init xenfb_init(void)
+ {
+-	if (!xen_domain())
++	if (!xen_pv_domain())
+ 		return -ENODEV;
+ 
+ 	/* Nothing to do if running in dom0. */
+diff --git a/drivers/xen/xenbus/xenbus_probe.c b/drivers/xen/xenbus/xenbus_probe.c
+index 649fcdf..568d14d 100644
+--- a/drivers/xen/xenbus/xenbus_probe.c
++++ b/drivers/xen/xenbus/xenbus_probe.c
+@@ -53,6 +53,8 @@
+ #include <xen/events.h>
+ #include <xen/page.h>
+ 
++#include <xen/hvm.h>
++
+ #include "xenbus_comms.h"
+ #include "xenbus_probe.h"
+ 
+@@ -802,11 +804,24 @@ static int __init xenbus_probe_init(void)
+ 	if (xen_initial_domain()) {
+ 		/* dom0 not yet supported */
+ 	} else {
++		if (xen_hvm_domain()) {
++			uint64_t v = 0;
++			err = hvm_get_parameter(HVM_PARAM_STORE_EVTCHN, &v);
++			if (err)
++				goto out_error;
++			xen_store_evtchn = (int)v;
++			err = hvm_get_parameter(HVM_PARAM_STORE_PFN, &v);
++			if (err)
++				goto out_error;
++			xen_store_mfn = (unsigned long)v;
++			xen_store_interface = ioremap(xen_store_mfn << PAGE_SHIFT, PAGE_SIZE);
++		} else {
++			xen_store_evtchn = xen_start_info->store_evtchn;
++			xen_store_mfn = xen_start_info->store_mfn;
++			xen_store_interface = mfn_to_virt(xen_store_mfn);
++		}
+ 		xenstored_ready = 1;
+-		xen_store_evtchn = xen_start_info->store_evtchn;
+-		xen_store_mfn = xen_start_info->store_mfn;
+ 	}
+-	xen_store_interface = mfn_to_virt(xen_store_mfn);
+ 
+ 	/* Initialize the interface to xenstore. */
+ 	err = xs_init();
+-- 
+1.5.6.5
+

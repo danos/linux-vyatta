@@ -1,0 +1,70 @@
+From ea861bd95ad4f8a2bc15d244f475a3b91e9fb877 Mon Sep 17 00:00:00 2001
+From: Stefano Stabellini <stefano.stabellini@eu.citrix.com>
+Date: Thu, 29 Jul 2010 14:53:16 +0100
+Subject: [PATCH] blkfront: do not create a PV cdrom device if xen_hvm_guest
+
+It is not possible to unplug emulated cdrom devices, and PV cdroms don't
+handle media insert, eject and stream, so we are better off disabling PV
+cdroms when running as a Xen HVM guest.
+
+Signed-off-by: Stefano Stabellini <stefano.stabellini@eu.citrix.com>
+(cherry picked from commit b98a409b80ac510c95b4f1bafdef28edaeabd3e7)
+---
+ drivers/block/xen-blkfront.c |   39 ++++++++++++++++++++++++++-------------
+ 1 files changed, 26 insertions(+), 13 deletions(-)
+
+diff --git a/drivers/block/xen-blkfront.c b/drivers/block/xen-blkfront.c
+index 151c560..ac692c5 100644
+--- a/drivers/block/xen-blkfront.c
++++ b/drivers/block/xen-blkfront.c
+@@ -737,21 +737,34 @@ static int blkfront_probe(struct xenbus_device *dev,
+ 		}
+ 	}
+ 
+-	/* no unplug has been done: do not hook devices != xen vbds */
+-	if (xen_hvm_domain() && (xen_platform_pci_unplug & XEN_UNPLUG_IGNORE)) {
+-		int major;
+-
+-		if (!VDEV_IS_EXTENDED(vdevice))
+-			major = BLKIF_MAJOR(vdevice);
+-		else
+-			major = XENVBD_MAJOR;
+-
+-		if (major != XENVBD_MAJOR) {
+-			printk(KERN_INFO
+-					"%s: HVM does not support vbd %d as xen block device\n",
+-					__FUNCTION__, vdevice);
++	if (xen_hvm_domain()) {
++		char *type;
++		int len;
++		/* no unplug has been done: do not hook devices != xen vbds */
++		if (xen_platform_pci_unplug & XEN_UNPLUG_IGNORE) {
++			int major;
++
++			if (!VDEV_IS_EXTENDED(vdevice))
++				major = BLKIF_MAJOR(vdevice);
++			else
++				major = XENVBD_MAJOR;
++
++			if (major != XENVBD_MAJOR) {
++				printk(KERN_INFO
++						"%s: HVM does not support vbd %d as xen block device\n",
++						__FUNCTION__, vdevice);
++				return -ENODEV;
++			}
++		}
++		/* do not create a PV cdrom device if we are an HVM guest */
++		type = xenbus_read(XBT_NIL, dev->nodename, "device-type", &len);
++		if (IS_ERR(type))
++			return -ENODEV;
++		if (strncmp(type, "cdrom", 5) == 0) {
++			kfree(type);
+ 			return -ENODEV;
+ 		}
++		kfree(type);
+ 	}
+ 	info = kzalloc(sizeof(*info), GFP_KERNEL);
+ 	if (!info) {
+-- 
+1.5.6.5
+

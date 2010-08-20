@@ -1,0 +1,378 @@
+From 67f3b6d66143353ca4536c643cef70941ecaade0 Mon Sep 17 00:00:00 2001
+From: Stefano Stabellini <stefano.stabellini@eu.citrix.com>
+Date: Fri, 14 May 2010 12:44:30 +0100
+Subject: [PATCH] x86: Unplug emulated disks and nics.
+
+Add a xen_emul_unplug command line option to the kernel to unplug
+xen emulated disks and nics.
+
+Set the default value of xen_emul_unplug depending on whether or
+not the Xen PV frontends and the Xen platform PCI driver have
+been compiled for this kernel (modules or built-in are both OK).
+
+The user can specify xen_emul_unplug=ignore to enable PV drivers on HVM
+even if the host platform doesn't support unplug.
+
+Signed-off-by: Stefano Stabellini <stefano.stabellini@eu.citrix.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+(cherry picked from commit c1c5413ad58cb73267d328e6020268aa2e50d8ca)
+---
+ Documentation/kernel-parameters.txt |   11 +++
+ arch/x86/xen/Makefile               |    2 +-
+ arch/x86/xen/enlighten.c            |    1 +
+ arch/x86/xen/platform-pci-unplug.c  |  135 +++++++++++++++++++++++++++++++++++
+ arch/x86/xen/xen-ops.h              |    1 +
+ drivers/block/xen-blkfront.c        |   17 +++++
+ drivers/xen/platform-pci.c          |    6 ++
+ drivers/xen/xenbus/xenbus_probe.c   |    4 +
+ include/xen/platform_pci.h          |   49 +++++++++++++
+ 9 files changed, 225 insertions(+), 1 deletions(-)
+ create mode 100644 arch/x86/xen/platform-pci-unplug.c
+ create mode 100644 include/xen/platform_pci.h
+
+diff --git a/Documentation/kernel-parameters.txt b/Documentation/kernel-parameters.txt
+index 5f6aa11..3e30e60 100644
+--- a/Documentation/kernel-parameters.txt
++++ b/Documentation/kernel-parameters.txt
+@@ -113,6 +113,7 @@ parameter is applicable:
+ 			More X86-64 boot options can be found in
+ 			Documentation/x86/x86_64/boot-options.txt .
+ 	X86	Either 32bit or 64bit x86 (same as X86-32+X86-64)
++	XEN	Xen support is enabled
+ 
+ In addition, the following text indicates that the option:
+ 
+@@ -2760,6 +2761,16 @@ and is between 256 and 4096 characters. It is defined in the file
+ 	xd=		[HW,XT] Original XT pre-IDE (RLL encoded) disks.
+ 	xd_geo=		See header of drivers/block/xd.c.
+ 
++	xen_emul_unplug=		[HW,X86,XEN]
++			Unplug Xen emulated devices
++			Format: [unplug0,][unplug1]
++			ide-disks -- unplug primary master IDE devices
++			aux-ide-disks -- unplug non-primary-master IDE devices
++			nics -- unplug network devices
++			all -- unplug all emulated devices (NICs and IDE disks)
++			ignore -- continue loading the Xen platform PCI driver even
++				if the version check failed
++
+ 	xirc2ps_cs=	[NET,PCMCIA]
+ 			Format:
+ 			<irq>,<irq_mask>,<io>,<full_duplex>,<do_sound>,<lockup_hack>[,<irq2>[,<irq3>[,<irq4>]]]
+diff --git a/arch/x86/xen/Makefile b/arch/x86/xen/Makefile
+index 3bb4fc2..9309546 100644
+--- a/arch/x86/xen/Makefile
++++ b/arch/x86/xen/Makefile
+@@ -12,7 +12,7 @@ CFLAGS_mmu.o			:= $(nostackp)
+ 
+ obj-y		:= enlighten.o setup.o multicalls.o mmu.o irq.o \
+ 			time.o xen-asm.o xen-asm_$(BITS).o \
+-			grant-table.o suspend.o
++			grant-table.o suspend.o platform-pci-unplug.o
+ 
+ obj-$(CONFIG_SMP)		+= smp.o
+ obj-$(CONFIG_PARAVIRT_SPINLOCKS)+= spinlock.o
+diff --git a/arch/x86/xen/enlighten.c b/arch/x86/xen/enlighten.c
+index f41ae25..bb2b65f 100644
+--- a/arch/x86/xen/enlighten.c
++++ b/arch/x86/xen/enlighten.c
+@@ -1307,6 +1307,7 @@ void __init xen_hvm_guest_init(void)
+ 	if (xen_feature(XENFEAT_hvm_callback_vector))
+ 		xen_have_vector_callback = 1;
+ 	register_cpu_notifier(&xen_hvm_cpu_notifier);
++	xen_unplug_emulated_devices();
+ 	have_vcpu_info_placement = 0;
+ 	x86_init.irqs.intr_init = xen_init_IRQ;
+ 	xen_hvm_init_time_ops();
+diff --git a/arch/x86/xen/platform-pci-unplug.c b/arch/x86/xen/platform-pci-unplug.c
+new file mode 100644
+index 0000000..2f7f3fb
+--- /dev/null
++++ b/arch/x86/xen/platform-pci-unplug.c
+@@ -0,0 +1,135 @@
++/******************************************************************************
++ * platform-pci-unplug.c
++ *
++ * Xen platform PCI device driver
++ * Copyright (c) 2010, Citrix
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms and conditions of the GNU General Public License,
++ * version 2, as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
++ * Place - Suite 330, Boston, MA 02111-1307 USA.
++ *
++ */
++
++#include <linux/init.h>
++#include <linux/io.h>
++#include <linux/module.h>
++
++#include <xen/platform_pci.h>
++
++#define XEN_PLATFORM_ERR_MAGIC -1
++#define XEN_PLATFORM_ERR_PROTOCOL -2
++#define XEN_PLATFORM_ERR_BLACKLIST -3
++
++/* store the value of xen_emul_unplug after the unplug is done */
++int xen_platform_pci_unplug;
++EXPORT_SYMBOL_GPL(xen_platform_pci_unplug);
++static int xen_emul_unplug;
++
++static int __init check_platform_magic(void)
++{
++	short magic;
++	char protocol;
++
++	magic = inw(XEN_IOPORT_MAGIC);
++	if (magic != XEN_IOPORT_MAGIC_VAL) {
++		printk(KERN_ERR "Xen Platform PCI: unrecognised magic value\n");
++		return XEN_PLATFORM_ERR_MAGIC;
++	}
++
++	protocol = inb(XEN_IOPORT_PROTOVER);
++
++	printk(KERN_DEBUG "Xen Platform PCI: I/O protocol version %d\n",
++			protocol);
++
++	switch (protocol) {
++	case 1:
++		outw(XEN_IOPORT_LINUX_PRODNUM, XEN_IOPORT_PRODNUM);
++		outl(XEN_IOPORT_LINUX_DRVVER, XEN_IOPORT_DRVVER);
++		if (inw(XEN_IOPORT_MAGIC) != XEN_IOPORT_MAGIC_VAL) {
++			printk(KERN_ERR "Xen Platform: blacklisted by host\n");
++			return XEN_PLATFORM_ERR_BLACKLIST;
++		}
++		break;
++	default:
++		printk(KERN_WARNING "Xen Platform PCI: unknown I/O protocol version");
++		return XEN_PLATFORM_ERR_PROTOCOL;
++	}
++
++	return 0;
++}
++
++void __init xen_unplug_emulated_devices(void)
++{
++	int r;
++
++	/* check the version of the xen platform PCI device */
++	r = check_platform_magic();
++	/* If the version matches enable the Xen platform PCI driver.
++	 * Also enable the Xen platform PCI driver if the version is really old
++	 * and the user told us to ignore it. */
++	if (r && !(r == XEN_PLATFORM_ERR_MAGIC &&
++			(xen_emul_unplug & XEN_UNPLUG_IGNORE)))
++		return;
++	/* Set the default value of xen_emul_unplug depending on whether or
++	 * not the Xen PV frontends and the Xen platform PCI driver have
++	 * been compiled for this kernel (modules or built-in are both OK). */
++	if (!xen_emul_unplug) {
++		if (xen_must_unplug_nics()) {
++			printk(KERN_INFO "Netfront and the Xen platform PCI driver have "
++					"been compiled for this kernel: unplug emulated NICs.\n");
++			xen_emul_unplug |= XEN_UNPLUG_ALL_NICS;
++		}
++		if (xen_must_unplug_disks()) {
++			printk(KERN_INFO "Blkfront and the Xen platform PCI driver have "
++					"been compiled for this kernel: unplug emulated disks.\n"
++					"You might have to change the root device\n"
++					"from /dev/hd[a-d] to /dev/xvd[a-d]\n"
++					"in your root= kernel command line option\n");
++			xen_emul_unplug |= XEN_UNPLUG_ALL_IDE_DISKS;
++		}
++	}
++	/* Now unplug the emulated devices */
++	if (!(xen_emul_unplug & XEN_UNPLUG_IGNORE))
++		outw(xen_emul_unplug, XEN_IOPORT_UNPLUG);
++	xen_platform_pci_unplug = xen_emul_unplug;
++}
++
++static int __init parse_xen_emul_unplug(char *arg)
++{
++	char *p, *q;
++	int l;
++
++	for (p = arg; p; p = q) {
++		q = strchr(p, ',');
++		if (q) {
++			l = q - p;
++			q++;
++		} else {
++			l = strlen(p);
++		}
++		if (!strncmp(p, "all", l))
++			xen_emul_unplug |= XEN_UNPLUG_ALL;
++		else if (!strncmp(p, "ide-disks", l))
++			xen_emul_unplug |= XEN_UNPLUG_ALL_IDE_DISKS;
++		else if (!strncmp(p, "aux-ide-disks", l))
++			xen_emul_unplug |= XEN_UNPLUG_AUX_IDE_DISKS;
++		else if (!strncmp(p, "nics", l))
++			xen_emul_unplug |= XEN_UNPLUG_ALL_NICS;
++		else if (!strncmp(p, "ignore", l))
++			xen_emul_unplug |= XEN_UNPLUG_IGNORE;
++		else
++			printk(KERN_WARNING "unrecognised option '%s' "
++				 "in parameter 'xen_emul_unplug'\n", p);
++	}
++	return 0;
++}
++early_param("xen_emul_unplug", parse_xen_emul_unplug);
+diff --git a/arch/x86/xen/xen-ops.h b/arch/x86/xen/xen-ops.h
+index 089d189..ed77694 100644
+--- a/arch/x86/xen/xen-ops.h
++++ b/arch/x86/xen/xen-ops.h
+@@ -40,6 +40,7 @@ void xen_vcpu_restore(void);
+ 
+ void xen_callback_vector(void);
+ void xen_hvm_init_shared_info(void);
++void __init xen_unplug_emulated_devices(void);
+ 
+ void __init xen_build_dynamic_phys_to_machine(void);
+ 
+diff --git a/drivers/block/xen-blkfront.c b/drivers/block/xen-blkfront.c
+index b8578bb..151c560 100644
+--- a/drivers/block/xen-blkfront.c
++++ b/drivers/block/xen-blkfront.c
+@@ -46,6 +46,7 @@
+ #include <xen/grant_table.h>
+ #include <xen/events.h>
+ #include <xen/page.h>
++#include <xen/platform_pci.h>
+ 
+ #include <xen/interface/grant_table.h>
+ #include <xen/interface/io/blkif.h>
+@@ -736,6 +737,22 @@ static int blkfront_probe(struct xenbus_device *dev,
+ 		}
+ 	}
+ 
++	/* no unplug has been done: do not hook devices != xen vbds */
++	if (xen_hvm_domain() && (xen_platform_pci_unplug & XEN_UNPLUG_IGNORE)) {
++		int major;
++
++		if (!VDEV_IS_EXTENDED(vdevice))
++			major = BLKIF_MAJOR(vdevice);
++		else
++			major = XENVBD_MAJOR;
++
++		if (major != XENVBD_MAJOR) {
++			printk(KERN_INFO
++					"%s: HVM does not support vbd %d as xen block device\n",
++					__FUNCTION__, vdevice);
++			return -ENODEV;
++		}
++	}
+ 	info = kzalloc(sizeof(*info), GFP_KERNEL);
+ 	if (!info) {
+ 		xenbus_dev_fatal(dev, -ENOMEM, "allocating info structure");
+diff --git a/drivers/xen/platform-pci.c b/drivers/xen/platform-pci.c
+index bdb44f2..c01b5dd 100644
+--- a/drivers/xen/platform-pci.c
++++ b/drivers/xen/platform-pci.c
+@@ -27,6 +27,7 @@
+ #include <linux/module.h>
+ #include <linux/pci.h>
+ 
++#include <xen/platform_pci.h>
+ #include <xen/grant_table.h>
+ #include <xen/xenbus.h>
+ #include <xen/events.h>
+@@ -195,6 +196,11 @@ static struct pci_driver platform_driver = {
+ 
+ static int __init platform_pci_module_init(void)
+ {
++	/* no unplug has been done, IGNORE hasn't been specified: just
++	 * return now */
++	if (!xen_platform_pci_unplug)
++		return -ENODEV;
++
+ 	return pci_register_driver(&platform_driver);
+ }
+ 
+diff --git a/drivers/xen/xenbus/xenbus_probe.c b/drivers/xen/xenbus/xenbus_probe.c
+index e8169db..840c9ff 100644
+--- a/drivers/xen/xenbus/xenbus_probe.c
++++ b/drivers/xen/xenbus/xenbus_probe.c
+@@ -53,6 +53,7 @@
+ #include <xen/events.h>
+ #include <xen/page.h>
+ 
++#include <xen/platform_pci.h>
+ #include <xen/hvm.h>
+ 
+ #include "xenbus_comms.h"
+@@ -974,6 +975,9 @@ static void wait_for_devices(struct xenbus_driver *xendrv)
+ #ifndef MODULE
+ static int __init boot_wait_for_devices(void)
+ {
++	if (xen_hvm_domain() && !xen_platform_pci_unplug)
++		return -ENODEV;
++
+ 	ready_to_wait_for_devices = 1;
+ 	wait_for_devices(NULL);
+ 	return 0;
+diff --git a/include/xen/platform_pci.h b/include/xen/platform_pci.h
+new file mode 100644
+index 0000000..ce9d671
+--- /dev/null
++++ b/include/xen/platform_pci.h
+@@ -0,0 +1,49 @@
++#ifndef _XEN_PLATFORM_PCI_H
++#define _XEN_PLATFORM_PCI_H
++
++#define XEN_IOPORT_MAGIC_VAL 0x49d2
++#define XEN_IOPORT_LINUX_PRODNUM 0x0003
++#define XEN_IOPORT_LINUX_DRVVER  0x0001
++
++#define XEN_IOPORT_BASE 0x10
++
++#define XEN_IOPORT_PLATFLAGS	(XEN_IOPORT_BASE + 0) /* 1 byte access (R/W) */
++#define XEN_IOPORT_MAGIC	(XEN_IOPORT_BASE + 0) /* 2 byte access (R) */
++#define XEN_IOPORT_UNPLUG	(XEN_IOPORT_BASE + 0) /* 2 byte access (W) */
++#define XEN_IOPORT_DRVVER	(XEN_IOPORT_BASE + 0) /* 4 byte access (W) */
++
++#define XEN_IOPORT_SYSLOG	(XEN_IOPORT_BASE + 2) /* 1 byte access (W) */
++#define XEN_IOPORT_PROTOVER	(XEN_IOPORT_BASE + 2) /* 1 byte access (R) */
++#define XEN_IOPORT_PRODNUM	(XEN_IOPORT_BASE + 2) /* 2 byte access (W) */
++
++#define XEN_UNPLUG_ALL_IDE_DISKS 1
++#define XEN_UNPLUG_ALL_NICS 2
++#define XEN_UNPLUG_AUX_IDE_DISKS 4
++#define XEN_UNPLUG_ALL 7
++#define XEN_UNPLUG_IGNORE 8
++
++static inline int xen_must_unplug_nics(void) {
++#if (defined(CONFIG_XEN_NETDEV_FRONTEND) || \
++		defined(CONFIG_XEN_NETDEV_FRONTEND_MODULE)) && \
++		(defined(CONFIG_XEN_PLATFORM_PCI) || \
++		 defined(CONFIG_XEN_PLATFORM_PCI_MODULE))
++        return 1;
++#else
++        return 0;
++#endif
++}
++
++static inline int xen_must_unplug_disks(void) {
++#if (defined(CONFIG_XEN_BLKDEV_FRONTEND) || \
++		defined(CONFIG_XEN_BLKDEV_FRONTEND_MODULE)) && \
++		(defined(CONFIG_XEN_PLATFORM_PCI) || \
++		 defined(CONFIG_XEN_PLATFORM_PCI_MODULE))
++        return 1;
++#else
++        return 0;
++#endif
++}
++
++extern int xen_platform_pci_unplug;
++
++#endif /* _XEN_PLATFORM_PCI_H */
+-- 
+1.5.6.5
+

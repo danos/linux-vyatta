@@ -1,0 +1,147 @@
+From 978759a28b039bc1e9d09e110bf85b1940731fbb Mon Sep 17 00:00:00 2001
+From: Stefano Stabellini <stefano.stabellini@eu.citrix.com>
+Date: Thu, 29 Jul 2010 14:37:48 +0100
+Subject: [PATCH] Introduce CONFIG_XEN_PVHVM compile option
+
+This patch introduce a CONFIG_XEN_PVHVM compile time option to
+enable/disable Xen PV on HVM support.
+
+Signed-off-by: Stefano Stabellini <stefano.stabellini@eu.citrix.com>
+(cherry picked from commit 5b270b05c41c21b19c88617c3, updated for lack of
+hypervisor detection infrastructure)
+---
+ arch/x86/xen/Kconfig               |    5 +++++
+ arch/x86/xen/enlighten.c           |    2 ++
+ arch/x86/xen/mmu.c                 |    2 ++
+ arch/x86/xen/platform-pci-unplug.c |    2 ++
+ arch/x86/xen/time.c                |    3 ++-
+ drivers/xen/Kconfig                |    2 +-
+ drivers/xen/events.c               |    4 ++++
+ 7 files changed, 18 insertions(+), 2 deletions(-)
+
+diff --git a/arch/x86/xen/Kconfig b/arch/x86/xen/Kconfig
+index b83e119..68128a1 100644
+--- a/arch/x86/xen/Kconfig
++++ b/arch/x86/xen/Kconfig
+@@ -13,6 +13,11 @@ config XEN
+ 	  kernel to boot in a paravirtualized environment under the
+ 	  Xen hypervisor.
+ 
++config XEN_PVHVM
++	def_bool y
++	depends on XEN
++	depends on X86_LOCAL_APIC
++
+ config XEN_MAX_DOMAIN_MEMORY
+        int "Maximum allowed size of a domain in gigabytes"
+        default 8 if X86_32
+diff --git a/arch/x86/xen/enlighten.c b/arch/x86/xen/enlighten.c
+index bdb6d66..50fbf65 100644
+--- a/arch/x86/xen/enlighten.c
++++ b/arch/x86/xen/enlighten.c
+@@ -1272,6 +1272,7 @@ void xen_hvm_init_shared_info(void)
+ 	}
+ }
+ 
++#ifdef CONFIG_XEN_PVHVM
+ static int __cpuinit xen_hvm_cpu_notify(struct notifier_block *self,
+ 				    unsigned long action, void *hcpu)
+ {
+@@ -1313,3 +1314,4 @@ void __init xen_hvm_guest_init(void)
+ 	xen_hvm_init_time_ops();
+ 	xen_hvm_init_mmu_ops();
+ }
++#endif
+diff --git a/arch/x86/xen/mmu.c b/arch/x86/xen/mmu.c
+index f3ff12a..971a405 100644
+--- a/arch/x86/xen/mmu.c
++++ b/arch/x86/xen/mmu.c
+@@ -1963,6 +1963,7 @@ void __init xen_init_mmu_ops(void)
+ 	pv_mmu_ops = xen_mmu_ops;
+ }
+ 
++#ifdef CONFIG_XEN_PVHVM
+ static void xen_hvm_exit_mmap(struct mm_struct *mm)
+ {
+ 	struct xen_hvm_pagetable_dying a;
+@@ -1994,6 +1995,7 @@ void __init xen_hvm_init_mmu_ops(void)
+ 	if (is_pagetable_dying_supported())
+ 		pv_mmu_ops.exit_mmap = xen_hvm_exit_mmap;
+ }
++#endif
+ 
+ #ifdef CONFIG_XEN_DEBUG_FS
+ 
+diff --git a/arch/x86/xen/platform-pci-unplug.c b/arch/x86/xen/platform-pci-unplug.c
+index 2f7f3fb..554c002 100644
+--- a/arch/x86/xen/platform-pci-unplug.c
++++ b/arch/x86/xen/platform-pci-unplug.c
+@@ -32,6 +32,7 @@
+ /* store the value of xen_emul_unplug after the unplug is done */
+ int xen_platform_pci_unplug;
+ EXPORT_SYMBOL_GPL(xen_platform_pci_unplug);
++#ifdef CONFIG_XEN_PVHVM
+ static int xen_emul_unplug;
+ 
+ static int __init check_platform_magic(void)
+@@ -133,3 +134,4 @@ static int __init parse_xen_emul_unplug(char *arg)
+ 	return 0;
+ }
+ early_param("xen_emul_unplug", parse_xen_emul_unplug);
++#endif
+diff --git a/arch/x86/xen/time.c b/arch/x86/xen/time.c
+index 7e47d09..094c70a 100644
+--- a/arch/x86/xen/time.c
++++ b/arch/x86/xen/time.c
+@@ -476,6 +476,7 @@ __init void xen_init_time_ops(void)
+ 	x86_platform.set_wallclock = xen_set_wallclock;
+ }
+ 
++#ifdef CONFIG_XEN_PVHVM
+ static void xen_hvm_setup_cpu_clockevents(void)
+ {
+ 	int cpu = smp_processor_id();
+@@ -504,4 +505,4 @@ __init void xen_hvm_init_time_ops(void)
+ 	x86_platform.get_wallclock = xen_get_wallclock;
+ 	x86_platform.set_wallclock = xen_set_wallclock;
+ }
+-
++#endif
+diff --git a/drivers/xen/Kconfig b/drivers/xen/Kconfig
+index f65d2c9..96572e2 100644
+--- a/drivers/xen/Kconfig
++++ b/drivers/xen/Kconfig
+@@ -64,7 +64,7 @@ config XEN_SYS_HYPERVISOR
+ 
+ config XEN_PLATFORM_PCI
+ 	tristate "xen platform pci device driver"
+-	depends on XEN
++	depends on XEN_PVHVM
+ 	default m
+ 	help
+ 	  Driver for the Xen PCI Platform device: it is responsible for
+diff --git a/drivers/xen/events.c b/drivers/xen/events.c
+index da01209..5d25cdf 100644
+--- a/drivers/xen/events.c
++++ b/drivers/xen/events.c
+@@ -968,6 +968,7 @@ int xen_set_callback_via(uint64_t via)
+ }
+ EXPORT_SYMBOL_GPL(xen_set_callback_via);
+ 
++#ifdef CONFIG_XEN_PVHVM
+ /* Vector callbacks are better than PCI interrupts to receive event
+  * channel notifications because we can receive vector callbacks on any
+  * vcpu and we don't need PCI support or APIC interactions. */
+@@ -991,6 +992,9 @@ void xen_callback_vector(void)
+ 			alloc_intr_gate(XEN_HVM_EVTCHN_CALLBACK, xen_hvm_callback_vector);
+ 	}
+ }
++#else
++void xen_callback_vector(void) {}
++#endif
+ 
+ void __init xen_init_IRQ(void)
+ {
+-- 
+1.5.6.5
+

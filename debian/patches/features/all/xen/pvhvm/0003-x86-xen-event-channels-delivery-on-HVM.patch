@@ -1,0 +1,334 @@
+From 48a0a3d35ae1c2b5851620b46713f536bf6978f8 Mon Sep 17 00:00:00 2001
+From: Sheng Yang <sheng@linux.intel.com>
+Date: Fri, 14 May 2010 12:40:51 +0100
+Subject: [PATCH] x86/xen: event channels delivery on HVM.
+
+Set the callback to receive evtchns from Xen, using the
+callback vector delivery mechanism.
+
+The traditional way for receiving event channel notifications from Xen
+is via the interrupts from the platform PCI device.
+The callback vector is a newer alternative that allow us to receive
+notifications on any vcpu and doesn't need any PCI support: we allocate
+a vector exclusively to receive events, in the vector handler we don't
+need to interact with the vlapic, therefore we avoid a VMEXIT.
+
+Signed-off-by: Stefano Stabellini <stefano.stabellini@eu.citrix.com>
+Signed-off-by: Sheng Yang <sheng@linux.intel.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+(cherry picked from commit 38e20b07efd541a959de367dc90a17f92ce2e8a6 with
+trivial merge conflicts resolved in arch/x86/include/asm/irq_vectors.h
+arch/x86/xen/enlighten.c)
+---
+ arch/x86/include/asm/irq_vectors.h |    3 ++
+ arch/x86/kernel/entry_32.S         |    3 ++
+ arch/x86/kernel/entry_64.S         |    3 ++
+ arch/x86/xen/enlighten.c           |   28 ++++++++++++++
+ arch/x86/xen/xen-ops.h             |    2 +
+ drivers/xen/events.c               |   69 ++++++++++++++++++++++++++++++++----
+ include/xen/events.h               |    7 ++++
+ include/xen/hvm.h                  |    6 +++
+ include/xen/interface/features.h   |    3 ++
+ 9 files changed, 117 insertions(+), 7 deletions(-)
+
+diff --git a/arch/x86/include/asm/irq_vectors.h b/arch/x86/include/asm/irq_vectors.h
+index 6e90a04..893179f 100644
+--- a/arch/x86/include/asm/irq_vectors.h
++++ b/arch/x86/include/asm/irq_vectors.h
+@@ -120,6 +120,9 @@
+  */
+ #define MCE_SELF_VECTOR			0xeb
+ 
++/* Xen vector callback to receive events in a HVM domain */
++#define XEN_HVM_EVTCHN_CALLBACK		0xe9
++
+ /*
+  * First APIC vector available to drivers: (vectors 0x30-0xee) we
+  * start at 0x31(0x41) to spread out vectors evenly between priority
+diff --git a/arch/x86/kernel/entry_32.S b/arch/x86/kernel/entry_32.S
+index c097e7d..7764118 100644
+--- a/arch/x86/kernel/entry_32.S
++++ b/arch/x86/kernel/entry_32.S
+@@ -1088,6 +1088,9 @@ ENTRY(xen_failsafe_callback)
+ .previous
+ ENDPROC(xen_failsafe_callback)
+ 
++BUILD_INTERRUPT3(xen_hvm_callback_vector, XEN_HVM_EVTCHN_CALLBACK,
++		xen_evtchn_do_upcall)
++
+ #endif	/* CONFIG_XEN */
+ 
+ #ifdef CONFIG_FUNCTION_TRACER
+diff --git a/arch/x86/kernel/entry_64.S b/arch/x86/kernel/entry_64.S
+index b5c061f..a626344 100644
+--- a/arch/x86/kernel/entry_64.S
++++ b/arch/x86/kernel/entry_64.S
+@@ -1364,6 +1364,9 @@ ENTRY(xen_failsafe_callback)
+ 	CFI_ENDPROC
+ END(xen_failsafe_callback)
+ 
++apicinterrupt XEN_HVM_EVTCHN_CALLBACK \
++	xen_hvm_callback_vector xen_evtchn_do_upcall
++
+ #endif /* CONFIG_XEN */
+ 
+ /*
+diff --git a/arch/x86/xen/enlighten.c b/arch/x86/xen/enlighten.c
+index 6bfbd45..786fd94 100644
+--- a/arch/x86/xen/enlighten.c
++++ b/arch/x86/xen/enlighten.c
+@@ -11,6 +11,7 @@
+  * Jeremy Fitzhardinge <jeremy@xensource.com>, XenSource Inc, 2007
+  */
+ 
++#include <linux/cpu.h>
+ #include <linux/kernel.h>
+ #include <linux/init.h>
+ #include <linux/smp.h>
+@@ -35,6 +36,7 @@
+ #include <xen/interface/memory.h>
+ #include <xen/features.h>
+ #include <xen/page.h>
++#include <xen/hvm.h>
+ #include <xen/hvc-console.h>
+ 
+ #include <asm/paravirt.h>
+@@ -77,6 +79,8 @@ struct shared_info xen_dummy_shared_info;
+ void *xen_initial_gdt;
+ 
+ RESERVE_BRK(shared_info_page_brk, PAGE_SIZE);
++__read_mostly int xen_have_vector_callback;
++EXPORT_SYMBOL_GPL(xen_have_vector_callback);
+ 
+ /*
+  * Point at some empty memory to start with. We map the real shared_info
+@@ -1268,6 +1272,24 @@ static void __init init_shared_info(void)
+ 	per_cpu(xen_vcpu, 0) = &HYPERVISOR_shared_info->vcpu_info[0];
+ }
+ 
++static int __cpuinit xen_hvm_cpu_notify(struct notifier_block *self,
++				    unsigned long action, void *hcpu)
++{
++	int cpu = (long)hcpu;
++	switch (action) {
++	case CPU_UP_PREPARE:
++		per_cpu(xen_vcpu, cpu) = &HYPERVISOR_shared_info->vcpu_info[cpu];
++		break;
++	default:
++		break;
++	}
++	return NOTIFY_OK;
++}
++
++static struct notifier_block __cpuinitdata xen_hvm_cpu_notifier = {
++	.notifier_call	= xen_hvm_cpu_notify,
++};
++
+ void __init xen_hvm_guest_init(void)
+ {
+ 	int r;
+@@ -1281,4 +1303,10 @@ void __init xen_hvm_guest_init(void)
+ 		return;
+ 
+ 	init_shared_info();
++
++	if (xen_feature(XENFEAT_hvm_callback_vector))
++		xen_have_vector_callback = 1;
++	register_cpu_notifier(&xen_hvm_cpu_notifier);
++	have_vcpu_info_placement = 0;
++	x86_init.irqs.intr_init = xen_init_IRQ;
+ }
+diff --git a/arch/x86/xen/xen-ops.h b/arch/x86/xen/xen-ops.h
+index f9153a3..0d0e0e6 100644
+--- a/arch/x86/xen/xen-ops.h
++++ b/arch/x86/xen/xen-ops.h
+@@ -38,6 +38,8 @@ void xen_enable_sysenter(void);
+ void xen_enable_syscall(void);
+ void xen_vcpu_restore(void);
+ 
++void xen_callback_vector(void);
++
+ void __init xen_build_dynamic_phys_to_machine(void);
+ 
+ void xen_init_irq_ops(void);
+diff --git a/drivers/xen/events.c b/drivers/xen/events.c
+index 30e0467..9b03dcd 100644
+--- a/drivers/xen/events.c
++++ b/drivers/xen/events.c
+@@ -28,6 +28,7 @@
+ #include <linux/string.h>
+ #include <linux/bootmem.h>
+ 
++#include <asm/desc.h>
+ #include <asm/ptrace.h>
+ #include <asm/irq.h>
+ #include <asm/idle.h>
+@@ -35,10 +36,13 @@
+ #include <asm/xen/hypercall.h>
+ #include <asm/xen/hypervisor.h>
+ 
++#include <xen/hvm.h>
+ #include <xen/xen-ops.h>
+ #include <xen/events.h>
+ #include <xen/interface/xen.h>
+ #include <xen/interface/event_channel.h>
++#include <xen/interface/hvm/hvm_op.h>
++#include <xen/interface/hvm/params.h>
+ 
+ /*
+  * This lock protects updates to the following mapping and reference-count
+@@ -617,17 +621,13 @@ static DEFINE_PER_CPU(unsigned, xed_nesting_count);
+  * a bitset of words which contain pending event bits.  The second
+  * level is a bitset of pending events themselves.
+  */
+-void xen_evtchn_do_upcall(struct pt_regs *regs)
++static void __xen_evtchn_do_upcall(struct pt_regs *regs)
+ {
+ 	int cpu = get_cpu();
+-	struct pt_regs *old_regs = set_irq_regs(regs);
+ 	struct shared_info *s = HYPERVISOR_shared_info;
+ 	struct vcpu_info *vcpu_info = __get_cpu_var(xen_vcpu);
+  	unsigned count;
+ 
+-	exit_idle();
+-	irq_enter();
+-
+ 	do {
+ 		unsigned long pending_words;
+ 
+@@ -663,10 +663,26 @@ void xen_evtchn_do_upcall(struct pt_regs *regs)
+ 	} while(count != 1);
+ 
+ out:
++
++	put_cpu();
++}
++
++void xen_evtchn_do_upcall(struct pt_regs *regs)
++{
++	struct pt_regs *old_regs = set_irq_regs(regs);
++
++	exit_idle();
++	irq_enter();
++
++	__xen_evtchn_do_upcall(regs);
++
+ 	irq_exit();
+ 	set_irq_regs(old_regs);
++}
+ 
+-	put_cpu();
++void xen_hvm_evtchn_do_upcall(void)
++{
++	__xen_evtchn_do_upcall(get_irq_regs());
+ }
+ 
+ /* Rebind a new event channel to an existing irq. */
+@@ -929,6 +945,40 @@ static struct irq_chip xen_dynamic_chip __read_mostly = {
+ 	.retrigger	= retrigger_dynirq,
+ };
+ 
++int xen_set_callback_via(uint64_t via)
++{
++	struct xen_hvm_param a;
++	a.domid = DOMID_SELF;
++	a.index = HVM_PARAM_CALLBACK_IRQ;
++	a.value = via;
++	return HYPERVISOR_hvm_op(HVMOP_set_param, &a);
++}
++EXPORT_SYMBOL_GPL(xen_set_callback_via);
++
++/* Vector callbacks are better than PCI interrupts to receive event
++ * channel notifications because we can receive vector callbacks on any
++ * vcpu and we don't need PCI support or APIC interactions. */
++void xen_callback_vector(void)
++{
++	int rc;
++	uint64_t callback_via;
++	if (xen_have_vector_callback) {
++		callback_via = HVM_CALLBACK_VECTOR(XEN_HVM_EVTCHN_CALLBACK);
++		rc = xen_set_callback_via(callback_via);
++		if (rc) {
++			printk(KERN_ERR "Request for Xen HVM callback vector"
++					" failed.\n");
++			xen_have_vector_callback = 0;
++			return;
++		}
++		printk(KERN_INFO "Xen HVM callback vector for event delivery is "
++				"enabled\n");
++		/* in the restore case the vector has already been allocated */
++		if (!test_bit(XEN_HVM_EVTCHN_CALLBACK, used_vectors))
++			alloc_intr_gate(XEN_HVM_EVTCHN_CALLBACK, xen_hvm_callback_vector);
++	}
++}
++
+ void __init xen_init_IRQ(void)
+ {
+ 	int i;
+@@ -943,5 +993,10 @@ void __init xen_init_IRQ(void)
+ 	for (i = 0; i < NR_EVENT_CHANNELS; i++)
+ 		mask_evtchn(i);
+ 
+-	irq_ctx_init(smp_processor_id());
++	if (xen_hvm_domain()) {
++		xen_callback_vector();
++		native_init_IRQ();
++	} else {
++		irq_ctx_init(smp_processor_id());
++	}
+ }
+diff --git a/include/xen/events.h b/include/xen/events.h
+index e68d59a..a15d932 100644
+--- a/include/xen/events.h
++++ b/include/xen/events.h
+@@ -56,4 +56,11 @@ void xen_poll_irq(int irq);
+ /* Determine the IRQ which is bound to an event channel */
+ unsigned irq_from_evtchn(unsigned int evtchn);
+ 
++/* Xen HVM evtchn vector callback */
++extern void xen_hvm_callback_vector(void);
++extern int xen_have_vector_callback;
++int xen_set_callback_via(uint64_t via);
++void xen_evtchn_do_upcall(struct pt_regs *regs);
++void xen_hvm_evtchn_do_upcall(void);
++
+ #endif	/* _XEN_EVENTS_H */
+diff --git a/include/xen/hvm.h b/include/xen/hvm.h
+index 5dfe8fb..b193fa2 100644
+--- a/include/xen/hvm.h
++++ b/include/xen/hvm.h
+@@ -3,6 +3,7 @@
+ #define XEN_HVM_H__
+ 
+ #include <xen/interface/hvm/params.h>
++#include <asm/xen/hypercall.h>
+ 
+ static inline int hvm_get_parameter(int idx, uint64_t *value)
+ {
+@@ -21,4 +22,9 @@ static inline int hvm_get_parameter(int idx, uint64_t *value)
+ 	return r;
+ }
+ 
++#define HVM_CALLBACK_VIA_TYPE_VECTOR 0x2
++#define HVM_CALLBACK_VIA_TYPE_SHIFT 56
++#define HVM_CALLBACK_VECTOR(x) (((uint64_t)HVM_CALLBACK_VIA_TYPE_VECTOR)<<\
++		HVM_CALLBACK_VIA_TYPE_SHIFT | (x))
++
+ #endif /* XEN_HVM_H__ */
+diff --git a/include/xen/interface/features.h b/include/xen/interface/features.h
+index f51b641..8ab08b9 100644
+--- a/include/xen/interface/features.h
++++ b/include/xen/interface/features.h
+@@ -41,6 +41,9 @@
+ /* x86: Does this Xen host support the MMU_PT_UPDATE_PRESERVE_AD hypercall? */
+ #define XENFEAT_mmu_pt_update_preserve_ad  5
+ 
++/* x86: Does this Xen host support the HVM callback vector type? */
++#define XENFEAT_hvm_callback_vector        8
++
+ #define XENFEAT_NR_SUBMAPS 1
+ 
+ #endif /* __XEN_PUBLIC_FEATURES_H__ */
+-- 
+1.5.6.5
+

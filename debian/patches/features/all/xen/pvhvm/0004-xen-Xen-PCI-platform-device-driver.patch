@@ -1,0 +1,564 @@
+From 6bbaa5ed0ec08dd8f30d271956dc8f1db8a92fca Mon Sep 17 00:00:00 2001
+From: Stefano Stabellini <stefano.stabellini@eu.citrix.com>
+Date: Mon, 17 May 2010 17:08:21 +0100
+Subject: [PATCH] xen: Xen PCI platform device driver.
+
+Add the xen pci platform device driver that is responsible
+for initializing the grant table and xenbus in PV on HVM mode.
+Few changes to xenbus and grant table are necessary to allow the delayed
+initialization in HVM mode.
+Grant table needs few additional modifications to work in HVM mode.
+
+The Xen PCI platform device raises an irq every time an event has been
+delivered to us. However these interrupts are only delivered to vcpu 0.
+The Xen PCI platform interrupt handler calls xen_hvm_evtchn_do_upcall
+that is a little wrapper around __xen_evtchn_do_upcall, the traditional
+Xen upcall handler, the very same used with traditional PV guests.
+
+When running on HVM the event channel upcall is never called while in
+progress because it is a normal Linux irq handler (and we cannot switch
+the irq chip wholesale to the Xen PV ones as we are running QEMU and
+might have passed in PCI devices), therefore we cannot be sure that
+evtchn_upcall_pending is 0 when returning.
+For this reason if evtchn_upcall_pending is set by Xen we need to loop
+again on the event channels set pending otherwise we might loose some
+event channel deliveries.
+
+Signed-off-by: Stefano Stabellini <stefano.stabellini@eu.citrix.com>
+Signed-off-by: Sheng Yang <sheng@linux.intel.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+(cherry picked from commit 183d03cc4ff39e0f0d952c09aa96d0abfd6e0c3c with
+trivial merge conflict resolved in drivers/xen/Kconfig)
+---
+ drivers/xen/Kconfig                 |   12 ++-
+ drivers/xen/Makefile                |    3 +-
+ drivers/xen/events.c                |    8 +-
+ drivers/xen/grant-table.c           |   77 +++++++++++++--
+ drivers/xen/manage.c                |    1 +
+ drivers/xen/platform-pci.c          |  181 +++++++++++++++++++++++++++++++++++
+ drivers/xen/xenbus/xenbus_probe.c   |   22 ++++-
+ include/linux/pci_ids.h             |    3 +
+ include/xen/grant_table.h           |    4 +
+ include/xen/interface/grant_table.h |    1 +
+ 10 files changed, 293 insertions(+), 19 deletions(-)
+ create mode 100644 drivers/xen/platform-pci.c
+
+diff --git a/drivers/xen/Kconfig b/drivers/xen/Kconfig
+index cab100a..f65d2c9 100644
+--- a/drivers/xen/Kconfig
++++ b/drivers/xen/Kconfig
+@@ -60,4 +60,14 @@ config XEN_SYS_HYPERVISOR
+          Create entries under /sys/hypervisor describing the Xen
+ 	 hypervisor environment.  When running native or in another
+ 	 virtual environment, /sys/hypervisor will still be present,
+-	 but will have no xen contents.
+\ No newline at end of file
++	 but will have no xen contents.
++
++config XEN_PLATFORM_PCI
++	tristate "xen platform pci device driver"
++	depends on XEN
++	default m
++	help
++	  Driver for the Xen PCI Platform device: it is responsible for
++	  initializing xenbus and grant_table when running in a Xen HVM
++	  domain. As a consequence this driver is required to run any Xen PV
++	  frontend on Xen HVM.
+diff --git a/drivers/xen/Makefile b/drivers/xen/Makefile
+index 7c28434..e392fb7 100644
+--- a/drivers/xen/Makefile
++++ b/drivers/xen/Makefile
+@@ -9,4 +9,5 @@ obj-$(CONFIG_XEN_XENCOMM)	+= xencomm.o
+ obj-$(CONFIG_XEN_BALLOON)	+= balloon.o
+ obj-$(CONFIG_XEN_DEV_EVTCHN)	+= evtchn.o
+ obj-$(CONFIG_XENFS)		+= xenfs/
+-obj-$(CONFIG_XEN_SYS_HYPERVISOR)	+= sys-hypervisor.o
+\ No newline at end of file
++obj-$(CONFIG_XEN_SYS_HYPERVISOR)	+= sys-hypervisor.o
++obj-$(CONFIG_XEN_PLATFORM_PCI)	+= platform-pci.o
+diff --git a/drivers/xen/events.c b/drivers/xen/events.c
+index 9b03dcd..9d99c9a 100644
+--- a/drivers/xen/events.c
++++ b/drivers/xen/events.c
+@@ -660,7 +660,7 @@ static void __xen_evtchn_do_upcall(struct pt_regs *regs)
+ 
+ 		count = __get_cpu_var(xed_nesting_count);
+ 		__get_cpu_var(xed_nesting_count) = 0;
+-	} while(count != 1);
++	} while (count != 1 || vcpu_info->evtchn_upcall_pending);
+ 
+ out:
+ 
+@@ -684,6 +684,7 @@ void xen_hvm_evtchn_do_upcall(void)
+ {
+ 	__xen_evtchn_do_upcall(get_irq_regs());
+ }
++EXPORT_SYMBOL_GPL(xen_hvm_evtchn_do_upcall);
+ 
+ /* Rebind a new event channel to an existing irq. */
+ void rebind_evtchn_irq(int evtchn, int irq)
+@@ -720,7 +721,10 @@ static int rebind_irq_to_cpu(unsigned irq, unsigned tcpu)
+ 	struct evtchn_bind_vcpu bind_vcpu;
+ 	int evtchn = evtchn_from_irq(irq);
+ 
+-	if (!VALID_EVTCHN(evtchn))
++	/* events delivered via platform PCI interrupts are always
++	 * routed to vcpu 0 */
++	if (!VALID_EVTCHN(evtchn) ||
++		(xen_hvm_domain() && !xen_have_vector_callback))
+ 		return -1;
+ 
+ 	/* Send future instances of this interrupt to other vcpu. */
+diff --git a/drivers/xen/grant-table.c b/drivers/xen/grant-table.c
+index 7d8f531..6652ce9 100644
+--- a/drivers/xen/grant-table.c
++++ b/drivers/xen/grant-table.c
+@@ -36,10 +36,12 @@
+ #include <linux/mm.h>
+ #include <linux/vmalloc.h>
+ #include <linux/uaccess.h>
++#include <linux/io.h>
+ 
+ #include <xen/interface/xen.h>
+ #include <xen/page.h>
+ #include <xen/grant_table.h>
++#include <xen/interface/memory.h>
+ #include <asm/xen/hypercall.h>
+ 
+ #include <asm/pgtable.h>
+@@ -57,6 +59,8 @@ static unsigned int boot_max_nr_grant_frames;
+ static int gnttab_free_count;
+ static grant_ref_t gnttab_free_head;
+ static DEFINE_SPINLOCK(gnttab_list_lock);
++unsigned long xen_hvm_resume_frames;
++EXPORT_SYMBOL_GPL(xen_hvm_resume_frames);
+ 
+ static struct grant_entry *shared;
+ 
+@@ -431,7 +435,7 @@ static unsigned int __max_nr_grant_frames(void)
+ 	return query.max_nr_frames;
+ }
+ 
+-static inline unsigned int max_nr_grant_frames(void)
++unsigned int gnttab_max_grant_frames(void)
+ {
+ 	unsigned int xen_max = __max_nr_grant_frames();
+ 
+@@ -439,6 +443,7 @@ static inline unsigned int max_nr_grant_frames(void)
+ 		return boot_max_nr_grant_frames;
+ 	return xen_max;
+ }
++EXPORT_SYMBOL_GPL(gnttab_max_grant_frames);
+ 
+ static int gnttab_map(unsigned int start_idx, unsigned int end_idx)
+ {
+@@ -447,6 +452,30 @@ static int gnttab_map(unsigned int start_idx, unsigned int end_idx)
+ 	unsigned int nr_gframes = end_idx + 1;
+ 	int rc;
+ 
++	if (xen_hvm_domain()) {
++		struct xen_add_to_physmap xatp;
++		unsigned int i = end_idx;
++		rc = 0;
++		/*
++		 * Loop backwards, so that the first hypercall has the largest
++		 * index, ensuring that the table will grow only once.
++		 */
++		do {
++			xatp.domid = DOMID_SELF;
++			xatp.idx = i;
++			xatp.space = XENMAPSPACE_grant_table;
++			xatp.gpfn = (xen_hvm_resume_frames >> PAGE_SHIFT) + i;
++			rc = HYPERVISOR_memory_op(XENMEM_add_to_physmap, &xatp);
++			if (rc != 0) {
++				printk(KERN_WARNING
++						"grant table add_to_physmap failed, err=%d\n", rc);
++				break;
++			}
++		} while (i-- > start_idx);
++
++		return rc;
++	}
++
+ 	frames = kmalloc(nr_gframes * sizeof(unsigned long), GFP_ATOMIC);
+ 	if (!frames)
+ 		return -ENOMEM;
+@@ -463,7 +492,7 @@ static int gnttab_map(unsigned int start_idx, unsigned int end_idx)
+ 
+ 	BUG_ON(rc || setup.status);
+ 
+-	rc = arch_gnttab_map_shared(frames, nr_gframes, max_nr_grant_frames(),
++	rc = arch_gnttab_map_shared(frames, nr_gframes, gnttab_max_grant_frames(),
+ 				    &shared);
+ 	BUG_ON(rc);
+ 
+@@ -474,9 +503,27 @@ static int gnttab_map(unsigned int start_idx, unsigned int end_idx)
+ 
+ int gnttab_resume(void)
+ {
+-	if (max_nr_grant_frames() < nr_grant_frames)
++	unsigned int max_nr_gframes;
++
++	max_nr_gframes = gnttab_max_grant_frames();
++	if (max_nr_gframes < nr_grant_frames)
+ 		return -ENOSYS;
+-	return gnttab_map(0, nr_grant_frames - 1);
++
++	if (xen_pv_domain())
++		return gnttab_map(0, nr_grant_frames - 1);
++
++	if (!shared) {
++		shared = ioremap(xen_hvm_resume_frames, PAGE_SIZE * max_nr_gframes);
++		if (shared == NULL) {
++			printk(KERN_WARNING
++					"Failed to ioremap gnttab share frames!");
++			return -ENOMEM;
++		}
++	}
++
++	gnttab_map(0, nr_grant_frames - 1);
++
++	return 0;
+ }
+ 
+ int gnttab_suspend(void)
+@@ -493,7 +540,7 @@ static int gnttab_expand(unsigned int req_entries)
+ 	cur = nr_grant_frames;
+ 	extra = ((req_entries + (GREFS_PER_GRANT_FRAME-1)) /
+ 		 GREFS_PER_GRANT_FRAME);
+-	if (cur + extra > max_nr_grant_frames())
++	if (cur + extra > gnttab_max_grant_frames())
+ 		return -ENOSPC;
+ 
+ 	rc = gnttab_map(cur, cur + extra - 1);
+@@ -503,15 +550,12 @@ static int gnttab_expand(unsigned int req_entries)
+ 	return rc;
+ }
+ 
+-static int __devinit gnttab_init(void)
++int gnttab_init(void)
+ {
+ 	int i;
+ 	unsigned int max_nr_glist_frames, nr_glist_frames;
+ 	unsigned int nr_init_grefs;
+ 
+-	if (!xen_domain())
+-		return -ENODEV;
+-
+ 	nr_grant_frames = 1;
+ 	boot_max_nr_grant_frames = __max_nr_grant_frames();
+ 
+@@ -554,5 +598,18 @@ static int __devinit gnttab_init(void)
+ 	kfree(gnttab_list);
+ 	return -ENOMEM;
+ }
++EXPORT_SYMBOL_GPL(gnttab_init);
++
++static int __devinit __gnttab_init(void)
++{
++	/* Delay grant-table initialization in the PV on HVM case */
++	if (xen_hvm_domain())
++		return 0;
++
++	if (!xen_pv_domain())
++		return -ENODEV;
++
++	return gnttab_init();
++}
+ 
+-core_initcall(gnttab_init);
++core_initcall(__gnttab_init);
+diff --git a/drivers/xen/manage.c b/drivers/xen/manage.c
+index 5d42d55..95e7b32 100644
+--- a/drivers/xen/manage.c
++++ b/drivers/xen/manage.c
+@@ -269,5 +269,6 @@ static int __init setup_shutdown_event(void)
+ 
+ 	return 0;
+ }
++EXPORT_SYMBOL_GPL(xen_setup_shutdown_event);
+ 
+ subsys_initcall(setup_shutdown_event);
+diff --git a/drivers/xen/platform-pci.c b/drivers/xen/platform-pci.c
+new file mode 100644
+index 0000000..a0ee5d0
+--- /dev/null
++++ b/drivers/xen/platform-pci.c
+@@ -0,0 +1,181 @@
++/******************************************************************************
++ * platform-pci.c
++ *
++ * Xen platform PCI device driver
++ * Copyright (c) 2005, Intel Corporation.
++ * Copyright (c) 2007, XenSource Inc.
++ * Copyright (c) 2010, Citrix
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms and conditions of the GNU General Public License,
++ * version 2, as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
++ * Place - Suite 330, Boston, MA 02111-1307 USA.
++ *
++ */
++
++
++#include <linux/interrupt.h>
++#include <linux/io.h>
++#include <linux/module.h>
++#include <linux/pci.h>
++
++#include <xen/grant_table.h>
++#include <xen/xenbus.h>
++#include <xen/events.h>
++#include <xen/hvm.h>
++
++#define DRV_NAME    "xen-platform-pci"
++
++MODULE_AUTHOR("ssmith@xensource.com and stefano.stabellini@eu.citrix.com");
++MODULE_DESCRIPTION("Xen platform PCI device");
++MODULE_LICENSE("GPL");
++
++static unsigned long platform_mmio;
++static unsigned long platform_mmio_alloc;
++static unsigned long platform_mmiolen;
++
++unsigned long alloc_xen_mmio(unsigned long len)
++{
++	unsigned long addr;
++
++	addr = platform_mmio + platform_mmio_alloc;
++	platform_mmio_alloc += len;
++	BUG_ON(platform_mmio_alloc > platform_mmiolen);
++
++	return addr;
++}
++
++static uint64_t get_callback_via(struct pci_dev *pdev)
++{
++	u8 pin;
++	int irq;
++
++	irq = pdev->irq;
++	if (irq < 16)
++		return irq; /* ISA IRQ */
++
++	pin = pdev->pin;
++
++	/* We don't know the GSI. Specify the PCI INTx line instead. */
++	return ((uint64_t)0x01 << 56) | /* PCI INTx identifier */
++		((uint64_t)pci_domain_nr(pdev->bus) << 32) |
++		((uint64_t)pdev->bus->number << 16) |
++		((uint64_t)(pdev->devfn & 0xff) << 8) |
++		((uint64_t)(pin - 1) & 3);
++}
++
++static irqreturn_t do_hvm_evtchn_intr(int irq, void *dev_id)
++{
++	xen_hvm_evtchn_do_upcall();
++	return IRQ_HANDLED;
++}
++
++static int xen_allocate_irq(struct pci_dev *pdev)
++{
++	return request_irq(pdev->irq, do_hvm_evtchn_intr,
++			IRQF_DISABLED | IRQF_NOBALANCING | IRQF_TRIGGER_RISING,
++			"xen-platform-pci", pdev);
++}
++
++static int __devinit platform_pci_init(struct pci_dev *pdev,
++				       const struct pci_device_id *ent)
++{
++	int i, ret;
++	long ioaddr, iolen;
++	long mmio_addr, mmio_len;
++	uint64_t callback_via;
++	unsigned int max_nr_gframes;
++
++	i = pci_enable_device(pdev);
++	if (i)
++		return i;
++
++	ioaddr = pci_resource_start(pdev, 0);
++	iolen = pci_resource_len(pdev, 0);
++
++	mmio_addr = pci_resource_start(pdev, 1);
++	mmio_len = pci_resource_len(pdev, 1);
++
++	if (mmio_addr == 0 || ioaddr == 0) {
++		dev_err(&pdev->dev, "no resources found\n");
++		ret = -ENOENT;
++		goto pci_out;
++	}
++
++	if (request_mem_region(mmio_addr, mmio_len, DRV_NAME) == NULL) {
++		dev_err(&pdev->dev, "MEM I/O resource 0x%lx @ 0x%lx busy\n",
++		       mmio_addr, mmio_len);
++		ret = -EBUSY;
++		goto pci_out;
++	}
++
++	if (request_region(ioaddr, iolen, DRV_NAME) == NULL) {
++		dev_err(&pdev->dev, "I/O resource 0x%lx @ 0x%lx busy\n",
++		       iolen, ioaddr);
++		ret = -EBUSY;
++		goto mem_out;
++	}
++
++	platform_mmio = mmio_addr;
++	platform_mmiolen = mmio_len;
++
++	if (!xen_have_vector_callback) {
++		ret = xen_allocate_irq(pdev);
++		if (ret) {
++			dev_warn(&pdev->dev, "request_irq failed err=%d\n", ret);
++			goto out;
++		}
++		callback_via = get_callback_via(pdev);
++		ret = xen_set_callback_via(callback_via);
++		if (ret) {
++			dev_warn(&pdev->dev, "Unable to set the evtchn callback "
++					 "err=%d\n", ret);
++			goto out;
++		}
++	}
++
++	max_nr_gframes = gnttab_max_grant_frames();
++	xen_hvm_resume_frames = alloc_xen_mmio(PAGE_SIZE * max_nr_gframes);
++	ret = gnttab_init();
++	if (ret)
++		goto out;
++	xenbus_probe(NULL);
++	return 0;
++
++out:
++	release_region(ioaddr, iolen);
++mem_out:
++	release_mem_region(mmio_addr, mmio_len);
++pci_out:
++	pci_disable_device(pdev);
++	return ret;
++}
++
++static struct pci_device_id platform_pci_tbl[] __devinitdata = {
++	{PCI_VENDOR_ID_XEN, PCI_DEVICE_ID_XEN_PLATFORM,
++		PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
++	{0,}
++};
++
++MODULE_DEVICE_TABLE(pci, platform_pci_tbl);
++
++static struct pci_driver platform_driver = {
++	.name =           DRV_NAME,
++	.probe =          platform_pci_init,
++	.id_table =       platform_pci_tbl,
++};
++
++static int __init platform_pci_module_init(void)
++{
++	return pci_register_driver(&platform_driver);
++}
++
++module_init(platform_pci_module_init);
+diff --git a/drivers/xen/xenbus/xenbus_probe.c b/drivers/xen/xenbus/xenbus_probe.c
+index 568d14d..e8169db 100644
+--- a/drivers/xen/xenbus/xenbus_probe.c
++++ b/drivers/xen/xenbus/xenbus_probe.c
+@@ -778,8 +778,23 @@ void xenbus_probe(struct work_struct *unused)
+ 	/* Notify others that xenstore is up */
+ 	blocking_notifier_call_chain(&xenstore_chain, 0, NULL);
+ }
++EXPORT_SYMBOL_GPL(xenbus_probe);
+ 
+-static int __init xenbus_probe_init(void)
++static int __init xenbus_probe_initcall(void)
++{
++	if (!xen_domain())
++		return -ENODEV;
++
++	if (xen_initial_domain() || xen_hvm_domain())
++		return 0;
++
++	xenbus_probe(NULL);
++	return 0;
++}
++
++device_initcall(xenbus_probe_initcall);
++
++static int __init xenbus_init(void)
+ {
+ 	int err = 0;
+ 
+@@ -831,9 +846,6 @@ static int __init xenbus_probe_init(void)
+ 		goto out_unreg_back;
+ 	}
+ 
+-	if (!xen_initial_domain())
+-		xenbus_probe(NULL);
+-
+ #ifdef CONFIG_XEN_COMPAT_XENFS
+ 	/*
+ 	 * Create xenfs mountpoint in /proc for compatibility with
+@@ -854,7 +866,7 @@ static int __init xenbus_probe_init(void)
+ 	return err;
+ }
+ 
+-postcore_initcall(xenbus_probe_init);
++postcore_initcall(xenbus_init);
+ 
+ MODULE_LICENSE("GPL");
+ 
+diff --git a/include/linux/pci_ids.h b/include/linux/pci_ids.h
+index 67325bf..c398cc3 100644
+--- a/include/linux/pci_ids.h
++++ b/include/linux/pci_ids.h
+@@ -2712,3 +2712,6 @@
+ #define PCI_DEVICE_ID_RME_DIGI32	0x9896
+ #define PCI_DEVICE_ID_RME_DIGI32_PRO	0x9897
+ #define PCI_DEVICE_ID_RME_DIGI32_8	0x9898
++
++#define PCI_VENDOR_ID_XEN		0x5853
++#define PCI_DEVICE_ID_XEN_PLATFORM	0x0001
+diff --git a/include/xen/grant_table.h b/include/xen/grant_table.h
+index a40f1cd..9a73170 100644
+--- a/include/xen/grant_table.h
++++ b/include/xen/grant_table.h
+@@ -51,6 +51,7 @@ struct gnttab_free_callback {
+ 	u16 count;
+ };
+ 
++int gnttab_init(void);
+ int gnttab_suspend(void);
+ int gnttab_resume(void);
+ 
+@@ -112,6 +113,9 @@ int arch_gnttab_map_shared(unsigned long *frames, unsigned long nr_gframes,
+ void arch_gnttab_unmap_shared(struct grant_entry *shared,
+ 			      unsigned long nr_gframes);
+ 
++extern unsigned long xen_hvm_resume_frames;
++unsigned int gnttab_max_grant_frames(void);
++
+ #define gnttab_map_vaddr(map) ((void *)(map.host_virt_addr))
+ 
+ #endif /* __ASM_GNTTAB_H__ */
+diff --git a/include/xen/interface/grant_table.h b/include/xen/interface/grant_table.h
+index 39da93c..39e5717 100644
+--- a/include/xen/interface/grant_table.h
++++ b/include/xen/interface/grant_table.h
+@@ -28,6 +28,7 @@
+ #ifndef __XEN_PUBLIC_GRANT_TABLE_H__
+ #define __XEN_PUBLIC_GRANT_TABLE_H__
+ 
++#include <xen/interface/xen.h>
+ 
+ /***********************************
+  * GRANT TABLE REPRESENTATION
+-- 
+1.5.6.5
+
