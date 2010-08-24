@@ -1,0 +1,109 @@
+From 124f4ffc5885803e2c0bf6f4c228830ab795b80b Mon Sep 17 00:00:00 2001
+From: Ian Campbell <ian.campbell@citrix.com>
+Date: Mon, 23 Aug 2010 11:59:29 +0100
+Subject: [PATCH] xen: pvhvm: rename xen_emul_unplug=ignore to =unnnecessary
+
+It is not immediately clear what this option causes to become
+ignored. The actual meaning is that it is not necessary to unplug the
+emulated devices to safely use the PV ones, even if the platform does
+not support the unplug protocol. (pressumably the user will only add
+this option if they have ensured that their domain configuration is
+safe).
+
+I think xen_emul_unplug=unnecessary better captures this.
+
+Signed-off-by: Ian Campbell <ian.campbell@citrix.com>
+Acked-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+Acked-by: Stefano Stabellini <Stefano.Stabellini@eu.citrix.com>
+(cherry picked from commit 1dc7ce99b091a11cce0f34456c1ffcb928f17edd)
+---
+ Documentation/kernel-parameters.txt |    5 +++--
+ arch/x86/xen/platform-pci-unplug.c  |   13 +++++++------
+ drivers/block/xen-blkfront.c        |    2 +-
+ include/xen/platform_pci.h          |    2 +-
+ 4 files changed, 12 insertions(+), 10 deletions(-)
+
+diff --git a/Documentation/kernel-parameters.txt b/Documentation/kernel-parameters.txt
+index f7f5797..9ec8558 100644
+--- a/Documentation/kernel-parameters.txt
++++ b/Documentation/kernel-parameters.txt
+@@ -2768,8 +2768,9 @@ and is between 256 and 4096 characters. It is defined in the file
+ 			aux-ide-disks -- unplug non-primary-master IDE devices
+ 			nics -- unplug network devices
+ 			all -- unplug all emulated devices (NICs and IDE disks)
+-			ignore -- continue loading the Xen platform PCI driver even
+-				if the version check failed
++			unnecessary -- unplugging emulated devices is
++				unnecessary even if the host did not respond to
++				the unplug protocol
+ 			never -- do not unplug even if version check succeeds
+ 
+ 	xirc2ps_cs=	[NET,PCMCIA]
+diff --git a/arch/x86/xen/platform-pci-unplug.c b/arch/x86/xen/platform-pci-unplug.c
+index 070dfa0..0f45638 100644
+--- a/arch/x86/xen/platform-pci-unplug.c
++++ b/arch/x86/xen/platform-pci-unplug.c
+@@ -78,10 +78,11 @@ void __init xen_unplug_emulated_devices(void)
+ 	/* check the version of the xen platform PCI device */
+ 	r = check_platform_magic();
+ 	/* If the version matches enable the Xen platform PCI driver.
+-	 * Also enable the Xen platform PCI driver if the version is really old
+-	 * and the user told us to ignore it. */
++	 * Also enable the Xen platform PCI driver if the host does
++	 * not support the unplug protocol (XEN_PLATFORM_ERR_MAGIC)
++	 * but the user told us that unplugging is unnecessary. */
+ 	if (r && !(r == XEN_PLATFORM_ERR_MAGIC &&
+-			(xen_emul_unplug & XEN_UNPLUG_IGNORE)))
++			(xen_emul_unplug & XEN_UNPLUG_UNNECESSARY)))
+ 		return;
+ 	/* Set the default value of xen_emul_unplug depending on whether or
+ 	 * not the Xen PV frontends and the Xen platform PCI driver have
+@@ -102,7 +103,7 @@ void __init xen_unplug_emulated_devices(void)
+ 		}
+ 	}
+ 	/* Now unplug the emulated devices */
+-	if (!(xen_emul_unplug & XEN_UNPLUG_IGNORE))
++	if (!(xen_emul_unplug & XEN_UNPLUG_UNNECESSARY))
+ 		outw(xen_emul_unplug, XEN_IOPORT_UNPLUG);
+ 	xen_platform_pci_unplug = xen_emul_unplug;
+ }
+@@ -128,8 +129,8 @@ static int __init parse_xen_emul_unplug(char *arg)
+ 			xen_emul_unplug |= XEN_UNPLUG_AUX_IDE_DISKS;
+ 		else if (!strncmp(p, "nics", l))
+ 			xen_emul_unplug |= XEN_UNPLUG_ALL_NICS;
+-		else if (!strncmp(p, "ignore", l))
+-			xen_emul_unplug |= XEN_UNPLUG_IGNORE;
++		else if (!strncmp(p, "unnecessary", l))
++			xen_emul_unplug |= XEN_UNPLUG_UNNECESSARY;
+ 		else if (!strncmp(p, "never", l))
+ 			xen_emul_unplug |= XEN_UNPLUG_NEVER;
+ 		else
+diff --git a/drivers/block/xen-blkfront.c b/drivers/block/xen-blkfront.c
+index ac692c5..86d4952 100644
+--- a/drivers/block/xen-blkfront.c
++++ b/drivers/block/xen-blkfront.c
+@@ -741,7 +741,7 @@ static int blkfront_probe(struct xenbus_device *dev,
+ 		char *type;
+ 		int len;
+ 		/* no unplug has been done: do not hook devices != xen vbds */
+-		if (xen_platform_pci_unplug & XEN_UNPLUG_IGNORE) {
++		if (xen_platform_pci_unplug & XEN_UNPLUG_UNNECESSARY) {
+ 			int major;
+ 
+ 			if (!VDEV_IS_EXTENDED(vdevice))
+diff --git a/include/xen/platform_pci.h b/include/xen/platform_pci.h
+index 123b775..590ccfd 100644
+--- a/include/xen/platform_pci.h
++++ b/include/xen/platform_pci.h
+@@ -20,7 +20,7 @@
+ #define XEN_UNPLUG_ALL_NICS 2
+ #define XEN_UNPLUG_AUX_IDE_DISKS 4
+ #define XEN_UNPLUG_ALL 7
+-#define XEN_UNPLUG_IGNORE 8
++#define XEN_UNPLUG_UNNECESSARY 8
+ #define XEN_UNPLUG_NEVER 16
+ 
+ static inline int xen_must_unplug_nics(void) {
+-- 
+1.5.6.5
+

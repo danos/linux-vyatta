@@ -6,14 +6,32 @@ The following commit were reverted:
 
 To regenerate:
 
-$ git checkout -b debian-base v2.6.32.19
+$ git checkout -b debian-base v2.6.32.20
 $ git pull git://xenbits.xensource.com/people/ianc/linux-2.6.git debian/squeeze/pvhvm
 
 $ git checkout -b debian-pvops e73f4955a821f850f5b88c32d12a81714523a95f
 $ git revert -m 1 bcf16b6b4f34fb40a7aaf637947c7d3bce0be671
+$ git merge v2.6.32.20
 
 $ git diff debian-base..debian-pvops
 
+diff --git a/Documentation/kernel-parameters.txt b/Documentation/kernel-parameters.txt
+index 9ec8558..3e30e60 100644
+--- a/Documentation/kernel-parameters.txt
++++ b/Documentation/kernel-parameters.txt
+@@ -2768,10 +2768,8 @@ and is between 256 and 4096 characters. It is defined in the file
+ 			aux-ide-disks -- unplug non-primary-master IDE devices
+ 			nics -- unplug network devices
+ 			all -- unplug all emulated devices (NICs and IDE disks)
+-			unnecessary -- unplugging emulated devices is
+-				unnecessary even if the host did not respond to
+-				the unplug protocol
+-			never -- do not unplug even if version check succeeds
++			ignore -- continue loading the Xen platform PCI driver even
++				if the version check failed
+ 
+ 	xirc2ps_cs=	[NET,PCMCIA]
+ 			Format:
 diff --git a/Documentation/x86/x86_64/boot-options.txt b/Documentation/x86/x86_64/boot-options.txt
 index 29a6ff8..81f9b94 100644
 --- a/Documentation/x86/x86_64/boot-options.txt
@@ -4970,7 +4988,7 @@ index 0000000..8ca31f1
 +}
 +EXPORT_SYMBOL(xen_unregister_device_domain_owner);
 diff --git a/arch/x86/xen/platform-pci-unplug.c b/arch/x86/xen/platform-pci-unplug.c
-index 554c002..2f7f3fb 100644
+index 0f45638..2f7f3fb 100644
 --- a/arch/x86/xen/platform-pci-unplug.c
 +++ b/arch/x86/xen/platform-pci-unplug.c
 @@ -32,7 +32,6 @@
@@ -4981,7 +4999,50 @@ index 554c002..2f7f3fb 100644
  static int xen_emul_unplug;
  
  static int __init check_platform_magic(void)
-@@ -134,4 +133,3 @@ static int __init parse_xen_emul_unplug(char *arg)
+@@ -72,17 +71,13 @@ void __init xen_unplug_emulated_devices(void)
+ {
+ 	int r;
+ 
+-	/* user explicitly requested no unplug */
+-	if (xen_emul_unplug & XEN_UNPLUG_NEVER)
+-		return;
+ 	/* check the version of the xen platform PCI device */
+ 	r = check_platform_magic();
+ 	/* If the version matches enable the Xen platform PCI driver.
+-	 * Also enable the Xen platform PCI driver if the host does
+-	 * not support the unplug protocol (XEN_PLATFORM_ERR_MAGIC)
+-	 * but the user told us that unplugging is unnecessary. */
++	 * Also enable the Xen platform PCI driver if the version is really old
++	 * and the user told us to ignore it. */
+ 	if (r && !(r == XEN_PLATFORM_ERR_MAGIC &&
+-			(xen_emul_unplug & XEN_UNPLUG_UNNECESSARY)))
++			(xen_emul_unplug & XEN_UNPLUG_IGNORE)))
+ 		return;
+ 	/* Set the default value of xen_emul_unplug depending on whether or
+ 	 * not the Xen PV frontends and the Xen platform PCI driver have
+@@ -103,7 +98,7 @@ void __init xen_unplug_emulated_devices(void)
+ 		}
+ 	}
+ 	/* Now unplug the emulated devices */
+-	if (!(xen_emul_unplug & XEN_UNPLUG_UNNECESSARY))
++	if (!(xen_emul_unplug & XEN_UNPLUG_IGNORE))
+ 		outw(xen_emul_unplug, XEN_IOPORT_UNPLUG);
+ 	xen_platform_pci_unplug = xen_emul_unplug;
+ }
+@@ -129,10 +124,8 @@ static int __init parse_xen_emul_unplug(char *arg)
+ 			xen_emul_unplug |= XEN_UNPLUG_AUX_IDE_DISKS;
+ 		else if (!strncmp(p, "nics", l))
+ 			xen_emul_unplug |= XEN_UNPLUG_ALL_NICS;
+-		else if (!strncmp(p, "unnecessary", l))
+-			xen_emul_unplug |= XEN_UNPLUG_UNNECESSARY;
+-		else if (!strncmp(p, "never", l))
+-			xen_emul_unplug |= XEN_UNPLUG_NEVER;
++		else if (!strncmp(p, "ignore", l))
++			xen_emul_unplug |= XEN_UNPLUG_IGNORE;
+ 		else
+ 			printk(KERN_WARNING "unrecognised option '%s' "
+ 				 "in parameter 'xen_emul_unplug'\n", p);
+@@ -140,4 +133,3 @@ static int __init parse_xen_emul_unplug(char *arg)
  	return 0;
  }
  early_param("xen_emul_unplug", parse_xen_emul_unplug);
@@ -6401,7 +6462,7 @@ index 1d886e0..f4a2b10 100644
  	  This driver implements the front-end of the Xen virtual
  	  block device driver.  It communicates with a back-end driver
 diff --git a/drivers/block/xen-blkfront.c b/drivers/block/xen-blkfront.c
-index ac692c5..89adac5 100644
+index 86d4952..89adac5 100644
 --- a/drivers/block/xen-blkfront.c
 +++ b/drivers/block/xen-blkfront.c
 @@ -42,6 +42,7 @@
@@ -6593,7 +6654,7 @@ index ac692c5..89adac5 100644
 -		char *type;
 -		int len;
 -		/* no unplug has been done: do not hook devices != xen vbds */
--		if (xen_platform_pci_unplug & XEN_UNPLUG_IGNORE) {
+-		if (xen_platform_pci_unplug & XEN_UNPLUG_UNNECESSARY) {
 -			int major;
 -
 -			if (!VDEV_IS_EXTENDED(vdevice))
@@ -30717,6 +30778,31 @@ index 0000000..fb2bf6b
 +
 +extern void unregister_xen_pcpu_notifier(struct notifier_block *nb);
 +#endif
+diff --git a/include/xen/platform_pci.h b/include/xen/platform_pci.h
+index a785a3b..ce9d671 100644
+--- a/include/xen/platform_pci.h
++++ b/include/xen/platform_pci.h
+@@ -16,15 +16,11 @@
+ #define XEN_IOPORT_PROTOVER	(XEN_IOPORT_BASE + 2) /* 1 byte access (R) */
+ #define XEN_IOPORT_PRODNUM	(XEN_IOPORT_BASE + 2) /* 2 byte access (W) */
+ 
+-#define XEN_UNPLUG_ALL_IDE_DISKS	(1<<0)
+-#define XEN_UNPLUG_ALL_NICS		(1<<1)
+-#define XEN_UNPLUG_AUX_IDE_DISKS	(1<<2)
+-#define XEN_UNPLUG_ALL			(XEN_UNPLUG_ALL_IDE_DISKS|\
+-					 XEN_UNPLUG_ALL_NICS|\
+-					 XEN_UNPLUG_AUX_IDE_DISKS)
+-
+-#define XEN_UNPLUG_UNNECESSARY 		(1<<16)
+-#define XEN_UNPLUG_NEVER	 		(1<<17)
++#define XEN_UNPLUG_ALL_IDE_DISKS 1
++#define XEN_UNPLUG_ALL_NICS 2
++#define XEN_UNPLUG_AUX_IDE_DISKS 4
++#define XEN_UNPLUG_ALL 7
++#define XEN_UNPLUG_IGNORE 8
+ 
+ static inline int xen_must_unplug_nics(void) {
+ #if (defined(CONFIG_XEN_NETDEV_FRONTEND) || \
 diff --git a/include/xen/privcmd.h b/include/xen/privcmd.h
 new file mode 100644
 index 0000000..b42cdfd
@@ -32684,7 +32770,7 @@ index 555d5d2..d1dc23c 100644
  {
  	int aligned;
 diff --git a/mm/memory.c b/mm/memory.c
-index 76d1b21..ce7f52d 100644
+index babb991..ae85b20 100644
 --- a/mm/memory.c
 +++ b/mm/memory.c
 @@ -553,6 +553,13 @@ struct page *vm_normal_page(struct vm_area_struct *vma, unsigned long addr,
