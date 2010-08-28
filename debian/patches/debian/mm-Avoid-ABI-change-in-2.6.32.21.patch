@@ -1,0 +1,163 @@
+From c74085a803eff43e860fe38adb024ea72db4a83f Mon Sep 17 00:00:00 2001
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Sat, 28 Aug 2010 22:05:36 +0100
+Subject: [PATCH] mm: Avoid ABI change in 2.6.32.21
+
+Hide vm_area_struct::vm_prev.
+---
+ include/linux/mm_types.h |    6 +++++-
+ kernel/fork.c            |    8 +++++---
+ mm/memory.c              |    2 +-
+ mm/mlock.c               |    2 +-
+ mm/mmap.c                |   10 +++++-----
+ mm/nommu.c               |    2 +-
+ 6 files changed, 18 insertions(+), 12 deletions(-)
+
+diff --git a/include/linux/mm_types.h b/include/linux/mm_types.h
+index 9d12ed5..4ef248a 100644
+--- a/include/linux/mm_types.h
++++ b/include/linux/mm_types.h
+@@ -138,7 +138,7 @@ struct vm_area_struct {
+ 					   within vm_mm. */
+ 
+ 	/* linked list of VM areas per task, sorted by address */
+-	struct vm_area_struct *vm_next, *vm_prev;
++	struct vm_area_struct *vm_next;
+ 
+ 	pgprot_t vm_page_prot;		/* Access permissions of this VMA. */
+ 	unsigned long vm_flags;		/* Flags, see mm.h. */
+@@ -188,6 +188,10 @@ struct vm_area_struct {
+ #endif
+ };
+ 
++#define sizeof_vm_area_struct (sizeof(struct vm_area_struct) + \
++			       sizeof(struct vm_area_struct *))
++#define vma_prev(vma) (*(struct vm_area_struct **)((vma) + 1))
++
+ struct core_thread {
+ 	struct task_struct *task;
+ 	struct core_thread *next;
+diff --git a/kernel/fork.c b/kernel/fork.c
+index e725666..8632df3 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -334,7 +334,7 @@ static int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
+ 		vma_set_policy(tmp, pol);
+ 		tmp->vm_flags &= ~VM_LOCKED;
+ 		tmp->vm_mm = mm;
+-		tmp->vm_next = tmp->vm_prev = NULL;
++		tmp->vm_next = vma_prev(tmp) = NULL;
+ 		anon_vma_link(tmp);
+ 		file = tmp->vm_file;
+ 		if (file) {
+@@ -368,7 +368,7 @@ static int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
+ 		 */
+ 		*pprev = tmp;
+ 		pprev = &tmp->vm_next;
+-		tmp->vm_prev = prev;
++		vma_prev(tmp) = prev;
+ 		prev = tmp;
+ 
+ 		__vma_link_rb(mm, tmp, rb_link, rb_parent);
+@@ -1510,7 +1510,9 @@ void __init proc_caches_init(void)
+ 	mm_cachep = kmem_cache_create("mm_struct",
+ 			sizeof(struct mm_struct), ARCH_MIN_MMSTRUCT_ALIGN,
+ 			SLAB_HWCACHE_ALIGN|SLAB_PANIC|SLAB_NOTRACK, NULL);
+-	vm_area_cachep = KMEM_CACHE(vm_area_struct, SLAB_PANIC);
++	vm_area_cachep = kmem_cache_create("vm_area_struct",
++			sizeof_vm_area_struct, __alignof__(struct vm_area_struct),
++			SLAB_PANIC, NULL);
+ 	mmap_init();
+ }
+ 
+diff --git a/mm/memory.c b/mm/memory.c
+index 194dc17..94b9906 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -2640,7 +2640,7 @@ static inline int check_stack_guard_page(struct vm_area_struct *vma, unsigned lo
+ {
+ 	address &= PAGE_MASK;
+ 	if ((vma->vm_flags & VM_GROWSDOWN) && address == vma->vm_start) {
+-		struct vm_area_struct *prev = vma->vm_prev;
++		struct vm_area_struct *prev = vma_prev(vma);
+ 
+ 		/*
+ 		 * Is there a mapping abutting this one below?
+diff --git a/mm/mlock.c b/mm/mlock.c
+index 380ea89..4ffb5b6 100644
+--- a/mm/mlock.c
++++ b/mm/mlock.c
+@@ -148,7 +148,7 @@ static inline int stack_guard_page(struct vm_area_struct *vma, unsigned long add
+ {
+ 	return (vma->vm_flags & VM_GROWSDOWN) &&
+ 		(vma->vm_start == addr) &&
+-		!vma_stack_continue(vma->vm_prev, addr);
++		!vma_stack_continue(vma_prev(vma), addr);
+ }
+ 
+ /**
+diff --git a/mm/mmap.c b/mm/mmap.c
+index b309c75..30ff36c 100644
+--- a/mm/mmap.c
++++ b/mm/mmap.c
+@@ -391,7 +391,7 @@ __vma_link_list(struct mm_struct *mm, struct vm_area_struct *vma,
+ {
+ 	struct vm_area_struct *next;
+ 
+-	vma->vm_prev = prev;
++	vma_prev(vma) = prev;
+ 	if (prev) {
+ 		next = prev->vm_next;
+ 		prev->vm_next = vma;
+@@ -405,7 +405,7 @@ __vma_link_list(struct mm_struct *mm, struct vm_area_struct *vma,
+ 	}
+ 	vma->vm_next = next;
+ 	if (next)
+-		next->vm_prev = vma;
++		vma_prev(next) = vma;
+ }
+ 
+ void __vma_link_rb(struct mm_struct *mm, struct vm_area_struct *vma,
+@@ -497,7 +497,7 @@ __vma_unlink(struct mm_struct *mm, struct vm_area_struct *vma,
+ 
+ 	prev->vm_next = next;
+ 	if (next)
+-		next->vm_prev = prev;
++		vma_prev(next) = prev;
+ 	rb_erase(&vma->vm_rb, &mm->mm_rb);
+ 	if (mm->mmap_cache == vma)
+ 		mm->mmap_cache = prev;
+@@ -1808,7 +1808,7 @@ detach_vmas_to_be_unmapped(struct mm_struct *mm, struct vm_area_struct *vma,
+ 	unsigned long addr;
+ 
+ 	insertion_point = (prev ? &prev->vm_next : &mm->mmap);
+-	vma->vm_prev = NULL;
++	vma_prev(vma) = NULL;
+ 	do {
+ 		rb_erase(&vma->vm_rb, &mm->mm_rb);
+ 		mm->map_count--;
+@@ -1817,7 +1817,7 @@ detach_vmas_to_be_unmapped(struct mm_struct *mm, struct vm_area_struct *vma,
+ 	} while (vma && vma->vm_start < end);
+ 	*insertion_point = vma;
+ 	if (vma)
+-		vma->vm_prev = prev;
++		vma_prev(vma) = prev;
+ 	tail_vma->vm_next = NULL;
+ 	if (mm->unmap_area == arch_unmap_area)
+ 		addr = prev ? prev->vm_end : mm->mmap_base;
+diff --git a/mm/nommu.c b/mm/nommu.c
+index ebb3154..1dc0646 100644
+--- a/mm/nommu.c
++++ b/mm/nommu.c
+@@ -672,7 +672,7 @@ static void add_vma_to_mm(struct mm_struct *mm, struct vm_area_struct *vma)
+ 	*pp = vma;
+ 	vma->vm_next = next;
+ 	if (next)
+-		next->vm_prev = vma;
++		vma_prev(next) = vma;
+ }
+ 
+ /*
+-- 
+1.7.1
+
