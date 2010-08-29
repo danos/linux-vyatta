@@ -140,6 +140,20 @@ class Gencontrol(Base):
                     image_fields['Breaks'].append(PackageRelationGroup([a]))
             image_fields['Depends'].append(l_depends)
 
+        bootloaders = config_entry_image.get('bootloaders')
+        print bootloaders
+        if bootloaders:
+            l = PackageRelationGroup()
+            for i in bootloaders:
+                i = config_entry_relations.get(i, i)
+                l.append(i)
+                a = PackageRelationEntry(i)
+                if a.operator is not None:
+                    a.operator = -a.operator
+                    image_fields['Breaks'].append(PackageRelationGroup([a]))
+            print l
+            image_fields['Suggests'].append(l)
+
         desc_parts = self.config.get_merge('description', arch, featureset, flavour, 'parts')
         if desc_parts:
             # XXX: Workaround, we need to support multiple entries of the same name
