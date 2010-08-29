@@ -1,0 +1,55 @@
+commit 769a693ecea9c4821b8fdb297b211d09740cc191
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Sun Feb 7 10:11:23 2010 -0800
+
+    Fix race in tty_fasync() properly
+    
+    This reverts commit 703625118069 ("tty: fix race in tty_fasync") and
+    commit b04da8bfdfbb ("fnctl: f_modown should call write_lock_irqsave/
+    restore") that tried to fix up some of the fallout but was incomplete.
+    
+    It turns out that we really cannot hold 'tty->ctrl_lock' over calling
+    __f_setown, because not only did that cause problems with interrupt
+    disables (which the second commit fixed), it also causes a potential
+    ABBA deadlock due to lock ordering.
+    
+    Thanks to Tetsuo Handa for following up on the issue, and running
+    lockdep to show the problem.  It goes roughly like this:
+    
+     - f_getown gets filp->f_owner.lock for reading without interrupts
+       disabled, so an interrupt that happens while that lock is held can
+       cause a lockdep chain from f_owner.lock -> sighand->siglock.
+    
+     - at the same time, the tty->ctrl_lock -> f_owner.lock chain that
+       commit 703625118069 introduced, together with the pre-existing
+       sighand->siglock -> tty->ctrl_lock chain means that we have a lock
+       dependency the other way too.
+    
+    So instead of extending tty->ctrl_lock over the whole __f_setown() call,
+    we now just take a reference to the 'pid' structure while holding the
+    lock, and then release it after having done the __f_setown.  That still
+    guarantees that 'struct pid' won't go away from under us, which is all
+    we really ever needed.
+    
+    Reported-and-tested-by: Tetsuo Handa <penguin-kernel@I-love.SAKURA.ne.jp>
+    Acked-by: Greg Kroah-Hartman <gregkh@suse.de>
+    Acked-by: Américo Wang <xiyou.wangcong@gmail.com>
+    Cc: stable@kernel.org
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+    Backported-to-Debian's-2.6.26-by: dann frazier <dannf@debian.org>
+
+diff --git a/drivers/char/tty_io.c b/drivers/char/tty_io.c
+index 60b691e..ced3fab 100644
+--- a/drivers/char/tty_io.c
++++ b/drivers/char/tty_io.c
+@@ -2911,8 +2911,10 @@ static int tty_fasync(int fd, struct file *filp, int on)
+ 			pid = task_pid(current);
+ 			type = PIDTYPE_PID;
+ 		}
++		get_pid(pid);
+ 		spin_unlock_irqrestore(&tty->ctrl_lock, flags);
+ 		retval = __f_setown(filp, pid, type, 0);
++		put_pid(pid);
+ 		if (retval)
+ 			return retval;
+ 	} else {
