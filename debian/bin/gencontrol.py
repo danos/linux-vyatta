@@ -130,15 +130,17 @@ class Gencontrol(Base):
             config_entry_commands_initramfs = self.config.merge('commands-image-initramfs-generators', arch, featureset, flavour)
             commands = [config_entry_commands_initramfs[i] for i in generators if config_entry_commands_initramfs.has_key(i)]
             makeflags['INITRD_CMD'] = ' '.join(commands)
-            l_depends = PackageRelationGroup()
+            l = PackageRelationGroup()
             for i in generators:
                 i = config_entry_relations.get(i, i)
-                l_depends.append(i)
+                l.append(i)
                 a = PackageRelationEntry(i)
                 if a.operator is not None:
                     a.operator = -a.operator
                     image_fields['Breaks'].append(PackageRelationGroup([a]))
-            image_fields['Depends'].append(l_depends)
+            for item in l:
+                item.arches = [arch]
+            image_fields['Depends'].append(l)
 
         bootloaders = config_entry_image.get('bootloaders')
         if bootloaders:
@@ -150,6 +152,8 @@ class Gencontrol(Base):
                 if a.operator is not None:
                     a.operator = -a.operator
                     image_fields['Breaks'].append(PackageRelationGroup([a]))
+            for item in l:
+                item.arches = [arch]
             image_fields['Suggests'].append(l)
 
         desc_parts = self.config.get_merge('description', arch, featureset, flavour, 'parts')
