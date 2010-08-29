@@ -122,7 +122,7 @@ class Gencontrol(Base):
         packages['source']['Build-Depends'].extend(relations_compiler_build_dep)
 
         image_fields = {'Description': PackageDescription()}
-        for field in 'Depends', 'Provides', 'Suggests', 'Recommends', 'Conflicts':
+        for field in 'Depends', 'Provides', 'Suggests', 'Recommends', 'Conflicts', 'Breaks':
             image_fields[field] = PackageRelation(config_entry_image.get(field.lower(), None), override_arches=(arch,))
 
         if config_entry_image.get('initramfs', True):
@@ -137,7 +137,7 @@ class Gencontrol(Base):
                 a = PackageRelationEntry(i)
                 if a.operator is not None:
                     a.operator = -a.operator
-                    image_fields['Conflicts'].append(PackageRelationGroup([a]))
+                    image_fields['Breaks'].append(PackageRelationGroup([a]))
             image_fields['Depends'].append(l_depends)
 
         desc_parts = self.config.get_merge('description', arch, featureset, flavour, 'parts')
