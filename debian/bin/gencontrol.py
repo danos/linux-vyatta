@@ -141,7 +141,6 @@ class Gencontrol(Base):
             image_fields['Depends'].append(l_depends)
 
         bootloaders = config_entry_image.get('bootloaders')
-        print bootloaders
         if bootloaders:
             l = PackageRelationGroup()
             for i in bootloaders:
@@ -151,7 +150,6 @@ class Gencontrol(Base):
                 if a.operator is not None:
                     a.operator = -a.operator
                     image_fields['Breaks'].append(PackageRelationGroup([a]))
-            print l
             image_fields['Suggests'].append(l)
 
         desc_parts = self.config.get_merge('description', arch, featureset, flavour, 'parts')
