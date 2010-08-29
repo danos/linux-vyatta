@@ -1,0 +1,101 @@
+From: stephen hemminger <shemminger@vyatta.com>
+Date: Sun, 7 Feb 2010 06:28:36 +0000
+Subject: [PATCH 26/56] sky2: receive checksum refactoring
+
+commit 375c568844e49d292885c7485d4a255f71680e56 upstream.
+
+Break the largish case for handling receive checksum into a separate
+function, and if there is a problem use dev_XXX routines to
+show which hardware is the problem.
+
+Turn one corner case into a BUG().  This only happens if the driver
+is expecting one behavior but the chip does the old behavior;
+only ever saw this when bringing up a new chip type and driver
+was buggy.
+
+Signed-off-by: Stephen Hemminger <shemminger@vyatta.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/sky2.c |   59 ++++++++++++++++++++++++---------------------------
+ 1 files changed, 28 insertions(+), 31 deletions(-)
+
+diff --git a/drivers/net/sky2.c b/drivers/net/sky2.c
+index 1aa1f33..478288b 100644
+--- a/drivers/net/sky2.c
++++ b/drivers/net/sky2.c
+@@ -2484,6 +2484,32 @@ static inline void sky2_rx_done(struct sky2_hw *hw, unsigned port,
+ 	}
+ }
+ 
++static void sky2_rx_checksum(struct sky2_port *sky2, u32 status)
++{
++	/* If this happens then driver assuming wrong format for chip type */
++	BUG_ON(sky2->hw->flags & SKY2_HW_NEW_LE);
++
++	/* Both checksum counters are programmed to start at
++	 * the same offset, so unless there is a problem they
++	 * should match. This failure is an early indication that
++	 * hardware receive checksumming won't work.
++	 */
++	if (likely((u16)(status >> 16) == (u16)status)) {
++		struct sk_buff *skb = sky2->rx_ring[sky2->rx_next].skb;
++		skb->ip_summed = CHECKSUM_COMPLETE;
++		skb->csum = le16_to_cpu(status);
++	} else {
++		dev_notice(&sky2->hw->pdev->dev,
++			   "%s: receive checksum problem (status = %#x)\n",
++			   sky2->netdev->name, status);
++
++		/* Disable checksum offload */
++		sky2->flags &= ~SKY2_FLAG_RX_CHECKSUM;
++		sky2_write32(sky2->hw, Q_ADDR(rxqaddr[sky2->port], Q_CSR),
++			     BMU_DIS_RX_CHKSUM);
++	}
++}
++
+ /* Process status response ring */
+ static int sky2_status_intr(struct sky2_hw *hw, int to_do, u16 idx)
+ {
+@@ -2552,37 +2578,8 @@ static int sky2_status_intr(struct sky2_hw *hw, int to_do, u16 idx)
+ 			/* fall through */
+ #endif
+ 		case OP_RXCHKS:
+-			if (!(sky2->flags & SKY2_FLAG_RX_CHECKSUM))
+-				break;
+-
+-			/* If this happens then driver assuming wrong format */
+-			if (unlikely(hw->flags & SKY2_HW_NEW_LE)) {
+-				if (net_ratelimit())
+-					printk(KERN_NOTICE "%s: unexpected"
+-					       " checksum status\n",
+-					       dev->name);
+-				break;
+-			}
+-
+-			/* Both checksum counters are programmed to start at
+-			 * the same offset, so unless there is a problem they
+-			 * should match. This failure is an early indication that
+-			 * hardware receive checksumming won't work.
+-			 */
+-			if (likely(status >> 16 == (status & 0xffff))) {
+-				skb = sky2->rx_ring[sky2->rx_next].skb;
+-				skb->ip_summed = CHECKSUM_COMPLETE;
+-				skb->csum = le16_to_cpu(status);
+-			} else {
+-				printk(KERN_NOTICE PFX "%s: hardware receive "
+-				       "checksum problem (status = %#x)\n",
+-				       dev->name, status);
+-				sky2->flags &= ~SKY2_FLAG_RX_CHECKSUM;
+-
+-				sky2_write32(sky2->hw,
+-					     Q_ADDR(rxqaddr[port], Q_CSR),
+-					     BMU_DIS_RX_CHKSUM);
+-			}
++			if (likely(sky2->flags & SKY2_FLAG_RX_CHECKSUM))
++				sky2_rx_checksum(sky2, status);
+ 			break;
+ 
+ 		case OP_TXINDEXLE:
+-- 
+1.7.1
+

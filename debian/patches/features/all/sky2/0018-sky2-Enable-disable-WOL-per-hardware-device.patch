@@ -1,0 +1,69 @@
+From: Mike McCormack <mikem@ring3k.org>
+Date: Sat, 23 Jan 2010 02:09:26 -0800
+Subject: [PATCH 18/56] sky2: Enable/disable WOL per hardware device
+
+commit 2ca4231de7f7a5fd7137bac152030ba71f15e8c3 upstream.
+
+Y2_HW_WOL_ON/Y2_HW_WOL_OFF should be set and cleared per chip,
+not per port.  On dual port cards, Y2_HW_WOL_ON should be
+enabled if either sky2 port has WOL enabled.
+
+Found while reviewing code for a WOL regression, though this is
+probably not the cause of the regression.
+
+Signed-off-by: Mike McCormack <mikem@ring3k.org>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/sky2.c |   29 ++++++++++++++++++++++-------
+ 1 files changed, 22 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/net/sky2.c b/drivers/net/sky2.c
+index 37f486b..02d0b42 100644
+--- a/drivers/net/sky2.c
++++ b/drivers/net/sky2.c
+@@ -3228,6 +3228,27 @@ static inline u8 sky2_wol_supported(const struct sky2_hw *hw)
+ 	return sky2_is_copper(hw) ? (WAKE_PHY | WAKE_MAGIC) : 0;
+ }
+ 
++static void sky2_hw_set_wol(struct sky2_hw *hw)
++{
++	int wol = 0;
++	int i;
++
++	for (i = 0; i < hw->ports; i++) {
++		struct net_device *dev = hw->dev[i];
++		struct sky2_port *sky2 = netdev_priv(dev);
++
++		if (sky2->wol)
++			wol = 1;
++	}
++
++	if (hw->chip_id == CHIP_ID_YUKON_EC_U ||
++	    hw->chip_id == CHIP_ID_YUKON_EX ||
++	    hw->chip_id == CHIP_ID_YUKON_FE_P)
++		sky2_write32(hw, B0_CTST, wol ? Y2_HW_WOL_ON : Y2_HW_WOL_OFF);
++
++	device_set_wakeup_enable(&hw->pdev->dev, wol);
++}
++
+ static void sky2_get_wol(struct net_device *dev, struct ethtool_wolinfo *wol)
+ {
+ 	const struct sky2_port *sky2 = netdev_priv(dev);
+@@ -3247,13 +3268,7 @@ static int sky2_set_wol(struct net_device *dev, struct ethtool_wolinfo *wol)
+ 
+ 	sky2->wol = wol->wolopts;
+ 
+-	if (hw->chip_id == CHIP_ID_YUKON_EC_U ||
+-	    hw->chip_id == CHIP_ID_YUKON_EX ||
+-	    hw->chip_id == CHIP_ID_YUKON_FE_P)
+-		sky2_write32(hw, B0_CTST, sky2->wol
+-			     ? Y2_HW_WOL_ON : Y2_HW_WOL_OFF);
+-
+-	device_set_wakeup_enable(&hw->pdev->dev, sky2->wol);
++	sky2_hw_set_wol(hw);
+ 
+ 	if (!netif_running(dev))
+ 		sky2_wol_init(sky2);
+-- 
+1.7.1
+

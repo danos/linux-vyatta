@@ -1,0 +1,106 @@
+From: stephen hemminger <shemminger@vyatta.com>
+Date: Fri, 12 Feb 2010 06:58:01 +0000
+Subject: [PATCH 31/56] sky2: jumbo packet changes
+
+commit 44dde56d37787cbad2e867a41fe87d6b0aa37fc8 upstream.
+
+Change how FIFO is programmed in jumbo mode (to match vendor driver).
+Mostly cosmetic, the only register change is that the bits 22,23
+are not programemd used.
+
+Signed-off-by: Stephen Hemminger <shemminger@vyatta.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/sky2.c |   36 ++++++++++++++----------------------
+ drivers/net/sky2.h |    8 ++++----
+ 2 files changed, 18 insertions(+), 26 deletions(-)
+
+diff --git a/drivers/net/sky2.c b/drivers/net/sky2.c
+index 2494842..8a87e16 100644
+--- a/drivers/net/sky2.c
++++ b/drivers/net/sky2.c
+@@ -798,29 +798,15 @@ static void sky2_set_tx_stfwd(struct sky2_hw *hw, unsigned port)
+ 	      hw->chip_rev != CHIP_REV_YU_EX_A0) ||
+ 	     hw->chip_id >= CHIP_ID_YUKON_FE_P) {
+ 		/* Yukon-Extreme B0 and further Extreme devices */
+-		/* enable Store & Forward mode for TX */
++		sky2_write32(hw, SK_REG(port, TX_GMF_CTRL_T), TX_STFW_ENA);
++	} else if (dev->mtu > ETH_DATA_LEN) {
++		/* set Tx GMAC FIFO Almost Empty Threshold */
++		sky2_write32(hw, SK_REG(port, TX_GMF_AE_THR),
++			     (ECU_JUMBO_WM << 16) | ECU_AE_THR);
+ 
+-		if (dev->mtu <= ETH_DATA_LEN)
+-			sky2_write32(hw, SK_REG(port, TX_GMF_CTRL_T),
+-				     TX_JUMBO_DIS | TX_STFW_ENA);
+-
+-		else
+-			sky2_write32(hw, SK_REG(port, TX_GMF_CTRL_T),
+-				     TX_JUMBO_ENA| TX_STFW_ENA);
+-	} else {
+-		if (dev->mtu <= ETH_DATA_LEN)
+-			sky2_write32(hw, SK_REG(port, TX_GMF_CTRL_T), TX_STFW_ENA);
+-		else {
+-			/* set Tx GMAC FIFO Almost Empty Threshold */
+-			sky2_write32(hw, SK_REG(port, TX_GMF_AE_THR),
+-				     (ECU_JUMBO_WM << 16) | ECU_AE_THR);
+-
+-			sky2_write32(hw, SK_REG(port, TX_GMF_CTRL_T), TX_STFW_DIS);
+-
+-			/* Can't do offload because of lack of store/forward */
+-			dev->features &= ~(NETIF_F_TSO | NETIF_F_SG | NETIF_F_ALL_CSUM);
+-		}
+-	}
++		sky2_write32(hw, SK_REG(port, TX_GMF_CTRL_T), TX_STFW_DIS);
++	} else
++		sky2_write32(hw, SK_REG(port, TX_GMF_CTRL_T), TX_STFW_ENA);
+ }
+ 
+ static void sky2_mac_init(struct sky2_hw *hw, unsigned port)
+@@ -2206,14 +2192,20 @@ static int sky2_change_mtu(struct net_device *dev, int new_mtu)
+ 	u16 ctl, mode;
+ 	u32 imask;
+ 
++	/* MTU size outside the spec */
+ 	if (new_mtu < ETH_ZLEN || new_mtu > ETH_JUMBO_MTU)
+ 		return -EINVAL;
+ 
++	/* MTU > 1500 on yukon FE and FE+ not allowed */
+ 	if (new_mtu > ETH_DATA_LEN &&
+ 	    (hw->chip_id == CHIP_ID_YUKON_FE ||
+ 	     hw->chip_id == CHIP_ID_YUKON_FE_P))
+ 		return -EINVAL;
+ 
++	/* TSO, etc on Yukon Ultra and MTU > 1500 not supported */
++	if (new_mtu > ETH_DATA_LEN && hw->chip_id == CHIP_ID_YUKON_EC_U)
++		dev->features &= ~(NETIF_F_TSO|NETIF_F_SG|NETIF_F_ALL_CSUM);
++
+ 	if (!netif_running(dev)) {
+ 		dev->mtu = new_mtu;
+ 		return 0;
+diff --git a/drivers/net/sky2.h b/drivers/net/sky2.h
+index 54cb303..a5e182d 100644
+--- a/drivers/net/sky2.h
++++ b/drivers/net/sky2.h
+@@ -1895,14 +1895,14 @@ enum {
+ 
+ /*	TX_GMF_CTRL_T	32 bit	Tx GMAC FIFO Control/Test */
+ enum {
+-	TX_STFW_DIS	= 1<<31,/* Disable Store & Forward (Yukon-EC Ultra) */
+-	TX_STFW_ENA	= 1<<30,/* Enable  Store & Forward (Yukon-EC Ultra) */
++	TX_STFW_DIS	= 1<<31,/* Disable Store & Forward */
++	TX_STFW_ENA	= 1<<30,/* Enable  Store & Forward */
+ 
+ 	TX_VLAN_TAG_ON	= 1<<25,/* enable  VLAN tagging */
+ 	TX_VLAN_TAG_OFF	= 1<<24,/* disable VLAN tagging */
+ 
+-	TX_JUMBO_ENA	= 1<<23,/* PCI Jumbo Mode enable (Yukon-EC Ultra) */
+-	TX_JUMBO_DIS	= 1<<22,/* PCI Jumbo Mode enable (Yukon-EC Ultra) */
++	TX_PCI_JUM_ENA  = 1<<23,/* PCI Jumbo Mode enable */
++	TX_PCI_JUM_DIS  = 1<<22,/* PCI Jumbo Mode enable */
+ 
+ 	GMF_WSP_TST_ON	= 1<<18,/* Write Shadow Pointer Test On */
+ 	GMF_WSP_TST_OFF	= 1<<17,/* Write Shadow Pointer Test Off */
+-- 
+1.7.1
+
