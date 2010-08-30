@@ -1,0 +1,130 @@
+commit f0e00e64d73d2e575fa76f059c02e15459c826f9
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Fri Aug 20 16:24:55 2010 -0700
+
+    mm: make the vma list be doubly linked
+    
+    [Backported to Debian's 2.6.26 by dann frazier <dannf@debian.org]
+    [Note: nommu.c changes ignored, no Debian ports use it]
+    
+    It's a really simple list, and several of the users want to go backwards
+    in it to find the previous vma.  So rather than have to look up the
+    previous entry with 'find_vma_prev()' or something similar, just make it
+    doubly linked instead.
+    
+    Tested-by: Ian Campbell <ijc@hellion.org.uk>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/include/linux/mm_types.h b/include/linux/mm_types.h
+index 02a27ae..dc9c951 100644
+--- a/include/linux/mm_types.h
++++ b/include/linux/mm_types.h
+@@ -109,7 +109,7 @@ struct vm_area_struct {
+ 					   within vm_mm. */
+ 
+ 	/* linked list of VM areas per task, sorted by address */
+-	struct vm_area_struct *vm_next;
++	struct vm_area_struct *vm_next, *vm_prev;
+ 
+ 	pgprot_t vm_page_prot;		/* Access permissions of this VMA. */
+ 	unsigned long vm_flags;		/* Flags, listed below. */
+diff --git a/kernel/fork.c b/kernel/fork.c
+index 7260a05..4b3963a 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -234,7 +234,7 @@ out:
+ #ifdef CONFIG_MMU
+ static int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
+ {
+-	struct vm_area_struct *mpnt, *tmp, **pprev;
++	struct vm_area_struct *mpnt, *tmp, *prev, **pprev;
+ 	struct rb_node **rb_link, *rb_parent;
+ 	int retval;
+ 	unsigned long charge;
+@@ -259,6 +259,7 @@ static int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
+ 	rb_parent = NULL;
+ 	pprev = &mm->mmap;
+ 
++	prev = NULL;
+ 	for (mpnt = oldmm->mmap; mpnt; mpnt = mpnt->vm_next) {
+ 		struct file *file;
+ 
+@@ -287,7 +288,7 @@ static int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
+ 		vma_set_policy(tmp, pol);
+ 		tmp->vm_flags &= ~VM_LOCKED;
+ 		tmp->vm_mm = mm;
+-		tmp->vm_next = NULL;
++		tmp->vm_next = tmp->vm_prev = NULL;
+ 		anon_vma_link(tmp);
+ 		file = tmp->vm_file;
+ 		if (file) {
+@@ -310,6 +311,8 @@ static int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
+ 		 */
+ 		*pprev = tmp;
+ 		pprev = &tmp->vm_next;
++		tmp->vm_prev = prev;
++		prev = tmp;
+ 
+ 		__vma_link_rb(mm, tmp, rb_link, rb_parent);
+ 		rb_link = &tmp->vm_rb.rb_right;
+diff --git a/mm/mmap.c b/mm/mmap.c
+index 2ffd74c..0c137e5 100644
+--- a/mm/mmap.c
++++ b/mm/mmap.c
+@@ -387,17 +387,23 @@ static inline void
+ __vma_link_list(struct mm_struct *mm, struct vm_area_struct *vma,
+ 		struct vm_area_struct *prev, struct rb_node *rb_parent)
+ {
++	struct vm_area_struct *next;
++
++	vma->vm_prev = prev;
+ 	if (prev) {
+-		vma->vm_next = prev->vm_next;
++		next = prev->vm_next;
+ 		prev->vm_next = vma;
+ 	} else {
+ 		mm->mmap = vma;
+ 		if (rb_parent)
+-			vma->vm_next = rb_entry(rb_parent,
++			next = rb_entry(rb_parent,
+ 					struct vm_area_struct, vm_rb);
+ 		else
+-			vma->vm_next = NULL;
++			next = NULL;
+ 	}
++	vma->vm_next = next;
++	if (next)
++		next->vm_prev = vma;
+ }
+ 
+ void __vma_link_rb(struct mm_struct *mm, struct vm_area_struct *vma,
+@@ -486,7 +492,11 @@ static inline void
+ __vma_unlink(struct mm_struct *mm, struct vm_area_struct *vma,
+ 		struct vm_area_struct *prev)
+ {
+-	prev->vm_next = vma->vm_next;
++	struct vm_area_struct *next = vma->vm_next;
++
++	prev->vm_next = next;
++	if (next)
++		next->vm_prev = prev;
+ 	rb_erase(&vma->vm_rb, &mm->mm_rb);
+ 	if (mm->mmap_cache == vma)
+ 		mm->mmap_cache = prev;
+@@ -1782,6 +1792,7 @@ detach_vmas_to_be_unmapped(struct mm_struct *mm, struct vm_area_struct *vma,
+ 	unsigned long addr;
+ 
+ 	insertion_point = (prev ? &prev->vm_next : &mm->mmap);
++	vma->vm_prev = NULL;
+ 	do {
+ 		rb_erase(&vma->vm_rb, &mm->mm_rb);
+ 		mm->map_count--;
+@@ -1789,6 +1800,8 @@ detach_vmas_to_be_unmapped(struct mm_struct *mm, struct vm_area_struct *vma,
+ 		vma = vma->vm_next;
+ 	} while (vma && vma->vm_start < end);
+ 	*insertion_point = vma;
++	if (vma)
++		vma->vm_prev = prev;
+ 	tail_vma->vm_next = NULL;
+ 	if (mm->unmap_area == arch_unmap_area)
+ 		addr = prev ? prev->vm_end : mm->mmap_base;

@@ -1,0 +1,45 @@
+commit 15c90686999deb38db2309a13740f2a52cb306f0
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Fri Aug 20 16:49:40 2010 -0700
+
+    mm: make stack guard page logic use vm_prev pointer
+    
+    [Backported to Debian's 2.6.26 by dann frazier <dannf@debian.org>]
+    
+    Like the mlock() change previously, this makes the stack guard check
+    code use vma->vm_prev to see what the mapping below the current stack
+    is, rather than have to look it up with find_vma().
+    
+    Also, accept an abutting stack segment, since that happens naturally if
+    you split the stack with mlock or mprotect.
+    
+    Tested-by: Ian Campbell <ijc@hellion.org.uk>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/mm/memory.c b/mm/memory.c
+index b169936..a92aca7 100644
+--- a/mm/memory.c	2010-08-29 23:49:51.000000000 -0600
++++ b/mm/memory.c	2010-08-29 23:46:34.000000000 -0600
+@@ -2285,11 +2285,18 @@ static inline int check_stack_guard_page
+ {
+ 	address &= PAGE_MASK;
+ 	if ((vma->vm_flags & VM_GROWSDOWN) && address == vma->vm_start) {
+-		address -= PAGE_SIZE;
+-		if (find_vma(vma->vm_mm, address) != vma)
+-			return -ENOMEM;
++		struct vm_area_struct *prev = vma->vm_prev;
+ 
+-		expand_stack(vma, address);
++		/*
++		 * Is there a mapping abutting this one below?
++		 *
++		 * That's only ok if it's the same stack mapping
++		 * that has gotten split..
++		 */
++		if (prev && prev->vm_end == address)
++			return prev->vm_flags & VM_GROWSDOWN ? 0 : -ENOMEM;
++
++		expand_stack(vma, address - PAGE_SIZE);
+ 	}
+ 	if ((vma->vm_flags & VM_GROWSUP) && address + PAGE_SIZE == vma->vm_end) {
+ 		struct vm_area_struct *next = vma->vm_next;
