@@ -1,0 +1,70 @@
+From 5caa730ee2d4f95169296a7a4c75dd9a20b6683a Mon Sep 17 00:00:00 2001
+From: Ralf Baechle <ralf@linux-mips.org>
+Date: Thu, 2 Sep 2010 23:22:23 +0200
+Subject: [PATCH] MIPS: DMA: Fix computation of DMA flags from device's coherent_dma_mask.
+
+This only matters for ISA devices with a 24-bit DMA limit or for devices
+with a 32-bit DMA limit on systems with ZONE_DMA32 enabled.  The latter
+currently only affects 32-bit PCI cards on Sibyte-based systems with more
+than 1GB RAM installed.
+
+Signed-off-by: Ralf Baechle <ralf@linux-mips.org>
+---
+ arch/mips/mm/dma-default.c |   28 ++++++++++++++++++++--------
+ 1 files changed, 20 insertions(+), 8 deletions(-)
+
+diff --git a/arch/mips/mm/dma-default.c b/arch/mips/mm/dma-default.c
+index 7ba8908..469d401 100644
+--- a/arch/mips/mm/dma-default.c
++++ b/arch/mips/mm/dma-default.c
+@@ -44,27 +44,39 @@ static inline int cpu_is_noncoherent_r10000(struct device *dev)
+ 
+ static gfp_t massage_gfp_flags(const struct device *dev, gfp_t gfp)
+ {
++	gfp_t dma_flag;
++
+ 	/* ignore region specifiers */
+ 	gfp &= ~(__GFP_DMA | __GFP_DMA32 | __GFP_HIGHMEM);
+ 
+-#ifdef CONFIG_ZONE_DMA
++#ifdef CONFIG_ISA
+ 	if (dev == NULL)
+-		gfp |= __GFP_DMA;
+-	else if (dev->coherent_dma_mask < DMA_BIT_MASK(24))
+-		gfp |= __GFP_DMA;
++		dma_flag = __GFP_DMA;
+ 	else
+ #endif
+-#ifdef CONFIG_ZONE_DMA32
++#if defined(CONFIG_ZONE_DMA32) && defined(CONFIG_ZONE_DMA)
+ 	     if (dev->coherent_dma_mask < DMA_BIT_MASK(32))
+-		gfp |= __GFP_DMA32;
++			dma_flag = __GFP_DMA;
++	else if (dev->coherent_dma_mask < DMA_BIT_MASK(64))
++			dma_flag = __GFP_DMA32;
++	else
++#endif
++#if defined(CONFIG_ZONE_DMA32) && !defined(CONFIG_ZONE_DMA)
++	     if (dev->coherent_dma_mask < DMA_BIT_MASK(64))
++		dma_flag = __GFP_DMA32;
++	else
++#endif
++#if defined(CONFIG_ZONE_DMA) && !defined(CONFIG_ZONE_DMA32)
++	     if (dev->coherent_dma_mask < DMA_BIT_MASK(64))
++		dma_flag = __GFP_DMA;
+ 	else
+ #endif
+-		;
++		dma_flag = 0;
+ 
+ 	/* Don't invoke OOM killer */
+ 	gfp |= __GFP_NORETRY;
+ 
+-	return gfp;
++	return gfp | dma_flag;
+ }
+ 
+ void *dma_alloc_noncoherent(struct device *dev, size_t size,
+-- 
+1.7.2.2
+
