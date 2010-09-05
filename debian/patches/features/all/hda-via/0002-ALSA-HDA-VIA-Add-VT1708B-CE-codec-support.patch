@@ -1,0 +1,96 @@
+From e0a8de6d2c6c6818882aac4706c44bb2b3cbe945 Mon Sep 17 00:00:00 2001
+From: Lydia Wang <lydiawang@viatech.com.cn>
+Date: Sat, 10 Oct 2009 19:07:29 +0800
+Subject: [PATCH 02/19] ALSA: HDA VIA: Add VT1708B-CE codec support.
+
+commit 518bf3ba753ad93644e7c6cf95c043c918d9429b upstream.
+
+Signed-off-by: Lydia Wang <lydiawang@viatech.com.cn>
+Signed-off-by: Logan Li <loganli@viatech.com.cn>
+Signed-off-by: Takashi Iwai <tiwai@suse.de>
+---
+ sound/pci/hda/patch_via.c |   27 ++++++++++++++++++++++++---
+ 1 files changed, 24 insertions(+), 3 deletions(-)
+
+diff --git a/sound/pci/hda/patch_via.c b/sound/pci/hda/patch_via.c
+index b859927..55e4a98 100644
+--- a/sound/pci/hda/patch_via.c
++++ b/sound/pci/hda/patch_via.c
+@@ -92,6 +92,7 @@ enum VIA_HDA_CODEC {
+ 	VT1708B_8CH,
+ 	VT1708B_4CH,
+ 	VT1708S,
++	VT1708BCE,
+ 	VT1702,
+ 	CODEC_TYPES,
+ };
+@@ -112,9 +113,11 @@ static enum VIA_HDA_CODEC get_codec_type(struct hda_codec *codec)
+ 		codec_type = VT1709_10CH;
+ 	else if (dev_id >= 0xe714 && dev_id <= 0xe717)
+ 		codec_type = VT1709_6CH;
+-	else if (dev_id >= 0xe720 && dev_id <= 0xe723)
++	else if (dev_id >= 0xe720 && dev_id <= 0xe723) {
+ 		codec_type = VT1708B_8CH;
+-	else if (dev_id >= 0xe724 && dev_id <= 0xe727)
++		if (snd_hda_param_read(codec, 0x16, AC_PAR_CONNLIST_LEN) == 0x7)
++			codec_type = VT1708BCE;
++	} else if (dev_id >= 0xe724 && dev_id <= 0xe727)
+ 		codec_type = VT1708B_4CH;
+ 	else if ((dev_id & 0xfff) == 0x397
+ 		 && (dev_id >> 12) < 8)
+@@ -232,6 +235,8 @@ struct via_spec {
+ 	const struct hda_input_mux *hp_mux;
+ 	unsigned int hp_independent_mode;
+ 
++	enum VIA_HDA_CODEC codec_type;
++
+ #ifdef CONFIG_SND_HDA_POWER_SAVE
+ 	struct hda_loopback_check loopback;
+ #endif
+@@ -987,6 +992,10 @@ static int via_init(struct hda_codec *codec)
+ 	for (i = 0; i < spec->num_iverbs; i++)
+ 		snd_hda_sequence_write(codec, spec->init_verbs[i]);
+ 
++	spec->codec_type = get_codec_type(codec);
++	if (spec->codec_type == VT1708BCE)
++		spec->codec_type = VT1708S; /* VT1708BCE & VT1708S are almost
++					       same */
+ 	/* Lydia Add for EAPD enable */
+ 	if (!spec->dig_in_nid) { /* No Digital In connection */
+ 		if (spec->dig_in_pin) {
+@@ -2377,12 +2386,14 @@ static struct hda_amp_list vt1708B_loopbacks[] = {
+ 	{ } /* end */
+ };
+ #endif
+-
++static int patch_vt1708S(struct hda_codec *codec);
+ static int patch_vt1708B_8ch(struct hda_codec *codec)
+ {
+ 	struct via_spec *spec;
+ 	int err;
+ 
++	if (get_codec_type(codec) == VT1708BCE)
++		return patch_vt1708S(codec);
+ 	/* create a codec specific record */
+ 	spec = kzalloc(sizeof(*spec), GFP_KERNEL);
+ 	if (spec == NULL)
+@@ -2914,6 +2925,16 @@ static int patch_vt1708S(struct hda_codec *codec)
+ 	spec->loopback.amplist = vt1708S_loopbacks;
+ #endif
+ 
++	/* correct names for VT1708BCE */
++	if (get_codec_type(codec) == VT1708BCE)	{
++		kfree(codec->chip_name);
++		codec->chip_name = kstrdup("VT1708BCE", GFP_KERNEL);
++		snprintf(codec->bus->card->mixername,
++			 sizeof(codec->bus->card->mixername),
++			 "%s %s", codec->vendor_name, codec->chip_name);
++		spec->stream_name_analog = "VT1708BCE Analog";
++		spec->stream_name_digital = "VT1708BCE Digital";
++	}
+ 	return 0;
+ }
+ 
+-- 
+1.7.1
+
