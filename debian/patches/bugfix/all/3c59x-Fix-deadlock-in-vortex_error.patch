@@ -1,0 +1,56 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Sat, 4 Sep 2010 01:51:50 +0100
+Subject: [PATCH] 3c59x: Fix deadlock in vortex_error()
+
+This fixes a bug introduced in commit
+de847272149365363a6043a963a6f42fb91566e2
+"3c59x: Use fine-grained locks for MII and windowed register access".
+
+vortex_interrupt() holds vp->window_lock over multiple register
+accesses to reduce locking overhead.  However it also needs to call
+vortex_error() sometimes, and that uses the regular functions for
+access to windowed registers, which will try to acquire window_lock
+again.
+
+Therefore, drop window_lock around the call to vortex_error() and set
+the window afterward reacquiring the lock.  Since vortex_error() may
+call vortex_rx(), which *does* require its caller to hold window_lock,
+lift that call up into vortex_interrupt().  This also removes the
+potential for calling vortex_rx() on a later-generation NIC.
+---
+ drivers/net/3c59x.c |   10 +++++++---
+ 1 files changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/net/3c59x.c b/drivers/net/3c59x.c
+index a045559..85671ad 100644
+--- a/drivers/net/3c59x.c
++++ b/drivers/net/3c59x.c
+@@ -1994,10 +1994,9 @@ vortex_error(struct net_device *dev, int status)
+ 		}
+ 	}
+ 
+-	if (status & RxEarly) {				/* Rx early is unused. */
+-		vortex_rx(dev);
++	if (status & RxEarly)				/* Rx early is unused. */
+ 		iowrite16(AckIntr | RxEarly, ioaddr + EL3_CMD);
+-	}
++
+ 	if (status & StatsFull) {			/* Empty statistics. */
+ 		static int DoneDidThat;
+ 		if (vortex_debug > 4)
+@@ -2298,7 +2297,12 @@ vortex_interrupt(int irq, void *dev_id)
+ 		if (status & (HostError | RxEarly | StatsFull | TxComplete | IntReq)) {
+ 			if (status == 0xffff)
+ 				break;
++			if (status & RxEarly)
++				vortex_rx(dev);
++			spin_unlock(&vp->window_lock);
+ 			vortex_error(dev, status);
++			spin_lock(&vp->window_lock);
++			window_set(vp, 7);
+ 		}
+ 
+ 		if (--work_done < 0) {
+-- 
+1.7.1
+
