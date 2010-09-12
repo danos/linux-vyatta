@@ -1,0 +1,105 @@
+From 030e105efc9a29c7d34fb59fb0e0a40e54178299 Mon Sep 17 00:00:00 2001
+From: Ben Skeggs <bskeggs@redhat.com>
+Date: Wed, 30 Jun 2010 13:34:05 +1000
+Subject: [PATCH] drm/nouveau: disable acceleration on NVA3/NVA5/NVA8 by default
+
+There's an GPU lockup problem for which the cause is currently unknown
+on these chipsets.
+
+Until it's resolved, it's better to leave the user with a working system
+without acceleration than to have random lockups.
+
+With this patch, acceleration will be off by default if a known problem
+chipset is detected, but can be re-enabled with nouveau.noaccel=0 on
+the kernel commandline.
+
+Signed-off-by: Ben Skeggs <bskeggs@redhat.com>
+
+[ cebbert@redhat.com : Backport to F12 and fix some module parameter descriptions. ]
+---
+
+--- a/drivers/gpu/drm/nouveau/nouveau_drv.c
++++ b/drivers/gpu/drm/nouveau/nouveau_drv.c
+@@ -75,11 +75,11 @@ int nouveau_ignorelid = 0;
+ int nouveau_ignorelid = 0;
+ module_param_named(ignorelid, nouveau_ignorelid, int, 0400);
+ 
+-MODULE_PARM_DESC(noagp, "Disable all acceleration");
++MODULE_PARM_DESC(noaccel, "Disable all acceleration");
+-int nouveau_noaccel = 0;
++int nouveau_noaccel = -1;
+ module_param_named(noaccel, nouveau_noaccel, int, 0400);
+ 
+-MODULE_PARM_DESC(noagp, "Disable fbcon acceleration");
++MODULE_PARM_DESC(nofbaccel, "Disable fbcon acceleration");
+ int nouveau_nofbaccel = 0;
+ module_param_named(nofbaccel, nouveau_nofbaccel, int, 0400);
+ 
+--- a/drivers/gpu/drm/nouveau/nouveau_drv.h
++++ b/drivers/gpu/drm/nouveau/nouveau_drv.h
+@@ -493,6 +493,7 @@ enum nouveau_card_type {
+ 
+ struct drm_nouveau_private {
+ 	struct drm_device *dev;
++	bool noaccel;
+ 	enum {
+ 		NOUVEAU_CARD_INIT_DOWN,
+ 		NOUVEAU_CARD_INIT_DONE,
+--- a/drivers/gpu/drm/nouveau/nouveau_state.c
++++ b/drivers/gpu/drm/nouveau/nouveau_state.c
+@@ -435,7 +435,7 @@ nouveau_card_init(struct drm_device *dev)
+ 	if (ret)
+ 		goto out_timer;
+ 
+-	if (nouveau_noaccel)
++	if (dev_priv->noaccel)
+ 		engine->graph.accel_blocked = true;
+ 	else {
+ 		/* PGRAPH */
+@@ -491,10 +491,10 @@ out_display:
+ out_irq:
+ 	drm_irq_uninstall(dev);
+ out_fifo:
+-	if (!nouveau_noaccel)
++	if (!dev_priv->noaccel)
+ 		engine->fifo.takedown(dev);
+ out_graph:
+-	if (!nouveau_noaccel)
++	if (!dev_priv->noaccel)
+ 		engine->graph.takedown(dev);
+ out_fb:
+ 	engine->fb.takedown(dev);
+@@ -532,7 +532,7 @@ static void nouveau_card_takedown(struct drm_device *dev)
+ 			dev_priv->channel = NULL;
+ 		}
+ 
+-		if (!nouveau_noaccel) {
++		if (!dev_priv->noaccel) {
+ 			engine->fifo.takedown(dev);
+ 			engine->graph.takedown(dev);
+ 		}
+@@ -691,6 +691,21 @@ int nouveau_load(struct drm_device *dev, unsigned long flags)
+ 	NV_INFO(dev, "Detected an NV%2x generation card (0x%08x)\n",
+ 		dev_priv->card_type, reg0);
+ 
++	if (nouveau_noaccel == -1) {
++		switch (dev_priv->chipset) {
++		case 0xa3:
++		case 0xa5:
++		case 0xa8:
++			dev_priv->noaccel = true;
++			break;
++		default:
++			dev_priv->noaccel = false;
++			break;
++		}
++	} else {
++		dev_priv->noaccel = (nouveau_noaccel != 0);
++	}
++
+ 	/* map larger RAMIN aperture on NV40 cards */
+ 	dev_priv->ramin  = NULL;
+ 	if (dev_priv->card_type >= NV_40) {
+-- 
+1.7.2
+
