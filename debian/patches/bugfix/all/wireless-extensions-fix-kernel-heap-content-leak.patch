@@ -1,0 +1,78 @@
+From 42da2f948d949efd0111309f5827bf0298bcc9a4 Mon Sep 17 00:00:00 2001
+From: Johannes Berg <johannes.berg@intel.com>
+Date: Mon, 30 Aug 2010 12:24:54 +0200
+Subject: wireless extensions: fix kernel heap content leak
+
+From: Johannes Berg <johannes.berg@intel.com>
+
+commit 42da2f948d949efd0111309f5827bf0298bcc9a4 upstream.
+
+Wireless extensions have an unfortunate, undocumented
+requirement which requires drivers to always fill
+iwp->length when returning a successful status. When
+a driver doesn't do this, it leads to a kernel heap
+content leak when userspace offers a larger buffer
+than would have been necessary.
+
+Arguably, this is a driver bug, as it should, if it
+returns 0, fill iwp->length, even if it separately
+indicated that the buffer contents was not valid.
+
+However, we can also at least avoid the memory content
+leak if the driver doesn't do this by setting the iwp
+length to max_tokens, which then reflects how big the
+buffer is that the driver may fill, regardless of how
+big the userspace buffer is.
+
+To illustrate the point, this patch also fixes a
+corresponding cfg80211 bug (since this requirement
+isn't documented nor was ever pointed out by anyone
+during code review, I don't trust all drivers nor
+all cfg80211 handlers to implement it correctly).
+
+Signed-off-by: Johannes Berg <johannes.berg@intel.com>
+Signed-off-by: John W. Linville <linville@tuxdriver.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+
+---
+ net/wireless/wext-compat.c |    3 +++
+ net/wireless/wext.c        |   16 ++++++++++++++++
+ 2 files changed, 19 insertions(+)
+
+--- a/net/wireless/wext-compat.c
++++ b/net/wireless/wext-compat.c
+@@ -1358,6 +1358,9 @@ int cfg80211_wext_giwessid(struct net_de
+ {
+ 	struct wireless_dev *wdev = dev->ieee80211_ptr;
+ 
++	data->flags = 0;
++	data->length = 0;
++
+ 	switch (wdev->iftype) {
+ 	case NL80211_IFTYPE_ADHOC:
+ 		return cfg80211_ibss_wext_giwessid(dev, info, data, ssid);
+--- a/net/wireless/wext.c
++++ b/net/wireless/wext.c
+@@ -854,6 +854,22 @@ static int ioctl_standard_iw_point(struc
+ 		}
+ 	}
+ 
++	if (IW_IS_GET(cmd) && !(descr->flags & IW_DESCR_FLAG_NOMAX)) {
++		/*
++		 * If this is a GET, but not NOMAX, it means that the extra
++		 * data is not bounded by userspace, but by max_tokens. Thus
++		 * set the length to max_tokens. This matches the extra data
++		 * allocation.
++		 * The driver should fill it with the number of tokens it
++		 * provided, and it may check iwp->length rather than having
++		 * knowledge of max_tokens. If the driver doesn't change the
++		 * iwp->length, this ioctl just copies back max_token tokens
++		 * filled with zeroes. Hopefully the driver isn't claiming
++		 * them to be valid data.
++		 */
++		iwp->length = descr->max_tokens;
++	}
++
+ 	err = handler(dev, info, (union iwreq_data *) iwp, extra);
+ 
+ 	iwp->length += essid_compat;
