@@ -1,0 +1,88 @@
+From 960bb81153ec66609799b8f1c072b9266629e765 Mon Sep 17 00:00:00 2001
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Mon, 20 Sep 2010 23:07:08 +0100
+Subject: [PATCH] Revert "sched: Pre-compute cpumask_weight(sched_domain_span(sd))"
+
+This reverts commit 6efd9bbce0d4b02d295f28054caa74e6edf811b7
+which is an ABI breaker.
+---
+ include/linux/sched.h |    1 -
+ kernel/sched.c        |    7 ++-----
+ kernel/sched_fair.c   |    8 +++++---
+ 3 files changed, 7 insertions(+), 9 deletions(-)
+
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index 2246de3..682d6d4 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -1003,7 +1003,6 @@ struct sched_domain {
+ 	char *name;
+ #endif
+ 
+-	unsigned int span_weight;
+ 	/*
+ 	 * Span of all CPUs in this domain.
+ 	 *
+diff --git a/kernel/sched.c b/kernel/sched.c
+index 152214d..98d4048 100644
+--- a/kernel/sched.c
++++ b/kernel/sched.c
+@@ -3678,7 +3678,7 @@ unsigned long __weak arch_scale_freq_power(struct sched_domain *sd, int cpu)
+ 
+ unsigned long default_scale_smt_power(struct sched_domain *sd, int cpu)
+ {
+-	unsigned long weight = sd->span_weight;
++	unsigned long weight = cpumask_weight(sched_domain_span(sd));
+ 	unsigned long smt_gain = sd->smt_gain;
+ 
+ 	smt_gain /= weight;
+@@ -3711,7 +3711,7 @@ unsigned long scale_rt_power(int cpu)
+ 
+ static void update_cpu_power(struct sched_domain *sd, int cpu)
+ {
+-	unsigned long weight = sd->span_weight;
++	unsigned long weight = cpumask_weight(sched_domain_span(sd));
+ 	unsigned long power = SCHED_LOAD_SCALE;
+ 	struct sched_group *sdg = sd->groups;
+ 
+@@ -8166,9 +8166,6 @@ cpu_attach_domain(struct sched_domain *sd, struct root_domain *rd, int cpu)
+ 	struct rq *rq = cpu_rq(cpu);
+ 	struct sched_domain *tmp;
+ 
+-	for (tmp = sd; tmp; tmp = tmp->parent)
+-		tmp->span_weight = cpumask_weight(sched_domain_span(tmp));
+-
+ 	/* Remove the sched domains which do not contribute to scheduling. */
+ 	for (tmp = sd; tmp; ) {
+ 		struct sched_domain *parent = tmp->parent;
+diff --git a/kernel/sched_fair.c b/kernel/sched_fair.c
+index 01e311e..623b876 100644
+--- a/kernel/sched_fair.c
++++ b/kernel/sched_fair.c
+@@ -1516,7 +1516,9 @@ select_task_rq_fair(struct rq *rq, struct task_struct *p, int sd_flag, int wake_
+ 		 * Pick the largest domain to update shares over
+ 		 */
+ 		tmp = sd;
+-		if (affine_sd && (!tmp || affine_sd->span_weight > sd->span_weight))
++		if (affine_sd && (!tmp ||
++				  cpumask_weight(sched_domain_span(affine_sd)) >
++				  cpumask_weight(sched_domain_span(sd))))
+ 			tmp = affine_sd;
+ 
+ 		if (tmp) {
+@@ -1562,10 +1564,10 @@ select_task_rq_fair(struct rq *rq, struct task_struct *p, int sd_flag, int wake_
+ 
+ 		/* Now try balancing at a lower domain level of new_cpu */
+ 		cpu = new_cpu;
+-		weight = sd->span_weight;
++		weight = cpumask_weight(sched_domain_span(sd));
+ 		sd = NULL;
+ 		for_each_domain(cpu, tmp) {
+-			if (weight <= tmp->span_weight)
++			if (weight <= cpumask_weight(sched_domain_span(tmp)))
+ 				break;
+ 			if (tmp->flags & sd_flag)
+ 				sd = tmp;
+-- 
+1.7.1
+
