@@ -1,4 +1,6 @@
 bwh: Adjust context in fs/ext4/ext4.h, fs/btrfs/super.h, kernel/sched.c
+bwh: Update patch to ext4_get_inode_flags() following
+     "ext4: Fix remaining racy updates of EXT4_I(inode)->i_flags" in 2.6.32.23
 
 diff -NurpP --minimal linux-2.6.32.1/arch/alpha/Kconfig linux-2.6.32.1-vs2.3.0.36.27/arch/alpha/Kconfig
 --- linux-2.6.32.1/arch/alpha/Kconfig	2009-12-03 20:01:49.000000000 +0100
@@ -3493,7 +3495,7 @@ diff -NurpP --minimal linux-2.6.32.1/fs/ext4/inode.c linux-2.6.32.1-vs2.3.0.36.2
  		return 0;
  	if (S_ISREG(inode->i_mode))
  		return 1;
-@@ -4735,36 +4736,60 @@ void ext4_set_inode_flags(struct inode *
+@@ -4735,41 +4736,62 @@ void ext4_set_inode_flags(struct inode *
  {
  	unsigned int flags = EXT4_I(inode)->i_flags;
  
@@ -3528,39 +3530,38 @@ diff -NurpP --minimal linux-2.6.32.1/fs/ext4/inode.c linux-2.6.32.1-vs2.3.0.36.2
  /* Propagate flags from i_flags to EXT4_I(inode)->i_flags */
  void ext4_get_inode_flags(struct ext4_inode_info *ei)
  {
- 	unsigned int flags = ei->vfs_inode.i_flags;
-+	unsigned int vflags = ei->vfs_inode.i_vflags;
-+
-+	ei->i_flags &= ~(EXT4_SYNC_FL | EXT4_APPEND_FL |
-+			EXT4_IMMUTABLE_FL | EXT4_IXUNLINK_FL |
-+			EXT4_NOATIME_FL | EXT4_DIRSYNC_FL |
-+			EXT4_BARRIER_FL | EXT4_COW_FL);
-+
-+	if (flags & S_IMMUTABLE)
-+		ei->i_flags |= EXT4_IMMUTABLE_FL;
-+	if (flags & S_IXUNLINK)
-+		ei->i_flags |= EXT4_IXUNLINK_FL;
+ 	unsigned int vfs_fl;
++	unsigned int vflags;
+ 	unsigned long old_fl, new_fl;
  
--	ei->i_flags &= ~(EXT4_SYNC_FL|EXT4_APPEND_FL|
--			EXT4_IMMUTABLE_FL|EXT4_NOATIME_FL|EXT4_DIRSYNC_FL);
- 	if (flags & S_SYNC)
- 		ei->i_flags |= EXT4_SYNC_FL;
- 	if (flags & S_APPEND)
- 		ei->i_flags |= EXT4_APPEND_FL;
--	if (flags & S_IMMUTABLE)
--		ei->i_flags |= EXT4_IMMUTABLE_FL;
- 	if (flags & S_NOATIME)
- 		ei->i_flags |= EXT4_NOATIME_FL;
- 	if (flags & S_DIRSYNC)
- 		ei->i_flags |= EXT4_DIRSYNC_FL;
-+
-+	if (vflags & V_BARRIER)
-+		ei->i_flags |= EXT4_BARRIER_FL;
-+	if (vflags & V_COW)
-+		ei->i_flags |= EXT4_COW_FL;
+ 	do {
+ 		vfs_fl = ei->vfs_inode.i_flags;
++		vflags = ei->vfs_node.i_vflags;
+ 		old_fl = ei->i_flags;
+ 		new_fl = old_fl & ~(EXT4_SYNC_FL|EXT4_APPEND_FL|
+ 				EXT4_IMMUTABLE_FL|EXT4_NOATIME_FL|
+-				EXT4_DIRSYNC_FL);
++				EXT4_DIRSYNC_FL | EXT4_IXUNLINK_FL |
++				EXT4_BARRIER_FL | EXT4_COW_FL);
+ 		if (vfs_fl & S_SYNC)
+ 			new_fl |= EXT4_SYNC_FL;
+ 		if (vfs_fl & S_APPEND)
+ 			new_fl |= EXT4_APPEND_FL;
+ 		if (vfs_fl & S_IMMUTABLE)
+ 			new_fl |= EXT4_IMMUTABLE_FL;
+ 		if (vfs_fl & S_NOATIME)
+ 			new_fl |= EXT4_NOATIME_FL;
+ 		if (vfs_fl & S_DIRSYNC)
+ 			new_fl |= EXT4_DIRSYNC_FL;
++		if (vfs_fl & S_IXUNLINK)
++			new_fl |= EXT4_IXUNLINK_FL;
++		if (vflags & V_BARRIER)
++			new_fl |= EXT4_BARRIER_FL;
++		if (vflags & V_COW)
++			new_fl |= EXT4_COW_FL;
+ 	} while (cmpxchg(&ei->i_flags, old_fl, new_fl) != old_fl);
  }
  
- static blkcnt_t ext4_inode_blocks(struct ext4_inode *raw_inode,
 @@ -4799,6 +4824,8 @@ struct inode *ext4_iget(struct super_blo
  	journal_t *journal = EXT4_SB(sb)->s_journal;
  	long ret;
