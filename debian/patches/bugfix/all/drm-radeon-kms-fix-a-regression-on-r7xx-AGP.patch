@@ -1,0 +1,142 @@
+From: Alex Deucher <alexdeucher@gmail.com>
+Date: Fri, 27 Aug 2010 13:59:54 -0400
+Subject: [PATCH] drm/radeon/kms: fix a regression on r7xx AGP due to the HDP flush fix
+
+commit 87cbf8f2c5d1b1fc4642c3dc0bb6efc587479603 upstream.
+
+commit: 812d046915f48236657f02c06d7dc47140e9ceda
+drm/radeon/kms/r7xx: add workaround for hw issue with HDP flush
+breaks on AGP boards since there is no VRAM gart table.
+
+This patch fixes the issue by creating a VRAM scratch page so that
+can be used on both AGP and PCIE.
+
+Fixes:
+https://bugs.freedesktop.org/show_bug.cgi?id=29834
+
+Signed-off-by: Alex Deucher <alexdeucher@gmail.com>
+Cc: stable@kernel.org
+Signed-off-by: Dave Airlie <airlied@redhat.com>
+---
+ drivers/gpu/drm/radeon/r600.c   |    2 +-
+ drivers/gpu/drm/radeon/radeon.h |    6 ++++
+ drivers/gpu/drm/radeon/rv770.c  |   52 +++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 59 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/gpu/drm/radeon/r600.c b/drivers/gpu/drm/radeon/r600.c
+index d0ebae9..aee8376 100644
+--- a/drivers/gpu/drm/radeon/r600.c
++++ b/drivers/gpu/drm/radeon/r600.c
+@@ -3541,7 +3541,7 @@ void r600_ioctl_wait_idle(struct radeon_device *rdev, struct radeon_bo *bo)
+ 	 * rather than write to HDP_REG_COHERENCY_FLUSH_CNTL
+ 	 */
+ 	if ((rdev->family >= CHIP_RV770) && (rdev->family <= CHIP_RV740)) {
+-		void __iomem *ptr = (void *)rdev->gart.table.vram.ptr;
++		void __iomem *ptr = (void *)rdev->vram_scratch.ptr;
+ 		u32 tmp;
+ 
+ 		WREG32(HDP_DEBUG1, 0);
+diff --git a/drivers/gpu/drm/radeon/radeon.h b/drivers/gpu/drm/radeon/radeon.h
+index 3dfcfa3..e90d9e3 100644
+--- a/drivers/gpu/drm/radeon/radeon.h
++++ b/drivers/gpu/drm/radeon/radeon.h
+@@ -1013,6 +1013,11 @@ int radeon_gem_set_tiling_ioctl(struct drm_device *dev, void *data,
+ int radeon_gem_get_tiling_ioctl(struct drm_device *dev, void *data,
+ 				struct drm_file *filp);
+ 
++/* VRAM scratch page for HDP bug */
++struct r700_vram_scratch {
++	struct radeon_bo		*robj;
++	volatile uint32_t		*ptr;
++};
+ 
+ /*
+  * Core structure, functions and helpers.
+@@ -1079,6 +1084,7 @@ struct radeon_device {
+ 	const struct firmware *pfp_fw;	/* r6/700 PFP firmware */
+ 	const struct firmware *rlc_fw;	/* r6/700 RLC firmware */
+ 	struct r600_blit r600_blit;
++	struct r700_vram_scratch vram_scratch;
+ 	int msi_enabled; /* msi enabled */
+ 	struct r600_ih ih; /* r6/700 interrupt ring */
+ 	struct workqueue_struct *wq;
+diff --git a/drivers/gpu/drm/radeon/rv770.c b/drivers/gpu/drm/radeon/rv770.c
+index f1c7968..a84e386 100644
+--- a/drivers/gpu/drm/radeon/rv770.c
++++ b/drivers/gpu/drm/radeon/rv770.c
+@@ -905,6 +905,54 @@ static void rv770_gpu_init(struct radeon_device *rdev)
+ 
+ }
+ 
++static int rv770_vram_scratch_init(struct radeon_device *rdev)
++{
++	int r;
++	u64 gpu_addr;
++
++	if (rdev->vram_scratch.robj == NULL) {
++		r = radeon_bo_create(rdev, NULL, RADEON_GPU_PAGE_SIZE,
++					true, RADEON_GEM_DOMAIN_VRAM,
++					&rdev->vram_scratch.robj);
++		if (r) {
++			return r;
++		}
++	}
++
++	r = radeon_bo_reserve(rdev->vram_scratch.robj, false);
++	if (unlikely(r != 0))
++		return r;
++	r = radeon_bo_pin(rdev->vram_scratch.robj,
++			  RADEON_GEM_DOMAIN_VRAM, &gpu_addr);
++	if (r) {
++		radeon_bo_unreserve(rdev->vram_scratch.robj);
++		return r;
++	}
++	r = radeon_bo_kmap(rdev->vram_scratch.robj,
++				(void **)&rdev->vram_scratch.ptr);
++	if (r)
++		radeon_bo_unpin(rdev->vram_scratch.robj);
++	radeon_bo_unreserve(rdev->vram_scratch.robj);
++
++	return r;
++}
++
++static void rv770_vram_scratch_fini(struct radeon_device *rdev)
++{
++	int r;
++
++	if (rdev->vram_scratch.robj == NULL) {
++		return;
++	}
++	r = radeon_bo_reserve(rdev->vram_scratch.robj, false);
++	if (likely(r == 0)) {
++		radeon_bo_kunmap(rdev->vram_scratch.robj);
++		radeon_bo_unpin(rdev->vram_scratch.robj);
++		radeon_bo_unreserve(rdev->vram_scratch.robj);
++	}
++	radeon_bo_unref(&rdev->vram_scratch.robj);
++}
++
+ int rv770_mc_init(struct radeon_device *rdev)
+ {
+ 	u32 tmp;
+@@ -970,6 +1018,9 @@ static int rv770_startup(struct radeon_device *rdev)
+ 		if (r)
+ 			return r;
+ 	}
++	r = rv770_vram_scratch_init(rdev);
++	if (r)
++		return r;
+ 	rv770_gpu_init(rdev);
+ 	r = r600_blit_init(rdev);
+ 	if (r) {
+@@ -1195,6 +1246,7 @@ void rv770_fini(struct radeon_device *rdev)
+ 	r600_irq_fini(rdev);
+ 	radeon_irq_kms_fini(rdev);
+ 	rv770_pcie_gart_fini(rdev);
++	rv770_vram_scratch_fini(rdev);
+ 	radeon_gem_fini(rdev);
+ 	radeon_fence_driver_fini(rdev);
+ 	radeon_clocks_fini(rdev);
+-- 
+1.7.1
+
