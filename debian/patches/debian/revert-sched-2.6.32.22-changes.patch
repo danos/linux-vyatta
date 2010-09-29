@@ -4,11 +4,12 @@ Revert all changes between 2.6.32.21 and 2.6.32.22 in the files:
 
 kernel/sched*.c
 kernel/cpu.c
+kernel/cpuset.c
 include/linux/cpuset.h
 include/linux/sched.h
 include/linux/topology.h
 
-This is a temporary measure for OpenVZ and VServer until they are
+This is a temporary measure for VServer until it is
 rebased on top of 2.6.32.22.
 
 diff --git a/include/linux/cpuset.h b/include/linux/cpuset.h
@@ -340,6 +341,97 @@ index 7e8b6ac..291ac58 100644
  	printk("Disabling non-boot CPUs ...\n");
  	for_each_online_cpu(cpu) {
  		if (cpu == first_cpu)
+diff --git a/kernel/cpuset.c b/kernel/cpuset.c
+index b120fd0..a81a910 100644
+--- a/kernel/cpuset.c
++++ b/kernel/cpuset.c
+@@ -2145,52 +2145,19 @@ void __init cpuset_init_smp(void)
+ void cpuset_cpus_allowed(struct task_struct *tsk, struct cpumask *pmask)
+ {
+ 	mutex_lock(&callback_mutex);
+-	task_lock(tsk);
+-	guarantee_online_cpus(task_cs(tsk), pmask);
+-	task_unlock(tsk);
++	cpuset_cpus_allowed_locked(tsk, pmask);
+ 	mutex_unlock(&callback_mutex);
+ }
+ 
+-int cpuset_cpus_allowed_fallback(struct task_struct *tsk)
++/**
++ * cpuset_cpus_allowed_locked - return cpus_allowed mask from a tasks cpuset.
++ * Must be called with callback_mutex held.
++ **/
++void cpuset_cpus_allowed_locked(struct task_struct *tsk, struct cpumask *pmask)
+ {
+-	const struct cpuset *cs;
+-	int cpu;
+-
+-	rcu_read_lock();
+-	cs = task_cs(tsk);
+-	if (cs)
+-		cpumask_copy(&tsk->cpus_allowed, cs->cpus_allowed);
+-	rcu_read_unlock();
+-
+-	/*
+-	 * We own tsk->cpus_allowed, nobody can change it under us.
+-	 *
+-	 * But we used cs && cs->cpus_allowed lockless and thus can
+-	 * race with cgroup_attach_task() or update_cpumask() and get
+-	 * the wrong tsk->cpus_allowed. However, both cases imply the
+-	 * subsequent cpuset_change_cpumask()->set_cpus_allowed_ptr()
+-	 * which takes task_rq_lock().
+-	 *
+-	 * If we are called after it dropped the lock we must see all
+-	 * changes in tsk_cs()->cpus_allowed. Otherwise we can temporary
+-	 * set any mask even if it is not right from task_cs() pov,
+-	 * the pending set_cpus_allowed_ptr() will fix things.
+-	 */
+-
+-	cpu = cpumask_any_and(&tsk->cpus_allowed, cpu_active_mask);
+-	if (cpu >= nr_cpu_ids) {
+-		/*
+-		 * Either tsk->cpus_allowed is wrong (see above) or it
+-		 * is actually empty. The latter case is only possible
+-		 * if we are racing with remove_tasks_in_empty_cpuset().
+-		 * Like above we can temporary set any mask and rely on
+-		 * set_cpus_allowed_ptr() as synchronization point.
+-		 */
+-		cpumask_copy(&tsk->cpus_allowed, cpu_possible_mask);
+-		cpu = cpumask_any(cpu_active_mask);
+-	}
+-
+-	return cpu;
++	task_lock(tsk);
++	guarantee_online_cpus(task_cs(tsk), pmask);
++	task_unlock(tsk);
+ }
+ 
+ void cpuset_init_current_mems_allowed(void)
+@@ -2379,6 +2346,22 @@ int __cpuset_node_allowed_hardwall(int node, gfp_t gfp_mask)
+ }
+ 
+ /**
++ * cpuset_lock - lock out any changes to cpuset structures
++ *
++ * The out of memory (oom) code needs to mutex_lock cpusets
++ * from being changed while it scans the tasklist looking for a
++ * task in an overlapping cpuset.  Expose callback_mutex via this
++ * cpuset_lock() routine, so the oom code can lock it, before
++ * locking the task list.  The tasklist_lock is a spinlock, so
++ * must be taken inside callback_mutex.
++ */
++
++void cpuset_lock(void)
++{
++	mutex_lock(&callback_mutex);
++}
++
++/**
+  * cpuset_unlock - release lock on cpuset changes
+  *
+  * Undo the lock taken in a previous cpuset_lock() call.
+diff --git a/kernel/sched.c b/kernel/sched.c
+index 89a30de..9990074 100644
 --- a/kernel/sched.c
 +++ b/kernel/sched.c
 @@ -542,9 +542,7 @@ struct rq {
@@ -352,7 +444,7 @@ index 7e8b6ac..291ac58 100644
  
  	struct cfs_rq cfs;
  	struct rt_rq rt;
-@@ -942,25 +943,14 @@ static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
+@@ -945,25 +943,14 @@ static inline void finish_lock_switch(struct rq *rq, struct task_struct *prev)
  #endif /* __ARCH_WANT_UNLOCKED_CTXSW */
  
  /*
@@ -379,7 +471,7 @@ index 7e8b6ac..291ac58 100644
  		spin_lock(&rq->lock);
  		if (likely(rq == task_rq(p)))
  			return rq;
-@@ -1832,20 +1822,6 @@ static void cfs_rq_set_shares(struct cfs_rq *cfs_rq, unsigned long shares)
+@@ -1835,20 +1822,6 @@ static void cfs_rq_set_shares(struct cfs_rq *cfs_rq, unsigned long shares)
  static void calc_load_account_active(struct rq *this_rq);
  static void update_sysctl(void);
  
@@ -400,7 +492,7 @@ index 7e8b6ac..291ac58 100644
  #include "sched_stats.h"
  #include "sched_idletask.c"
  #include "sched_fair.c"
-@@ -1895,14 +1871,13 @@ static void update_avg(u64 *avg, u64 sample)
+@@ -1898,14 +1871,13 @@ static void update_avg(u64 *avg, u64 sample)
  	*avg += diff >> 3;
  }
  
@@ -417,7 +509,7 @@ index 7e8b6ac..291ac58 100644
  	p->se.on_rq = 1;
  }
  
-@@ -1978,7 +1953,7 @@ static void activate_task(struct rq *rq, struct task_struct *p, int wakeup)
+@@ -1981,7 +1953,7 @@ static void activate_task(struct rq *rq, struct task_struct *p, int wakeup)
  	if (task_contributes_to_load(p))
  		rq->nr_uninterruptible--;
  
@@ -426,7 +518,7 @@ index 7e8b6ac..291ac58 100644
  	inc_nr_running(rq);
  }
  
-@@ -2003,6 +1978,20 @@ inline int task_curr(const struct task_struct *p)
+@@ -2006,6 +1978,20 @@ inline int task_curr(const struct task_struct *p)
  	return cpu_curr(task_cpu(p)) == p;
  }
  
@@ -447,7 +539,7 @@ index 7e8b6ac..291ac58 100644
  static inline void check_class_changed(struct rq *rq, struct task_struct *p,
  				       const struct sched_class *prev_class,
  				       int oldprio, int running)
-@@ -2029,15 +2018,21 @@ static inline void check_class_changed(struct rq *rq, struct task_struct *p,
+@@ -2032,15 +2018,21 @@ static inline void check_class_changed(struct rq *rq, struct task_struct *p,
   */
  void kthread_bind(struct task_struct *p, unsigned int cpu)
  {
@@ -469,7 +561,7 @@ index 7e8b6ac..291ac58 100644
  }
  EXPORT_SYMBOL(kthread_bind);
  
-@@ -2075,23 +2070,35 @@ task_hot(struct task_struct *p, u64 now, struct sched_domain *sd)
+@@ -2078,23 +2070,35 @@ task_hot(struct task_struct *p, u64 now, struct sched_domain *sd)
  void set_task_cpu(struct task_struct *p, unsigned int new_cpu)
  {
  	int old_cpu = task_cpu(p);
@@ -513,7 +605,7 @@ index 7e8b6ac..291ac58 100644
  
  	__set_task_cpu(p, new_cpu);
  }
-@@ -2324,69 +2331,6 @@ void task_oncpu_function_call(struct task_struct *p,
+@@ -2327,69 +2331,6 @@ void task_oncpu_function_call(struct task_struct *p,
  	preempt_enable();
  }
  
@@ -583,7 +675,7 @@ index 7e8b6ac..291ac58 100644
  /***
   * try_to_wake_up - wake up a thread
   * @p: the to-be-woken-up thread
-@@ -2435,34 +2379,22 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
+@@ -2438,34 +2379,22 @@ static int try_to_wake_up(struct task_struct *p, unsigned int state,
  	 *
  	 * First fix up the nr_uninterruptible count:
  	 */
@@ -627,7 +719,7 @@ index 7e8b6ac..291ac58 100644
  
  #ifdef CONFIG_SCHEDSTATS
  	schedstat_inc(rq, ttwu_count);
-@@ -2515,8 +2447,8 @@ out_running:
+@@ -2518,8 +2447,8 @@ out_running:
  
  	p->state = TASK_RUNNING;
  #ifdef CONFIG_SMP
@@ -638,7 +730,7 @@ index 7e8b6ac..291ac58 100644
  
  	if (unlikely(rq->idle_stamp)) {
  		u64 delta = rq->clock - rq->idle_stamp;
-@@ -2596,6 +2528,7 @@ static void __sched_fork(struct task_struct *p)
+@@ -2599,6 +2528,7 @@ static void __sched_fork(struct task_struct *p)
  	p->se.nr_failed_migrations_running	= 0;
  	p->se.nr_failed_migrations_hot		= 0;
  	p->se.nr_forced_migrations		= 0;
@@ -646,7 +738,7 @@ index 7e8b6ac..291ac58 100644
  
  	p->se.nr_wakeups			= 0;
  	p->se.nr_wakeups_sync			= 0;
-@@ -2616,6 +2549,14 @@ static void __sched_fork(struct task_struct *p)
+@@ -2619,6 +2549,14 @@ static void __sched_fork(struct task_struct *p)
  #ifdef CONFIG_PREEMPT_NOTIFIERS
  	INIT_HLIST_HEAD(&p->preempt_notifiers);
  #endif
@@ -661,7 +753,7 @@ index 7e8b6ac..291ac58 100644
  }
  
  /*
-@@ -2626,12 +2567,6 @@ void sched_fork(struct task_struct *p, int clone_flags)
+@@ -2629,12 +2567,6 @@ void sched_fork(struct task_struct *p, int clone_flags)
  	int cpu = get_cpu();
  
  	__sched_fork(p);
@@ -674,7 +766,7 @@ index 7e8b6ac..291ac58 100644
  
  	/*
  	 * Revert to default priority/policy on fork if requested.
-@@ -2663,9 +2598,9 @@ void sched_fork(struct task_struct *p, int clone_flags)
+@@ -2666,9 +2598,9 @@ void sched_fork(struct task_struct *p, int clone_flags)
  	if (!rt_prio(p->prio))
  		p->sched_class = &fair_sched_class;
  
@@ -687,7 +779,7 @@ index 7e8b6ac..291ac58 100644
  	set_task_cpu(p, cpu);
  
  #if defined(CONFIG_SCHEDSTATS) || defined(CONFIG_TASK_DELAY_ACCT)
-@@ -2695,38 +2630,28 @@ void wake_up_new_task(struct task_struct *p, unsigned long clone_flags)
+@@ -2698,38 +2630,28 @@ void wake_up_new_task(struct task_struct *p, unsigned long clone_flags)
  {
  	unsigned long flags;
  	struct rq *rq;
@@ -740,7 +832,7 @@ index 7e8b6ac..291ac58 100644
  }
  
  #ifdef CONFIG_PREEMPT_NOTIFIERS
-@@ -3113,6 +3038,15 @@ static void calc_load_account_active(struct rq *this_rq)
+@@ -3116,6 +3038,15 @@ static void calc_load_account_active(struct rq *this_rq)
  }
  
  /*
@@ -756,7 +848,7 @@ index 7e8b6ac..291ac58 100644
   * Update rq->cpu_load[] statistics. This function is usually called every
   * scheduler tick (TICK_NSEC).
   */
-@@ -3194,28 +3128,24 @@ static void double_rq_unlock(struct rq *rq1, struct rq *rq2)
+@@ -3197,28 +3128,24 @@ static void double_rq_unlock(struct rq *rq1, struct rq *rq2)
  }
  
  /*
@@ -795,7 +887,7 @@ index 7e8b6ac..291ac58 100644
  		/* Need to wait for migration thread (might exit: take ref). */
  		struct task_struct *mt = rq->migration_thread;
  
-@@ -3227,11 +3157,24 @@ void sched_exec(void)
+@@ -3230,11 +3157,24 @@ void sched_exec(void)
  
  		return;
  	}
@@ -821,7 +913,7 @@ index 7e8b6ac..291ac58 100644
   * pull_task - move a task from a remote runqueue to the local runqueue.
   * Both runqueues must be locked.
   */
-@@ -6031,15 +5974,14 @@ EXPORT_SYMBOL(wait_for_completion_killable);
+@@ -6034,15 +5974,14 @@ EXPORT_SYMBOL(wait_for_completion_killable);
   */
  bool try_wait_for_completion(struct completion *x)
  {
@@ -839,7 +931,7 @@ index 7e8b6ac..291ac58 100644
  	return ret;
  }
  EXPORT_SYMBOL(try_wait_for_completion);
-@@ -6054,13 +5996,12 @@ EXPORT_SYMBOL(try_wait_for_completion);
+@@ -6057,13 +5996,12 @@ EXPORT_SYMBOL(try_wait_for_completion);
   */
  bool completion_done(struct completion *x)
  {
@@ -855,7 +947,7 @@ index 7e8b6ac..291ac58 100644
  	return ret;
  }
  EXPORT_SYMBOL(completion_done);
-@@ -6154,7 +6095,7 @@ void rt_mutex_setprio(struct task_struct *p, int prio)
+@@ -6157,7 +6095,7 @@ void rt_mutex_setprio(struct task_struct *p, int prio)
  	if (running)
  		p->sched_class->set_curr_task(rq);
  	if (on_rq) {
@@ -864,7 +956,7 @@ index 7e8b6ac..291ac58 100644
  
  		check_class_changed(rq, p, prev_class, oldprio, running);
  	}
-@@ -6198,7 +6139,7 @@ void set_user_nice(struct task_struct *p, long nice)
+@@ -6201,7 +6139,7 @@ void set_user_nice(struct task_struct *p, long nice)
  	delta = p->prio - old_prio;
  
  	if (on_rq) {
@@ -873,7 +965,7 @@ index 7e8b6ac..291ac58 100644
  		/*
  		 * If the task increased its priority or is running and
  		 * lowered its priority, then reschedule its CPU:
-@@ -6589,7 +6530,7 @@ SYSCALL_DEFINE1(sched_getscheduler, pid_t, pid)
+@@ -6592,7 +6530,7 @@ SYSCALL_DEFINE1(sched_getscheduler, pid_t, pid)
  		return -EINVAL;
  
  	retval = -ESRCH;
@@ -882,7 +974,7 @@ index 7e8b6ac..291ac58 100644
  	p = find_process_by_pid(pid);
  	if (p) {
  		retval = security_task_getscheduler(p);
-@@ -6597,7 +6538,7 @@ SYSCALL_DEFINE1(sched_getscheduler, pid_t, pid)
+@@ -6600,7 +6538,7 @@ SYSCALL_DEFINE1(sched_getscheduler, pid_t, pid)
  			retval = p->policy
  				| (p->sched_reset_on_fork ? SCHED_RESET_ON_FORK : 0);
  	}
@@ -891,7 +983,7 @@ index 7e8b6ac..291ac58 100644
  	return retval;
  }
  
-@@ -6615,7 +6556,7 @@ SYSCALL_DEFINE2(sched_getparam, pid_t, pid, struct sched_param __user *, param)
+@@ -6618,7 +6556,7 @@ SYSCALL_DEFINE2(sched_getparam, pid_t, pid, struct sched_param __user *, param)
  	if (!param || pid < 0)
  		return -EINVAL;
  
@@ -900,7 +992,7 @@ index 7e8b6ac..291ac58 100644
  	p = find_process_by_pid(pid);
  	retval = -ESRCH;
  	if (!p)
-@@ -6626,7 +6567,7 @@ SYSCALL_DEFINE2(sched_getparam, pid_t, pid, struct sched_param __user *, param)
+@@ -6629,7 +6567,7 @@ SYSCALL_DEFINE2(sched_getparam, pid_t, pid, struct sched_param __user *, param)
  		goto out_unlock;
  
  	lp.sched_priority = p->rt_priority;
@@ -909,7 +1001,7 @@ index 7e8b6ac..291ac58 100644
  
  	/*
  	 * This one might sleep, we cannot do it with a spinlock held ...
-@@ -6636,7 +6577,7 @@ SYSCALL_DEFINE2(sched_getparam, pid_t, pid, struct sched_param __user *, param)
+@@ -6639,7 +6577,7 @@ SYSCALL_DEFINE2(sched_getparam, pid_t, pid, struct sched_param __user *, param)
  	return retval;
  
  out_unlock:
@@ -918,7 +1010,7 @@ index 7e8b6ac..291ac58 100644
  	return retval;
  }
  
-@@ -6647,18 +6588,22 @@ long sched_setaffinity(pid_t pid, const struct cpumask *in_mask)
+@@ -6650,18 +6588,22 @@ long sched_setaffinity(pid_t pid, const struct cpumask *in_mask)
  	int retval;
  
  	get_online_cpus();
@@ -945,7 +1037,7 @@ index 7e8b6ac..291ac58 100644
  
  	if (!alloc_cpumask_var(&cpus_allowed, GFP_KERNEL)) {
  		retval = -ENOMEM;
-@@ -6739,12 +6684,10 @@ SYSCALL_DEFINE3(sched_setaffinity, pid_t, pid, unsigned int, len,
+@@ -6742,12 +6684,10 @@ SYSCALL_DEFINE3(sched_setaffinity, pid_t, pid, unsigned int, len,
  long sched_getaffinity(pid_t pid, struct cpumask *mask)
  {
  	struct task_struct *p;
@@ -959,7 +1051,7 @@ index 7e8b6ac..291ac58 100644
  
  	retval = -ESRCH;
  	p = find_process_by_pid(pid);
-@@ -6755,12 +6698,10 @@ long sched_getaffinity(pid_t pid, struct cpumask *mask)
+@@ -6758,12 +6698,10 @@ long sched_getaffinity(pid_t pid, struct cpumask *mask)
  	if (retval)
  		goto out_unlock;
  
@@ -973,7 +1065,7 @@ index 7e8b6ac..291ac58 100644
  	put_online_cpus();
  
  	return retval;
-@@ -6999,8 +6940,6 @@ SYSCALL_DEFINE2(sched_rr_get_interval, pid_t, pid,
+@@ -7002,8 +6940,6 @@ SYSCALL_DEFINE2(sched_rr_get_interval, pid_t, pid,
  {
  	struct task_struct *p;
  	unsigned int time_slice;
@@ -982,7 +1074,7 @@ index 7e8b6ac..291ac58 100644
  	int retval;
  	struct timespec t;
  
-@@ -7008,7 +6947,7 @@ SYSCALL_DEFINE2(sched_rr_get_interval, pid_t, pid,
+@@ -7011,7 +6947,7 @@ SYSCALL_DEFINE2(sched_rr_get_interval, pid_t, pid,
  		return -EINVAL;
  
  	retval = -ESRCH;
@@ -991,7 +1083,7 @@ index 7e8b6ac..291ac58 100644
  	p = find_process_by_pid(pid);
  	if (!p)
  		goto out_unlock;
-@@ -7017,17 +6956,15 @@ SYSCALL_DEFINE2(sched_rr_get_interval, pid_t, pid,
+@@ -7020,17 +6956,15 @@ SYSCALL_DEFINE2(sched_rr_get_interval, pid_t, pid,
  	if (retval)
  		goto out_unlock;
  
@@ -1012,7 +1104,7 @@ index 7e8b6ac..291ac58 100644
  	return retval;
  }
  
-@@ -7118,7 +7055,6 @@ void __cpuinit init_idle(struct task_struct *idle, int cpu)
+@@ -7121,7 +7055,6 @@ void __cpuinit init_idle(struct task_struct *idle, int cpu)
  	spin_lock_irqsave(&rq->lock, flags);
  
  	__sched_fork(idle);
@@ -1020,7 +1112,7 @@ index 7e8b6ac..291ac58 100644
  	idle->se.exec_start = sched_clock();
  
  	cpumask_copy(&idle->cpus_allowed, cpumask_of(cpu));
-@@ -7213,19 +7149,7 @@ int set_cpus_allowed_ptr(struct task_struct *p, const struct cpumask *new_mask)
+@@ -7216,19 +7149,7 @@ int set_cpus_allowed_ptr(struct task_struct *p, const struct cpumask *new_mask)
  	struct rq *rq;
  	int ret = 0;
  
@@ -1040,7 +1132,7 @@ index 7e8b6ac..291ac58 100644
  	if (!cpumask_intersects(new_mask, cpu_active_mask)) {
  		ret = -EINVAL;
  		goto out;
-@@ -7254,7 +7178,7 @@ again:
+@@ -7257,7 +7178,7 @@ again:
  
  		get_task_struct(mt);
  		task_rq_unlock(rq, &flags);
@@ -1049,7 +1141,7 @@ index 7e8b6ac..291ac58 100644
  		put_task_struct(mt);
  		wait_for_completion(&req.done);
  		tlb_migrate_finish(p->mm);
-@@ -7281,7 +7205,7 @@ EXPORT_SYMBOL_GPL(set_cpus_allowed_ptr);
+@@ -7284,7 +7205,7 @@ EXPORT_SYMBOL_GPL(set_cpus_allowed_ptr);
  static int __migrate_task(struct task_struct *p, int src_cpu, int dest_cpu)
  {
  	struct rq *rq_dest, *rq_src;
@@ -1058,7 +1150,7 @@ index 7e8b6ac..291ac58 100644
  
  	if (unlikely(!cpu_active(dest_cpu)))
  		return ret;
-@@ -7293,17 +7217,19 @@ static int __migrate_task(struct task_struct *p, int src_cpu, int dest_cpu)
+@@ -7296,17 +7217,19 @@ static int __migrate_task(struct task_struct *p, int src_cpu, int dest_cpu)
  	/* Already moved. */
  	if (task_cpu(p) != src_cpu)
  		goto done;
@@ -1084,7 +1176,7 @@ index 7e8b6ac..291ac58 100644
  		activate_task(rq_dest, p, 0);
  		check_preempt_curr(rq_dest, p, 0);
  	}
-@@ -7382,29 +7308,57 @@ static int migration_thread(void *data)
+@@ -7385,29 +7308,57 @@ static int migration_thread(void *data)
  }
  
  #ifdef CONFIG_HOTPLUG_CPU
@@ -1159,7 +1251,7 @@ index 7e8b6ac..291ac58 100644
  }
  
  /*
-@@ -7798,23 +7752,14 @@ migration_call(struct notifier_block *nfb, unsigned long action, void *hcpu)
+@@ -7801,23 +7752,14 @@ migration_call(struct notifier_block *nfb, unsigned long action, void *hcpu)
  		cpu_rq(cpu)->migration_thread = NULL;
  		break;
  
@@ -1187,7 +1279,7 @@ index 7e8b6ac..291ac58 100644
  		/* Idle task back to normal (off runqueue, low prio) */
  		spin_lock_irq(&rq->lock);
  		update_rq_clock(rq);
-@@ -7823,6 +7768,7 @@ migration_call(struct notifier_block *nfb, unsigned long action, void *hcpu)
+@@ -7826,6 +7768,7 @@ migration_call(struct notifier_block *nfb, unsigned long action, void *hcpu)
  		rq->idle->sched_class = &idle_sched_class;
  		migrate_dead_tasks(cpu);
  		spin_unlock_irq(&rq->lock);
@@ -1195,7 +1287,7 @@ index 7e8b6ac..291ac58 100644
  		migrate_nr_uninterruptible(rq);
  		BUG_ON(rq->nr_running != 0);
  		calc_global_load_remove(rq);
-@@ -10153,13 +10099,13 @@ void sched_move_task(struct task_struct *tsk)
+@@ -10156,13 +10099,13 @@ void sched_move_task(struct task_struct *tsk)
  
  #ifdef CONFIG_FAIR_GROUP_SCHED
  	if (tsk->sched_class->moved_group)
@@ -1211,7 +1303,7 @@ index 7e8b6ac..291ac58 100644
  
  	task_rq_unlock(rq, &flags);
  }
-@@ -10931,30 +10877,12 @@ static void cpuacct_charge(struct task_struct *tsk, u64 cputime)
+@@ -10934,30 +10877,12 @@ static void cpuacct_charge(struct task_struct *tsk, u64 cputime)
  }
  
  /*
@@ -1242,7 +1334,7 @@ index 7e8b6ac..291ac58 100644
  
  	if (unlikely(!cpuacct_subsys.active))
  		return;
-@@ -10963,7 +10891,7 @@ static void cpuacct_update_stats(struct task_struct *tsk,
+@@ -10966,7 +10891,7 @@ static void cpuacct_update_stats(struct task_struct *tsk,
  	ca = task_ca(tsk);
  
  	do {
