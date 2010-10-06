@@ -1,0 +1,50 @@
+From: Christoph Hellwig <hch@infradead.org>
+Date: Tue, 3 Mar 2009 14:48:36 -0500
+Subject: [PATCH] xfs: prevent kernel crash due to corrupted inode log format
+
+commit e8fa6b483feebd23ded5eb01afd7a6e82b6078c6 upstream.
+
+Andras Korn reported an oops on log replay causes by a corrupted
+xfs_inode_log_format_t passing a 0 size to kmem_zalloc.  This patch handles
+to small or too large numbers of log regions gracefully by rejecting the
+log replay with a useful error message.
+
+Signed-off-by: Christoph Hellwig <hch@lst.de>
+Reported-by: Andras Korn <korn-sgi.com@chardonnay.math.bme.hu>
+Reviewed-by: Eric Sandeen <sandeen@sandeen.net>
+Signed-off-by: Felix Blyakher <felixb@sgi.com>
+---
+ fs/xfs/xfs_log_recover.c |   17 +++++++++++++----
+ 1 files changed, 13 insertions(+), 4 deletions(-)
+
+diff --git a/fs/xfs/xfs_log_recover.c b/fs/xfs/xfs_log_recover.c
+index 504d540..ceeba45 100644
+--- a/fs/xfs/xfs_log_recover.c
++++ b/fs/xfs/xfs_log_recover.c
+@@ -1455,10 +1455,19 @@ xlog_recover_add_to_trans(
+ 	item = item->ri_prev;
+ 
+ 	if (item->ri_total == 0) {		/* first region to be added */
+-		item->ri_total	= in_f->ilf_size;
+-		ASSERT(item->ri_total <= XLOG_MAX_REGIONS_IN_ITEM);
+-		item->ri_buf = kmem_zalloc((item->ri_total *
+-					    sizeof(xfs_log_iovec_t)), KM_SLEEP);
++		if (in_f->ilf_size == 0 ||
++		    in_f->ilf_size > XLOG_MAX_REGIONS_IN_ITEM) {
++			xlog_warn(
++	"XFS: bad number of regions (%d) in inode log format",
++				  in_f->ilf_size);
++			ASSERT(0);
++			return XFS_ERROR(EIO);
++		}
++
++		item->ri_total = in_f->ilf_size;
++		item->ri_buf =
++			kmem_zalloc(item->ri_total * sizeof(xfs_log_iovec_t),
++				    KM_SLEEP);
+ 	}
+ 	ASSERT(item->ri_total > item->ri_cnt);
+ 	/* Description region is ri_buf[0] */
+-- 
+1.7.1
+
