@@ -1,0 +1,42 @@
+[Adjusted to apply to Debian's 2.6.32 by dann frazier <dannf@debian.org>]
+
+commit 8b4216018bdbfbb1b76150d202b15ee68c38e991
+Author: Abhijith Das <adas@redhat.com>
+Date:   Sun Jul 4 01:33:24 2010 -0400
+
+    GFS2: BUG in gfs2_adjust_quota
+    
+    HighMem pages on i686 do not get mapped to the buffer_heads and this was
+    causing a NULL pointer dereference when we were trying to memset page buffers
+    to zero.
+    We now use zero_user() that kmaps the page and directly manipulates page data.
+    This patch also fixes a boundary condition that was incorrect.
+    
+    Signed-off-by: Abhi Das <adas@redhat.com>
+    Signed-off-by: Steven Whitehouse <swhiteho@redhat.com>
+
+diff -urpN a/fs/gfs2/quota.c b/fs/gfs2/quota.c
+--- a/fs/gfs2/quota.c	2010-10-13 22:27:13.000000000 -0600
++++ b/fs/gfs2/quota.c	2010-10-13 22:28:03.000000000 -0600
+@@ -679,10 +679,8 @@ get_a_page:
+ 		if (!buffer_mapped(bh))
+ 			goto unlock_out;
+ 		/* If it's a newly allocated disk block for quota, zero it */
+-		if (buffer_new(bh)) {
+-			memset(bh->b_data, 0, bh->b_size);
+-			set_buffer_uptodate(bh);
+-		}
++		if (buffer_new(bh))
++			zero_user(page, pos - blocksize, bh->b_size);
+ 	}
+ 
+ 	if (PageUptodate(page))
+@@ -708,7 +706,7 @@ get_a_page:
+ 
+ 	/* If quota straddles page boundary, we need to update the rest of the
+ 	 * quota at the beginning of the next page */
+-	if (offset != 0) { /* first page, offset is closer to PAGE_CACHE_SIZE */
++	if ((offset + sizeof(struct gfs2_quota)) > PAGE_CACHE_SIZE) {
+ 		ptr = ptr + nbytes;
+ 		nbytes = sizeof(struct gfs2_quota) - nbytes;
+ 		offset = 0;
