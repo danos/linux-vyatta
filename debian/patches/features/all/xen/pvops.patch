@@ -5274,7 +5274,7 @@ index 360f8d8..8a390dc 100644
  	BUG();
  }
 diff --git a/arch/x86/xen/time.c b/arch/x86/xen/time.c
-index 094c70a..68feb40 100644
+index 3b1ba77..68feb40 100644
 --- a/arch/x86/xen/time.c
 +++ b/arch/x86/xen/time.c
 @@ -201,8 +201,22 @@ static unsigned long xen_get_wallclock(void)
@@ -5340,7 +5340,19 @@ index 094c70a..68feb40 100644
  static void xen_hvm_setup_cpu_clockevents(void)
  {
  	int cpu = smp_processor_id();
-@@ -505,4 +520,3 @@ __init void xen_hvm_init_time_ops(void)
+@@ -488,9 +503,8 @@ static void xen_hvm_setup_cpu_clockevents(void)
+ __init void xen_hvm_init_time_ops(void)
+ {
+ 	/* vector callback is needed otherwise we cannot receive interrupts
+-	 * on cpu > 0 and at this point we don't know how many cpus are
+-	 * available */
+-	if (!xen_have_vector_callback)
++	 * on cpu > 0 */
++	if (!xen_have_vector_callback && num_present_cpus() > 1)
+ 		return;
+ 	if (!xen_feature(XENFEAT_hvm_safe_pvclock)) {
+ 		printk(KERN_INFO "Xen doesn't support pvclock on HVM,"
+@@ -506,4 +520,3 @@ __init void xen_hvm_init_time_ops(void)
  	x86_platform.get_wallclock = xen_get_wallclock;
  	x86_platform.set_wallclock = xen_set_wallclock;
  }
@@ -26309,7 +26321,7 @@ index 92a1ef8..89f2e42 100644
   * @dev: xenbus device
   * @ring_mfn: mfn of ring to grant
 diff --git a/drivers/xen/xenbus/xenbus_probe.c b/drivers/xen/xenbus/xenbus_probe.c
-index f52baf3..3a83ba2 100644
+index 59857e8..3a83ba2 100644
 --- a/drivers/xen/xenbus/xenbus_probe.c
 +++ b/drivers/xen/xenbus/xenbus_probe.c
 @@ -49,6 +49,8 @@
@@ -26675,19 +26687,33 @@ index f52baf3..3a83ba2 100644
  
  /* A flag to determine if xenstored is 'ready' (i.e. has started) */
  int xenstored_ready = 0;
-@@ -768,11 +662,6 @@ void xenbus_probe(struct work_struct *unused)
+@@ -752,10 +646,7 @@ int register_xenstore_notifier(struct notifier_block *nb)
  {
- 	BUG_ON((xenstored_ready <= 0));
+ 	int ret = 0;
  
+-	if (xenstored_ready > 0)
+-		ret = nb->notifier_call(nb, 0, NULL);
+-	else
+-		blocking_notifier_chain_register(&xenstore_chain, nb);
++	blocking_notifier_chain_register(&xenstore_chain, nb);
+ 
+ 	return ret;
+ }
+@@ -769,12 +660,7 @@ EXPORT_SYMBOL_GPL(unregister_xenstore_notifier);
+ 
+ void xenbus_probe(struct work_struct *unused)
+ {
+-	xenstored_ready = 1;
+-
 -	/* Enumerate devices in xenstore and watch for changes. */
 -	xenbus_probe_devices(&xenbus_frontend);
 -	register_xenbus_watch(&fe_watch);
 -	xenbus_backend_probe_and_watch();
--
++	BUG_ON((xenstored_ready <= 0));
+ 
  	/* Notify others that xenstore is up */
  	blocking_notifier_call_chain(&xenstore_chain, 0, NULL);
- }
-@@ -795,28 +684,45 @@ device_initcall(xenbus_probe_initcall);
+@@ -798,28 +684,45 @@ device_initcall(xenbus_probe_initcall);
  static int __init xenbus_init(void)
  {
  	int err = 0;
@@ -26744,15 +26770,15 @@ index f52baf3..3a83ba2 100644
  		if (xen_hvm_domain()) {
  			uint64_t v = 0;
  			err = hvm_get_parameter(HVM_PARAM_STORE_EVTCHN, &v);
-@@ -833,7 +739,6 @@ static int __init xenbus_init(void)
+@@ -835,7 +738,6 @@ static int __init xenbus_init(void)
+ 			xen_store_evtchn = xen_start_info->store_evtchn;
  			xen_store_mfn = xen_start_info->store_mfn;
  			xen_store_interface = mfn_to_virt(xen_store_mfn);
+-			xenstored_ready = 1;
  		}
--		xenstored_ready = 1;
  	}
  
- 	/* Initialize the interface to xenstore. */
-@@ -841,7 +746,7 @@ static int __init xenbus_init(void)
+@@ -844,7 +746,7 @@ static int __init xenbus_init(void)
  	if (err) {
  		printk(KERN_WARNING
  		       "XENBUS: Error initializing xenstore comms: %i\n", err);
@@ -26761,7 +26787,7 @@ index f52baf3..3a83ba2 100644
  	}
  
  #ifdef CONFIG_XEN_COMPAT_XENFS
-@@ -854,131 +759,13 @@ static int __init xenbus_init(void)
+@@ -857,131 +759,13 @@ static int __init xenbus_init(void)
  
  	return 0;
  
