@@ -1,0 +1,66 @@
+From: Florian Fainelli <florian@openwrt.org>
+Date: Wed, 7 Apr 2010 16:50:58 -0700
+Subject: [PATCH 1/2] r6040: fix r6040_multicast_list
+
+commit 3bcf8229a8c49769e48d3e0bd1e20d8e003f8106 upstream.
+
+As reported in <https://bugzilla.kernel.org/show_bug.cgi?id=15355>, r6040_
+multicast_list currently crashes. This is due a wrong maximum of multicast
+entries. This patch fixes the following issues with multicast:
+
+- number of maximum entries if off-by-one (4 instead of 3)
+
+- the writing of the hash table index is not necessary and leads to invalid
+values being written into the MCR1 register, so the MAC is simply put in a non
+coherent state
+
+- when we exceed the maximum number of mutlticast address, writing the
+broadcast address should be done in registers MID_1{L,M,H} instead of
+MID_O{L,M,H}, otherwise we would loose the adapter's MAC address
+
+Signed-off-by: Florian Fainelli <florian@openwrt.org>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+[bwh: Adjust context for 2.6.27]
+---
+ drivers/net/r6040.c |   11 ++++-------
+ 1 files changed, 4 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/net/r6040.c b/drivers/net/r6040.c
+index 8b14c6e..ac865e1 100644
+--- a/drivers/net/r6040.c
++++ b/drivers/net/r6040.c
+@@ -135,7 +135,7 @@
+ #define RX_DESC_SIZE	(RX_DCNT * sizeof(struct r6040_descriptor))
+ #define TX_DESC_SIZE	(TX_DCNT * sizeof(struct r6040_descriptor))
+ #define MBCR_DEFAULT	0x012A	/* MAC Bus Control Register */
+-#define MCAST_MAX	4	/* Max number multicast addresses to filter */
++#define MCAST_MAX	3	/* Max number multicast addresses to filter */
+ 
+ /* PHY settings */
+ #define ICPLUS_PHY_ID	0x0243
+@@ -985,9 +985,6 @@ static void r6040_multicast_list(struct net_device *dev)
+ 			crc >>= 26;
+ 			hash_table[crc >> 4] |= 1 << (15 - (crc & 0xf));
+ 		}
+-		/* Write the index of the hash table */
+-		for (i = 0; i < 4; i++)
+-			iowrite16(hash_table[i] << 14, ioaddr + MCR1);
+ 		/* Fill the MAC hash tables with their values */
+ 		iowrite16(hash_table[0], ioaddr + MAR0);
+ 		iowrite16(hash_table[1], ioaddr + MAR1);
+@@ -1003,9 +1000,9 @@ static void r6040_multicast_list(struct net_device *dev)
+ 		dmi = dmi->next;
+ 	}
+ 	for (i = dev->mc_count; i < MCAST_MAX; i++) {
+-		iowrite16(0xffff, ioaddr + MID_0L + 8*i);
+-		iowrite16(0xffff, ioaddr + MID_0M + 8*i);
+-		iowrite16(0xffff, ioaddr + MID_0H + 8*i);
++		iowrite16(0xffff, ioaddr + MID_1L + 8*i);
++		iowrite16(0xffff, ioaddr + MID_1M + 8*i);
++		iowrite16(0xffff, ioaddr + MID_1H + 8*i);
+ 	}
+ }
+ 
+-- 
+1.7.1
+
