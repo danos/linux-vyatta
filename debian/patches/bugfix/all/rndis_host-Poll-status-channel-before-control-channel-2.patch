@@ -1,0 +1,113 @@
+From bdaeb492f60e9c5cd95cec491f4a33df1f779e93 Mon Sep 17 00:00:00 2001
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Tue, 19 Oct 2010 23:23:01 +0100
+Subject: [PATCH] rndis_host: Poll status channel before control channel
+
+Some RNDIS devices don't respond on the control channel until polled
+on the status channel.  In particular, this was reported to be the
+case for the 2Wire HomePortal 1000SW and for some Windows Mobile
+devices.
+
+This is roughly based on a patch by John Carr <john.carr@unrouted.co.uk>
+which is currently applied by Mandriva.
+
+Reported-by: Mark Glassberg <vzeeaxwl@myfairpoint.net>
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+ drivers/net/usb/rndis_host.c   |   39 ++++++++++++++++++++++++++++++++-------
+ include/linux/usb/rndis_host.h |    2 ++
+ 2 files changed, 34 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/net/usb/rndis_host.c b/drivers/net/usb/rndis_host.c
+index f56dec6..b17148b 100644
+--- a/drivers/net/usb/rndis_host.c
++++ b/drivers/net/usb/rndis_host.c
+@@ -103,8 +103,10 @@ static void rndis_msg_indicate(struct usbnet *dev, struct rndis_indicate *msg,
+ int rndis_command(struct usbnet *dev, struct rndis_msg_hdr *buf, int buflen)
+ {
+ 	struct cdc_state	*info = (void *) &dev->data;
++	struct usb_cdc_notification notification;
+ 	int			master_ifnum;
+ 	int			retval;
++	int			partial;
+ 	unsigned		count;
+ 	__le32			rsp;
+ 	u32			xid = 0, msg_len, request_id;
+@@ -132,13 +134,20 @@ int rndis_command(struct usbnet *dev, struct rndis_msg_hdr *buf, int buflen)
+ 	if (unlikely(retval < 0 || xid == 0))
+ 		return retval;
+ 
+-	// FIXME Seems like some devices discard responses when
+-	// we time out and cancel our "get response" requests...
+-	// so, this is fragile.  Probably need to poll for status.
++	/* Some devices don't respond on the control channel until
++	 * polled on the status channel, so do that first. */
++	if (dev->driver_info->data & RNDIS_DRIVER_DATA_POLL_STATUS) {
++		retval = usb_interrupt_msg(
++			dev->udev,
++			usb_rcvintpipe(dev->udev,
++				       dev->status->desc.bEndpointAddress),
++			&notification, sizeof(notification), &partial,
++			RNDIS_CONTROL_TIMEOUT_MS);
++		if (unlikely(retval < 0))
++			return retval;
++	}
+ 
+-	/* ignore status endpoint, just poll the control channel;
+-	 * the request probably completed immediately
+-	 */
++	/* Poll the control channel; the request probably completed immediately */
+ 	rsp = buf->msg_type | RNDIS_MSG_COMPLETION;
+ 	for (count = 0; count < 10; count++) {
+ 		memset(buf, 0, CONTROL_BUFFER_SIZE);
+@@ -582,17 +591,33 @@ static const struct driver_info	rndis_info = {
+ 	.tx_fixup =	rndis_tx_fixup,
+ };
+ 
++static const struct driver_info	rndis_poll_status_info = {
++	.description =	"RNDIS device (poll status before control)",
++	.flags =	FLAG_ETHER | FLAG_FRAMING_RN | FLAG_NO_SETINT,
++	.data =		RNDIS_DRIVER_DATA_POLL_STATUS,
++	.bind =		rndis_bind,
++	.unbind =	rndis_unbind,
++	.status =	rndis_status,
++	.rx_fixup =	rndis_rx_fixup,
++	.tx_fixup =	rndis_tx_fixup,
++};
++
+ /*-------------------------------------------------------------------------*/
+ 
+ static const struct usb_device_id	products [] = {
+ {
++	/* 2Wire HomePortal 1000SW */
++	USB_DEVICE_AND_INTERFACE_INFO(0x1630, 0x0042,
++				      USB_CLASS_COMM, 2 /* ACM */, 0x0ff),
++	.driver_info = (unsigned long) &rndis_poll_status_info,
++}, {
+ 	/* RNDIS is MSFT's un-official variant of CDC ACM */
+ 	USB_INTERFACE_INFO(USB_CLASS_COMM, 2 /* ACM */, 0x0ff),
+ 	.driver_info = (unsigned long) &rndis_info,
+ }, {
+ 	/* "ActiveSync" is an undocumented variant of RNDIS, used in WM5 */
+ 	USB_INTERFACE_INFO(USB_CLASS_MISC, 1, 1),
+-	.driver_info = (unsigned long) &rndis_info,
++	.driver_info = (unsigned long) &rndis_poll_status_info,
+ }, {
+ 	/* RNDIS for tethering */
+ 	USB_INTERFACE_INFO(USB_CLASS_WIRELESS_CONTROLLER, 1, 3),
+diff --git a/include/linux/usb/rndis_host.h b/include/linux/usb/rndis_host.h
+index 1ef1ebc..0ba03a3 100644
+--- a/include/linux/usb/rndis_host.h
++++ b/include/linux/usb/rndis_host.h
+@@ -256,6 +256,8 @@ struct rndis_keepalive_c {	/* IN (optionally OUT) */
+ #define FLAG_RNDIS_PHYM_NOT_WIRELESS	0x0001
+ #define FLAG_RNDIS_PHYM_WIRELESS	0x0002
+ 
++/* Flags for driver_info::data */
++#define RNDIS_DRIVER_DATA_POLL_STATUS	1	/* poll status before control */
+ 
+ extern void rndis_status(struct usbnet *dev, struct urb *urb);
+ extern int
+-- 
+1.7.1
+
