@@ -1,0 +1,40 @@
+From 00abe504c5cf268b73c45232aba56949af628349 Mon Sep 17 00:00:00 2001
+From: Dongxiao Xu <dongxiao.xu@intel.com>
+Date: Mon, 13 Sep 2010 10:17:58 +0800
+Subject: [PATCH] xen/netfront: Fix another potential race condition
+
+When trying to start next hrtimer in current callback,
+we should judge its return value and do error handling.
+
+Signed-off-by: Dongxiao Xu <dongxiao.xu@intel.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ drivers/net/xen-netfront.c |   11 ++++++++---
+ 1 files changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/net/xen-netfront.c b/drivers/net/xen-netfront.c
+index 02e7888..6661d6d 100644
+--- a/drivers/net/xen-netfront.c
++++ b/drivers/net/xen-netfront.c
+@@ -1376,10 +1376,15 @@ static enum hrtimer_restart smart_poll_function(struct hrtimer *timer)
+ 		np->smart_poll.active = 0;
+ 	}
+ 
+-	if (np->rx.sring->private.netif.smartpoll_active)
+-		hrtimer_start(timer,
++	if (np->rx.sring->private.netif.smartpoll_active) {
++		if ( hrtimer_start(timer,
+ 			ktime_set(0, NANO_SECOND/psmart_poll->smart_poll_freq),
+-			HRTIMER_MODE_REL);
++			HRTIMER_MODE_REL) ) {
++			printk(KERN_DEBUG "Failed to start hrtimer,"
++					"use interrupt mode for this packet\n");
++			np->rx.sring->private.netif.smartpoll_active = 0;
++		}
++	}
+ 
+ end:
+ 	spin_unlock_irqrestore(&np->tx_lock, flags);
+-- 
+1.7.1
+

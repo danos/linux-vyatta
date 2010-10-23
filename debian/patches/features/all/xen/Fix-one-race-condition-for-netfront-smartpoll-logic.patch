@@ -1,0 +1,49 @@
+From cb09635065163a933d0d00d077ddd9f0c0a908a1 Mon Sep 17 00:00:00 2001
+From: Dongxiao Xu <dongxiao.xu@intel.com>
+Date: Fri, 10 Sep 2010 09:00:54 +0800
+Subject: [PATCH] Fix one race condition for netfront smartpoll logic
+
+Assume one case like, netfront poll could not get any data,
+and it clears the shared flag to indicate it is not polling.
+However at this moment (netfront has cleared the flag but
+still in hrtimer callback), netback triggers one interrupt
+to netfront and tries to start the timer, the operation will
+be failed since the timer is still alive.
+
+Add this logic that, if the new hrtimer starts failed,
+netfront should clear the shared flag to indicate that it is
+not polling.
+
+Signed-off-by: Dongxiao Xu <dongxiao.xu@intel.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ drivers/net/xen-netfront.c |   13 +++++++++----
+ 1 files changed, 9 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/net/xen-netfront.c b/drivers/net/xen-netfront.c
+index 6426bb8..02e7888 100644
+--- a/drivers/net/xen-netfront.c
++++ b/drivers/net/xen-netfront.c
+@@ -1401,10 +1401,15 @@ static irqreturn_t xennet_interrupt(int irq, void *dev_id)
+ 			napi_schedule(&np->napi);
+ 	}
+ 
+-	if (np->smart_poll.feature_smart_poll)
+-		hrtimer_start(&np->smart_poll.timer,
+-			ktime_set(0, NANO_SECOND/np->smart_poll.smart_poll_freq),
+-			HRTIMER_MODE_REL);
++	if (np->smart_poll.feature_smart_poll) {
++		if ( hrtimer_start(&np->smart_poll.timer,
++			ktime_set(0,NANO_SECOND/np->smart_poll.smart_poll_freq),
++			HRTIMER_MODE_REL) ) {
++			printk(KERN_DEBUG "Failed to start hrtimer,"
++					"use interrupt mode for this packet\n");
++			np->rx.sring->private.netif.smartpoll_active = 0;
++		}
++	}
+ 
+ 	spin_unlock_irqrestore(&np->tx_lock, flags);
+ 
+-- 
+1.7.1
+
