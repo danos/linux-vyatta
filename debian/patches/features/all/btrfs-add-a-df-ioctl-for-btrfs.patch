@@ -1,0 +1,109 @@
+From: Josef Bacik <josef@redhat.com>
+Date: Wed, 13 Jan 2010 18:19:06 +0000
+Subject: [PATCH] Btrfs: add a "df" ioctl for btrfs
+
+commit 1406e4327be3a533a2b18582f715ce2cfbcf6804 upstream.
+
+df is a very loaded question in btrfs.  This gives us a way to get the per-space
+usage information so we can tell exactly what is in use where.  This will help
+us figure out ENOSPC problems, and help users better understand where their disk
+space is going.
+
+Signed-off-by: Josef Bacik <josef@redhat.com>
+Signed-off-by: Chris Mason <chris.mason@oracle.com>
+[Backported to Debian's 2.6.32 by Mike Hommey <mh@glandium.org>]
+[bwh: Add genksyms guard to avoid an ABI change]
+---
+diff --git a/fs/btrfs/ioctl.c b/fs/btrfs/ioctl.c
+index cdbb054..1e7a71d 100644
+--- a/fs/btrfs/ioctl.c
++++ b/fs/btrfs/ioctl.c
+@@ -1270,6 +1270,49 @@ out:
+ 	return ret;
+ }
+ 
++long btrfs_ioctl_space_info(struct btrfs_root *root, void __user *arg)
++{
++	struct btrfs_ioctl_space_args space_args;
++	struct btrfs_ioctl_space_info space;
++	struct btrfs_ioctl_space_info *dest;
++	struct btrfs_space_info *info;
++	int ret = 0;
++
++	if (copy_from_user(&space_args,
++			   (struct btrfs_ioctl_space_args __user *)arg,
++			   sizeof(space_args)))
++		return -EFAULT;
++
++	space_args.total_spaces = 0;
++	dest = (struct btrfs_ioctl_space_info *)
++		(arg + sizeof(struct btrfs_ioctl_space_args));
++
++	rcu_read_lock();
++	list_for_each_entry_rcu(info, &root->fs_info->space_info, list) {
++		if (!space_args.space_slots) {
++			space_args.total_spaces++;
++			continue;
++		}
++		if (space_args.total_spaces >= space_args.space_slots)
++			break;
++		space.flags = info->flags;
++		space.total_bytes = info->total_bytes;
++		space.used_bytes = info->bytes_used;
++		if (copy_to_user(dest, &space, sizeof(space))) {
++			ret = -EFAULT;
++			break;
++		}
++		dest++;
++		space_args.total_spaces++;
++	}
++	rcu_read_unlock();
++
++	if (copy_to_user(arg, &space_args, sizeof(space_args)))
++		ret = -EFAULT;
++
++	return ret;
++}
++
+ /*
+  * there are many ways the trans_start and trans_end ioctls can lead
+  * to deadlocks.  They should only be used by applications that
+@@ -1334,6 +1377,8 @@ long btrfs_ioctl(struct file *file, unsigned int
+ 		return btrfs_ioctl_trans_start(file);
+ 	case BTRFS_IOC_TRANS_END:
+ 		return btrfs_ioctl_trans_end(file);
++	case BTRFS_IOC_SPACE_INFO:
++		return btrfs_ioctl_space_info(root, argp);
+ 	case BTRFS_IOC_SYNC:
+ 		btrfs_sync_fs(file->f_dentry->d_sb, 1);
+ 		return 0;
+--- a/fs/btrfs/ioctl.h
++++ b/fs/btrfs/ioctl.h
+@@ -36,6 +36,20 @@ struct btrfs_ioctl_clone_range_args {
+   __u64 dest_offset;
+ };
+ 
++#ifndef __GENKSYMS__
++struct btrfs_ioctl_space_info {
++	u64 flags;
++	u64 total_bytes;
++	u64 used_bytes;
++};
++
++struct btrfs_ioctl_space_args {
++	u64 space_slots;
++	u64 total_spaces;
++	struct btrfs_ioctl_space_info spaces[0];
++};
++#endif
++
+ #define BTRFS_IOC_SNAP_CREATE _IOW(BTRFS_IOCTL_MAGIC, 1, \
+ 				   struct btrfs_ioctl_vol_args)
+ #define BTRFS_IOC_DEFRAG _IOW(BTRFS_IOCTL_MAGIC, 2, \
+@@ -67,4 +79,6 @@ struct btrfs_ioctl_clone_range_args {
+ 				   struct btrfs_ioctl_vol_args)
+ #define BTRFS_IOC_SNAP_DESTROY _IOW(BTRFS_IOCTL_MAGIC, 15, \
+ 				struct btrfs_ioctl_vol_args)
++#define BTRFS_IOC_SPACE_INFO _IOWR(BTRFS_IOCTL_MAGIC, 20, \
++				    struct btrfs_ioctl_space_args)
+ #endif
