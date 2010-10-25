@@ -1,0 +1,93 @@
+From: Olaf Rempel <razzor@kopf-tisch.de>
+Date: Tue, 8 Jun 2010 20:32:38 +0000 (+0200)
+Subject: [ARM] orion/kirkwood: reset PCIe unit on boot
+X-Git-Tag: v2.6.36-rc1~591^2^2~5^2~16
+X-Git-Url: http://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Ftorvalds%2Flinux-2.6.git;a=commitdiff_plain;h=21f0ba90a447090153edeaf2f14f9f7e8bd9bc80
+
+[ARM] orion/kirkwood: reset PCIe unit on boot
+
+Patch found in QNAPs vendor source package, with some cleanups
+(proper defines, shortened max. timeout from 1s to 200ms).
+
+Without this patch the PCIe SATA controller (Marvell 88sx7042/sata_mv)
+in my QNAP TS-419P (Marvell 88f6281/Kirkwood) stops working after a
+few minutes.
+
+The symptomes are described in this thread:
+http://marc.info/?l=linux-ide&m=124822863706181&w=2
+
+[ Note: this is a workaround in need of a better analysis/solution -- NP ]
+
+Acked-by: Saeed Bishara <saeed@marvell.com>
+Tested-by: Bernhard R. Link <brl@pcpool00.mathematik.uni-freiburg.de>
+Seconded-by: Martin Michlmayr <tbm@cyrius.com>
+I'm_not_very_happy_with_it-by: Lennert Buytenhek <buytenh@wantstofly.org>
+Signed-off-by: Nicolas Pitre <nico@fluxnic.net>
+---
+
+diff --git a/arch/arm/plat-orion/pcie.c b/arch/arm/plat-orion/pcie.c
+index 54c84a4..779553a 100644
+--- a/arch/arm/plat-orion/pcie.c
++++ b/arch/arm/plat-orion/pcie.c
+@@ -13,6 +13,7 @@
+ #include <linux/mbus.h>
+ #include <asm/mach/pci.h>
+ #include <plat/pcie.h>
++#include <linux/delay.h>
+ 
+ /*
+  * PCIe unit register offsets.
+@@ -46,6 +47,8 @@
+ #define  PCIE_STAT_BUS_OFFS		8
+ #define  PCIE_STAT_BUS_MASK		0xff
+ #define  PCIE_STAT_LINK_DOWN		1
++#define PCIE_DEBUG_CTRL         0x1a60
++#define  PCIE_DEBUG_SOFT_RESET		(1<<20)
+ 
+ 
+ u32 __init orion_pcie_dev_id(void __iomem *base)
+@@ -85,6 +88,32 @@ void __init orion_pcie_set_local_bus_nr(void __iomem *base, int nr)
+ 	writel(stat, base + PCIE_STAT_OFF);
+ }
+ 
++void __init orion_pcie_reset(void __iomem *base)
++{
++	u32 reg;
++	int i;
++
++	/*
++	 * MV-S104860-U0, Rev. C:
++	 * PCI Express Unit Soft Reset
++	 * When set, generates an internal reset in the PCI Express unit.
++	 * This bit should be cleared after the link is re-established.
++	 */
++	reg = readl(base + PCIE_DEBUG_CTRL);
++	reg |= PCIE_DEBUG_SOFT_RESET;
++	writel(reg, base + PCIE_DEBUG_CTRL);
++
++	for (i = 0; i < 20; i++) {
++		mdelay(10);
++
++		if (orion_pcie_link_up(base))
++			break;
++	}
++
++	reg &= ~(PCIE_DEBUG_SOFT_RESET);
++	writel(reg, base + PCIE_DEBUG_CTRL);
++}
++
+ /*
+  * Setup PCIE BARs and Address Decode Wins:
+  * BAR[0,2] -> disabled, BAR[1] -> covers all DRAM banks
+@@ -147,6 +176,11 @@ void __init orion_pcie_setup(void __iomem *base,
+ 	u32 mask;
+ 
+ 	/*
++	 * soft reset PCIe unit
++	 */
++	orion_pcie_reset(base);
++
++	/*
+ 	 * Point PCIe unit MBUS decode windows to DRAM space.
+ 	 */
+ 	orion_pcie_setup_wins(base, dram);
