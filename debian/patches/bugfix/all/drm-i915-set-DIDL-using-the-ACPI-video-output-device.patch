@@ -1,0 +1,97 @@
+From 3143751ff51a163b77f7efd389043e038f3e008e Mon Sep 17 00:00:00 2001
+From: Zhang Rui <rui.zhang@intel.com>
+Date: Mon, 29 Mar 2010 15:12:16 +0800
+Subject: [PATCH] drm/i915: set DIDL using the ACPI video output device _ADR method return.
+
+we used to set the DIDL in the output device detected order.
+But some BIOSes requires it to be initialized in the ACPI device order.
+e.g. the value of the first field in DIDL stands for the first
+ACPI video output device in ACPI namespace.
+
+Now we initialize the DIDL using the device id, i.e. _ADR return value,
+of each ACPI video device, if it is not 0.
+https://bugzilla.kernel.org/show_bug.cgi?id=15054
+
+Signed-off-by: Zhang Rui <rui.zhang@intel.com>
+Signed-off-by: Eric Anholt <eric@anholt.net>
+---
+ drivers/gpu/drm/i915/i915_opregion.c |   54 +++++++++++++++++++++++++++++++--
+ 1 files changed, 50 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_opregion.c b/drivers/gpu/drm/i915/i915_opregion.c
+index 7cc8410..8fcc75c 100644
+--- a/drivers/gpu/drm/i915/i915_opregion.c
++++ b/drivers/gpu/drm/i915/i915_opregion.c
+@@ -382,8 +382,57 @@ static void intel_didl_outputs(struct drm_device *dev)
+ 	struct drm_i915_private *dev_priv = dev->dev_private;
+ 	struct intel_opregion *opregion = &dev_priv->opregion;
+ 	struct drm_connector *connector;
++	acpi_handle handle;
++	struct acpi_device *acpi_dev, *acpi_cdev, *acpi_video_bus = NULL;
++	unsigned long long device_id;
++	acpi_status status;
+ 	int i = 0;
+ 
++	handle = DEVICE_ACPI_HANDLE(&dev->pdev->dev);
++	if (!handle || ACPI_FAILURE(acpi_bus_get_device(handle, &acpi_dev)))
++		return;
++
++	if (acpi_is_video_device(acpi_dev))
++		acpi_video_bus = acpi_dev;
++	else {
++		list_for_each_entry(acpi_cdev, &acpi_dev->children, node) {
++			if (acpi_is_video_device(acpi_cdev)) {
++				acpi_video_bus = acpi_cdev;
++				break;
++			}
++		}
++	}
++
++	if (!acpi_video_bus) {
++		printk(KERN_WARNING "No ACPI video bus found\n");
++		return;
++	}
++
++	list_for_each_entry(acpi_cdev, &acpi_video_bus->children, node) {
++		if (i >= 8) {
++			dev_printk (KERN_ERR, &dev->pdev->dev,
++				    "More than 8 outputs detected\n");
++			return;
++		}
++		status =
++			acpi_evaluate_integer(acpi_cdev->handle, "_ADR",
++						NULL, &device_id);
++		if (ACPI_SUCCESS(status)) {
++			if (!device_id)
++				goto blind_set;
++			opregion->acpi->didl[i] = (u32)(device_id & 0x0f0f);
++			i++;
++		}
++	}
++
++end:
++	/* If fewer than 8 outputs, the list must be null terminated */
++	if (i < 8)
++		opregion->acpi->didl[i] = 0;
++	return;
++
++blind_set:
++	i = 0;
+ 	list_for_each_entry(connector, &dev->mode_config.connector_list, head) {
+ 		int output_type = ACPI_OTHER_OUTPUT;
+ 		if (i >= 8) {
+@@ -416,10 +465,7 @@ static void intel_didl_outputs(struct drm_device *dev)
+ 		opregion->acpi->didl[i] |= (1<<31) | output_type | i;
+ 		i++;
+ 	}
+-
+-	/* If fewer than 8 outputs, the list must be null terminated */
+-	if (i < 8)
+-		opregion->acpi->didl[i] = 0;
++	goto end;
+ }
+ 
+ int intel_opregion_init(struct drm_device *dev, int resume)
+-- 
+1.7.1
+
