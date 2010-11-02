@@ -1,0 +1,146 @@
+From: Bernie Thompson <bernie@plugable.com>
+Date: Sun, 5 Sep 2010 23:35:15 +0000 (-0700)
+Subject: staging: udlfb: remove metrics_misc sysfs attribute
+X-Git-Tag: v2.6.37-rc1~60^2~3^2~679
+X-Git-Url: http://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Ftorvalds%2Flinux-2.6.git;a=commitdiff_plain;h=f11f4bc027414bc7db5dde49c55b7149a627b591
+
+staging: udlfb: remove metrics_misc sysfs attribute
+
+Remove metrics_misc sysfs attribute
+
+Previously returned multiple values, which goes against sysfs guidelines.
+Had been used for debugging to figure out which of the multiple
+fbdev interfaces an app was using, but log file messages are sufficient.
+
+Signed-off-by: Bernie Thompson <bernie@plugable.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+---
+
+diff --git a/drivers/staging/udlfb/udlfb.c b/drivers/staging/udlfb/udlfb.c
+index 0e03dd3..b027a1e 100644
+--- a/drivers/staging/udlfb/udlfb.c
++++ b/drivers/staging/udlfb/udlfb.c
+@@ -661,7 +661,6 @@ static void dlfb_ops_copyarea(struct fb_info *info,
+ 	dlfb_handle_damage(dev, area->dx, area->dy,
+ 			area->width, area->height, info->screen_base);
+ #endif
+-	atomic_inc(&dev->copy_count);
+ 
+ }
+ 
+@@ -679,7 +678,6 @@ static void dlfb_ops_imageblit(struct fb_info *info,
+ 
+ #endif
+ 
+-	atomic_inc(&dev->blit_count);
+ }
+ 
+ static void dlfb_ops_fillrect(struct fb_info *info,
+@@ -695,8 +693,6 @@ static void dlfb_ops_fillrect(struct fb_info *info,
+ 			      rect->height, info->screen_base);
+ #endif
+ 
+-	atomic_inc(&dev->fill_count);
+-
+ }
+ 
+ static void dlfb_get_edid(struct dlfb_data *dev)
+@@ -754,7 +750,6 @@ static int dlfb_ops_ioctl(struct fb_info *info, unsigned int cmd,
+ 
+ 		dlfb_handle_damage(dev, area->x, area->y, area->w, area->h,
+ 			   info->screen_base);
+-		atomic_inc(&dev->damage_count);
+ 	}
+ 
+ 	return 0;
+@@ -1088,29 +1083,6 @@ static ssize_t metrics_cpu_kcycles_used_show(struct device *fbdev,
+ 			atomic_read(&dev->cpu_kcycles_used));
+ }
+ 
+-static ssize_t metrics_misc_show(struct device *fbdev,
+-				   struct device_attribute *a, char *buf) {
+-	struct fb_info *fb_info = dev_get_drvdata(fbdev);
+-	struct dlfb_data *dev = fb_info->par;
+-	return snprintf(buf, PAGE_SIZE,
+-			"Calls to\ndamage: %u\nblit: %u\n"
+-			"defio faults: %u\ncopy: %u\n"
+-			"fill: %u\n\n"
+-			"active framebuffer clients: %d\n"
+-			"urbs available %d(%d)\n"
+-			"Shadow framebuffer in use? %s\n"
+-			"Any lost pixels? %s\n",
+-			atomic_read(&dev->damage_count),
+-			atomic_read(&dev->blit_count),
+-			atomic_read(&dev->defio_fault_count),
+-			atomic_read(&dev->copy_count),
+-			atomic_read(&dev->fill_count),
+-			dev->fb_count,
+-			dev->urbs.available, dev->urbs.limit_sem.count,
+-			(dev->backing_buffer) ? "yes" : "no",
+-			atomic_read(&dev->lost_pixels) ? "yes" : "no");
+-}
+-
+ static ssize_t edid_show(struct kobject *kobj, struct bin_attribute *a,
+ 			 char *buf, loff_t off, size_t count) {
+	struct device *fbdev = container_of(kobj, struct device, kobj);
+@@ -1144,11 +1116,6 @@ static ssize_t metrics_reset_store(struct device *fbdev,
+ 	atomic_set(&dev->bytes_identical, 0);
+ 	atomic_set(&dev->bytes_sent, 0);
+ 	atomic_set(&dev->cpu_kcycles_used, 0);
+-	atomic_set(&dev->blit_count, 0);
+-	atomic_set(&dev->copy_count, 0);
+-	atomic_set(&dev->fill_count, 0);
+-	atomic_set(&dev->defio_fault_count, 0);
+-	atomic_set(&dev->damage_count, 0);
+ 
+ 	return count;
+ }
+@@ -1189,7 +1156,6 @@ static struct device_attribute fb_device_attrs[] = {
+ 	__ATTR_RO(metrics_bytes_identical),
+ 	__ATTR_RO(metrics_bytes_sent),
+ 	__ATTR_RO(metrics_cpu_kcycles_used),
+-	__ATTR_RO(metrics_misc),
+ 	__ATTR(metrics_reset, S_IWUGO, NULL, metrics_reset_store),
+ 	__ATTR_RW(use_defio),
+ };
+@@ -1207,7 +1173,6 @@ static void dlfb_dpy_deferred_io(struct fb_info *info,
+ 	int bytes_sent = 0;
+ 	int bytes_identical = 0;
+ 	int bytes_rendered = 0;
+-	int fault_count = 0;
+ 
+ 	if (!atomic_read(&dev->use_defio))
+ 		return;
+@@ -1228,7 +1193,6 @@ static void dlfb_dpy_deferred_io(struct fb_info *info,
+ 				  &cmd, cur->index << PAGE_SHIFT,
+ 				  PAGE_SIZE, &bytes_identical, &bytes_sent);
+ 		bytes_rendered += PAGE_SIZE;
+-		fault_count++;
+ 	}
+ 
+ 	if (cmd > (char *) urb->transfer_buffer) {
+@@ -1239,7 +1203,6 @@ static void dlfb_dpy_deferred_io(struct fb_info *info,
+ 	} else
+ 		dlfb_urb_completion(urb);
+ 
+-	atomic_add(fault_count, &dev->defio_fault_count);
+ 	atomic_add(bytes_sent, &dev->bytes_sent);
+ 	atomic_add(bytes_identical, &dev->bytes_identical);
+ 	atomic_add(bytes_rendered, &dev->bytes_rendered);
+diff --git a/drivers/staging/udlfb/udlfb.h b/drivers/staging/udlfb/udlfb.h
+index b07a693..f32a220 100644
+--- a/drivers/staging/udlfb/udlfb.h
++++ b/drivers/staging/udlfb/udlfb.h
+@@ -54,12 +54,6 @@ struct dlfb_data {
+ 	atomic_t bytes_identical; /* saved effort with backbuffer comparison */
+ 	atomic_t bytes_sent; /* to usb, after compression including overhead */
+ 	atomic_t cpu_kcycles_used; /* transpired during pixel processing */
+-	/* interface usage metrics. Clients can call driver via several */
+-	atomic_t blit_count;
+-	atomic_t copy_count;
+-	atomic_t fill_count;
+-	atomic_t damage_count;
+-	atomic_t defio_fault_count;
+ };
+ 
+ #define NR_USB_REQUEST_I2C_SUB_IO 0x02
