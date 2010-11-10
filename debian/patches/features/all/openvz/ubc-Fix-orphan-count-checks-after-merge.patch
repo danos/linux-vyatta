@@ -1,0 +1,112 @@
+From e5db932edffe86ddc4a8f9cdfc6e267ed887570c Mon Sep 17 00:00:00 2001
+From: Pavel Emelyanov <xemul@openvz.org>
+Date: Sat, 6 Nov 2010 17:02:43 +0300
+Subject: [PATCH] ubc: Fix orphan count checks after merge
+
+After merging -stable the orphans checking function started checking
+the wrong counter.
+
+http://bugzilla.openvz.org/show_bug.cgi?id=1693
+
+Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+---
+ include/bc/sock_orphan.h |   20 ++++++++------------
+ include/net/tcp.h        |    4 ++--
+ kernel/bc/net.c          |   14 ++++++++------
+ 3 files changed, 18 insertions(+), 20 deletions(-)
+
+diff --git a/include/bc/sock_orphan.h b/include/bc/sock_orphan.h
+index c5b2412..8f829c3 100644
+--- a/include/bc/sock_orphan.h
++++ b/include/bc/sock_orphan.h
+@@ -19,9 +19,13 @@
+ 
+ static inline struct percpu_counter *__ub_get_orphan_count_ptr(struct sock *sk)
+ {
+-	if (sock_has_ubc(sk))
+-		return &sock_bc(sk)->ub->ub_orphan_count;
+-	return sk->sk_prot->orphan_count;
++	if (sock_has_ubc(sk)) {
++		struct user_beancounter *ub;
++
++		ub = top_beancounter(sock_bc(sk)->ub);
++		return &ub->ub_orphan_count;
++	} else
++		return sk->sk_prot->orphan_count;
+ }
+ 
+ static inline void ub_inc_orphan_count(struct sock *sk)
+@@ -39,15 +43,7 @@ static inline int ub_get_orphan_count(struct sock *sk)
+ 	return percpu_counter_sum_positive(__ub_get_orphan_count_ptr(sk));
+ }
+ 
+-extern int __ub_too_many_orphans(struct sock *sk, int count);
+-static inline int ub_too_many_orphans(struct sock *sk, int shift)
+-{
+-#ifdef CONFIG_BEANCOUNTERS
+-	if (__ub_too_many_orphans(sk, shift))
+-		return 1;
+-#endif
+-	return tcp_too_many_orphans(sk, shift);
+-}
++extern int ub_too_many_orphans(struct sock *sk, int count);
+ 
+ #include <bc/kmem.h>
+ 
+diff --git a/include/net/tcp.h b/include/net/tcp.h
+index 6fa5f0d..ac5f07d 100644
+--- a/include/net/tcp.h
++++ b/include/net/tcp.h
+@@ -272,9 +272,9 @@ static inline int between(__u32 seq1, __u32 seq2, __u32 seq3)
+ 	return seq3 - seq2 >= seq1 - seq2;
+ }
+ 
+-static inline bool tcp_too_many_orphans(struct sock *sk, int shift)
++static inline bool tcp_too_many_orphans(struct sock *sk,
++		struct percpu_counter *ocp, int shift)
+ {
+-	struct percpu_counter *ocp = sk->sk_prot->orphan_count;
+ 	int orphans = percpu_counter_read_positive(ocp);
+ 
+ 	if (orphans << shift > sysctl_tcp_max_orphans) {
+diff --git a/kernel/bc/net.c b/kernel/bc/net.c
+index 2866ebb..427fc42 100644
+--- a/kernel/bc/net.c
++++ b/kernel/bc/net.c
+@@ -102,17 +102,18 @@ EXPORT_SYMBOL(skb_charge_fullsize);
+ static int ub_sock_makewreserv_locked(struct sock *sk,
+ 		int bufid, unsigned long size);
+ 
+-int __ub_too_many_orphans(struct sock *sk, int shift)
++int ub_too_many_orphans(struct sock *sk, int shift)
+ {
+-	struct user_beancounter *ub;
+ 	struct percpu_counter *cnt;
+ 
++	cnt = sk->sk_prot->orphan_count;
+ 	if (sock_has_ubc(sk)) {
+-		int orphans, limit;
++		struct user_beancounter *ub;
++		unsigned int orphans, limit;
+ 
+ 		ub = top_beancounter(sock_bc(sk)->ub);
+-		limit = ((int)ub->ub_parms[UB_NUMTCPSOCK].barrier) >> 2;
+-		cnt = __ub_get_orphan_count_ptr(sk);
++		limit = ub->ub_parms[UB_NUMTCPSOCK].barrier >> 2;
++		cnt = &ub->ub_orphan_count;
+ 
+ 		orphans = percpu_counter_read_positive(cnt);
+ 		if ((orphans << shift) >= limit)
+@@ -122,7 +123,8 @@ int __ub_too_many_orphans(struct sock *sk, int shift)
+ 		if ((orphans << shift) >= limit)
+ 			return 1;
+ 	}
+-	return 0;
++
++	return tcp_too_many_orphans(sk, cnt, shift);
+ }
+ 
+ /*
+-- 
+1.7.2.3
+
