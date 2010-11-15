@@ -1,0 +1,187 @@
+From: John Hughes <john@calva.com>
+Date: Wed, 7 Apr 2010 21:29:25 -0700
+Subject: [PATCH] x25: Patch to fix bug 15678 - x25 accesses fields beyond end of packet.
+
+commit f5eb917b861828da18dc28854308068c66d1449a upstream.
+
+Here is a patch to stop X.25 examining fields beyond the end of the packet.
+
+For example, when a simple CALL ACCEPTED was received:
+
+	10 10 0f
+
+x25_parse_facilities was attempting to decode the FACILITIES field, but this
+packet contains no facilities field.
+
+Signed-off-by: John Hughes <john@calva.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ include/net/x25.h        |    4 +++
+ net/x25/af_x25.c         |   47 +++++++++++++++++++++++++++++++++++++++++++++-
+ net/x25/x25_facilities.c |   12 ++++++++++-
+ net/x25/x25_in.c         |   15 ++++++++++---
+ 4 files changed, 72 insertions(+), 6 deletions(-)
+
+diff --git a/include/net/x25.h b/include/net/x25.h
+index 9baa07d..33f67fb 100644
+--- a/include/net/x25.h
++++ b/include/net/x25.h
+@@ -182,6 +182,10 @@ extern int  sysctl_x25_clear_request_timeout;
+ extern int  sysctl_x25_ack_holdback_timeout;
+ extern int  sysctl_x25_forward;
+ 
++extern int x25_parse_address_block(struct sk_buff *skb,
++		struct x25_address *called_addr,
++		struct x25_address *calling_addr);
++
+ extern int  x25_addr_ntoa(unsigned char *, struct x25_address *,
+ 			  struct x25_address *);
+ extern int  x25_addr_aton(unsigned char *, struct x25_address *,
+diff --git a/net/x25/af_x25.c b/net/x25/af_x25.c
+index 9796f3e..fe26c01 100644
+--- a/net/x25/af_x25.c
++++ b/net/x25/af_x25.c
+@@ -82,6 +82,41 @@ struct compat_x25_subscrip_struct {
+ };
+ #endif
+ 
++
++int x25_parse_address_block(struct sk_buff *skb,
++		struct x25_address *called_addr,
++		struct x25_address *calling_addr)
++{
++	unsigned char len;
++	int needed;
++	int rc;
++
++	if (skb->len < 1) {
++		/* packet has no address block */
++		rc = 0;
++		goto empty;
++	}
++
++	len = *skb->data;
++	needed = 1 + (len >> 4) + (len & 0x0f);
++
++	if (skb->len < needed) {
++		/* packet is too short to hold the addresses it claims
++		   to hold */
++		rc = -1;
++		goto empty;
++	}
++
++	return x25_addr_ntoa(skb->data, called_addr, calling_addr);
++
++empty:
++	*called_addr->x25_addr = 0;
++	*calling_addr->x25_addr = 0;
++
++	return rc;
++}
++
++
+ int x25_addr_ntoa(unsigned char *p, struct x25_address *called_addr,
+ 		  struct x25_address *calling_addr)
+ {
+@@ -921,16 +956,26 @@ int x25_rx_call_request(struct sk_buff *skb, struct x25_neigh *nb,
+ 	/*
+ 	 *	Extract the X.25 addresses and convert them to ASCII strings,
+ 	 *	and remove them.
++	 *
++	 *	Address block is mandatory in call request packets
+ 	 */
+-	addr_len = x25_addr_ntoa(skb->data, &source_addr, &dest_addr);
++	addr_len = x25_parse_address_block(skb, &source_addr, &dest_addr);
++	if (addr_len <= 0)
++		goto out_clear_request;
+ 	skb_pull(skb, addr_len);
+ 
+ 	/*
+ 	 *	Get the length of the facilities, skip past them for the moment
+ 	 *	get the call user data because this is needed to determine
+ 	 *	the correct listener
++	 *
++	 *	Facilities length is mandatory in call request packets
+ 	 */
++	if (skb->len < 1)
++		goto out_clear_request;
+ 	len = skb->data[0] + 1;
++	if (skb->len < len)
++		goto out_clear_request;
+ 	skb_pull(skb,len);
+ 
+ 	/*
+diff --git a/net/x25/x25_facilities.c b/net/x25/x25_facilities.c
+index a21f664..a2765c6 100644
+--- a/net/x25/x25_facilities.c
++++ b/net/x25/x25_facilities.c
+@@ -35,7 +35,7 @@ int x25_parse_facilities(struct sk_buff *skb, struct x25_facilities *facilities,
+ 		struct x25_dte_facilities *dte_facs, unsigned long *vc_fac_mask)
+ {
+ 	unsigned char *p = skb->data;
+-	unsigned int len = *p++;
++	unsigned int len;
+ 
+ 	*vc_fac_mask = 0;
+ 
+@@ -50,6 +50,14 @@ int x25_parse_facilities(struct sk_buff *skb, struct x25_facilities *facilities,
+ 	memset(dte_facs->called_ae, '\0', sizeof(dte_facs->called_ae));
+ 	memset(dte_facs->calling_ae, '\0', sizeof(dte_facs->calling_ae));
+ 
++	if (skb->len < 1)
++		return 0;
++
++	len = *p++;
++
++	if (len >= skb->len)
++		return -1;
++
+ 	while (len > 0) {
+ 		switch (*p & X25_FAC_CLASS_MASK) {
+ 		case X25_FAC_CLASS_A:
+@@ -247,6 +255,8 @@ int x25_negotiate_facilities(struct sk_buff *skb, struct sock *sk,
+ 	memcpy(new, ours, sizeof(*new));
+ 
+ 	len = x25_parse_facilities(skb, &theirs, dte, &x25->vc_facil_mask);
++	if (len < 0)
++		return len;
+ 
+ 	/*
+ 	 *	They want reverse charging, we won't accept it.
+diff --git a/net/x25/x25_in.c b/net/x25/x25_in.c
+index 96d9227..b39072f 100644
+--- a/net/x25/x25_in.c
++++ b/net/x25/x25_in.c
+@@ -89,6 +89,7 @@ static int x25_queue_rx_frame(struct sock *sk, struct sk_buff *skb, int more)
+ static int x25_state1_machine(struct sock *sk, struct sk_buff *skb, int frametype)
+ {
+ 	struct x25_address source_addr, dest_addr;
++	int len;
+ 
+ 	switch (frametype) {
+ 		case X25_CALL_ACCEPTED: {
+@@ -106,11 +107,17 @@ static int x25_state1_machine(struct sock *sk, struct sk_buff *skb, int frametyp
+ 			 *	Parse the data in the frame.
+ 			 */
+ 			skb_pull(skb, X25_STD_MIN_LEN);
+-			skb_pull(skb, x25_addr_ntoa(skb->data, &source_addr, &dest_addr));
+-			skb_pull(skb,
+-				 x25_parse_facilities(skb, &x25->facilities,
++
++			len = x25_parse_address_block(skb, &source_addr,
++						&dest_addr);
++			if (len > 0)
++				skb_pull(skb, len);
++
++			len = x25_parse_facilities(skb, &x25->facilities,
+ 						&x25->dte_facilities,
+-						&x25->vc_facil_mask));
++						&x25->vc_facil_mask);
++			if (len > 0)
++				skb_pull(skb, len);
+ 			/*
+ 			 *	Copy any Call User Data.
+ 			 */
+-- 
+1.7.2.3
+
