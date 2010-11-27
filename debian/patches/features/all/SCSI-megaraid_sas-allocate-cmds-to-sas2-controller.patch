@@ -1,0 +1,87 @@
+From: Yang, Bo <Bo.Yang@lsi.com>
+Date: Tue, 6 Oct 2009 14:40:58 -0600
+Subject: [PATCH 4/5] [SCSI] megaraid_sas: allocate the application cmds to sas2 controller
+
+commit 7bebf5c79cb62766c76c6c1b9c77b86496fd363e upstream.
+
+MegaRAID SAS2 controller ioctl can't use 32 cmd for applications.
+Driver need to divide different number of cmds to IO and application.
+
+Signed-off-by Bo Yang<bo.yang@lsi.com>
+Signed-off-by: James Bottomley <James.Bottomley@suse.de>
+---
+ drivers/scsi/megaraid/megaraid_sas.c |   24 +++++++++++++++++++++---
+ drivers/scsi/megaraid/megaraid_sas.h |    1 +
+ 2 files changed, 22 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/scsi/megaraid/megaraid_sas.c b/drivers/scsi/megaraid/megaraid_sas.c
+index 9967ee7..5afd651 100644
+--- a/drivers/scsi/megaraid/megaraid_sas.c
++++ b/drivers/scsi/megaraid/megaraid_sas.c
+@@ -1239,7 +1239,14 @@ static void megasas_complete_cmd_dpc(unsigned long instance_addr)
+ 
+ 		spin_lock_irqsave(instance->host->host_lock, flags);
+ 		instance->flag &= ~MEGASAS_FW_BUSY;
+-		instance->host->can_queue =
++		if ((instance->pdev->device ==
++			PCI_DEVICE_ID_LSI_SAS0073SKINNY) ||
++			(instance->pdev->device ==
++			PCI_DEVICE_ID_LSI_SAS0071SKINNY)) {
++			instance->host->can_queue =
++				instance->max_fw_cmds - MEGASAS_SKINNY_INT_CMDS;
++		} else
++			instance->host->can_queue =
+ 				instance->max_fw_cmds - MEGASAS_INT_CMDS;
+ 
+ 		spin_unlock_irqrestore(instance->host->host_lock, flags);
+@@ -2774,7 +2781,13 @@ static int megasas_io_attach(struct megasas_instance *instance)
+ 	 */
+ 	host->irq = instance->pdev->irq;
+ 	host->unique_id = instance->unique_id;
+-	host->can_queue = instance->max_fw_cmds - MEGASAS_INT_CMDS;
++	if ((instance->pdev->device == PCI_DEVICE_ID_LSI_SAS0073SKINNY) ||
++		(instance->pdev->device == PCI_DEVICE_ID_LSI_SAS0071SKINNY)) {
++		host->can_queue =
++			instance->max_fw_cmds - MEGASAS_SKINNY_INT_CMDS;
++	} else
++		host->can_queue =
++			instance->max_fw_cmds - MEGASAS_INT_CMDS;
+ 	host->this_id = instance->init_id;
+ 	host->sg_tablesize = instance->max_num_sge;
+ 	host->max_sectors = instance->max_sectors_per_req;
+@@ -2909,7 +2922,6 @@ megasas_probe_one(struct pci_dev *pdev, const struct pci_device_id *id)
+ 	spin_lock_init(&poll_aen_lock);
+ 
+ 	mutex_init(&instance->aen_mutex);
+-	sema_init(&instance->ioctl_sem, MEGASAS_INT_CMDS);
+ 
+ 	/*
+ 	 * Initialize PCI related and misc parameters
+@@ -2919,6 +2931,12 @@ megasas_probe_one(struct pci_dev *pdev, const struct pci_device_id *id)
+ 	instance->unique_id = pdev->bus->number << 8 | pdev->devfn;
+ 	instance->init_id = MEGASAS_DEFAULT_INIT_ID;
+ 
++	if ((instance->pdev->device == PCI_DEVICE_ID_LSI_SAS0073SKINNY) ||
++		(instance->pdev->device == PCI_DEVICE_ID_LSI_SAS0071SKINNY)) {
++		sema_init(&instance->ioctl_sem, MEGASAS_SKINNY_INT_CMDS);
++	} else
++		sema_init(&instance->ioctl_sem, MEGASAS_INT_CMDS);
++
+ 	megasas_dbg_lvl = 0;
+ 	instance->flag = 0;
+ 	instance->unload = 0;
+diff --git a/drivers/scsi/megaraid/megaraid_sas.h b/drivers/scsi/megaraid/megaraid_sas.h
+index 8ac6b26..4c78cd3 100644
+--- a/drivers/scsi/megaraid/megaraid_sas.h
++++ b/drivers/scsi/megaraid/megaraid_sas.h
+@@ -655,6 +655,7 @@ struct megasas_ctrl_info {
+  * is shown below
+  */
+ #define MEGASAS_INT_CMDS			32
++#define MEGASAS_SKINNY_INT_CMDS			5
+ 
+ /*
+  * FW can accept both 32 and 64 bit SGLs. We want to allocate 32/64 bit
+-- 
+1.7.2.3
+
