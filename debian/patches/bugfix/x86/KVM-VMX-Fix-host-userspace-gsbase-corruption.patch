@@ -1,0 +1,71 @@
+Subject: [PATCH 2.6.32.y] KVM: VMX: Fix host userspace gsbase corruption
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Fri, 26 Nov 2010 06:31:36 +0000
+
+commit c8770e7ba63bb5dd8fe5f9d251275a8fa717fb78 upstream.
+
+We now use load_gs_index() to load gs safely; unfortunately this also
+changes MSR_KERNEL_GS_BASE, which we managed separately.  This resulted
+in confusion and breakage running 32-bit host userspace on a 64-bit kernel.
+
+Fix by
+- saving guest MSR_KERNEL_GS_BASE before we we reload the host's gs
+- doing the host save/load unconditionally, instead of only when in guest
+  long mode
+
+Things can be cleaned up further, but this is the minmal fix for now.
+
+Signed-off-by: Avi Kivity <avi@redhat.com>
+Signed-off-by: Marcelo Tosatti <mtosatti@redhat.com>
+[bwh: Backport to 2.6.32]
+---
+ arch/x86/kvm/vmx.c |   16 +++++++++++-----
+ 1 files changed, 11 insertions(+), 5 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx.c b/arch/x86/kvm/vmx.c
+index 0abb3a5..7238dd9 100644
+--- a/arch/x86/kvm/vmx.c
++++ b/arch/x86/kvm/vmx.c
+@@ -654,10 +654,7 @@ static void vmx_save_host_state(struct kvm_vcpu *vcpu)
+ #endif
+ 
+ #ifdef CONFIG_X86_64
+-	if (is_long_mode(&vmx->vcpu))
+-		save_msrs(vmx->host_msrs +
+-			  vmx->msr_offset_kernel_gs_base, 1);
+-
++	save_msrs(vmx->host_msrs + vmx->msr_offset_kernel_gs_base, 1);
+ #endif
+ 	load_msrs(vmx->guest_msrs, vmx->save_nmsrs);
+ 	load_transition_efer(vmx);
+@@ -672,17 +669,26 @@ static void __vmx_load_host_state(struct vcpu_vmx *vmx)
+ 	vmx->host_state.loaded = 0;
+ 	if (vmx->host_state.fs_reload_needed)
+ 		loadsegment(fs, vmx->host_state.fs_sel);
++#ifdef CONFIG_X86_64
++	if (is_long_mode(&vmx->vcpu))
++		save_msrs(vmx->guest_msrs + vmx->msr_offset_kernel_gs_base, 1);
++#endif
+ 	if (vmx->host_state.gs_ldt_reload_needed) {
+ 		kvm_load_ldt(vmx->host_state.ldt_sel);
+ #ifdef CONFIG_X86_64
+ 		load_gs_index(vmx->host_state.gs_sel);
+-		wrmsrl(MSR_KERNEL_GS_BASE, current->thread.gs);
+ #else
+ 		loadsegment(gs, vmx->host_state.gs_sel);
+ #endif
+ 	}
+ 	reload_tss();
++#ifdef CONFIG_X86_64
++	save_msrs(vmx->guest_msrs, vmx->msr_offset_kernel_gs_base);
++	save_msrs(vmx->guest_msrs + vmx->msr_offset_kernel_gs_base + 1,
++		  vmx->save_nmsrs - vmx->msr_offset_kernel_gs_base - 1);
++#else
+ 	save_msrs(vmx->guest_msrs, vmx->save_nmsrs);
++#endif
+ 	load_msrs(vmx->host_msrs, vmx->save_nmsrs);
+ 	reload_host_efer(vmx);
+ 	load_gdt(&__get_cpu_var(host_gdt));
+-- 
+1.7.2.3
+
