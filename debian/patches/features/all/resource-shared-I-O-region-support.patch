@@ -1,0 +1,120 @@
+From: Alan Cox <alan@linux.intel.com>
+Date: Mon, 29 Mar 2010 19:38:00 +0200
+Subject: [PATCH] resource: shared I/O region support
+
+commit 8b6d043b7ee2d1b819dc833d677ea2aead71a0c0 upstream.
+
+SuperIO devices share regions and use lock/unlock operations to chip
+select.  We therefore need to be able to request a resource and wait for
+it to be freed by whichever other SuperIO device currently hogs it.
+Right now you have to poll which is horrible.
+
+Add a MUXED field to IO port resources. If the MUXED field is set on the
+resource and on the request (via request_muxed_region) then we block
+until the previous owner of the muxed resource releases their region.
+
+This allows us to implement proper resource sharing and locking for
+superio chips using code of the form
+
+enable_my_superio_dev() {
+	request_muxed_region(0x44, 0x02, "superio:watchdog");
+	outb() ..sequence to enable chip
+}
+
+disable_my_superio_dev() {
+	outb() .. sequence of disable chip
+	release_region(0x44, 0x02);
+}
+
+Signed-off-by: Giel van Schijndel <me@mortis.eu>
+Signed-off-by: Alan Cox <alan@linux.intel.com>
+Signed-off-by: Jesse Barnes <jbarnes@virtuousgeek.org>
+[Mike Hommey: Adjust context for 2.6.32]
+[bwh: Hide the added #include from genksyms]
+---
+ include/linux/ioport.h |    4 +++-
+ kernel/resource.c      |   18 +++++++++++++++++-
+ 2 files changed, 20 insertions(+), 2 deletions(-)
+
+diff --git a/include/linux/ioport.h b/include/linux/ioport.h
+index 83aa812..140b00d 100644
+--- a/include/linux/ioport.h
++++ b/include/linux/ioport.h
+@@ -50,6 +50,7 @@ struct resource_list {
+ #define IORESOURCE_STARTALIGN	0x00040000	/* start field is alignment */
+ 
+ #define IORESOURCE_MEM_64	0x00100000
++#define IORESOURCE_MUXED	0x00400000	/* Resource is software muxed */
+ 
+ #define IORESOURCE_EXCLUSIVE	0x08000000	/* Userland may not map this resource */
+ #define IORESOURCE_DISABLED	0x10000000
+@@ -136,7 +137,8 @@ static inline unsigned long resource_type(struct resource *res)
+ }
+ 
+ /* Convenience shorthand with allocation */
+-#define request_region(start,n,name)	__request_region(&ioport_resource, (start), (n), (name), 0)
++#define request_region(start,n,name)		__request_region(&ioport_resource, (start), (n), (name), 0)
++#define request_muxed_region(start,n,name)	__request_region(&ioport_resource, (start), (n), (name), IORESOURCE_MUXED)
+ #define __request_mem_region(start,n,name, excl) __request_region(&iomem_resource, (start), (n), (name), excl)
+ #define request_mem_region(start,n,name) __request_region(&iomem_resource, (start), (n), (name), 0)
+ #define request_mem_region_exclusive(start,n,name) \
+diff --git a/kernel/resource.c b/kernel/resource.c
+index fb11a58..06bd8ef 100644
+--- a/kernel/resource.c
++++ b/kernel/resource.c
+@@ -15,6 +15,9 @@
+ #include <linux/spinlock.h>
+ #include <linux/fs.h>
+ #include <linux/proc_fs.h>
++#ifndef __GENKSYMS__
++#include <linux/sched.h>
++#endif
+ #include <linux/seq_file.h>
+ #include <linux/device.h>
+ #include <linux/pfn.h>
+@@ -601,6 +604,8 @@ resource_size_t resource_alignment(struct resource *res)
+  * release_region releases a matching busy region.
+  */
+ 
++static DECLARE_WAIT_QUEUE_HEAD(muxed_resource_wait);
++
+ /**
+  * __request_region - create a new busy resource region
+  * @parent: parent resource descriptor
+@@ -613,6 +618,7 @@ struct resource * __request_region(struct resource *parent,
+ 				   resource_size_t start, resource_size_t n,
+ 				   const char *name, int flags)
+ {
++	DECLARE_WAITQUEUE(wait, current);
+ 	struct resource *res = kzalloc(sizeof(*res), GFP_KERNEL);
+ 
+ 	if (!res)
+@@ -637,7 +643,15 @@ struct resource * __request_region(struct resource *parent,
+ 			if (!(conflict->flags & IORESOURCE_BUSY))
+ 				continue;
+ 		}
+-
++		if (conflict->flags & flags & IORESOURCE_MUXED) {
++			add_wait_queue(&muxed_resource_wait, &wait);
++			write_unlock(&resource_lock);
++			set_current_state(TASK_UNINTERRUPTIBLE);
++			schedule();
++			remove_wait_queue(&muxed_resource_wait, &wait);
++			write_lock(&resource_lock);
++			continue;
++		}
+ 		/* Uhhuh, that didn't work out.. */
+ 		kfree(res);
+ 		res = NULL;
+@@ -711,6 +725,8 @@ void __release_region(struct resource *parent, resource_size_t start,
+ 				break;
+ 			*p = res->sibling;
+ 			write_unlock(&resource_lock);
++			if (res->flags & IORESOURCE_MUXED)
++				wake_up(&muxed_resource_wait);
+ 			kfree(res);
+ 			return;
+ 		}
+-- 
+1.7.2.3
+
