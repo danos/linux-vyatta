@@ -1,0 +1,156 @@
+From 68320323a51c2378aca433c76157d9e66104ff1e Mon Sep 17 00:00:00 2001
+From: Jiang, Yunhong <yunhong.jiang@intel.com>
+Date: Tue, 14 Sep 2010 14:41:52 -0700
+Subject: [PATCH] xen/acpi: Add cpu hotplug support
+
+Add physical CPU hotplug support to origin/xen/next-2.6.32 branch.
+Please notice that, even with this change, the acpi_processor->id is
+still always -1. This is because several workaround in PM side depends
+on acpi_processor->id == -1. As the CPU hotplug logic does not depends
+on acpi_processor->id, I'd still keep it no changes.
+
+But we need change the acpi_processor->id in the future.
+
+Signed-off-by: Jiang, Yunhong <yunhong.jiang@intel.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ drivers/acpi/processor_xen.c |   43 ++++++++++++++++++++++++++++++++++++++---
+ drivers/xen/pcpu.c           |   34 ++++++++++++++++++++++++++++++++-
+ include/xen/pcpu.h           |    2 +
+ 3 files changed, 74 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/acpi/processor_xen.c b/drivers/acpi/processor_xen.c
+index 2f37c9c..305398d 100644
+--- a/drivers/acpi/processor_xen.c
++++ b/drivers/acpi/processor_xen.c
+@@ -39,6 +39,7 @@
+ #include <acpi/acpi_drivers.h>
+ #include <acpi/processor.h>
+ #include <xen/acpi.h>
++#include <xen/pcpu.h>
+ 
+ #define PREFIX "ACPI: "
+ 
+@@ -82,6 +83,42 @@ struct acpi_driver xen_acpi_processor_driver = {
+ 		},
+ };
+ 
++static int is_processor_present(acpi_handle handle)
++{
++	acpi_status status;
++	unsigned long long sta = 0;
++
++
++	status = acpi_evaluate_integer(handle, "_STA", NULL, &sta);
++
++	if (ACPI_SUCCESS(status) && (sta & ACPI_STA_DEVICE_PRESENT))
++		return 1;
++
++	/*
++	 * _STA is mandatory for a processor that supports hot plug
++	 */
++	if (status == AE_NOT_FOUND)
++		ACPI_DEBUG_PRINT((ACPI_DB_INFO,
++				"Processor does not support hot plug\n"));
++	else
++		ACPI_EXCEPTION((AE_INFO, status,
++				"Processor Device is not present"));
++	return 0;
++}
++
++static acpi_status
++xen_acpi_processor_hotadd_init(struct acpi_processor *pr, int *p_cpu)
++{
++	if (!is_processor_present(pr->handle))
++		return AE_ERROR;
++
++	if (processor_cntl_xen_notify(pr,
++				PROCESSOR_HOTPLUG, HOTPLUG_TYPE_ADD))
++		return AE_ERROR;
++
++	return AE_OK;
++}
++
+ static int xen_acpi_processor_get_info(struct acpi_device *device)
+ {
+ 	acpi_status status = 0;
+@@ -164,14 +201,12 @@ static int xen_acpi_processor_get_info(struct acpi_device *device)
+ 	 *  They should be ignored _iff they are physically not present.
+ 	 *
+ 	 */
+-#if 0
+-	if (pr->id == -1) {
++	if (xen_pcpu_index(pr->acpi_id, 1) == -1) {
+ 		if (ACPI_FAILURE
+-		    (acpi_processor_hotadd_init(pr->handle, &pr->id))) {
++		    (xen_acpi_processor_hotadd_init(pr, &pr->id))) {
+ 			return -ENODEV;
+ 		}
+ 	}
+-#endif
+ 
+ 	/*
+ 	 * On some boxes several processors use the same processor bus id.
+diff --git a/drivers/xen/pcpu.c b/drivers/xen/pcpu.c
+index 6450c17..6d1a770 100644
+--- a/drivers/xen/pcpu.c
++++ b/drivers/xen/pcpu.c
+@@ -313,6 +313,38 @@ static struct pcpu *_sync_pcpu(int cpu_num, int *max_id, int *result)
+ 	return pcpu;
+ }
+ 
++int xen_pcpu_index(uint32_t id, int is_acpiid)
++{
++	int cpu_num = 0, max_id = 0, ret;
++	xen_platform_op_t op = {
++		.cmd            = XENPF_get_cpuinfo,
++		.interface_version  = XENPF_INTERFACE_VERSION,
++	};
++	struct xenpf_pcpuinfo *info = &op.u.pcpu_info;
++
++	info->xen_cpuid = 0;
++	ret = HYPERVISOR_dom0_op(&op);
++	if (ret)
++		return -1;
++	max_id = op.u.pcpu_info.max_present;
++
++	while ((cpu_num <= max_id)) {
++		info->xen_cpuid = cpu_num;
++		ret = HYPERVISOR_dom0_op(&op);
++		if (ret)
++			continue;
++
++		if (op.u.pcpu_info.max_present > max_id)
++			max_id = op.u.pcpu_info.max_present;
++		if (id == (is_acpiid ? info->acpi_id : info->apic_id))
++			return cpu_num;
++		cpu_num++;
++	}
++
++    return -1;
++}
++EXPORT_SYMBOL(xen_pcpu_index);
++
+ /*
+  * Sync dom0's pcpu information with xen hypervisor's
+  */
+@@ -417,4 +449,4 @@ static int __init xen_pcpu_init(void)
+ 	return err;
+ }
+ 
+-subsys_initcall(xen_pcpu_init);
++arch_initcall(xen_pcpu_init);
+diff --git a/include/xen/pcpu.h b/include/xen/pcpu.h
+index fb2bf6b..7e8f9d1 100644
+--- a/include/xen/pcpu.h
++++ b/include/xen/pcpu.h
+@@ -27,4 +27,6 @@ static inline int xen_pcpu_online(uint32_t flags)
+ extern int register_xen_pcpu_notifier(struct notifier_block *nb);
+ 
+ extern void unregister_xen_pcpu_notifier(struct notifier_block *nb);
++
++extern int xen_pcpu_index(uint32_t acpi_id, int is_acpiid);
+ #endif
+-- 
+1.7.2.3
+
