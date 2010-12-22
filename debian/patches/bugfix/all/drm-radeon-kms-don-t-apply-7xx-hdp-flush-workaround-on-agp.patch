@@ -1,0 +1,58 @@
+From f3886f85cfde578f1d0ba6e40ac5f9d70043923b Mon Sep 17 00:00:00 2001
+From: Alex Deucher <alexdeucher@gmail.com>
+Date: Wed, 8 Dec 2010 10:05:34 -0500
+Subject: drm/radeon/kms: don't apply 7xx HDP flush workaround on AGP
+
+From: Alex Deucher <alexdeucher@gmail.com>
+
+commit f3886f85cfde578f1d0ba6e40ac5f9d70043923b upstream.
+
+It should be required for all 7xx asics, but seems to cause
+problems on some AGP 7xx chips.
+
+Fixes:
+https://bugzilla.kernel.org/show_bug.cgi?id=19002
+
+Signed-off-by: Alex Deucher <alexdeucher@gmail.com>
+Reported-and-Tested-by: Duncan <1i5t5.duncan@cox.net>
+Signed-off-by: Dave Airlie <airlied@redhat.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+
+---
+ drivers/gpu/drm/radeon/r600.c |   11 ++++++++---
+ 1 file changed, 8 insertions(+), 3 deletions(-)
+
+--- a/drivers/gpu/drm/radeon/r600.c
++++ b/drivers/gpu/drm/radeon/r600.c
+@@ -878,12 +878,15 @@ void r600_pcie_gart_tlb_flush(struct rad
+ 	u32 tmp;
+ 
+ 	/* flush hdp cache so updates hit vram */
+-	if ((rdev->family >= CHIP_RV770) && (rdev->family <= CHIP_RV740)) {
++	if ((rdev->family >= CHIP_RV770) && (rdev->family <= CHIP_RV740) &&
++	    !(rdev->flags & RADEON_IS_AGP)) {
+ 		void __iomem *ptr = (void *)rdev->gart.table.vram.ptr;
+ 		u32 tmp;
+ 
+ 		/* r7xx hw bug.  write to HDP_DEBUG1 followed by fb read
+ 		 * rather than write to HDP_REG_COHERENCY_FLUSH_CNTL
++		 * This seems to cause problems on some AGP cards. Just use the old
++		 * method for them.
+ 		 */
+ 		WREG32(HDP_DEBUG1, 0);
+ 		tmp = readl((void __iomem *)ptr);
+@@ -3525,10 +3528,12 @@ int r600_debugfs_mc_info_init(struct rad
+ void r600_ioctl_wait_idle(struct radeon_device *rdev, struct radeon_bo *bo)
+ {
+ 	/* r7xx hw bug.  write to HDP_DEBUG1 followed by fb read
+-	 * rather than write to HDP_REG_COHERENCY_FLUSH_CNTL
++	 * rather than write to HDP_REG_COHERENCY_FLUSH_CNTL.
++	 * This seems to cause problems on some AGP cards. Just use the old
++	 * method for them.
+ 	 */
+ 	if ((rdev->family >= CHIP_RV770) && (rdev->family <= CHIP_RV740) &&
+-	    rdev->vram_scratch.ptr) {
++	    rdev->vram_scratch.ptr && !(rdev->flags & RADEON_IS_AGP)) {
+ 		void __iomem *ptr = (void *)rdev->vram_scratch.ptr;
+ 		u32 tmp;
+ 
