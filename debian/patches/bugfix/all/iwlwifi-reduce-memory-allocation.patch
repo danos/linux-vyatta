@@ -1,0 +1,82 @@
+From ee1fedd6b5f930ee87771fd59275f5a606713bf2 Mon Sep 17 00:00:00 2001
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Mon, 17 May 2010 02:37:34 -0700
+Subject: [PATCH] iwlwifi: reduce memory allocation
+
+Vaguely based on
+commit ff0d91c3eea6e25b47258349b455671f98f1b0cd upstream,
+from which the following description comes.
+
+From: Johannes Berg <johannes.berg@intel.com>
+
+Currently, the driver allocates up to 19 skb pointers
+for each TFD, of which we have 256 per queue. This
+means that for each TX queue, we allocate 19k/38k
+(an order 4 or 5 allocation on 32/64 bit respectively)
+just for each queue's "txb" array, which contains only
+the SKB pointers.
+
+However, due to the way we use these pointers only the
+first one can ever be assigned. When the driver was
+initially written, the idea was that it could be
+passed multiple SKBs for each TFD and attach all
+those to implement gather DMA. However, due to
+constraints in the userspace API and lack of TCP/IP
+level checksumming in the device, this is in fact not
+possible. And even if it were, the SKBs would be
+chained, and we wouldn't need to keep pointers to
+each anyway.
+
+Change this to only keep track of one SKB per TFD,
+and thereby reduce memory consumption to just one
+pointer per TFD, which is an order 0 allocation per
+transmit queue.
+
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+ drivers/net/wireless/iwlwifi/iwl-agn.c |    8 +++-----
+ drivers/net/wireless/iwlwifi/iwl-dev.h |    2 +-
+ 2 files changed, 4 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/net/wireless/iwlwifi/iwl-agn.c b/drivers/net/wireless/iwlwifi/iwl-agn.c
+index c56d355..60a3966 100644
+--- a/drivers/net/wireless/iwlwifi/iwl-agn.c
++++ b/drivers/net/wireless/iwlwifi/iwl-agn.c
+@@ -438,7 +438,7 @@ void iwl_hw_txq_free_tfd(struct iwl_priv *priv, struct iwl_tx_queue *txq)
+ 	/* Sanity check on number of chunks */
+ 	num_tbs = iwl_tfd_get_num_tbs(tfd);
+ 
+-	if (num_tbs >= IWL_NUM_OF_TBS) {
++	if (num_tbs > 2) {
+ 		IWL_ERR(priv, "Too many chunks: %i\n", num_tbs);
+ 		/* @todo issue fatal error, it is quite serious situation */
+ 		return;
+@@ -481,10 +481,8 @@ int iwl_hw_txq_attach_buf_to_tfd(struct iwl_priv *priv,
+ 
+ 	num_tbs = iwl_tfd_get_num_tbs(tfd);
+ 
+-	/* Each TFD can point to a maximum 20 Tx buffers */
+-	if (num_tbs >= IWL_NUM_OF_TBS) {
+-		IWL_ERR(priv, "Error can not send more than %d chunks\n",
+-			  IWL_NUM_OF_TBS);
++	if (num_tbs >= 2) {
++		IWL_ERR(priv, "Error can not send more than 2 chunks\n");
+ 		return -EINVAL;
+ 	}
+ 
+diff --git a/drivers/net/wireless/iwlwifi/iwl-dev.h b/drivers/net/wireless/iwlwifi/iwl-dev.h
+index 8f98d72..48927f2 100644
+--- a/drivers/net/wireless/iwlwifi/iwl-dev.h
++++ b/drivers/net/wireless/iwlwifi/iwl-dev.h
+@@ -197,7 +197,7 @@ struct iwl_queue {
+ 
+ /* One for each TFD */
+ struct iwl_tx_info {
+-	struct sk_buff *skb[IWL_NUM_OF_TBS - 1];
++	struct sk_buff *skb[1];
+ };
+ 
+ /**
+-- 
+1.7.2.3
+
