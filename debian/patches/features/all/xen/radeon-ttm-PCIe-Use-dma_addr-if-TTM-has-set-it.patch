@@ -1,0 +1,164 @@
+From f36895d8ad906e8fffc28a7f66012f8d77fed644 Mon Sep 17 00:00:00 2001
+From: Konrad Rzeszutek Wilk <konrad.wilk@oracle.com>
+Date: Thu, 2 Dec 2010 11:04:29 -0500
+Subject: [PATCH] radeon/ttm/PCIe: Use dma_addr if TTM has set it.
+
+If the TTM layer has used the DMA API to setup pages that are
+TTM_PAGE_FLAG_DMA32 (look at patch titled: "ttm: Utilize the dma_addr_t
+array for pages that are to in DMA32 pool."), lets use it
+when programming the GART in the PCIe type cards.
+
+This patch skips doing the pci_map_page (and pci_unmap_page) if
+there is a DMA addresses passed in for that page. If the dma_address
+is zero (or DMA_ERROR_CODE), then we continue on with our old
+behaviour.
+
+Signed-off-by: Konrad Rzeszutek Wilk <konrad.wilk@oracle.com>
+Signed-off-by: Ian Campbell <ian.campbell@citrix.com>
+(cherry picked from commit 289030bd1c000fa46388ca31bc67b223aacf90f2 in
+git://git.kernel.org/pub/scm/linux/kernel/git/konrad/xen.git#devel/ttm.pci-api-v2)
+---
+ drivers/gpu/drm/radeon/radeon.h      |    4 ++-
+ drivers/gpu/drm/radeon/radeon_gart.c |   36 ++++++++++++++++++++++++---------
+ drivers/gpu/drm/radeon/radeon_ttm.c  |    5 +++-
+ 3 files changed, 33 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/gpu/drm/radeon/radeon.h b/drivers/gpu/drm/radeon/radeon.h
+index cba2497..a002f3c 100644
+--- a/drivers/gpu/drm/radeon/radeon.h
++++ b/drivers/gpu/drm/radeon/radeon.h
+@@ -284,6 +284,7 @@ struct radeon_gart {
+ 	union radeon_gart_table		table;
+ 	struct page			**pages;
+ 	dma_addr_t			*pages_addr;
++	bool				*ttm_alloced;
+ 	bool				ready;
+ };
+ 
+@@ -296,7 +297,8 @@ void radeon_gart_fini(struct radeon_device *rdev);
+ void radeon_gart_unbind(struct radeon_device *rdev, unsigned offset,
+ 			int pages);
+ int radeon_gart_bind(struct radeon_device *rdev, unsigned offset,
+-		     int pages, struct page **pagelist);
++		     int pages, struct page **pagelist,
++		     dma_addr_t *dma_addr);
+ 
+ 
+ /*
+diff --git a/drivers/gpu/drm/radeon/radeon_gart.c b/drivers/gpu/drm/radeon/radeon_gart.c
+index e73d56e..f5d513d 100644
+--- a/drivers/gpu/drm/radeon/radeon_gart.c
++++ b/drivers/gpu/drm/radeon/radeon_gart.c
+@@ -148,8 +148,9 @@ void radeon_gart_unbind(struct radeon_device *rdev, unsigned offset,
+ 	p = t / (PAGE_SIZE / RADEON_GPU_PAGE_SIZE);
+ 	for (i = 0; i < pages; i++, p++) {
+ 		if (rdev->gart.pages[p]) {
+-			pci_unmap_page(rdev->pdev, rdev->gart.pages_addr[p],
+-				       PAGE_SIZE, PCI_DMA_BIDIRECTIONAL);
++			if (!rdev->gart.ttm_alloced[p])
++				pci_unmap_page(rdev->pdev, rdev->gart.pages_addr[p],
++				       		PAGE_SIZE, PCI_DMA_BIDIRECTIONAL);
+ 			rdev->gart.pages[p] = NULL;
+ 			rdev->gart.pages_addr[p] = 0;
+ 			for (j = 0; j < (PAGE_SIZE / RADEON_GPU_PAGE_SIZE); j++, t++) {
+@@ -162,7 +163,7 @@ void radeon_gart_unbind(struct radeon_device *rdev, unsigned offset,
+ }
+ 
+ int radeon_gart_bind(struct radeon_device *rdev, unsigned offset,
+-		     int pages, struct page **pagelist)
++		     int pages, struct page **pagelist, dma_addr_t *dma_addr)
+ {
+ 	unsigned t;
+ 	unsigned p;
+@@ -177,15 +178,22 @@ int radeon_gart_bind(struct radeon_device *rdev, unsigned offset,
+ 	p = t / (PAGE_SIZE / RADEON_GPU_PAGE_SIZE);
+ 
+ 	for (i = 0; i < pages; i++, p++) {
+-		/* we need to support large memory configurations */
+-		/* assume that unbind have already been call on the range */
+-		rdev->gart.pages_addr[p] = pci_map_page(rdev->pdev, pagelist[i],
++		/* On TTM path, we only use the DMA API if TTM_PAGE_FLAG_DMA32
++		 * is requested. */
++		if (dma_addr[p] != DMA_ERROR_CODE) {
++			rdev->gart.ttm_alloced[p] = true;
++			rdev->gart.pages_addr[p] = dma_addr[p];
++		} else {
++			/* we need to support large memory configurations */
++			/* assume that unbind have already been call on the range */
++			rdev->gart.pages_addr[p] = pci_map_page(rdev->pdev, pagelist[i],
+ 							0, PAGE_SIZE,
+ 							PCI_DMA_BIDIRECTIONAL);
+-		if (pci_dma_mapping_error(rdev->pdev, rdev->gart.pages_addr[p])) {
+-			/* FIXME: failed to map page (return -ENOMEM?) */
+-			radeon_gart_unbind(rdev, offset, pages);
+-			return -ENOMEM;
++			if (pci_dma_mapping_error(rdev->pdev, rdev->gart.pages_addr[p])) {
++				/* FIXME: failed to map page (return -ENOMEM?) */
++				radeon_gart_unbind(rdev, offset, pages);
++				return -ENOMEM;
++			}
+ 		}
+ 		rdev->gart.pages[p] = pagelist[i];
+ 		page_base = rdev->gart.pages_addr[p];
+@@ -227,6 +235,12 @@ int radeon_gart_init(struct radeon_device *rdev)
+ 		radeon_gart_fini(rdev);
+ 		return -ENOMEM;
+ 	}
++	rdev->gart.ttm_alloced = kzalloc(sizeof(bool) *
++					rdev->gart.num_cpu_pages, GFP_KERNEL);
++	if (rdev->gart.ttm_alloced == NULL) {
++		radeon_gart_fini(rdev);
++		return -ENOMEM;
++	}
+ 	return 0;
+ }
+ 
+@@ -239,6 +253,8 @@ void radeon_gart_fini(struct radeon_device *rdev)
+ 	rdev->gart.ready = false;
+ 	kfree(rdev->gart.pages);
+ 	kfree(rdev->gart.pages_addr);
++	kfree(rdev->gart.ttm_alloced);
+ 	rdev->gart.pages = NULL;
+ 	rdev->gart.pages_addr = NULL;
++	rdev->gart.ttm_alloced = NULL;
+ }
+diff --git a/drivers/gpu/drm/radeon/radeon_ttm.c b/drivers/gpu/drm/radeon/radeon_ttm.c
+index 70c2402..10d24bb 100644
+--- a/drivers/gpu/drm/radeon/radeon_ttm.c
++++ b/drivers/gpu/drm/radeon/radeon_ttm.c
+@@ -618,6 +618,7 @@ struct radeon_ttm_backend {
+ 	unsigned long			num_pages;
+ 	struct page			**pages;
+ 	struct page			*dummy_read_page;
++	dma_addr_t			*dma_addrs;
+ 	bool				populated;
+ 	bool				bound;
+ 	unsigned			offset;
+@@ -633,6 +634,7 @@ static int radeon_ttm_backend_populate(struct ttm_backend *backend,
+ 
+ 	gtt = container_of(backend, struct radeon_ttm_backend, backend);
+ 	gtt->pages = pages;
++	gtt->dma_addrs = dma_addrs;
+ 	gtt->num_pages = num_pages;
+ 	gtt->dummy_read_page = dummy_read_page;
+ 	gtt->populated = true;
+@@ -645,6 +647,7 @@ static void radeon_ttm_backend_clear(struct ttm_backend *backend)
+ 
+ 	gtt = container_of(backend, struct radeon_ttm_backend, backend);
+ 	gtt->pages = NULL;
++	gtt->dma_addrs = NULL;
+ 	gtt->num_pages = 0;
+ 	gtt->dummy_read_page = NULL;
+ 	gtt->populated = false;
+@@ -664,7 +667,7 @@ static int radeon_ttm_backend_bind(struct ttm_backend *backend,
+ 		WARN(1, "nothing to bind %lu pages for mreg %p back %p!\n", gtt->num_pages, bo_mem, backend);
+ 	}
+ 	r = radeon_gart_bind(gtt->rdev, gtt->offset,
+-			     gtt->num_pages, gtt->pages);
++			     gtt->num_pages, gtt->pages, gtt->dma_addrs);
+ 	if (r) {
+ 		DRM_ERROR("failed to bind %lu pages at 0x%08X\n",
+ 			  gtt->num_pages, gtt->offset);
+-- 
+1.5.6.5
+

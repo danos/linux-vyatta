@@ -1,0 +1,63 @@
+From 9551827190db2d34f106255f0b5bfdc452e85cd8 Mon Sep 17 00:00:00 2001
+From: Konrad Rzeszutek Wilk <konrad.wilk@oracle.com>
+Date: Mon, 26 Jul 2010 14:15:55 -0400
+Subject: [PATCH] ttm: Set VM_IO only on pages with TTM_MEMTYPE_FLAG_NEEDS_IOREMAP set.
+
+This patch is based on "[Patch RFC] ttm: nouveau accelerated on Xen
+pv-ops kernel"
+http://lists.freedesktop.org/archives/nouveau/2010-March/005326.html
+
+Under Xen, the PFN of page is virtualized. The physical addresses used
+for DMA programming needs to be the Machine Frame Number (MFN).
+Xen transparently does the correct translation using the _PAGE_IOMEM
+PTE bit. If the bit is set, Xen assumes that the backing memory is in
+the IOMEM space, and PFN equals MFN. If not set, page_to_pfn() returns
+a phantom MFN.
+
+The patch enables the ttm_bo_vm_fault() handler to behave correctly
+under Xen, and has no side-effects on normal (not under Xen) operations.
+
+The use of TTM_MEMTYPE_FLAG_NEEDS_IOREMAP in the check assumes that
+only pages which have this flag are backed by device memory or IO.
+
+Signed-off-by: Konrad Rzeszutek Wilk <konrad.wilk@oracle.com>
+Signed-off-by: Arvind R <arvino55@gmail.com>
+---
+ drivers/gpu/drm/ttm/ttm_bo_vm.c |    7 +++++--
+ 1 files changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/ttm/ttm_bo_vm.c b/drivers/gpu/drm/ttm/ttm_bo_vm.c
+index 3dc8d6b..ea3b8fb 100644
+--- a/drivers/gpu/drm/ttm/ttm_bo_vm.c
++++ b/drivers/gpu/drm/ttm/ttm_bo_vm.c
+@@ -239,6 +239,7 @@ int ttm_bo_mmap(struct file *filp, struct vm_area_struct *vma,
+ {
+ 	struct ttm_bo_driver *driver;
+ 	struct ttm_buffer_object *bo;
++	struct ttm_mem_type_manager *man;
+ 	int ret;
+ 
+ 	read_lock(&bdev->vm_lock);
+@@ -271,7 +272,10 @@ int ttm_bo_mmap(struct file *filp, struct vm_area_struct *vma,
+ 	 */
+ 
+ 	vma->vm_private_data = bo;
+-	vma->vm_flags |= VM_RESERVED | VM_IO | VM_MIXEDMAP | VM_DONTEXPAND;
++	vma->vm_flags |= VM_RESERVED | VM_MIXEDMAP | VM_DONTEXPAND;
++	man = &bdev->man[bo->mem.mem_type];
++	if (man->flags & TTM_MEMTYPE_FLAG_NEEDS_IOREMAP)
++		vma->vm_flags |= VM_IO;
+ 	vma->vm_page_prot = vm_get_page_prot(vma->vm_flags);
+ 	return 0;
+ out_unref:
+@@ -288,7 +292,6 @@ int ttm_fbdev_mmap(struct vm_area_struct *vma, struct ttm_buffer_object *bo)
+ 	vma->vm_ops = &ttm_bo_vm_ops;
+ 	vma->vm_private_data = ttm_bo_reference(bo);
+ 	vma->vm_flags |= VM_RESERVED | VM_IO | VM_MIXEDMAP | VM_DONTEXPAND;
+-	vma->vm_page_prot = vm_get_page_prot(vma->vm_flags);
+ 	return 0;
+ }
+ EXPORT_SYMBOL(ttm_fbdev_mmap);
+-- 
+1.5.6.5
+

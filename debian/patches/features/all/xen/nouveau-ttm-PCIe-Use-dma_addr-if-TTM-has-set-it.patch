@@ -1,0 +1,86 @@
+From a51f54d4bf6f9e8fd1c584730316fba1aab29d77 Mon Sep 17 00:00:00 2001
+From: Konrad Rzeszutek Wilk <konrad.wilk@oracle.com>
+Date: Thu, 2 Dec 2010 11:36:24 -0500
+Subject: [PATCH] nouveau/ttm/PCIe: Use dma_addr if TTM has set it.
+
+If the TTM layer has used the DMA API to setup pages that are
+TTM_PAGE_FLAG_DMA32 (look at patch titled: "ttm: Utilize the dma_addr_t
+array for pages that are to in DMA32 pool."), lets use it
+when programming the GART in the PCIe type cards.
+
+This patch skips doing the pci_map_page (and pci_unmap_page) if
+there is a DMA addresses passed in for that page. If the dma_address
+is zero (or DMA_ERROR_CODE), then we continue on with our old
+behaviour.
+
+Signed-off-by: Konrad Rzeszutek Wilk <konrad.wilk@oracle.com>
+Signed-off-by: Ian Campbell <ian.campbell@citrix.com>
+(cherry picked from commit b47cde0e9a0e2289a91bacd524b8e10163a10ebb in
+git://git.kernel.org/pub/scm/linux/kernel/git/konrad/xen.git#devel/ttm.pci-api-v2)
+---
+ drivers/gpu/drm/nouveau/nouveau_sgdma.c |   28 +++++++++++++++++++++-------
+ 1 files changed, 21 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/gpu/drm/nouveau/nouveau_sgdma.c b/drivers/gpu/drm/nouveau/nouveau_sgdma.c
+index 351582b..947edda 100644
+--- a/drivers/gpu/drm/nouveau/nouveau_sgdma.c
++++ b/drivers/gpu/drm/nouveau/nouveau_sgdma.c
+@@ -11,6 +11,7 @@ struct nouveau_sgdma_be {
+ 	struct drm_device *dev;
+ 
+ 	dma_addr_t *pages;
++	bool *ttm_alloced;
+ 	unsigned nr_pages;
+ 
+ 	unsigned pte_start;
+@@ -34,15 +35,25 @@ nouveau_sgdma_populate(struct ttm_backend *be, unsigned long num_pages,
+ 	if (!nvbe->pages)
+ 		return -ENOMEM;
+ 
++	nvbe->ttm_alloced = kmalloc(sizeof(bool) * num_pages, GFP_KERNEL);
++	if (!nvbe->ttm_alloced)
++		return -ENOMEM;
++
+ 	nvbe->nr_pages = 0;
+ 	while (num_pages--) {
+-		nvbe->pages[nvbe->nr_pages] =
+-			pci_map_page(dev->pdev, pages[nvbe->nr_pages], 0,
++		if (dma_addrs[nvbe->nr_pages] != DMA_ERROR_CODE) {
++			nvbe->pages[nvbe->nr_pages] =
++					dma_addrs[nvbe->nr_pages];
++		 	nvbe->ttm_alloced[nvbe->nr_pages] = true;
++		} else {
++			nvbe->pages[nvbe->nr_pages] =
++				pci_map_page(dev->pdev, pages[nvbe->nr_pages], 0,
+ 				     PAGE_SIZE, PCI_DMA_BIDIRECTIONAL);
+-		if (pci_dma_mapping_error(dev->pdev,
+-					  nvbe->pages[nvbe->nr_pages])) {
+-			be->func->clear(be);
+-			return -EFAULT;
++			if (pci_dma_mapping_error(dev->pdev,
++						  nvbe->pages[nvbe->nr_pages])) {
++				be->func->clear(be);
++				return -EFAULT;
++			}
+ 		}
+ 
+ 		nvbe->nr_pages++;
+@@ -65,11 +76,14 @@ nouveau_sgdma_clear(struct ttm_backend *be)
+ 			be->func->unbind(be);
+ 
+ 		while (nvbe->nr_pages--) {
+-			pci_unmap_page(dev->pdev, nvbe->pages[nvbe->nr_pages],
++			if (!nvbe->ttm_alloced[nvbe->nr_pages])
++				pci_unmap_page(dev->pdev, nvbe->pages[nvbe->nr_pages],
+ 				       PAGE_SIZE, PCI_DMA_BIDIRECTIONAL);
+ 		}
+ 		kfree(nvbe->pages);
++		kfree(nvbe->ttm_alloced);
+ 		nvbe->pages = NULL;
++		nvbe->ttm_alloced = NULL;
+ 		nvbe->nr_pages = 0;
+ 	}
+ }
+-- 
+1.5.6.5
+

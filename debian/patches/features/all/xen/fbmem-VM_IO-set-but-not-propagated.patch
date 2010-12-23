@@ -1,0 +1,46 @@
+From c07fbfd17e614a76b194f371c5331e21e6cffb54 Mon Sep 17 00:00:00 2001
+From: Daniel De Graaf <dgdegra@tycho.nsa.gov>
+Date: Tue, 10 Aug 2010 18:02:45 -0700
+Subject: [PATCH] fbmem: VM_IO set, but not propagated
+
+When we setup up the VMA flags for the mmap flag and we end up using the
+fallback mmap functionality we set the vma->vm_flags |= VM_IO.  However we
+neglect to propagate the flag to the vma->vm_page_prot.
+
+This bug was found when Linux kernel was running under Xen.  In that
+scenario, any page that has VM_IO flag to it, means that it MUST be a
+MMIO/VRAM backend memory , _not_ System RAM.  That is what the fbmem.c
+does: sets VM_IO, ioremaps the region - everything is peachy.
+
+Well, not exactly.  The vm_page_prot does not get the relevant PTE flags
+set (_PAGE_IOMAP) which under Xen is a death-kneel to pages that are
+referencing real physical devices but don't have that flag set.
+
+This patch fixes this.
+
+Signed-off-by: Konrad Rzeszutek Wilk <konrad.wilk@oracle.com>
+Signed-off-by: Daniel De Graaf <dgdegra@tycho.nsa.gov>
+Tested-by: Eamon Walsh <ewalsh@tycho.nsa.gov>
+Cc: Florian Tobias Schandinat <FlorianSchandinat@gmx.de>
+Cc: Dave Airlie <airlied@linux.ie>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+---
+ drivers/video/fbmem.c |    1 +
+ 1 files changed, 1 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/video/fbmem.c b/drivers/video/fbmem.c
+index a8500c6..b066475 100644
+--- a/drivers/video/fbmem.c
++++ b/drivers/video/fbmem.c
+@@ -1362,6 +1362,7 @@ fb_mmap(struct file *file, struct vm_area_struct * vma)
+ 	vma->vm_pgoff = off >> PAGE_SHIFT;
+ 	/* This is an IO map - tell maydump to skip this VMA */
+ 	vma->vm_flags |= VM_IO | VM_RESERVED;
++	vma->vm_page_prot = vm_get_page_prot(vma->vm_flags);
+ 	fb_pgprotect(file, vma, off);
+ 	if (io_remap_pfn_range(vma, vma->vm_start, off >> PAGE_SHIFT,
+ 			     vma->vm_end - vma->vm_start, vma->vm_page_prot))
+-- 
+1.5.6.5
+

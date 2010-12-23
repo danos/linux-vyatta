@@ -1,0 +1,125 @@
+From 1ce376e6406e408d8870d6cb49425bb498c1f184 Mon Sep 17 00:00:00 2001
+From: Konrad Rzeszutek Wilk <konrad.wilk@oracle.com>
+Date: Mon, 29 Nov 2010 13:52:18 -0500
+Subject: [PATCH] ttm: Introduce a placeholder for DMA (bus) addresses.
+
+This is right now limited to only non-pool constructs.
+
+Based on 0bffe70f91d6 from
+git://git.kernel.org/pub/scm/linux/kernel/git/konrad/xen.git#devel/ttm.pci-api-v2
+by Konrad Rzeszutek Wilk <konrad.wilk@oracle.com> but completely rewritten due
+to the absence of 1403b1a38e8b19a "drm/ttm: add pool wc/uc page allocator V3"
+in this tree.
+
+Signed-off-by: Ian Campbell <ian.campbell@citrix.com>
+---
+ drivers/gpu/drm/ttm/ttm_tt.c    |   26 ++++++++++++++++++++++----
+ include/drm/ttm/ttm_bo_driver.h |    3 +++
+ 2 files changed, 25 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/ttm/ttm_tt.c b/drivers/gpu/drm/ttm/ttm_tt.c
+index 48ec9aa..4ff26c6 100644
+--- a/drivers/gpu/drm/ttm/ttm_tt.c
++++ b/drivers/gpu/drm/ttm/ttm_tt.c
+@@ -49,7 +49,9 @@ static int ttm_tt_swapin(struct ttm_tt *ttm);
+ static void ttm_tt_alloc_page_directory(struct ttm_tt *ttm)
+ {
+ 	unsigned long size = ttm->num_pages * sizeof(*ttm->pages);
++	unsigned long dma_size = ttm->num_pages * sizeof(*ttm->dma_address);
+ 	ttm->pages = NULL;
++	ttm->dma_address = NULL;
+ 
+ 	if (size <= PAGE_SIZE)
+ 		ttm->pages = kzalloc(size, GFP_KERNEL);
+@@ -59,6 +61,15 @@ static void ttm_tt_alloc_page_directory(struct ttm_tt *ttm)
+ 		if (ttm->pages)
+ 			ttm->page_flags |= TTM_PAGE_FLAG_VMALLOC;
+ 	}
++
++	if (dma_size <= PAGE_SIZE)
++		ttm->dma_address = kzalloc(dma_size, GFP_KERNEL);
++
++	if (!ttm->dma_address) {
++		ttm->dma_address = vmalloc_user(dma_size);
++		if (ttm->dma_address)
++			ttm->page_flags |= TTM_PAGE_FLAG_VMALLOC_DMA;
++	}
+ }
+ 
+ static void ttm_tt_free_page_directory(struct ttm_tt *ttm)
+@@ -70,9 +81,16 @@ static void ttm_tt_free_page_directory(struct ttm_tt *ttm)
+ 		kfree(ttm->pages);
+ 	}
+ 	ttm->pages = NULL;
++	if (ttm->page_flags & TTM_PAGE_FLAG_VMALLOC_DMA) {
++		vfree(ttm->dma_address);
++		ttm->page_flags &= ~TTM_PAGE_FLAG_VMALLOC_DMA;
++	} else {
++		kfree(ttm->dma_address);
++	}
++	ttm->dma_address = NULL;
+ }
+ 
+-static struct page *ttm_tt_alloc_page(unsigned page_flags)
++static struct page *ttm_tt_alloc_page(unsigned page_flags, dma_addr_t *dma_address)
+ {
+ 	gfp_t gfp_flags = GFP_USER;
+ 
+@@ -87,7 +105,7 @@ static struct page *ttm_tt_alloc_page(unsigned page_flags)
+ 	return alloc_page(gfp_flags);
+ }
+ 
+-static void ttm_tt_free_page(struct page *page, unsigned page_flags)
++static void ttm_tt_free_page(struct page *page, unsigned page_flags, dma_addr_t *dma_address)
+ {
+ 	__free_page(page);
+ }
+@@ -136,7 +154,7 @@ static struct page *__ttm_tt_get_page(struct ttm_tt *ttm, int index)
+ 	int ret;
+ 
+ 	while (NULL == (p = ttm->pages[index])) {
+-		p = ttm_tt_alloc_page(ttm->page_flags);
++		p = ttm_tt_alloc_page(ttm->page_flags, &ttm->dma_address[index]);
+ 
+ 		if (!p)
+ 			return NULL;
+@@ -319,7 +337,7 @@ static void ttm_tt_free_alloced_pages(struct ttm_tt *ttm)
+ 				       "Leaking pages.\n");
+ 			ttm_mem_global_free_page(ttm->glob->mem_glob,
+ 						 cur_page);
+-			ttm_tt_free_page(cur_page, ttm->page_flags);
++			ttm_tt_free_page(cur_page, ttm->page_flags, &ttm->dma_address[i]);
+ 		}
+ 	}
+ 	ttm->state = tt_unpopulated;
+diff --git a/include/drm/ttm/ttm_bo_driver.h b/include/drm/ttm/ttm_bo_driver.h
+index 4c4e0f8..114707b 100644
+--- a/include/drm/ttm/ttm_bo_driver.h
++++ b/include/drm/ttm/ttm_bo_driver.h
+@@ -123,6 +123,7 @@ struct ttm_backend {
+ #define TTM_PAGE_FLAG_PERSISTANT_SWAP (1 << 5)
+ #define TTM_PAGE_FLAG_ZERO_ALLOC      (1 << 6)
+ #define TTM_PAGE_FLAG_DMA32           (1 << 7)
++#define TTM_PAGE_FLAG_VMALLOC_DMA     (1 << 8)
+ 
+ enum ttm_caching_state {
+ 	tt_uncached,
+@@ -149,6 +150,7 @@ enum ttm_caching_state {
+  * @swap_storage: Pointer to shmem struct file for swap storage.
+  * @caching_state: The current caching state of the pages.
+  * @state: The current binding state of the pages.
++ * @dma_address: The DMA (bus) addresses of the pages (if TTM_PAGE_FLAG_DMA32)
+  *
+  * This is a structure holding the pages, caching- and aperture binding
+  * status for a buffer object that isn't backed by fixed (VRAM / AGP)
+@@ -173,6 +175,7 @@ struct ttm_tt {
+ 		tt_unbound,
+ 		tt_unpopulated,
+ 	} state;
++	dma_addr_t *dma_address;
+ };
+ 
+ #define TTM_MEMTYPE_FLAG_FIXED         (1 << 0)	/* Fixed (on-card) PCI memory */
+-- 
+1.5.6.5
+
