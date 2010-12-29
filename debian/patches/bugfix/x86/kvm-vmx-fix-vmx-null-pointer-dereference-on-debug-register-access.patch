@@ -1,0 +1,44 @@
+commit 370c6b5200b04645ab1b00bad931ae899cd55471
+Author: Gleb Natapov <gleb@redhat.com>
+Date:   Wed Nov 10 12:08:12 2010 +0200
+
+    KVM: VMX: fix vmx null pointer dereference on debug register access
+    
+    There is a bug in KVM that can be used to crash a host on Intel
+    machines. If emulator is tricked into emulating mov to/from DR instruction
+    it causes NULL pointer dereference on VMX since kvm_x86_ops->(set|get)_dr
+    are not initialized. Recently this is not exploitable from guest
+    userspace, but malicious guest kernel can trigger it easily.
+    
+    CVE-2010-0435
+    
+    On upstream bug was fixed differently around 2.6.34.
+    
+    Signed-off-by: Gleb Natapov <gleb@redhat.com>
+    Signed-off-by: Avi Kivity <avi@redhat.com>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+    [dannf: adjusted to apply to Debian's 2.6.26]
+
+diff -urpN a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+--- a/arch/x86/kvm/x86.c	2010-12-29 10:52:59.402636320 -0700
++++ b/arch/x86/kvm/x86.c	2010-12-29 11:26:30.646136793 -0700
+@@ -2113,6 +2113,9 @@ int emulator_get_dr(struct x86_emulate_c
+ {
+ 	struct kvm_vcpu *vcpu = ctxt->vcpu;
+ 
++	if (!kvm_x86_opts->get_dr)
++		return X86EMUL_UNHANDLEABLE;
++
+ 	switch (dr) {
+ 	case 0 ... 3:
+ 		*dest = kvm_x86_ops->get_dr(vcpu, dr);
+@@ -2128,6 +2131,9 @@ int emulator_set_dr(struct x86_emulate_c
+ 	unsigned long mask = (ctxt->mode == X86EMUL_MODE_PROT64) ? ~0ULL : ~0U;
+ 	int exception;
+ 
++	if (!kvm_x86_opts->set_dr)
++		return X86EMUL_UNHANDLEABLE;
++
+ 	kvm_x86_ops->set_dr(ctxt->vcpu, dr, value & mask, &exception);
+ 	if (exception) {
+ 		/* FIXME: better handling */
