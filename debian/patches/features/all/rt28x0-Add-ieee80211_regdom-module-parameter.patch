@@ -1,0 +1,100 @@
+From 709aa977034bbaeb126b75c8d8f1e0abbaa1f96d Mon Sep 17 00:00:00 2001
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Mon, 6 Dec 2010 05:48:53 +0000
+Subject: [PATCH] rt28x0: Add ieee80211_regdom module parameter mimicking cfg80211
+
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+ drivers/staging/rt2860/common/cmm_cfg.c   |   32 +++++++++++++++-------------
+ drivers/staging/rt2860/common/rtmp_init.c |    9 ++++++++
+ 2 files changed, 26 insertions(+), 15 deletions(-)
+
+diff --git a/drivers/staging/rt2860/common/cmm_cfg.c b/drivers/staging/rt2860/common/cmm_cfg.c
+index 24f4393..0c9af70 100644
+--- a/drivers/staging/rt2860/common/cmm_cfg.c
++++ b/drivers/staging/rt2860/common/cmm_cfg.c
+@@ -82,20 +82,31 @@ char *GetBW(int BW)
+ */
+ int RT_CfgSetCountryRegion(struct rt_rtmp_adapter *pAd, char *arg, int band)
+ {
+-	long region, regionMax;
++	long region;
+ 	u8 *pCountryRegion;
+ 
+-	region = simple_strtol(arg, 0, 10);
++	/* Match cfg80211 static regdom names */
++	if (!strcmp(arg, "00"))
++		region = (band == BAND_24G) ? 0 : 10;
++	else if (!strcmp(arg, "US"))
++		region = 0;
++	else if (!strcmp(arg, "JP"))
++		region = (band == BAND_24G) ? 5 : 2;
++	else if (!strcmp(arg, "EU"))
++		region = 1;
++	else {
++		DBGPRINT(RT_DEBUG_ERROR,
++			 ("CfgSetCountryRegion(): region %s is invalid\n",
++			  arg));
++		return FALSE;
++	}
+ 
+ 	if (band == BAND_24G) {
+ 		pCountryRegion = &pAd->CommonCfg.CountryRegion;
+-		regionMax = REGION_MAXIMUM_BG_BAND;
+ 	} else {
+ 		pCountryRegion = &pAd->CommonCfg.CountryRegionForABand;
+-		regionMax = REGION_MAXIMUM_A_BAND;
+ 	}
+ 
+-	/* TODO: Is it neccesay for following check??? */
+ 	/* Country can be set only when EEPROM not programmed */
+ 	if (*pCountryRegion & 0x80) {
+ 		DBGPRINT(RT_DEBUG_ERROR,
+@@ -103,16 +114,7 @@ int RT_CfgSetCountryRegion(struct rt_rtmp_adapter *pAd, char *arg, int band)
+ 		return FALSE;
+ 	}
+ 
+-	if ((region >= 0) && (region <= REGION_MAXIMUM_BG_BAND)) {
+-		*pCountryRegion = (u8)region;
+-	} else if ((region == REGION_31_BG_BAND) && (band == BAND_24G)) {
+-		*pCountryRegion = (u8)region;
+-	} else {
+-		DBGPRINT(RT_DEBUG_ERROR,
+-			 ("CfgSetCountryRegion():region(%ld) out of range!\n",
+-			  region));
+-		return FALSE;
+-	}
++	*pCountryRegion = (u8)region;
+ 
+ 	return TRUE;
+ 
+diff --git a/drivers/staging/rt2860/common/rtmp_init.c b/drivers/staging/rt2860/common/rtmp_init.c
+index 21a95ff..b42ee9f 100644
+--- a/drivers/staging/rt2860/common/rtmp_init.c
++++ b/drivers/staging/rt2860/common/rtmp_init.c
+@@ -3198,6 +3198,11 @@ void CfgInitHook(struct rt_rtmp_adapter *pAd)
+ 	pAd->bBroadComHT = TRUE;
+ }
+ 
++static char *ieee80211_regdom = "00";
++
++module_param(ieee80211_regdom, charp, 0444);
++MODULE_PARM_DESC(ieee80211_regdom, "IEEE 802.11 regulatory domain code");
++
+ int rt28xx_init(struct rt_rtmp_adapter *pAd,
+ 		char *pDefaultMac, char *pHostName)
+ {
+@@ -3373,6 +3378,10 @@ int rt28xx_init(struct rt_rtmp_adapter *pAd,
+ 	/* We should read EEPROM for all cases.  rt2860b */
+ 	NICReadEEPROMParameters(pAd, (u8 *)pDefaultMac);
+ 
++	/* Set country/region if not already programmed */
++	RT_CfgSetCountryRegion(pAd, ieee80211_regdom, BAND_24G);
++	RT_CfgSetCountryRegion(pAd, ieee80211_regdom, BAND_5G);
++
+ 	DBGPRINT(RT_DEBUG_OFF, ("3. Phy Mode = %d\n", pAd->CommonCfg.PhyMode));
+ 
+ 	NICInitAsicFromEEPROM(pAd);	/*rt2860b */
+-- 
+1.7.2.3
+
