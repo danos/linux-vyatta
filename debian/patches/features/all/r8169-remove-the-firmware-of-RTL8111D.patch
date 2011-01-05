@@ -1,5 +1,5 @@
-From: Francois Romieu <romieu@fr.zoreil.com>
-Date: Mon, 3 Jan 2011 00:35:52 +0100
+From: =?UTF-8?q?fran=C3=A7ois=20romieu?= <romieu@fr.zoreil.com>
+Date: Mon, 3 Jan 2011 15:07:31 +0000
 Subject: [PATCH] r8169: remove the firmware of RTL8111D.
 
 commit bca03d5f32c8ee9b5cfa1d32640a63fded6cb3c0 upstream.
@@ -16,11 +16,18 @@ Simple firmware checking added per Ben Hutchings suggestion.
 Signed-off-by: Hayes Wang <hayeswang@realtek.com>
 Signed-off-by: Francois Romieu <romieu@fr.zoreil.com>
 Cc: Ben Hutchings <benh@debian.org>
+Signed-off-by: David S. Miller <davem@davemloft.net>
 [bwh: Adjust for Debian's 2.6.32]
 ---
+ drivers/net/Kconfig |    1 +
+ drivers/net/r8169.c |  164 ++++++++++++++++++++++++++++++++++++++++++++------
+ 2 files changed, 145 insertions(+), 20 deletions(-)
+
+diff --git a/drivers/net/Kconfig b/drivers/net/Kconfig
+index 18b26ba..57b0ef5 100644
 --- a/drivers/net/Kconfig
 +++ b/drivers/net/Kconfig
-@@ -2233,6 +2233,7 @@ config YELLOWFIN
+@@ -2180,6 +2180,7 @@ config YELLOWFIN
  config R8169
  	tristate "Realtek 8169 gigabit ethernet support"
  	depends on PCI
@@ -29,7 +36,7 @@ Cc: Ben Hutchings <benh@debian.org>
  	select MII
  	---help---
 diff --git a/drivers/net/r8169.c b/drivers/net/r8169.c
-index a31745b..a9b9e2a 100644
+index a31745b..71d0708 100644
 --- a/drivers/net/r8169.c
 +++ b/drivers/net/r8169.c
 @@ -23,6 +23,7 @@
@@ -59,7 +66,7 @@ index a31745b..a9b9e2a 100644
  
  static int rtl8169_open(struct net_device *dev);
  static netdev_tx_t rtl8169_start_xmit(struct sk_buff *skb,
-@@ -1375,6 +1381,65 @@ static void rtl_phy_write(void __iomem *ioaddr, struct phy_reg *regs, int len)
+@@ -1375,6 +1381,68 @@ static void rtl_phy_write(void __iomem *ioaddr, struct phy_reg *regs, int len)
  	}
  }
  
@@ -89,7 +96,9 @@ index a31745b..a9b9e2a 100644
 +	size_t i;
 +
 +	if (fw->size % sizeof(*phytable)) {
-+		netif_err(tp, probe, dev, "odd sized firmware %zd\n", fw->size);
++		if (netif_msg_probe(tp))
++			printk(KERN_ERR "%s: odd sized firmware %zd\n",
++			       dev->name, fw->size);
 +		return;
 +	}
 +
@@ -100,8 +109,9 @@ index a31745b..a9b9e2a 100644
 +			break;
 +
 +		if ((action & 0xf0000000) != PHY_WRITE) {
-+			netif_err(tp, probe, dev,
-+				  "unknown action 0x%08x\n", action);
++			if (netif_msg_probe(tp))
++				printk(KERN_ERR "%s: unknown action 0x%08x\n",
++				       dev->name, action);
 +			return;
 +		}
 +	}
@@ -125,7 +135,7 @@ index a31745b..a9b9e2a 100644
  static void rtl8169s_hw_phy_config(void __iomem *ioaddr)
  {
  	struct phy_reg phy_reg_init[] = {
-@@ -1707,9 +1772,10 @@ static void rtl8168c_4_hw_phy_config(void __iomem *ioaddr)
+@@ -1707,9 +1775,10 @@ static void rtl8168c_4_hw_phy_config(void __iomem *ioaddr)
  	rtl8168c_3_hw_phy_config(ioaddr);
  }
  
@@ -137,7 +147,7 @@ index a31745b..a9b9e2a 100644
  		{ 0x1f, 0x0001 },
  		{ 0x06, 0x4064 },
  		{ 0x07, 0x2863 },
-@@ -1726,24 +1792,41 @@ static void rtl8168d_1_hw_phy_config(void __iomem *ioaddr)
+@@ -1726,24 +1795,41 @@ static void rtl8168d_1_hw_phy_config(void __iomem *ioaddr)
  		{ 0x12, 0xf49f },
  		{ 0x13, 0x070b },
  		{ 0x1a, 0x05ad },
@@ -185,7 +195,7 @@ index a31745b..a9b9e2a 100644
  	if (rtl8168d_efuse_read(ioaddr, 0x01) == 0xb1) {
  		struct phy_reg phy_reg_init[] = {
  			{ 0x1f, 0x0002 },
-@@ -1784,22 +1867,33 @@ static void rtl8168d_1_hw_phy_config(void __iomem *ioaddr)
+@@ -1784,22 +1870,35 @@ static void rtl8168d_1_hw_phy_config(void __iomem *ioaddr)
  		rtl_phy_write(ioaddr, phy_reg_init, ARRAY_SIZE(phy_reg_init));
  	}
  
@@ -209,7 +219,9 @@ index a31745b..a9b9e2a 100644
 +		rtl_phy_write_fw(tp, fw);
 +		release_firmware(fw);
 +	} else {
-+		netif_warn(tp, probe, tp->dev, "unable to apply firmware patch\n");
++		if (netif_msg_probe(tp))
++			printk(KERN_WARNING "%s: unable to apply firmware patch\n",
++			       tp->dev->name);
 +	}
 +
 +	mdio_write(ioaddr, 0x1f, 0x0000);
@@ -223,7 +235,7 @@ index a31745b..a9b9e2a 100644
  		{ 0x1f, 0x0001 },
  		{ 0x06, 0x4064 },
  		{ 0x07, 0x2863 },
-@@ -1818,12 +1912,28 @@ static void rtl8168d_2_hw_phy_config(void __iomem *ioaddr)
+@@ -1818,12 +1917,28 @@ static void rtl8168d_2_hw_phy_config(void __iomem *ioaddr)
  		{ 0x1a, 0x05ad },
  		{ 0x14, 0x94c0 },
  
@@ -253,7 +265,7 @@ index a31745b..a9b9e2a 100644
  
  	rtl_phy_write(ioaddr, phy_reg_init_0, ARRAY_SIZE(phy_reg_init_0));
  
-@@ -1867,19 +1977,26 @@ static void rtl8168d_2_hw_phy_config(void __iomem *ioaddr)
+@@ -1867,19 +1982,28 @@ static void rtl8168d_2_hw_phy_config(void __iomem *ioaddr)
  		rtl_phy_write(ioaddr, phy_reg_init, ARRAY_SIZE(phy_reg_init));
  	}
  
@@ -279,14 +291,16 @@ index a31745b..a9b9e2a 100644
 +		rtl_phy_write_fw(tp, fw);
 +		release_firmware(fw);
 +	} else {
-+		netif_warn(tp, probe, tp->dev, "unable to apply firmware patch\n");
++		if (netif_msg_probe(tp))
++			printk(KERN_WARNING "%s: unable to apply firmware patch\n",
++			       tp->dev->name);
 +	}
 +
 +	mdio_write(ioaddr, 0x1f, 0x0000);
  }
  
  static void rtl8168d_3_hw_phy_config(void __iomem *ioaddr)
-@@ -2017,10 +2134,10 @@ static void rtl_hw_phy_config(struct net_device *dev)
+@@ -2017,10 +2141,10 @@ static void rtl_hw_phy_config(struct net_device *dev)
  		rtl8168cp_2_hw_phy_config(ioaddr);
  		break;
  	case RTL_GIGA_MAC_VER_25:
@@ -299,3 +313,6 @@ index a31745b..a9b9e2a 100644
  		break;
  	case RTL_GIGA_MAC_VER_27:
  		rtl8168d_3_hw_phy_config(ioaddr);
+-- 
+1.7.2.3
+
