@@ -1,3 +1,34 @@
+From: Linus Torvalds <torvalds@linux-foundation.org>
+Date: Fri, 15 Oct 2010 11:09:28 -0700
+Subject: [PATCH] De-pessimize rds_page_copy_user
+
+commit 799c10559d60f159ab2232203f222f18fa3c4a5f upstream.
+
+Don't try to "optimize" rds_page_copy_user() by using kmap_atomic() and
+the unsafe atomic user mode accessor functions.  It's actually slower
+than the straightforward code on any reasonable modern CPU.
+
+Back when the code was written (although probably not by the time it was
+actually merged, though), 32-bit x86 may have been the dominant
+architecture.  And there kmap_atomic() can be a lot faster than kmap()
+(unless you have very good locality, in which case the virtual address
+caching by kmap() can overcome all the downsides).
+
+But these days, x86-64 may not be more populous, but it's getting there
+(and if you care about performance, it's definitely already there -
+you'd have upgraded your CPU's already in the last few years).  And on
+x86-64, the non-kmap_atomic() version is faster, simply because the code
+is simpler and doesn't have the "re-try page fault" case.
+
+People with old hardware are not likely to care about RDS anyway, and
+the optimization for the 32-bit case is simply buggy, since it doesn't
+verify the user addresses properly.
+
+Reported-by: Dan Rosenberg <drosenberg@vsecurity.com>
+Acked-by: Andrew Morton <akpm@linux-foundation.org>
+Cc: stable@kernel.org
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+---
  net/rds/page.c |   27 +++++++--------------------
  1 files changed, 7 insertions(+), 20 deletions(-)
 
