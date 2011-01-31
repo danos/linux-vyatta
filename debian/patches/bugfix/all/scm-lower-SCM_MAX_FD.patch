@@ -1,0 +1,71 @@
+commit f1d0e842f4b3dd9f7ea8fe2ae439ea922d421026
+Author: dann frazier <dann.frazier@canonical.com>
+Date:   Mon Jan 17 11:52:13 2011 -0700
+
+    scm: lower SCM_MAX_FD
+    
+    Lower SCM_MAX_FD from 255 to 253 so that allocations for scm_fp_list are
+    halved. (commit f8d570a4 added two pointers in this structure)
+    
+    scm_fp_dup() should not copy whole structure (and trigger kmemcheck
+    warnings), but only the used part. While we are at it, only allocate
+    needed size.
+    
+    Signed-off-by: Eric Dumazet <eric.dumazet@gmail.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+    [dannf:  Backported to Debian's 2.6.26]
+
+diff --git a/include/net/scm.h b/include/net/scm.h
+index 33e9986..d33d511 100644
+--- a/include/net/scm.h
++++ b/include/net/scm.h
+@@ -10,12 +10,13 @@
+ /* Well, we should have at least one descriptor open
+  * to accept passed FDs 8)
+  */
+-#define SCM_MAX_FD	255
++#define SCM_MAX_FD	253
+ 
+ struct scm_fp_list
+ {
+ 	struct list_head	list;
+-	int			count;
++	short			count;
++	short			max;
+ 	struct file		*fp[SCM_MAX_FD];
+ };
+ 
+diff --git a/net/core/scm.c b/net/core/scm.c
+index ab242cc..c10e1f1 100644
+--- a/net/core/scm.c
++++ b/net/core/scm.c
+@@ -77,10 +77,11 @@ static int scm_fp_copy(struct cmsghdr *cmsg, struct scm_fp_list **fplp)
+ 		*fplp = fpl;
+ 		INIT_LIST_HEAD(&fpl->list);
+ 		fpl->count = 0;
++		fpl->max = SCM_MAX_FD;
+ 	}
+ 	fpp = &fpl->fp[fpl->count];
+ 
+-	if (fpl->count + num > SCM_MAX_FD)
++	if (fpl->count + num > fpl->max)
+ 		return -EINVAL;
+ 
+ 	/*
+@@ -299,12 +300,13 @@ struct scm_fp_list *scm_fp_dup(struct scm_fp_list *fpl)
+ 	if (!fpl)
+ 		return NULL;
+ 
+-	new_fpl = kmalloc(sizeof(*fpl), GFP_KERNEL);
++	new_fpl = kmemdup(fpl, offsetof(struct scm_fp_list, fp[fpl->count]),
++			  GFP_KERNEL);
+ 	if (new_fpl) {
+ 		INIT_LIST_HEAD(&new_fpl->list);
+-		for (i=fpl->count-1; i>=0; i--)
++		for (i = 0; i < fpl->count; i++)
+ 			get_file(fpl->fp[i]);
+-		memcpy(new_fpl, fpl, sizeof(*fpl));
++		new_fpl->max = new_fpl->count;
+ 	}
+ 	return new_fpl;
+ }

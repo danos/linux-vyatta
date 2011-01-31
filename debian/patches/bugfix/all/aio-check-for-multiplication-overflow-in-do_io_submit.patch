@@ -1,0 +1,41 @@
+commit 0565f633733ae622c6c9c6b85f36b5bdf4d10085
+Author: Jeff Moyer <jmoyer@redhat.com>
+Date:   Fri Sep 10 14:16:00 2010 -0700
+
+    [Backported to Debian's 2.6.26 by dann frazier <dannf@debian.org>]
+    
+    aio: check for multiplication overflow in do_io_submit
+    
+    Tavis Ormandy pointed out that do_io_submit does not do proper bounds
+    checking on the passed-in iocb array:
+    
+           if (unlikely(nr < 0))
+                   return -EINVAL;
+    
+           if (unlikely(!access_ok(VERIFY_READ, iocbpp, (nr*sizeof(iocbpp)))))
+                   return -EFAULT;                      ^^^^^^^^^^^^^^^^^^
+    
+    The attached patch checks for overflow, and if it is detected, the
+    number of iocbs submitted is scaled down to a number that will fit in
+    the long.  This is an ok thing to do, as sys_io_submit is documented as
+    returning the number of iocbs submitted, so callers should handle a
+    return value of less than the 'nr' argument passed in.
+    
+    Reported-by: Tavis Ormandy <taviso@cmpxchg8b.com>
+    Signed-off-by: Jeff Moyer <jmoyer@redhat.com>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+
+diff --git a/fs/aio.c b/fs/aio.c
+index 8ed807d..f1c7b64 100644
+--- a/fs/aio.c
++++ b/fs/aio.c
+@@ -1662,6 +1662,9 @@ SYSCALL_DEFINE3(io_submit, aio_context_t, ctx_id, long, nr,
+ 	if (unlikely(nr < 0))
+ 		return -EINVAL;
+ 
++	if (unlikely(nr > LONG_MAX/sizeof(*iocbpp)))
++		nr = LONG_MAX/sizeof(*iocbpp);
++
+ 	if (unlikely(!access_ok(VERIFY_READ, iocbpp, (nr*sizeof(*iocbpp)))))
+ 		return -EFAULT;
+ 

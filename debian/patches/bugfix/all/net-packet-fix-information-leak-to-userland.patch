@@ -1,0 +1,40 @@
+commit 9a3e5ca92a4d5d61e9e65f61112e7bf194c16022
+Author: Vasiliy Kulikov <segooon@gmail.com>
+Date:   Wed Nov 10 12:09:10 2010 -0800
+
+    net: packet: fix information leak to userland
+    
+    [Adjusted to apply to Debian's 2.6.26 by dann frazier <dannf@debian.org>]
+    
+    packet_getname_spkt() doesn't initialize all members of sa_data field of
+    sockaddr struct if strlen(dev->name) < 13.  This structure is then copied
+    to userland.  It leads to leaking of contents of kernel stack memory.
+    We have to fully fill sa_data with strncpy() instead of strlcpy().
+    
+    The same with packet_getname(): it doesn't initialize sll_pkttype field of
+    sockaddr_ll.  Set it to zero.
+    
+    Signed-off-by: Vasiliy Kulikov <segooon@gmail.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+
+diff --git a/net/packet/af_packet.c b/net/packet/af_packet.c
+index 2cee87d..49ef3e6 100644
+--- a/net/packet/af_packet.c
++++ b/net/packet/af_packet.c
+@@ -1137,7 +1137,7 @@ static int packet_getname_spkt(struct socket *sock, struct sockaddr *uaddr,
+ 	uaddr->sa_family = AF_PACKET;
+ 	dev = dev_get_by_index(sock_net(sk), pkt_sk(sk)->ifindex);
+ 	if (dev) {
+-		strlcpy(uaddr->sa_data, dev->name, 15);
++		strlcpy(uaddr->sa_data, dev->name, 14);
+ 		dev_put(dev);
+ 	} else
+ 		memset(uaddr->sa_data, 0, 14);
+@@ -1160,6 +1160,7 @@ static int packet_getname(struct socket *sock, struct sockaddr *uaddr,
+ 	sll->sll_family = AF_PACKET;
+ 	sll->sll_ifindex = po->ifindex;
+ 	sll->sll_protocol = po->num;
++	sll->sll_pkttype = 0;
+ 	dev = dev_get_by_index(sock_net(sk), po->ifindex);
+ 	if (dev) {
+ 		sll->sll_hatype = dev->type;
