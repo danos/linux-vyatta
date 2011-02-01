@@ -1,0 +1,61 @@
+commit b433c3d4549ae74935b585115f076c6fb7bc48fe
+Author: Peter Zijlstra <peterz@infradead.org>
+Date:   Mon Jun 28 16:51:01 2010 +0200
+
+    init, sched: Fix race between init and kthreadd
+    
+    Ilya reported that on a very slow machine he could reliably
+    reproduce a race between forking init and kthreadd. We first
+    fork init so that it  obtains pid-1, however since the scheduler
+    is already fully running at this point it can preempt and run
+    the init thread before we spawn and set kthreadd_task.
+    
+    The init thread can then attempt spawning kthreads without
+    kthreadd being present which results in an OOPS.
+    
+    Reported-by: Ilya Loginov <isloginov@gmail.com>
+    Signed-off-by: Peter Zijlstra <a.p.zijlstra@chello.nl>
+    Acked-by: Linus Torvalds <torvalds@linux-foundation.org>
+    LKML-Reference: <1277736661.3561.110.camel@laptop>
+    Signed-off-by: Ingo Molnar <mingo@elte.hu>
+
+diff --git a/init/main.c b/init/main.c
+index 4051d75..1566130 100644
+--- a/init/main.c
++++ b/init/main.c
+@@ -413,16 +413,24 @@ static void __init setup_command_line(char *command_line)
+  * gcc-3.4 accidentally inlines this function, so use noinline.
+  */
+ 
++static __initdata DECLARE_COMPLETION(kthreadd_done);
++
+ static noinline void __init_refok rest_init(void)
+ 	__releases(kernel_lock)
+ {
+ 	int pid;
+ 
+ 	rcu_scheduler_starting();
++	/*
++	 * We need to spawn init first so that it obtains pid-1, however
++	 * the init task will end up wanting to create kthreads, which, if
++	 * we schedule it before we create kthreadd, will OOPS.
++	 */
+ 	kernel_thread(kernel_init, NULL, CLONE_FS | CLONE_SIGHAND);
+ 	numa_default_policy();
+ 	pid = kernel_thread(kthreadd, NULL, CLONE_FS | CLONE_FILES);
+ 	kthreadd_task = find_task_by_pid_ns(pid, &init_pid_ns);
++	complete(&kthreadd_done);
+ 	unlock_kernel();
+ 
+ 	/*
+@@ -846,6 +854,10 @@ static noinline int init_post(void)
+ 
+ static int __init kernel_init(void * unused)
+ {
++	/*
++	 * Wait until kthreadd is all set-up.
++	 */
++	wait_for_completion(&kthreadd_done);
+ 	lock_kernel();
+ 
+ 	/*
