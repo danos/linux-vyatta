@@ -1,0 +1,59 @@
+From: J. R. Okajima <hooanon05@yahoo.co.jp>
+Date: Mon, 1 Mar 2010 23:13:34 +0900
+Subject: [PATCH 2/4] Revert "aufs: bugfix, unlock mmap_sem temporary using BKL"
+
+commit 639e607997502dfe7dbe140c8de5d81ba99d4240 in aufs2-2.6
+
+This reverts commit 4b70e6f04d4292d8b5ce6cd7ac7371e68eab9175.
+BKL doesn't help the multi threaded application.
+Lockdep says mmap_sem is circular here. It may be correct, but I am not
+sure whether it is false positive or not in real world.
+
+Reported-by: "James ." <jazzrz86@gmail.com>
+---
+ fs/aufs/f_op.c |   15 ---------------
+ 1 files changed, 0 insertions(+), 15 deletions(-)
+
+diff --git a/fs/aufs/f_op.c b/fs/aufs/f_op.c
+index 4c4ef82..6f89992 100644
+--- a/fs/aufs/f_op.c
++++ b/fs/aufs/f_op.c
+@@ -25,7 +25,6 @@
+ #include <linux/mman.h>
+ #include <linux/mm.h>
+ #include <linux/security.h>
+-#include <linux/smp_lock.h>
+ #include "aufs.h"
+ 
+ /* common function to regular file and dir */
+@@ -583,18 +582,6 @@ static int aufs_mmap(struct file *file, struct vm_area_struct *vma)
+ 	dentry = file->f_dentry;
+ 	wlock = !!(file->f_mode & FMODE_WRITE) && (vma->vm_flags & VM_SHARED);
+ 	sb = dentry->d_sb;
+-	/*
+-	 * Very ugly BKL approach to keep the order of locks.
+-	 * Here mm->mmap_sem is acquired by our caller.
+-	 *
+-	 * native readdir, i_mutex, copy_to_user, mmap_sem
+-	 * aufs readdir, i_mutex, rwsem, nested-i_mutex, copy_to_user, mmap_sem
+-	 * aufs mmap, mmap_sem, rwsem
+-	 *
+-	 * Unlock it temporary.
+-	 */
+-	lock_kernel();
+-	up_write(&current->mm->mmap_sem);
+ 	si_read_lock(sb, AuLock_FLUSH);
+ 	err = au_reval_and_lock_fdi(file, au_reopen_nondir, /*wlock*/1);
+ 	if (unlikely(err))
+@@ -662,8 +649,6 @@ static int aufs_mmap(struct file *file, struct vm_area_struct *vma)
+ 	fi_write_unlock(file);
+  out:
+ 	si_read_unlock(sb);
+-	down_write(&current->mm->mmap_sem);
+-	unlock_kernel();
+ 	return err;
+ }
+ 
+-- 
+1.7.2.3
+

@@ -1,0 +1,64 @@
+From: J. R. Okajima <hooanon05@yahoo.co.jp>
+Date: Mon, 1 Mar 2010 17:52:50 +0900
+Subject: [PATCH 1/4] Revert "aufs: narrow down the BKL region"
+
+commit e62ca9737674cf9b70a961cb8d1efed4a7cff976 in aufs2-2.6
+
+This reverts commit d84deeb079e09b33c2339bc7a54cf7d15c3b8a85.
+BKL doesn't help the multi threaded application.
+Lockdep says mmap_sem is circular here. It may be correct, but I am not
+sure whether it is false positive or not in real world.
+
+Reported-by: "James ." <jazzrz86@gmail.com>
+Signed-off-by: J. R. Okajima <hooanon05@yahoo.co.jp>
+---
+ fs/aufs/f_op.c |   14 ++++----------
+ 1 files changed, 4 insertions(+), 10 deletions(-)
+
+diff --git a/fs/aufs/f_op.c b/fs/aufs/f_op.c
+index 3e9e47d..4c4ef82 100644
+--- a/fs/aufs/f_op.c
++++ b/fs/aufs/f_op.c
+@@ -597,11 +597,8 @@ static int aufs_mmap(struct file *file, struct vm_area_struct *vma)
+ 	up_write(&current->mm->mmap_sem);
+ 	si_read_lock(sb, AuLock_FLUSH);
+ 	err = au_reval_and_lock_fdi(file, au_reopen_nondir, /*wlock*/1);
+-	if (unlikely(err)) {
+-		down_write(&current->mm->mmap_sem);
+-		unlock_kernel();
++	if (unlikely(err))
+ 		goto out;
+-	}
+ 
+ 	mmapped = !!au_test_mmapped(file);
+ 	if (wlock) {
+@@ -609,16 +606,11 @@ static int aufs_mmap(struct file *file, struct vm_area_struct *vma)
+ 
+ 		err = au_ready_to_write(file, -1, &pin);
+ 		di_downgrade_lock(dentry, AuLock_IR);
+-		if (unlikely(err)) {
+-			down_write(&current->mm->mmap_sem);
+-			unlock_kernel();
++		if (unlikely(err))
+ 			goto out_unlock;
+-		}
+ 		au_unpin(&pin);
+ 	} else
+ 		di_downgrade_lock(dentry, AuLock_IR);
+-	down_write(&current->mm->mmap_sem);
+-	unlock_kernel();
+ 
+ 	h_file = au_h_fptr(file, au_fbstart(file));
+ 	if (!mmapped && au_test_fs_bad_mapping(h_file->f_dentry->d_sb)) {
+@@ -670,6 +662,8 @@ static int aufs_mmap(struct file *file, struct vm_area_struct *vma)
+ 	fi_write_unlock(file);
+  out:
+ 	si_read_unlock(sb);
++	down_write(&current->mm->mmap_sem);
++	unlock_kernel();
+ 	return err;
+ }
+ 
+-- 
+1.7.2.3
+
