@@ -1,0 +1,59 @@
+From 75f64dd54a185150ebfc45e99351c890d4a2252f Mon Sep 17 00:00:00 2001
+From: Ondrej Zary <linux@rainbow-software.org>
+Date: Wed, 23 Jun 2010 12:57:15 +0200
+Subject: [PATCH] rt2500usb: fallback to SW encryption for TKIP+AES
+
+HW crypto in rt2500usb does not seem to support keys with different ciphers,
+which breaks TKIP+AES mode. Fall back to software encryption to fix it.
+
+This should fix long-standing problems with rt2500usb and WPA, such as:
+http://rt2x00.serialmonkey.com/phpBB/viewtopic.php?f=4&t=4834
+https://bugzilla.redhat.com/show_bug.cgi?id=484888
+
+Also tested that it does not break WEP, TKIP-only and AES-only modes.
+
+Signed-off-by: Ondrej Zary <linux@rainbow-software.org>
+Acked-by: Gertjan van Wingerde <gwingerde@gmail.com>
+Signed-off-by: John W. Linville <linville@tuxdriver.com>
+---
+ drivers/net/wireless/rt2x00/rt2500usb.c |   10 ++++++++++
+ 1 files changed, 10 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/net/wireless/rt2x00/rt2500usb.c b/drivers/net/wireless/rt2x00/rt2500usb.c
+index 002db64..963238c 100644
+--- a/drivers/net/wireless/rt2x00/rt2500usb.c
++++ b/drivers/net/wireless/rt2x00/rt2500usb.c
+@@ -347,6 +347,7 @@ static int rt2500usb_config_key(struct rt2x00_dev *rt2x00dev,
+ {
+ 	u32 mask;
+ 	u16 reg;
++	enum cipher curr_cipher;
+ 
+ 	if (crypto->cmd == SET_KEY) {
+ 		/*
+@@ -357,6 +358,7 @@ static int rt2500usb_config_key(struct rt2x00_dev *rt2x00dev,
+ 		mask = TXRX_CSR0_KEY_ID.bit_mask;
+ 
+ 		rt2500usb_register_read(rt2x00dev, TXRX_CSR0, &reg);
++		curr_cipher = rt2x00_get_field16(reg, TXRX_CSR0_ALGORITHM);
+ 		reg &= mask;
+ 
+ 		if (reg && reg == mask)
+@@ -365,6 +367,14 @@ static int rt2500usb_config_key(struct rt2x00_dev *rt2x00dev,
+ 		reg = rt2x00_get_field16(reg, TXRX_CSR0_KEY_ID);
+ 
+ 		key->hw_key_idx += reg ? ffz(reg) : 0;
++		/*
++		 * Hardware requires that all keys use the same cipher
++		 * (e.g. TKIP-only, AES-only, but not TKIP+AES).
++		 * If this is not the first key, compare the cipher with the
++		 * first one and fall back to SW crypto if not the same.
++		 */
++		if (key->hw_key_idx > 0 && crypto->cipher != curr_cipher)
++			return -EOPNOTSUPP;
+ 
+ 		rt2500usb_register_multiwrite(rt2x00dev, reg,
+ 					      crypto->key, sizeof(crypto->key));
+-- 
+1.7.2.3
+
