@@ -1,0 +1,4701 @@
+diff --git a/Documentation/kernel-parameters.txt b/Documentation/kernel-parameters.txt
+index 5f6aa11..c840e7d 100644
+--- a/Documentation/kernel-parameters.txt
++++ b/Documentation/kernel-parameters.txt
+@@ -878,6 +878,7 @@ and is between 256 and 4096 characters. It is defined in the file
+ 	i8042.panicblink=
+ 			[HW] Frequency with which keyboard LEDs should blink
+ 			     when kernel panics (default is 0.5 sec)
++	i8042.notimeout	[HW] Ignore timeout condition signalled by conroller
+ 	i8042.reset	[HW] Reset the controller during init and cleanup
+ 	i8042.unlock	[HW] Unlock (ignore) the keylock
+ 
+@@ -2577,6 +2578,10 @@ and is between 256 and 4096 characters. It is defined in the file
+ 			disables clocksource verification at runtime.
+ 			Used to enable high-resolution timer mode on older
+ 			hardware, and in virtualized environment.
++			[x86] noirqtime: Do not use TSC to do irq accounting.
++			Used to run time disable IRQ_TIME_ACCOUNTING on any
++			platforms where RDTSC is slow and this accounting
++			can add overhead.
+ 
+ 	turbografx.map[2|3]=	[HW,JOY]
+ 			TurboGraFX parallel port interface
+diff --git a/Makefile b/Makefile
+index 928ad57..34f5c21 100644
+diff --git a/arch/ia64/include/asm/system.h b/arch/ia64/include/asm/system.h
+index 927a381..1ff461e 100644
+--- a/arch/ia64/include/asm/system.h
++++ b/arch/ia64/include/asm/system.h
+@@ -281,10 +281,6 @@ void cpu_idle_wait(void);
+ 
+ void default_idle(void);
+ 
+-#ifdef CONFIG_VIRT_CPU_ACCOUNTING
+-extern void account_system_vtime(struct task_struct *);
+-#endif
+-
+ #endif /* __KERNEL__ */
+ 
+ #endif /* __ASSEMBLY__ */
+diff --git a/arch/parisc/kernel/firmware.c b/arch/parisc/kernel/firmware.c
+index df971fa..4896ed0 100644
+--- a/arch/parisc/kernel/firmware.c
++++ b/arch/parisc/kernel/firmware.c
+@@ -1126,15 +1126,13 @@ int pdc_iodc_print(const unsigned char *str, unsigned count)
+ 	unsigned int i;
+ 	unsigned long flags;
+ 
+-	for (i = 0; i < count && i < 79;) {
++	for (i = 0; i < count;) {
+ 		switch(str[i]) {
+ 		case '\n':
+ 			iodc_dbuf[i+0] = '\r';
+ 			iodc_dbuf[i+1] = '\n';
+ 			i += 2;
+ 			goto print;
+-		case '\b':	/* BS */
+-			i--; /* overwrite last */
+ 		default:
+ 			iodc_dbuf[i] = str[i];
+ 			i++;
+@@ -1142,15 +1140,6 @@ int pdc_iodc_print(const unsigned char *str, unsigned count)
+ 		}
+ 	}
+ 
+-	/* if we're at the end of line, and not already inserting a newline,
+-	 * insert one anyway. iodc console doesn't claim to support >79 char
+-	 * lines. don't account for this in the return value.
+-	 */
+-	if (i == 79 && iodc_dbuf[i-1] != '\n') {
+-		iodc_dbuf[i+0] = '\r';
+-		iodc_dbuf[i+1] = '\n';
+-	}
+-
+ print:
+         spin_lock_irqsave(&pdc_lock, flags);
+         real32_call(PAGE0->mem_cons.iodc_io,
+diff --git a/arch/powerpc/include/asm/system.h b/arch/powerpc/include/asm/system.h
+index bb8e006..094a12a 100644
+--- a/arch/powerpc/include/asm/system.h
++++ b/arch/powerpc/include/asm/system.h
+@@ -540,10 +540,6 @@ extern void reloc_got2(unsigned long);
+ 
+ #define PTRRELOC(x)	((typeof(x)) add_reloc_offset((unsigned long)(x)))
+ 
+-#ifdef CONFIG_VIRT_CPU_ACCOUNTING
+-extern void account_system_vtime(struct task_struct *);
+-#endif
+-
+ extern struct dentry *powerpc_debugfs_root;
+ 
+ #endif /* __KERNEL__ */
+diff --git a/arch/powerpc/kernel/cpu_setup_6xx.S b/arch/powerpc/kernel/cpu_setup_6xx.S
+index 55cba4a..f8cd9fb 100644
+--- a/arch/powerpc/kernel/cpu_setup_6xx.S
++++ b/arch/powerpc/kernel/cpu_setup_6xx.S
+@@ -18,7 +18,7 @@
+ #include <asm/mmu.h>
+ 
+ _GLOBAL(__setup_cpu_603)
+-	mflr	r4
++	mflr	r5
+ BEGIN_MMU_FTR_SECTION
+ 	li	r10,0
+ 	mtspr	SPRN_SPRG_603_LRU,r10		/* init SW LRU tracking */
+@@ -27,60 +27,60 @@ BEGIN_FTR_SECTION
+ 	bl	__init_fpu_registers
+ END_FTR_SECTION_IFCLR(CPU_FTR_FPU_UNAVAILABLE)
+ 	bl	setup_common_caches
+-	mtlr	r4
++	mtlr	r5
+ 	blr
+ _GLOBAL(__setup_cpu_604)
+-	mflr	r4
++	mflr	r5
+ 	bl	setup_common_caches
+ 	bl	setup_604_hid0
+-	mtlr	r4
++	mtlr	r5
+ 	blr
+ _GLOBAL(__setup_cpu_750)
+-	mflr	r4
++	mflr	r5
+ 	bl	__init_fpu_registers
+ 	bl	setup_common_caches
+ 	bl	setup_750_7400_hid0
+-	mtlr	r4
++	mtlr	r5
+ 	blr
+ _GLOBAL(__setup_cpu_750cx)
+-	mflr	r4
++	mflr	r5
+ 	bl	__init_fpu_registers
+ 	bl	setup_common_caches
+ 	bl	setup_750_7400_hid0
+ 	bl	setup_750cx
+-	mtlr	r4
++	mtlr	r5
+ 	blr
+ _GLOBAL(__setup_cpu_750fx)
+-	mflr	r4
++	mflr	r5
+ 	bl	__init_fpu_registers
+ 	bl	setup_common_caches
+ 	bl	setup_750_7400_hid0
+ 	bl	setup_750fx
+-	mtlr	r4
++	mtlr	r5
+ 	blr
+ _GLOBAL(__setup_cpu_7400)
+-	mflr	r4
++	mflr	r5
+ 	bl	__init_fpu_registers
+ 	bl	setup_7400_workarounds
+ 	bl	setup_common_caches
+ 	bl	setup_750_7400_hid0
+-	mtlr	r4
++	mtlr	r5
+ 	blr
+ _GLOBAL(__setup_cpu_7410)
+-	mflr	r4
++	mflr	r5
+ 	bl	__init_fpu_registers
+ 	bl	setup_7410_workarounds
+ 	bl	setup_common_caches
+ 	bl	setup_750_7400_hid0
+ 	li	r3,0
+ 	mtspr	SPRN_L2CR2,r3
+-	mtlr	r4
++	mtlr	r5
+ 	blr
+ _GLOBAL(__setup_cpu_745x)
+-	mflr	r4
++	mflr	r5
+ 	bl	setup_common_caches
+ 	bl	setup_745x_specifics
+-	mtlr	r4
++	mtlr	r5
+ 	blr
+ 
+ /* Enable caches for 603's, 604, 750 & 7400 */
+@@ -194,10 +194,10 @@ setup_750cx:
+ 	cror	4*cr0+eq,4*cr0+eq,4*cr1+eq
+ 	cror	4*cr0+eq,4*cr0+eq,4*cr2+eq
+ 	bnelr
+-	lwz	r6,CPU_SPEC_FEATURES(r5)
++	lwz	r6,CPU_SPEC_FEATURES(r4)
+ 	li	r7,CPU_FTR_CAN_NAP
+ 	andc	r6,r6,r7
+-	stw	r6,CPU_SPEC_FEATURES(r5)
++	stw	r6,CPU_SPEC_FEATURES(r4)
+ 	blr
+ 
+ /* 750fx specific
+@@ -225,12 +225,12 @@ BEGIN_FTR_SECTION
+ 	andis.	r11,r11,L3CR_L3E@h
+ 	beq	1f
+ END_FTR_SECTION_IFSET(CPU_FTR_L3CR)
+-	lwz	r6,CPU_SPEC_FEATURES(r5)
++	lwz	r6,CPU_SPEC_FEATURES(r4)
+ 	andi.	r0,r6,CPU_FTR_L3_DISABLE_NAP
+ 	beq	1f
+ 	li	r7,CPU_FTR_CAN_NAP
+ 	andc	r6,r6,r7
+-	stw	r6,CPU_SPEC_FEATURES(r5)
++	stw	r6,CPU_SPEC_FEATURES(r4)
+ 1:
+ 	mfspr	r11,SPRN_HID0
+ 
+diff --git a/arch/powerpc/sysdev/fsl_rio.c b/arch/powerpc/sysdev/fsl_rio.c
+index 757a83f..fa79af5 100644
+--- a/arch/powerpc/sysdev/fsl_rio.c
++++ b/arch/powerpc/sysdev/fsl_rio.c
+@@ -832,7 +832,6 @@ fsl_rio_dbell_handler(int irq, void *dev_instance)
+ 	if (dsr & DOORBELL_DSR_QFI) {
+ 		pr_info("RIO: doorbell queue full\n");
+ 		out_be32(&priv->msg_regs->dsr, DOORBELL_DSR_QFI);
+-		goto out;
+ 	}
+ 
+ 	/* XXX Need to check/dispatch until queue empty */
+diff --git a/arch/s390/include/asm/system.h b/arch/s390/include/asm/system.h
+index 379661d..6b3a2e2 100644
+--- a/arch/s390/include/asm/system.h
++++ b/arch/s390/include/asm/system.h
+@@ -97,7 +97,6 @@ static inline void restore_access_regs(unsigned int *acrs)
+ 
+ extern void account_vtime(struct task_struct *, struct task_struct *);
+ extern void account_tick_vtime(struct task_struct *);
+-extern void account_system_vtime(struct task_struct *);
+ 
+ #ifdef CONFIG_PFAULT
+ extern void pfault_irq_init(void);
+diff --git a/arch/s390/include/asm/vdso.h b/arch/s390/include/asm/vdso.h
+index 7bdd7c8..4a76d94 100644
+--- a/arch/s390/include/asm/vdso.h
++++ b/arch/s390/include/asm/vdso.h
+@@ -7,7 +7,7 @@
+ #define VDSO32_LBASE	0
+ #define VDSO64_LBASE	0
+ 
+-#define VDSO_VERSION_STRING	LINUX_2.6.26
++#define VDSO_VERSION_STRING	LINUX_2.6.29
+ 
+ #ifndef __ASSEMBLY__
+ 
+diff --git a/arch/x86/Kconfig b/arch/x86/Kconfig
+index cb5a57c..73ae02a 100644
+--- a/arch/x86/Kconfig
++++ b/arch/x86/Kconfig
+@@ -753,6 +753,17 @@ config SCHED_MC
+ 	  making when dealing with multi-core CPU chips at a cost of slightly
+ 	  increased overhead in some places. If unsure say N here.
+ 
++config IRQ_TIME_ACCOUNTING
++	bool "Fine granularity task level IRQ time accounting"
++	default n
++	---help---
++	  Select this option to enable fine granularity task irq time
++	  accounting. This is done by reading a timestamp on each
++	  transitions between softirq and hardirq state, so there can be a
++	  small performance impact.
++
++	  If in doubt, say N here.
++
+ source "kernel/Kconfig.preempt"
+ 
+ config X86_UP_APIC
+diff --git a/arch/x86/include/asm/mmu_context.h b/arch/x86/include/asm/mmu_context.h
+index 4a2d4e0..8b5393e 100644
+--- a/arch/x86/include/asm/mmu_context.h
++++ b/arch/x86/include/asm/mmu_context.h
+@@ -36,8 +36,6 @@ static inline void switch_mm(struct mm_struct *prev, struct mm_struct *next,
+ 	unsigned cpu = smp_processor_id();
+ 
+ 	if (likely(prev != next)) {
+-		/* stop flush ipis for the previous mm */
+-		cpumask_clear_cpu(cpu, mm_cpumask(prev));
+ #ifdef CONFIG_SMP
+ 		percpu_write(cpu_tlbstate.state, TLBSTATE_OK);
+ 		percpu_write(cpu_tlbstate.active_mm, next);
+@@ -47,6 +45,9 @@ static inline void switch_mm(struct mm_struct *prev, struct mm_struct *next,
+ 		/* Re-load page tables */
+ 		load_cr3(next->pgd);
+ 
++		/* stop flush ipis for the previous mm */
++		cpumask_clear_cpu(cpu, mm_cpumask(prev));
++
+ 		/*
+ 		 * load the LDT, if the LDT is different:
+ 		 */
+diff --git a/arch/x86/kernel/cpu/mtrr/main.c b/arch/x86/kernel/cpu/mtrr/main.c
+index 84e83de..419e328 100644
+--- a/arch/x86/kernel/cpu/mtrr/main.c
++++ b/arch/x86/kernel/cpu/mtrr/main.c
+@@ -762,13 +762,21 @@ void set_mtrr_aps_delayed_init(void)
+ }
+ 
+ /*
+- * MTRR initialization for all AP's
++ * Delayed MTRR initialization for all AP's
+  */
+ void mtrr_aps_init(void)
+ {
+ 	if (!use_intel())
+ 		return;
+ 
++	/*
++	 * Check if someone has requested the delay of AP MTRR initialization,
++	 * by doing set_mtrr_aps_delayed_init(), prior to this point. If not,
++	 * then we are done.
++	 */
++	if (!mtrr_aps_delayed_init)
++		return;
++
+ 	set_mtrr(~0U, 0, 0, 0);
+ 	mtrr_aps_delayed_init = false;
+ }
+diff --git a/arch/x86/kernel/tsc.c b/arch/x86/kernel/tsc.c
+index aaefa71..bc07543 100644
+--- a/arch/x86/kernel/tsc.c
++++ b/arch/x86/kernel/tsc.c
+@@ -104,10 +104,14 @@ int __init notsc_setup(char *str)
+ 
+ __setup("notsc", notsc_setup);
+ 
++static int no_sched_irq_time;
++
+ static int __init tsc_setup(char *str)
+ {
+ 	if (!strcmp(str, "reliable"))
+ 		tsc_clocksource_reliable = 1;
++	if (!strncmp(str, "noirqtime", 9))
++		no_sched_irq_time = 1;
+ 	return 1;
+ }
+ 
+@@ -802,6 +806,7 @@ void mark_tsc_unstable(char *reason)
+ 	if (!tsc_unstable) {
+ 		tsc_unstable = 1;
+ 		sched_clock_stable = 0;
++		disable_sched_clock_irqtime();
+ 		printk(KERN_INFO "Marking TSC unstable due to %s\n", reason);
+ 		/* Change only the rating, when not registered */
+ 		if (clocksource_tsc.mult)
+@@ -990,6 +995,9 @@ void __init tsc_init(void)
+ 	/* now allow native_sched_clock() to use rdtsc */
+ 	tsc_disabled = 0;
+ 
++	if (!no_sched_irq_time)
++		enable_sched_clock_irqtime();
++
+ 	lpj = ((u64)tsc_khz * 1000);
+ 	do_div(lpj, HZ);
+ 	lpj_fine = lpj;
+diff --git a/drivers/ata/pata_mpc52xx.c b/drivers/ata/pata_mpc52xx.c
+index 2bc2dbe..99d41be 100644
+--- a/drivers/ata/pata_mpc52xx.c
++++ b/drivers/ata/pata_mpc52xx.c
+@@ -610,7 +610,7 @@ static struct scsi_host_template mpc52xx_ata_sht = {
+ };
+ 
+ static struct ata_port_operations mpc52xx_ata_port_ops = {
+-	.inherits		= &ata_sff_port_ops,
++	.inherits		= &ata_bmdma_port_ops,
+ 	.sff_dev_select		= mpc52xx_ata_dev_select,
+ 	.set_piomode		= mpc52xx_ata_set_piomode,
+ 	.set_dmamode		= mpc52xx_ata_set_dmamode,
+diff --git a/drivers/char/hvc_iucv.c b/drivers/char/hvc_iucv.c
+index b8a5d65..b0e168f 100644
+--- a/drivers/char/hvc_iucv.c
++++ b/drivers/char/hvc_iucv.c
+@@ -139,6 +139,8 @@ struct hvc_iucv_private *hvc_iucv_get_private(uint32_t num)
+  *
+  * This function allocates a new struct iucv_tty_buffer element and, optionally,
+  * allocates an internal data buffer with the specified size @size.
++ * The internal data buffer is always allocated with GFP_DMA which is
++ * required for receiving and sending data with IUCV.
+  * Note: The total message size arises from the internal buffer size and the
+  *	 members of the iucv_tty_msg structure.
+  * The function returns NULL if memory allocation has failed.
+@@ -154,7 +156,7 @@ static struct iucv_tty_buffer *alloc_tty_buffer(size_t size, gfp_t flags)
+ 
+ 	if (size > 0) {
+ 		bufp->msg.length = MSG_SIZE(size);
+-		bufp->mbuf = kmalloc(bufp->msg.length, flags);
++		bufp->mbuf = kmalloc(bufp->msg.length, flags | GFP_DMA);
+ 		if (!bufp->mbuf) {
+ 			mempool_free(bufp, hvc_iucv_mempool);
+ 			return NULL;
+@@ -237,7 +239,7 @@ static int hvc_iucv_write(struct hvc_iucv_private *priv,
+ 	if (!rb->mbuf) { /* message not yet received ... */
+ 		/* allocate mem to store msg data; if no memory is available
+ 		 * then leave the buffer on the list and re-try later */
+-		rb->mbuf = kmalloc(rb->msg.length, GFP_ATOMIC);
++		rb->mbuf = kmalloc(rb->msg.length, GFP_ATOMIC | GFP_DMA);
+ 		if (!rb->mbuf)
+ 			return -ENOMEM;
+ 
+diff --git a/drivers/char/tpm/tpm.c b/drivers/char/tpm/tpm.c
+index 47c2d27..8548ae7 100644
+--- a/drivers/char/tpm/tpm.c
++++ b/drivers/char/tpm/tpm.c
+@@ -353,12 +353,14 @@ unsigned long tpm_calc_ordinal_duration(struct tpm_chip *chip,
+ 		    tpm_protected_ordinal_duration[ordinal &
+ 						   TPM_PROTECTED_ORDINAL_MASK];
+ 
+-	if (duration_idx != TPM_UNDEFINED)
++	if (duration_idx != TPM_UNDEFINED) {
+ 		duration = chip->vendor.duration[duration_idx];
+-	if (duration <= 0)
++		/* if duration is 0, it's because chip->vendor.duration wasn't */
++		/* filled yet, so we set the lowest timeout just to give enough */
++		/* time for tpm_get_timeouts() to succeed */
++		return (duration <= 0 ? HZ : duration);
++	} else
+ 		return 2 * 60 * HZ;
+-	else
+-		return duration;
+ }
+ EXPORT_SYMBOL_GPL(tpm_calc_ordinal_duration);
+ 
+@@ -564,9 +566,11 @@ duration:
+ 	if (rc)
+ 		return;
+ 
+-	if (be32_to_cpu(tpm_cmd.header.out.return_code)
+-	    != 3 * sizeof(u32))
++	if (be32_to_cpu(tpm_cmd.header.out.return_code) != 0 ||
++	    be32_to_cpu(tpm_cmd.header.out.length)
++	    != sizeof(tpm_cmd.header.out) + sizeof(u32) + 3 * sizeof(u32))
+ 		return;
++
+ 	duration_cap = &tpm_cmd.params.getcap_out.cap.duration;
+ 	chip->vendor.duration[TPM_SHORT] =
+ 	    usecs_to_jiffies(be32_to_cpu(duration_cap->tpm_short));
+@@ -910,6 +914,18 @@ ssize_t tpm_show_caps_1_2(struct device * dev,
+ }
+ EXPORT_SYMBOL_GPL(tpm_show_caps_1_2);
+ 
++ssize_t tpm_show_timeouts(struct device *dev, struct device_attribute *attr,
++			  char *buf)
++{
++	struct tpm_chip *chip = dev_get_drvdata(dev);
++
++	return sprintf(buf, "%d %d %d\n",
++	               jiffies_to_usecs(chip->vendor.duration[TPM_SHORT]),
++	               jiffies_to_usecs(chip->vendor.duration[TPM_MEDIUM]),
++	               jiffies_to_usecs(chip->vendor.duration[TPM_LONG]));
++}
++EXPORT_SYMBOL_GPL(tpm_show_timeouts);
++
+ ssize_t tpm_store_cancel(struct device *dev, struct device_attribute *attr,
+ 			const char *buf, size_t count)
+ {
+diff --git a/drivers/char/tpm/tpm.h b/drivers/char/tpm/tpm.h
+index 792868d..ba1779c 100644
+--- a/drivers/char/tpm/tpm.h
++++ b/drivers/char/tpm/tpm.h
+@@ -56,6 +56,8 @@ extern ssize_t tpm_show_owned(struct device *, struct device_attribute *attr,
+ 				char *);
+ extern ssize_t tpm_show_temp_deactivated(struct device *,
+ 					 struct device_attribute *attr, char *);
++extern ssize_t tpm_show_timeouts(struct device *,
++				 struct device_attribute *attr, char *);
+ 
+ struct tpm_chip;
+ 
+diff --git a/drivers/char/tpm/tpm_tis.c b/drivers/char/tpm/tpm_tis.c
+index ca15c04..2a7af69 100644
+--- a/drivers/char/tpm/tpm_tis.c
++++ b/drivers/char/tpm/tpm_tis.c
+@@ -354,6 +354,7 @@ static DEVICE_ATTR(temp_deactivated, S_IRUGO, tpm_show_temp_deactivated,
+ 		   NULL);
+ static DEVICE_ATTR(caps, S_IRUGO, tpm_show_caps_1_2, NULL);
+ static DEVICE_ATTR(cancel, S_IWUSR | S_IWGRP, NULL, tpm_store_cancel);
++static DEVICE_ATTR(timeouts, S_IRUGO, tpm_show_timeouts, NULL);
+ 
+ static struct attribute *tis_attrs[] = {
+ 	&dev_attr_pubek.attr,
+@@ -363,7 +364,8 @@ static struct attribute *tis_attrs[] = {
+ 	&dev_attr_owned.attr,
+ 	&dev_attr_temp_deactivated.attr,
+ 	&dev_attr_caps.attr,
+-	&dev_attr_cancel.attr, NULL,
++	&dev_attr_cancel.attr,
++	&dev_attr_timeouts.attr, NULL,
+ };
+ 
+ static struct attribute_group tis_attr_grp = {
+diff --git a/drivers/gpu/drm/Kconfig b/drivers/gpu/drm/Kconfig
+index 96eddd1..020cf28 100644
+diff --git a/drivers/gpu/drm/i915/intel_lvds.c b/drivers/gpu/drm/i915/intel_lvds.c
+index d5b7361..44626bc 100644
+diff --git a/drivers/gpu/drm/radeon/radeon_atombios.c b/drivers/gpu/drm/radeon/radeon_atombios.c
+index e5e22b1..4e928b9 100644
+diff --git a/drivers/gpu/drm/radeon/radeon_display.c b/drivers/gpu/drm/radeon/radeon_display.c
+index 6f68315..083a181 100644
+diff --git a/drivers/hwmon/via686a.c b/drivers/hwmon/via686a.c
+index 39e82a4..ccdf559 100644
+--- a/drivers/hwmon/via686a.c
++++ b/drivers/hwmon/via686a.c
+@@ -687,6 +687,13 @@ static int __devexit via686a_remove(struct platform_device *pdev)
+ 	return 0;
+ }
+ 
++static void via686a_update_fan_div(struct via686a_data *data)
++{
++	int reg = via686a_read_value(data, VIA686A_REG_FANDIV);
++	data->fan_div[0] = (reg >> 4) & 0x03;
++	data->fan_div[1] = reg >> 6;
++}
++
+ static void __devinit via686a_init_device(struct via686a_data *data)
+ {
+ 	u8 reg;
+@@ -700,6 +707,9 @@ static void __devinit via686a_init_device(struct via686a_data *data)
+ 	via686a_write_value(data, VIA686A_REG_TEMP_MODE,
+ 			    (reg & ~VIA686A_TEMP_MODE_MASK)
+ 			    | VIA686A_TEMP_MODE_CONTINUOUS);
++
++	/* Pre-read fan clock divisor values */
++	via686a_update_fan_div(data);
+ }
+ 
+ static struct via686a_data *via686a_update_device(struct device *dev)
+@@ -751,9 +761,7 @@ static struct via686a_data *via686a_update_device(struct device *dev)
+ 		    (via686a_read_value(data, VIA686A_REG_TEMP_LOW23) &
+ 		     0xc0) >> 6;
+ 
+-		i = via686a_read_value(data, VIA686A_REG_FANDIV);
+-		data->fan_div[0] = (i >> 4) & 0x03;
+-		data->fan_div[1] = i >> 6;
++		via686a_update_fan_div(data);
+ 		data->alarms =
+ 		    via686a_read_value(data,
+ 				       VIA686A_REG_ALARM1) |
+diff --git a/drivers/i2c/i2c-core.c b/drivers/i2c/i2c-core.c
+index 8066db7..71a5f89 100644
+--- a/drivers/i2c/i2c-core.c
++++ b/drivers/i2c/i2c-core.c
+@@ -745,6 +745,14 @@ static int i2c_do_del_adapter(struct device_driver *d, void *data)
+ static int __unregister_client(struct device *dev, void *dummy)
+ {
+ 	struct i2c_client *client = i2c_verify_client(dev);
++	if (client && strcmp(client->name, "dummy"))
++		i2c_unregister_device(client);
++	return 0;
++}
++
++static int __unregister_dummy(struct device *dev, void *dummy)
++{
++	struct i2c_client *client = i2c_verify_client(dev);
+ 	if (client)
+ 		i2c_unregister_device(client);
+ 	return 0;
+@@ -793,8 +801,12 @@ int i2c_del_adapter(struct i2c_adapter *adap)
+ 	}
+ 
+ 	/* Detach any active clients. This can't fail, thus we do not
+-	   checking the returned value. */
++	 * check the returned value. This is a two-pass process, because
++	 * we can't remove the dummy devices during the first pass: they
++	 * could have been instantiated by real devices wishing to clean
++	 * them up properly, so we give them a chance to do that first. */
+ 	res = device_for_each_child(&adap->dev, NULL, __unregister_client);
++	res = device_for_each_child(&adap->dev, NULL, __unregister_dummy);
+ 
+ #ifdef CONFIG_I2C_COMPAT
+ 	class_compat_remove_link(i2c_adapter_compat_class, &adap->dev,
+diff --git a/drivers/input/mouse/bcm5974.c b/drivers/input/mouse/bcm5974.c
+index 0d1d334..bbedd57 100644
+--- a/drivers/input/mouse/bcm5974.c
++++ b/drivers/input/mouse/bcm5974.c
+@@ -55,6 +55,14 @@
+ #define USB_DEVICE_ID_APPLE_WELLSPRING3_ANSI	0x0236
+ #define USB_DEVICE_ID_APPLE_WELLSPRING3_ISO	0x0237
+ #define USB_DEVICE_ID_APPLE_WELLSPRING3_JIS	0x0238
++/* MacbookAir3,2 (unibody), aka wellspring5 */
++#define USB_DEVICE_ID_APPLE_WELLSPRING4_ANSI	0x023f
++#define USB_DEVICE_ID_APPLE_WELLSPRING4_ISO	0x0240
++#define USB_DEVICE_ID_APPLE_WELLSPRING4_JIS	0x0241
++/* MacbookAir3,1 (unibody), aka wellspring4 */
++#define USB_DEVICE_ID_APPLE_WELLSPRING4A_ANSI	0x0242
++#define USB_DEVICE_ID_APPLE_WELLSPRING4A_ISO	0x0243
++#define USB_DEVICE_ID_APPLE_WELLSPRING4A_JIS	0x0244
+ 
+ #define BCM5974_DEVICE(prod) {					\
+ 	.match_flags = (USB_DEVICE_ID_MATCH_DEVICE |		\
+@@ -80,6 +88,14 @@ static const struct usb_device_id bcm5974_table[] = {
+ 	BCM5974_DEVICE(USB_DEVICE_ID_APPLE_WELLSPRING3_ANSI),
+ 	BCM5974_DEVICE(USB_DEVICE_ID_APPLE_WELLSPRING3_ISO),
+ 	BCM5974_DEVICE(USB_DEVICE_ID_APPLE_WELLSPRING3_JIS),
++	/* MacbookAir3,2 */
++	BCM5974_DEVICE(USB_DEVICE_ID_APPLE_WELLSPRING4_ANSI),
++	BCM5974_DEVICE(USB_DEVICE_ID_APPLE_WELLSPRING4_ISO),
++	BCM5974_DEVICE(USB_DEVICE_ID_APPLE_WELLSPRING4_JIS),
++	/* MacbookAir3,1 */
++	BCM5974_DEVICE(USB_DEVICE_ID_APPLE_WELLSPRING4A_ANSI),
++	BCM5974_DEVICE(USB_DEVICE_ID_APPLE_WELLSPRING4A_ISO),
++	BCM5974_DEVICE(USB_DEVICE_ID_APPLE_WELLSPRING4A_JIS),
+ 	/* Terminating entry */
+ 	{}
+ };
+@@ -233,6 +249,30 @@ static const struct bcm5974_config bcm5974_config_table[] = {
+ 		{ DIM_X, DIM_X / SN_COORD, -4460, 5166 },
+ 		{ DIM_Y, DIM_Y / SN_COORD, -75, 6700 }
+ 	},
++	{
++		USB_DEVICE_ID_APPLE_WELLSPRING4_ANSI,
++		USB_DEVICE_ID_APPLE_WELLSPRING4_ISO,
++		USB_DEVICE_ID_APPLE_WELLSPRING4_JIS,
++		HAS_INTEGRATED_BUTTON,
++		0x84, sizeof(struct bt_data),
++		0x81, TYPE2, FINGER_TYPE2, FINGER_TYPE2 + SIZEOF_ALL_FINGERS,
++		{ DIM_PRESSURE, DIM_PRESSURE / SN_PRESSURE, 0, 300 },
++		{ DIM_WIDTH, DIM_WIDTH / SN_WIDTH, 0, 2048 },
++		{ DIM_X, DIM_X / SN_COORD, -4620, 5140 },
++		{ DIM_Y, DIM_Y / SN_COORD, -150, 6600 }
++	},
++	{
++		USB_DEVICE_ID_APPLE_WELLSPRING4A_ANSI,
++		USB_DEVICE_ID_APPLE_WELLSPRING4A_ISO,
++		USB_DEVICE_ID_APPLE_WELLSPRING4A_JIS,
++		HAS_INTEGRATED_BUTTON,
++		0x84, sizeof(struct bt_data),
++		0x81, TYPE2, FINGER_TYPE2, FINGER_TYPE2 + SIZEOF_ALL_FINGERS,
++		{ DIM_PRESSURE, DIM_PRESSURE / SN_PRESSURE, 0, 300 },
++		{ DIM_WIDTH, DIM_WIDTH / SN_WIDTH, 0, 2048 },
++		{ DIM_X, DIM_X / SN_COORD, -4616, 5112 },
++		{ DIM_Y, DIM_Y / SN_COORD, -142, 5234 }
++	},
+ 	{}
+ };
+ 
+diff --git a/drivers/input/serio/i8042-x86ia64io.h b/drivers/input/serio/i8042-x86ia64io.h
+index 21ef4b5..fc58fba 100644
+--- a/drivers/input/serio/i8042-x86ia64io.h
++++ b/drivers/input/serio/i8042-x86ia64io.h
+@@ -416,6 +416,13 @@ static const struct dmi_system_id __initconst i8042_dmi_nomux_table[] = {
+ 			DMI_MATCH(DMI_PRODUCT_VERSION, "0100"),
+ 		},
+ 	},
++	{
++		/* Dell Vostro V13 */
++		.matches = {
++			DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
++			DMI_MATCH(DMI_PRODUCT_NAME, "Vostro V13"),
++		},
++	},
+ 	{ }
+ };
+ 
+@@ -537,6 +544,17 @@ static const struct dmi_system_id __initconst i8042_dmi_laptop_table[] = {
+ };
+ #endif
+ 
++static const struct dmi_system_id __initconst i8042_dmi_notimeout_table[] = {
++	{
++		/* Dell Vostro V13 */
++		.matches = {
++			DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
++			DMI_MATCH(DMI_PRODUCT_NAME, "Vostro V13"),
++		},
++	},
++	{ }
++};
++
+ /*
+  * Some Wistron based laptops need us to explicitly enable the 'Dritek
+  * keyboard extension' to make their extra keys start generating scancodes.
+@@ -866,6 +884,9 @@ static int __init i8042_platform_init(void)
+ 	if (dmi_check_system(i8042_dmi_nomux_table))
+ 		i8042_nomux = true;
+ 
++	if (dmi_check_system(i8042_dmi_notimeout_table))
++		i8042_notimeout = true;
++
+ 	if (dmi_check_system(i8042_dmi_dritek_table))
+ 		i8042_dritek = true;
+ #endif /* CONFIG_X86 */
+diff --git a/drivers/input/serio/i8042.c b/drivers/input/serio/i8042.c
+index 16f5ab2..db9d1ea 100644
+--- a/drivers/input/serio/i8042.c
++++ b/drivers/input/serio/i8042.c
+@@ -64,6 +64,10 @@ static unsigned int i8042_blink_frequency = 500;
+ module_param_named(panicblink, i8042_blink_frequency, uint, 0600);
+ MODULE_PARM_DESC(panicblink, "Frequency with which keyboard LEDs should blink when kernel panics");
+ 
++static bool i8042_notimeout;
++module_param_named(notimeout, i8042_notimeout, bool, 0);
++MODULE_PARM_DESC(notimeout, "Ignore timeouts signalled by i8042");
++
+ #ifdef CONFIG_X86
+ static bool i8042_dritek;
+ module_param_named(dritek, i8042_dritek, bool, 0);
+@@ -434,7 +438,7 @@ static irqreturn_t i8042_interrupt(int irq, void *dev_id)
+ 	} else {
+ 
+ 		dfl = ((str & I8042_STR_PARITY) ? SERIO_PARITY : 0) |
+-		      ((str & I8042_STR_TIMEOUT) ? SERIO_TIMEOUT : 0);
++		      ((str & I8042_STR_TIMEOUT && !i8042_notimeout) ? SERIO_TIMEOUT : 0);
+ 
+ 		port_no = (str & I8042_STR_AUXDATA) ?
+ 				I8042_AUX_PORT_NO : I8042_KBD_PORT_NO;
+diff --git a/drivers/md/dm-mpath.c b/drivers/md/dm-mpath.c
+index f336c69..fcf717c 100644
+--- a/drivers/md/dm-mpath.c
++++ b/drivers/md/dm-mpath.c
+@@ -33,7 +33,6 @@ struct pgpath {
+ 	unsigned fail_count;		/* Cumulative failure count */
+ 
+ 	struct dm_path path;
+-	struct work_struct deactivate_path;
+ 	struct work_struct activate_path;
+ };
+ 
+@@ -113,7 +112,6 @@ static struct workqueue_struct *kmultipathd, *kmpath_handlerd;
+ static void process_queued_ios(struct work_struct *work);
+ static void trigger_event(struct work_struct *work);
+ static void activate_path(struct work_struct *work);
+-static void deactivate_path(struct work_struct *work);
+ 
+ 
+ /*-----------------------------------------------
+@@ -126,7 +124,6 @@ static struct pgpath *alloc_pgpath(void)
+ 
+ 	if (pgpath) {
+ 		pgpath->is_active = 1;
+-		INIT_WORK(&pgpath->deactivate_path, deactivate_path);
+ 		INIT_WORK(&pgpath->activate_path, activate_path);
+ 	}
+ 
+@@ -138,14 +135,6 @@ static void free_pgpath(struct pgpath *pgpath)
+ 	kfree(pgpath);
+ }
+ 
+-static void deactivate_path(struct work_struct *work)
+-{
+-	struct pgpath *pgpath =
+-		container_of(work, struct pgpath, deactivate_path);
+-
+-	blk_abort_queue(pgpath->path.dev->bdev->bd_disk->queue);
+-}
+-
+ static struct priority_group *alloc_priority_group(void)
+ {
+ 	struct priority_group *pg;
+@@ -949,7 +938,6 @@ static int fail_path(struct pgpath *pgpath)
+ 		      pgpath->path.dev->name, m->nr_valid_paths);
+ 
+ 	schedule_work(&m->trigger_event);
+-	queue_work(kmultipathd, &pgpath->deactivate_path);
+ 
+ out:
+ 	spin_unlock_irqrestore(&m->lock, flags);
+diff --git a/drivers/md/dm.c b/drivers/md/dm.c
+index d7786e3..d186687 100644
+--- a/drivers/md/dm.c
++++ b/drivers/md/dm.c
+@@ -1925,13 +1925,14 @@ static void event_callback(void *context)
+ 	wake_up(&md->eventq);
+ }
+ 
++/*
++ * Protected by md->suspend_lock obtained by dm_swap_table().
++ */
+ static void __set_size(struct mapped_device *md, sector_t size)
+ {
+ 	set_capacity(md->disk, size);
+ 
+-	mutex_lock(&md->bdev->bd_inode->i_mutex);
+ 	i_size_write(md->bdev->bd_inode, (loff_t)size << SECTOR_SHIFT);
+-	mutex_unlock(&md->bdev->bd_inode->i_mutex);
+ }
+ 
+ static int __bind(struct mapped_device *md, struct dm_table *t,
+diff --git a/drivers/md/md.c b/drivers/md/md.c
+index 2c66c7e..68bfb68 100644
+--- a/drivers/md/md.c
++++ b/drivers/md/md.c
+@@ -4802,9 +4802,10 @@ static int add_new_disk(mddev_t * mddev, mdu_disk_info_t *info)
+ 		/* set saved_raid_disk if appropriate */
+ 		if (!mddev->persistent) {
+ 			if (info->state & (1<<MD_DISK_SYNC)  &&
+-			    info->raid_disk < mddev->raid_disks)
++			    info->raid_disk < mddev->raid_disks) {
+ 				rdev->raid_disk = info->raid_disk;
+-			else
++				set_bit(In_sync, &rdev->flags);
++			} else
+ 				rdev->raid_disk = -1;
+ 		} else
+ 			super_types[mddev->major_version].
+diff --git a/drivers/media/radio/radio-aimslab.c b/drivers/media/radio/radio-aimslab.c
+index 35edee0..30052db 100644
+--- a/drivers/media/radio/radio-aimslab.c
++++ b/drivers/media/radio/radio-aimslab.c
+@@ -31,7 +31,6 @@
+ #include <linux/module.h>	/* Modules 			*/
+ #include <linux/init.h>		/* Initdata			*/
+ #include <linux/ioport.h>	/* request_region		*/
+-#include <linux/delay.h>	/* udelay			*/
+ #include <linux/videodev2.h>	/* kernel radio structs		*/
+ #include <linux/version.h>	/* for KERNEL_VERSION MACRO	*/
+ #include <linux/io.h>		/* outb, outb_p			*/
+@@ -71,27 +70,17 @@ static struct rtrack rtrack_card;
+ 
+ /* local things */
+ 
+-static void sleep_delay(long n)
+-{
+-	/* Sleep nicely for 'n' uS */
+-	int d = n / msecs_to_jiffies(1000);
+-	if (!d)
+-		udelay(n);
+-	else
+-		msleep(jiffies_to_msecs(d));
+-}
+-
+ static void rt_decvol(struct rtrack *rt)
+ {
+ 	outb(0x58, rt->io);		/* volume down + sigstr + on	*/
+-	sleep_delay(100000);
++	msleep(100);
+ 	outb(0xd8, rt->io);		/* volume steady + sigstr + on	*/
+ }
+ 
+ static void rt_incvol(struct rtrack *rt)
+ {
+ 	outb(0x98, rt->io);		/* volume up + sigstr + on	*/
+-	sleep_delay(100000);
++	msleep(100);
+ 	outb(0xd8, rt->io);		/* volume steady + sigstr + on	*/
+ }
+ 
+@@ -120,7 +109,7 @@ static int rt_setvol(struct rtrack *rt, int vol)
+ 
+ 	if (vol == 0) {			/* volume = 0 means mute the card */
+ 		outb(0x48, rt->io);	/* volume down but still "on"	*/
+-		sleep_delay(2000000);	/* make sure it's totally down	*/
++		msleep(2000);	/* make sure it's totally down	*/
+ 		outb(0xd0, rt->io);	/* volume steady, off		*/
+ 		rt->curvol = 0;		/* track the volume state!	*/
+ 		mutex_unlock(&rt->lock);
+@@ -155,7 +144,7 @@ static void send_0_byte(struct rtrack *rt)
+ 		outb_p(128+64+16+8+  1, rt->io);  /* on + wr-enable + data low */
+ 		outb_p(128+64+16+8+2+1, rt->io);  /* clock */
+ 	}
+-	sleep_delay(1000);
++	msleep(1);
+ }
+ 
+ static void send_1_byte(struct rtrack *rt)
+@@ -169,7 +158,7 @@ static void send_1_byte(struct rtrack *rt)
+ 		outb_p(128+64+16+8+4+2+1, rt->io); /* clock */
+ 	}
+ 
+-	sleep_delay(1000);
++	msleep(1);
+ }
+ 
+ static int rt_setfreq(struct rtrack *rt, unsigned long freq)
+@@ -423,7 +412,7 @@ static int __init rtrack_init(void)
+ 
+ 	/* this ensures that the volume is all the way down  */
+ 	outb(0x48, rt->io);		/* volume down but still "on"	*/
+-	sleep_delay(2000000);	/* make sure it's totally down	*/
++	msleep(2000);	/* make sure it's totally down	*/
+ 	outb(0xc0, rt->io);		/* steady volume, mute card	*/
+ 
+ 	return 0;
+diff --git a/drivers/media/video/em28xx/em28xx-cards.c b/drivers/media/video/em28xx/em28xx-cards.c
+index c0fd5c6..331d1ec 100644
+--- a/drivers/media/video/em28xx/em28xx-cards.c
++++ b/drivers/media/video/em28xx/em28xx-cards.c
+@@ -1525,11 +1525,11 @@ struct em28xx_board em28xx_boards[] = {
+ 		.input           = { {
+ 			.type     = EM28XX_VMUX_COMPOSITE1,
+ 			.vmux     = SAA7115_COMPOSITE0,
+-			.amux     = EM28XX_AMUX_VIDEO2,
++			.amux     = EM28XX_AMUX_LINE_IN,
+ 		}, {
+ 			.type     = EM28XX_VMUX_SVIDEO,
+ 			.vmux     = SAA7115_SVIDEO3,
+-			.amux     = EM28XX_AMUX_VIDEO2,
++			.amux     = EM28XX_AMUX_LINE_IN,
+ 		} },
+ 	},
+ 	[EM2860_BOARD_TERRATEC_AV350] = {
+diff --git a/drivers/net/wireless/ath/ath9k/ath9k.h b/drivers/net/wireless/ath/ath9k/ath9k.h
+index ad11969..8a51256 100644
+--- a/drivers/net/wireless/ath/ath9k/ath9k.h
++++ b/drivers/net/wireless/ath/ath9k/ath9k.h
+@@ -214,8 +214,8 @@ void ath_descdma_cleanup(struct ath_softc *sc, struct ath_descdma *dd,
+ 
+ /* returns delimiter padding required given the packet length */
+ #define ATH_AGGR_GET_NDELIM(_len)					\
+-	(((((_len) + ATH_AGGR_DELIM_SZ) < ATH_AGGR_MINPLEN) ?           \
+-	  (ATH_AGGR_MINPLEN - (_len) - ATH_AGGR_DELIM_SZ) : 0) >> 2)
++       (((_len) >= ATH_AGGR_MINPLEN) ? 0 :                             \
++        DIV_ROUND_UP(ATH_AGGR_MINPLEN - (_len), ATH_AGGR_DELIM_SZ))
+ 
+ #define BAW_WITHIN(_start, _bawsz, _seqno) \
+ 	((((_seqno) - (_start)) & 4095) < (_bawsz))
+diff --git a/drivers/net/wireless/hostap/hostap_cs.c b/drivers/net/wireless/hostap/hostap_cs.c
+index b4ff1dc..6992f8f 100644
+--- a/drivers/net/wireless/hostap/hostap_cs.c
++++ b/drivers/net/wireless/hostap/hostap_cs.c
+@@ -662,12 +662,6 @@ static int prism2_config(struct pcmcia_device *link)
+ 	link->dev_node = &hw_priv->node;
+ 
+ 	/*
+-	 * Make sure the IRQ handler cannot proceed until at least
+-	 * dev->base_addr is initialized.
+-	 */
+-	spin_lock_irqsave(&local->irq_init_lock, flags);
+-
+-	/*
+ 	 * Allocate an interrupt line.  Note that this does not assign a
+ 	 * handler to the interrupt, unless the 'Handler' member of the
+ 	 * irq structure is initialized.
+@@ -690,9 +684,10 @@ static int prism2_config(struct pcmcia_device *link)
+ 	CS_CHECK(RequestConfiguration,
+ 		 pcmcia_request_configuration(link, &link->conf));
+ 
++	/* IRQ handler cannot proceed until at dev->base_addr is initialized */
++	spin_lock_irqsave(&local->irq_init_lock, flags);
+ 	dev->irq = link->irq.AssignedIRQ;
+ 	dev->base_addr = link->io.BasePort1;
+-
+ 	spin_unlock_irqrestore(&local->irq_init_lock, flags);
+ 
+ 	/* Finally, report what we've done */
+@@ -724,7 +719,6 @@ static int prism2_config(struct pcmcia_device *link)
+ 	return ret;
+ 
+  cs_failed:
+-	spin_unlock_irqrestore(&local->irq_init_lock, flags);
+ 	cs_error(link, last_fn, last_ret);
+ 
+  failed:
+diff --git a/drivers/net/wireless/iwlwifi/iwl-agn.c b/drivers/net/wireless/iwlwifi/iwl-agn.c
+index 166bedd..0e56d78 100644
+--- a/drivers/net/wireless/iwlwifi/iwl-agn.c
++++ b/drivers/net/wireless/iwlwifi/iwl-agn.c
+@@ -1044,6 +1044,9 @@ static void iwl_irq_tasklet_legacy(struct iwl_priv *priv)
+ 	/* only Re-enable if diabled by irq */
+ 	if (test_bit(STATUS_INT_ENABLED, &priv->status))
+ 		iwl_enable_interrupts(priv);
++	/* Re-enable RF_KILL if it occurred */
++	else if (handled & CSR_INT_BIT_RF_KILL)
++		iwl_enable_rfkill_int(priv);
+ 
+ #ifdef CONFIG_IWLWIFI_DEBUG
+ 	if (iwl_get_debug_level(priv) & (IWL_DL_ISR)) {
+@@ -1245,6 +1248,9 @@ static void iwl_irq_tasklet(struct iwl_priv *priv)
+ 	/* only Re-enable if diabled by irq */
+ 	if (test_bit(STATUS_INT_ENABLED, &priv->status))
+ 		iwl_enable_interrupts(priv);
++	/* Re-enable RF_KILL if it occurred */
++	else if (handled & CSR_INT_BIT_RF_KILL)
++		iwl_enable_rfkill_int(priv);
+ 
+ 	spin_unlock_irqrestore(&priv->lock, flags);
+ 
+@@ -2358,9 +2364,10 @@ static void iwl_mac_stop(struct ieee80211_hw *hw)
+ 
+ 	flush_workqueue(priv->workqueue);
+ 
+-	/* enable interrupts again in order to receive rfkill changes */
++	/* User space software may expect getting rfkill changes
++	 * even if interface is down */
+ 	iwl_write32(priv, CSR_INT, 0xFFFFFFFF);
+-	iwl_enable_interrupts(priv);
++	iwl_enable_rfkill_int(priv);
+ 
+ 	IWL_DEBUG_MAC80211(priv, "leave\n");
+ }
+@@ -3060,14 +3067,14 @@ static int iwl_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+ 	 * 8. Setup and register mac80211
+ 	 **********************************/
+ 
+-	/* enable interrupts if needed: hw bug w/a */
++	/* enable rfkill interrupt: hw bug w/a */
+ 	pci_read_config_word(priv->pci_dev, PCI_COMMAND, &pci_cmd);
+ 	if (pci_cmd & PCI_COMMAND_INTX_DISABLE) {
+ 		pci_cmd &= ~PCI_COMMAND_INTX_DISABLE;
+ 		pci_write_config_word(priv->pci_dev, PCI_COMMAND, pci_cmd);
+ 	}
+ 
+-	iwl_enable_interrupts(priv);
++	iwl_enable_rfkill_int(priv);
+ 
+ 	err = iwl_setup_mac(priv);
+ 	if (err)
+diff --git a/drivers/net/wireless/iwlwifi/iwl-helpers.h b/drivers/net/wireless/iwlwifi/iwl-helpers.h
+index f8481e8..bf2a33f 100644
+--- a/drivers/net/wireless/iwlwifi/iwl-helpers.h
++++ b/drivers/net/wireless/iwlwifi/iwl-helpers.h
+@@ -160,6 +160,12 @@ static inline void iwl_disable_interrupts(struct iwl_priv *priv)
+ 	IWL_DEBUG_ISR(priv, "Disabled interrupts\n");
+ }
+ 
++static inline void iwl_enable_rfkill_int(struct iwl_priv *priv)
++{
++	IWL_DEBUG_ISR(priv, "Enabling rfkill interrupt\n");
++	iwl_write32(priv, CSR_INT_MASK, CSR_INT_BIT_RF_KILL);
++}
++
+ static inline void iwl_enable_interrupts(struct iwl_priv *priv)
+ {
+ 	IWL_DEBUG_ISR(priv, "Enabling interrupts\n");
+diff --git a/drivers/net/wireless/p54/txrx.c b/drivers/net/wireless/p54/txrx.c
+index 0edd7b4..9000787 100644
+--- a/drivers/net/wireless/p54/txrx.c
++++ b/drivers/net/wireless/p54/txrx.c
+@@ -617,7 +617,7 @@ static void p54_tx_80211_header(struct p54_common *priv, struct sk_buff *skb,
+ 	else
+ 		*burst_possible = false;
+ 
+-	if (info->flags & IEEE80211_TX_CTL_ASSIGN_SEQ)
++	if (!(info->flags & IEEE80211_TX_CTL_ASSIGN_SEQ))
+ 		*flags |= P54_HDR_FLAG_DATA_OUT_SEQNR;
+ 
+ 	if (info->flags & IEEE80211_TX_CTL_PSPOLL_RESPONSE)
+diff --git a/drivers/net/wireless/rt2x00/rt73usb.c b/drivers/net/wireless/rt2x00/rt73usb.c
+index 14e7bb2..1585577 100644
+--- a/drivers/net/wireless/rt2x00/rt73usb.c
++++ b/drivers/net/wireless/rt2x00/rt73usb.c
+@@ -2400,6 +2400,7 @@ static struct usb_device_id rt73usb_device_table[] = {
+ 	{ USB_DEVICE(0x04bb, 0x093d), USB_DEVICE_DATA(&rt73usb_ops) },
+ 	{ USB_DEVICE(0x148f, 0x2573), USB_DEVICE_DATA(&rt73usb_ops) },
+ 	{ USB_DEVICE(0x148f, 0x2671), USB_DEVICE_DATA(&rt73usb_ops) },
++	{ USB_DEVICE(0x0812, 0x3101), USB_DEVICE_DATA(&rt73usb_ops) },
+ 	/* Qcom */
+ 	{ USB_DEVICE(0x18e8, 0x6196), USB_DEVICE_DATA(&rt73usb_ops) },
+ 	{ USB_DEVICE(0x18e8, 0x6229), USB_DEVICE_DATA(&rt73usb_ops) },
+diff --git a/drivers/pci/pci-stub.c b/drivers/pci/pci-stub.c
+index f7b68ca..4ae494b 100644
+--- a/drivers/pci/pci-stub.c
++++ b/drivers/pci/pci-stub.c
+@@ -54,6 +54,9 @@ static int __init pci_stub_init(void)
+ 			subdevice = PCI_ANY_ID, class=0, class_mask=0;
+ 		int fields;
+ 
++		if (!strlen(id))
++			continue;
++
+ 		fields = sscanf(id, "%x:%x:%x:%x:%x:%x",
+ 				&vendor, &device, &subvendor, &subdevice,
+ 				&class, &class_mask);
+diff --git a/drivers/power/ds2760_battery.c b/drivers/power/ds2760_battery.c
+index 6f1dba5..ad31df1 100644
+--- a/drivers/power/ds2760_battery.c
++++ b/drivers/power/ds2760_battery.c
+@@ -211,7 +211,7 @@ static int ds2760_battery_read_status(struct ds2760_device_info *di)
+ 	if (di->rem_capacity > 100)
+ 		di->rem_capacity = 100;
+ 
+-	if (di->current_uA >= 100L)
++	if (di->current_uA < -100L)
+ 		di->life_sec = -((di->accum_current_uAh - di->empty_uAh) * 36L)
+ 					/ (di->current_uA / 100L);
+ 	else
+diff --git a/drivers/rtc/rtc-cmos.c b/drivers/rtc/rtc-cmos.c
+index 66c2d6a..2ac43f0 100644
+--- a/drivers/rtc/rtc-cmos.c
++++ b/drivers/rtc/rtc-cmos.c
+@@ -36,6 +36,7 @@
+ #include <linux/platform_device.h>
+ #include <linux/mod_devicetable.h>
+ #include <linux/log2.h>
++#include <linux/pm.h>
+ 
+ /* this is for "generic access to PC-style RTC" using CMOS_READ/CMOS_WRITE */
+ #include <asm-generic/rtc.h>
+@@ -855,7 +856,7 @@ static void __exit cmos_do_remove(struct device *dev)
+ 
+ #ifdef	CONFIG_PM
+ 
+-static int cmos_suspend(struct device *dev, pm_message_t mesg)
++static int cmos_suspend(struct device *dev)
+ {
+ 	struct cmos_rtc	*cmos = dev_get_drvdata(dev);
+ 	unsigned char	tmp;
+@@ -902,7 +903,7 @@ static int cmos_suspend(struct device *dev, pm_message_t mesg)
+  */
+ static inline int cmos_poweroff(struct device *dev)
+ {
+-	return cmos_suspend(dev, PMSG_HIBERNATE);
++	return cmos_suspend(dev);
+ }
+ 
+ static int cmos_resume(struct device *dev)
+@@ -949,9 +950,9 @@ static int cmos_resume(struct device *dev)
+ 	return 0;
+ }
+ 
++static SIMPLE_DEV_PM_OPS(cmos_pm_ops, cmos_suspend, cmos_resume);
++
+ #else
+-#define	cmos_suspend	NULL
+-#define	cmos_resume	NULL
+ 
+ static inline int cmos_poweroff(struct device *dev)
+ {
+@@ -1087,7 +1088,7 @@ static void __exit cmos_pnp_remove(struct pnp_dev *pnp)
+ 
+ static int cmos_pnp_suspend(struct pnp_dev *pnp, pm_message_t mesg)
+ {
+-	return cmos_suspend(&pnp->dev, mesg);
++	return cmos_suspend(&pnp->dev);
+ }
+ 
+ static int cmos_pnp_resume(struct pnp_dev *pnp)
+@@ -1167,8 +1168,9 @@ static struct platform_driver cmos_platform_driver = {
+ 	.shutdown	= cmos_platform_shutdown,
+ 	.driver = {
+ 		.name		= (char *) driver_name,
+-		.suspend	= cmos_suspend,
+-		.resume		= cmos_resume,
++#ifdef CONFIG_PM
++		.pm		= &cmos_pm_ops,
++#endif
+ 	}
+ };
+ 
+diff --git a/drivers/scsi/libsas/sas_scsi_host.c b/drivers/scsi/libsas/sas_scsi_host.c
+index 39fb9aa..974f462 100644
+--- a/drivers/scsi/libsas/sas_scsi_host.c
++++ b/drivers/scsi/libsas/sas_scsi_host.c
+@@ -648,6 +648,7 @@ void sas_scsi_recover_host(struct Scsi_Host *shost)
+ 
+ 	spin_lock_irqsave(shost->host_lock, flags);
+ 	list_splice_init(&shost->eh_cmd_q, &eh_work_q);
++	shost->host_eh_scheduled = 0;
+ 	spin_unlock_irqrestore(shost->host_lock, flags);
+ 
+ 	SAS_DPRINTK("Enter %s\n", __func__);
+diff --git a/drivers/scsi/mpt2sas/mpt2sas_base.c b/drivers/scsi/mpt2sas/mpt2sas_base.c
+index 670241e..4381bfa 100644
+--- a/drivers/scsi/mpt2sas/mpt2sas_base.c
++++ b/drivers/scsi/mpt2sas/mpt2sas_base.c
+@@ -1947,9 +1947,9 @@ _base_allocate_memory_pools(struct MPT2SAS_ADAPTER *ioc,  int sleep_flag)
+ 		/* adjust hba_queue_depth, reply_free_queue_depth,
+ 		 * and queue_size
+ 		 */
+-		ioc->hba_queue_depth -= queue_diff;
+-		ioc->reply_free_queue_depth -= queue_diff;
+-		queue_size -= queue_diff;
++		ioc->hba_queue_depth -= (queue_diff / 2);
++		ioc->reply_free_queue_depth -= (queue_diff / 2);
++		queue_size = facts->MaxReplyDescriptorPostQueueDepth;
+ 	}
+ 	ioc->reply_post_queue_depth = queue_size;
+ 
+@@ -3595,6 +3595,8 @@ mpt2sas_base_detach(struct MPT2SAS_ADAPTER *ioc)
+ static void
+ _base_reset_handler(struct MPT2SAS_ADAPTER *ioc, int reset_phase)
+ {
++	mpt2sas_scsih_reset_handler(ioc, reset_phase);
++	mpt2sas_ctl_reset_handler(ioc, reset_phase);
+ 	switch (reset_phase) {
+ 	case MPT2_IOC_PRE_RESET:
+ 		dtmprintk(ioc, printk(MPT2SAS_DEBUG_FMT "%s: "
+@@ -3625,8 +3627,6 @@ _base_reset_handler(struct MPT2SAS_ADAPTER *ioc, int reset_phase)
+ 		    "MPT2_IOC_DONE_RESET\n", ioc->name, __func__));
+ 		break;
+ 	}
+-	mpt2sas_scsih_reset_handler(ioc, reset_phase);
+-	mpt2sas_ctl_reset_handler(ioc, reset_phase);
+ }
+ 
+ /**
+@@ -3680,6 +3680,7 @@ mpt2sas_base_hard_reset_handler(struct MPT2SAS_ADAPTER *ioc, int sleep_flag,
+ {
+ 	int r;
+ 	unsigned long flags;
++	u8 pe_complete = ioc->wait_for_port_enable_to_complete;
+ 
+ 	dtmprintk(ioc, printk(MPT2SAS_DEBUG_FMT "%s: enter\n", ioc->name,
+ 	    __func__));
+@@ -3701,6 +3702,14 @@ mpt2sas_base_hard_reset_handler(struct MPT2SAS_ADAPTER *ioc, int sleep_flag,
+ 	if (r)
+ 		goto out;
+ 	_base_reset_handler(ioc, MPT2_IOC_AFTER_RESET);
++
++	/* If this hard reset is called while port enable is active, then
++	 * there is no reason to call make_ioc_operational
++	 */
++	if (pe_complete) {
++		r = -EFAULT;
++		goto out;
++	}
+ 	r = _base_make_ioc_operational(ioc, sleep_flag);
+ 	if (!r)
+ 		_base_reset_handler(ioc, MPT2_IOC_DONE_RESET);
+diff --git a/drivers/scsi/mpt2sas/mpt2sas_scsih.c b/drivers/scsi/mpt2sas/mpt2sas_scsih.c
+index f10bf70..9e75206 100644
+--- a/drivers/scsi/mpt2sas/mpt2sas_scsih.c
++++ b/drivers/scsi/mpt2sas/mpt2sas_scsih.c
+@@ -2585,9 +2585,6 @@ _scsih_check_topo_delete_events(struct MPT2SAS_ADAPTER *ioc,
+ 	u16 handle;
+ 
+ 	for (i = 0 ; i < event_data->NumEntries; i++) {
+-		if (event_data->PHY[i].PhyStatus &
+-		    MPI2_EVENT_SAS_TOPO_PHYSTATUS_VACANT)
+-			continue;
+ 		handle = le16_to_cpu(event_data->PHY[i].AttachedDevHandle);
+ 		if (!handle)
+ 			continue;
+diff --git a/drivers/scsi/sd.c b/drivers/scsi/sd.c
+index 81a9d25..568d363 100644
+--- a/drivers/scsi/sd.c
++++ b/drivers/scsi/sd.c
+@@ -1040,6 +1040,12 @@ static unsigned int sd_completed_bytes(struct scsi_cmnd *scmd)
+ 	u64 end_lba = blk_rq_pos(scmd->request) + (scsi_bufflen(scmd) / 512);
+ 	u64 bad_lba;
+ 	int info_valid;
++	/*
++	 * resid is optional but mostly filled in.  When it's unused,
++	 * its value is zero, so we assume the whole buffer transferred
++	 */
++	unsigned int transferred = scsi_bufflen(scmd) - scsi_get_resid(scmd);
++	unsigned int good_bytes;
+ 
+ 	if (!blk_fs_request(scmd->request))
+ 		return 0;
+@@ -1073,7 +1079,8 @@ static unsigned int sd_completed_bytes(struct scsi_cmnd *scmd)
+ 	/* This computation should always be done in terms of
+ 	 * the resolution of the device's medium.
+ 	 */
+-	return (bad_lba - start_lba) * scmd->device->sector_size;
++	good_bytes = (bad_lba - start_lba) * scmd->device->sector_size;
++	return min(good_bytes, transferred);
+ }
+ 
+ /**
+diff --git a/drivers/serial/8250.c b/drivers/serial/8250.c
+index 5ed1b82..6a451e8 100644
+--- a/drivers/serial/8250.c
++++ b/drivers/serial/8250.c
+@@ -255,7 +255,8 @@ static const struct serial8250_config uart_config[] = {
+ 		.fifo_size	= 128,
+ 		.tx_loadsz	= 128,
+ 		.fcr		= UART_FCR_ENABLE_FIFO | UART_FCR_R_TRIG_10,
+-		.flags		= UART_CAP_FIFO | UART_CAP_EFR | UART_CAP_SLEEP,
++		/* UART_CAP_EFR breaks billionon CF bluetooth card. */
++		.flags		= UART_CAP_FIFO | UART_CAP_SLEEP,
+ 	},
+ 	[PORT_RSA] = {
+ 		.name		= "RSA",
+diff --git a/drivers/staging/comedi/drivers/jr3_pci.c b/drivers/staging/comedi/drivers/jr3_pci.c
+index 0d2c2eb..59a6106 100644
+--- a/drivers/staging/comedi/drivers/jr3_pci.c
++++ b/drivers/staging/comedi/drivers/jr3_pci.c
+@@ -52,6 +52,7 @@ Devices: [JR3] PCI force sensor board (jr3_pci)
+ 
+ #define PCI_VENDOR_ID_JR3 0x1762
+ #define PCI_DEVICE_ID_JR3_1_CHANNEL 0x3111
++#define PCI_DEVICE_ID_JR3_1_CHANNEL_NEW 0x1111
+ #define PCI_DEVICE_ID_JR3_2_CHANNEL 0x3112
+ #define PCI_DEVICE_ID_JR3_3_CHANNEL 0x3113
+ #define PCI_DEVICE_ID_JR3_4_CHANNEL 0x3114
+@@ -71,6 +72,8 @@ static DEFINE_PCI_DEVICE_TABLE(jr3_pci_pci_table) = {
+ 	{
+ 	PCI_VENDOR_ID_JR3, PCI_DEVICE_ID_JR3_1_CHANNEL,
+ 		    PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0}, {
++	PCI_VENDOR_ID_JR3, PCI_DEVICE_ID_JR3_1_CHANNEL_NEW,
++		    PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0}, {
+ 	PCI_VENDOR_ID_JR3, PCI_DEVICE_ID_JR3_2_CHANNEL,
+ 		    PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0}, {
+ 	PCI_VENDOR_ID_JR3, PCI_DEVICE_ID_JR3_3_CHANNEL,
+@@ -807,6 +810,10 @@ static int jr3_pci_attach(struct comedi_device *dev,
+ 					devpriv->n_channels = 1;
+ 				}
+ 				break;
++			case PCI_DEVICE_ID_JR3_1_CHANNEL_NEW:{
++					devpriv->n_channels = 1;
++				}
++				break;
+ 			case PCI_DEVICE_ID_JR3_2_CHANNEL:{
+ 					devpriv->n_channels = 2;
+ 				}
+diff --git a/drivers/staging/comedi/drivers/ni_labpc.c b/drivers/staging/comedi/drivers/ni_labpc.c
+index dc3f398..4ac745a 100644
+--- a/drivers/staging/comedi/drivers/ni_labpc.c
++++ b/drivers/staging/comedi/drivers/ni_labpc.c
+@@ -528,7 +528,8 @@ int labpc_common_attach(struct comedi_device *dev, unsigned long iobase,
+ 	/* grab our IRQ */
+ 	if (irq) {
+ 		isr_flags = 0;
+-		if (thisboard->bustype == pci_bustype)
++		if (thisboard->bustype == pci_bustype
++		    || thisboard->bustype == pcmcia_bustype)
+ 			isr_flags |= IRQF_SHARED;
+ 		if (request_irq(irq, labpc_interrupt, isr_flags,
+ 				driver_labpc.driver_name, dev)) {
+diff --git a/drivers/staging/hv/blkvsc_drv.c b/drivers/staging/hv/blkvsc_drv.c
+index 62b2828..871a202 100644
+--- a/drivers/staging/hv/blkvsc_drv.c
++++ b/drivers/staging/hv/blkvsc_drv.c
+@@ -378,6 +378,7 @@ static int blkvsc_probe(struct device *device)
+ 		blkdev->gd->first_minor = 0;
+ 	blkdev->gd->fops = &block_ops;
+ 	blkdev->gd->private_data = blkdev;
++	blkdev->gd->driverfs_dev = &(blkdev->device_ctx->device);
+ 	sprintf(blkdev->gd->disk_name, "hd%c", 'a' + devnum);
+ 
+ 	blkvsc_do_inquiry(blkdev);
+diff --git a/drivers/staging/hv/netvsc_drv.c b/drivers/staging/hv/netvsc_drv.c
+index 547261d..a5101e3 100644
+--- a/drivers/staging/hv/netvsc_drv.c
++++ b/drivers/staging/hv/netvsc_drv.c
+@@ -296,6 +296,7 @@ static void netvsc_linkstatus_callback(struct hv_device *device_obj,
+ 	if (status == 1) {
+ 		netif_carrier_on(net);
+ 		netif_wake_queue(net);
++		netif_notify_peers(net);
+ 	} else {
+ 		netif_carrier_off(net);
+ 		netif_stop_queue(net);
+diff --git a/drivers/staging/usbip/vhci_hcd.c b/drivers/staging/usbip/vhci_hcd.c
+index c201802..5ea5d57 100644
+--- a/drivers/staging/usbip/vhci_hcd.c
++++ b/drivers/staging/usbip/vhci_hcd.c
+@@ -798,20 +798,6 @@ static int vhci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
+ 		spin_unlock_irqrestore(&vdev->priv_lock, flags2);
+ 	}
+ 
+-
+-	if (!vdev->ud.tcp_socket) {
+-		/* tcp connection is closed */
+-		usbip_uinfo("vhci_hcd: vhci_urb_dequeue() gives back urb %p\n",
+-									urb);
+-
+-		usb_hcd_unlink_urb_from_ep(hcd, urb);
+-
+-		spin_unlock_irqrestore(&the_controller->lock, flags);
+-		usb_hcd_giveback_urb(vhci_to_hcd(the_controller), urb,
+-								urb->status);
+-		spin_lock_irqsave(&the_controller->lock, flags);
+-	}
+-
+ 	spin_unlock_irqrestore(&the_controller->lock, flags);
+ 
+ 	usbip_dbg_vhci_hc("leave\n");
+diff --git a/drivers/usb/class/cdc-acm.c b/drivers/usb/class/cdc-acm.c
+index e3017c4..399dd67 100644
+--- a/drivers/usb/class/cdc-acm.c
++++ b/drivers/usb/class/cdc-acm.c
+@@ -1596,6 +1596,7 @@ static struct usb_device_id acm_ids[] = {
+ 	{ NOKIA_PCSUITE_ACM_INFO(0x0154), }, /* Nokia 5800 XpressMusic */
+ 	{ NOKIA_PCSUITE_ACM_INFO(0x04ce), }, /* Nokia E90 */
+ 	{ NOKIA_PCSUITE_ACM_INFO(0x01d4), }, /* Nokia E55 */
++	{ NOKIA_PCSUITE_ACM_INFO(0x0302), }, /* Nokia N8 */
+ 	{ SAMSUNG_PCSUITE_ACM_INFO(0x6651), }, /* Samsung GTi8510 (INNOV8) */
+ 
+ 	/* NOTE: non-Nokia COMM/ACM/0xff is likely MSFT RNDIS... NOT a modem! */
+diff --git a/drivers/usb/core/hub.c b/drivers/usb/core/hub.c
+index 12254e1..fc722a0 100644
+--- a/drivers/usb/core/hub.c
++++ b/drivers/usb/core/hub.c
+@@ -648,6 +648,8 @@ static void hub_init_func3(struct work_struct *ws);
+ static void hub_activate(struct usb_hub *hub, enum hub_activation_type type)
+ {
+ 	struct usb_device *hdev = hub->hdev;
++	struct usb_hcd *hcd;
++	int ret;
+ 	int port1;
+ 	int status;
+ 	bool need_debounce_delay = false;
+@@ -686,6 +688,25 @@ static void hub_activate(struct usb_hub *hub, enum hub_activation_type type)
+ 			atomic_set(&to_usb_interface(hub->intfdev)->
+ 					pm_usage_cnt, 1);
+ 			return;		/* Continues at init2: below */
++		} else if (type == HUB_RESET_RESUME) {
++			/* The internal host controller state for the hub device
++			 * may be gone after a host power loss on system resume.
++			 * Update the device's info so the HW knows it's a hub.
++			 */
++			hcd = bus_to_hcd(hdev->bus);
++			if (hcd->driver->update_hub_device) {
++				ret = hcd->driver->update_hub_device(hcd, hdev,
++						&hub->tt, GFP_NOIO);
++				if (ret < 0) {
++					dev_err(hub->intfdev, "Host not "
++							"accepting hub info "
++							"update.\n");
++					dev_err(hub->intfdev, "LS/FS devices "
++							"and hubs may not work "
++							"under this hub\n.");
++				}
++			}
++			hub_power_on(hub, true);
+ 		} else {
+ 			hub_power_on(hub, true);
+ 		}
+@@ -2683,6 +2704,11 @@ hub_port_init (struct usb_hub *hub, struct usb_device *udev, int port1,
+ 		udev->ttport = hdev->ttport;
+ 	} else if (udev->speed != USB_SPEED_HIGH
+ 			&& hdev->speed == USB_SPEED_HIGH) {
++		if (!hub->tt.hub) {
++			dev_err(&udev->dev, "parent hub has no TT\n");
++			retval = -EINVAL;
++			goto fail;
++		}
+ 		udev->tt = &hub->tt;
+ 		udev->ttport = port1;
+ 	}
+diff --git a/drivers/usb/gadget/printer.c b/drivers/usb/gadget/printer.c
+index 2d867fd..8966d5d 100644
+--- a/drivers/usb/gadget/printer.c
++++ b/drivers/usb/gadget/printer.c
+@@ -130,31 +130,31 @@ static struct printer_dev usb_printer_gadget;
+  * parameters are in UTF-8 (superset of ASCII's 7 bit characters).
+  */
+ 
+-static ushort __initdata idVendor;
++static ushort idVendor;
+ module_param(idVendor, ushort, S_IRUGO);
+ MODULE_PARM_DESC(idVendor, "USB Vendor ID");
+ 
+-static ushort __initdata idProduct;
++static ushort idProduct;
+ module_param(idProduct, ushort, S_IRUGO);
+ MODULE_PARM_DESC(idProduct, "USB Product ID");
+ 
+-static ushort __initdata bcdDevice;
++static ushort bcdDevice;
+ module_param(bcdDevice, ushort, S_IRUGO);
+ MODULE_PARM_DESC(bcdDevice, "USB Device version (BCD)");
+ 
+-static char *__initdata iManufacturer;
++static char *iManufacturer;
+ module_param(iManufacturer, charp, S_IRUGO);
+ MODULE_PARM_DESC(iManufacturer, "USB Manufacturer string");
+ 
+-static char *__initdata iProduct;
++static char *iProduct;
+ module_param(iProduct, charp, S_IRUGO);
+ MODULE_PARM_DESC(iProduct, "USB Product string");
+ 
+-static char *__initdata iSerialNum;
++static char *iSerialNum;
+ module_param(iSerialNum, charp, S_IRUGO);
+ MODULE_PARM_DESC(iSerialNum, "1");
+ 
+-static char *__initdata iPNPstring;
++static char *iPNPstring;
+ module_param(iPNPstring, charp, S_IRUGO);
+ MODULE_PARM_DESC(iPNPstring, "MFG:linux;MDL:g_printer;CLS:PRINTER;SN:1;");
+ 
+diff --git a/drivers/usb/host/ehci-hcd.c b/drivers/usb/host/ehci-hcd.c
+index 8198fc0..7b2e99c 100644
+--- a/drivers/usb/host/ehci-hcd.c
++++ b/drivers/usb/host/ehci-hcd.c
+@@ -103,6 +103,9 @@ MODULE_PARM_DESC (ignore_oc, "ignore bogus hardware overcurrent indications");
+ 
+ #define	INTR_MASK (STS_IAA | STS_FATAL | STS_PCD | STS_ERR | STS_INT)
+ 
++/* for ASPM quirk of ISOC on AMD SB800 */
++static struct pci_dev *amd_nb_dev;
++
+ /*-------------------------------------------------------------------------*/
+ 
+ #include "ehci.h"
+@@ -502,6 +505,11 @@ static void ehci_stop (struct usb_hcd *hcd)
+ 	spin_unlock_irq (&ehci->lock);
+ 	ehci_mem_cleanup (ehci);
+ 
++	if (amd_nb_dev) {
++		pci_dev_put(amd_nb_dev);
++		amd_nb_dev = NULL;
++	}
++
+ #ifdef	EHCI_STATS
+ 	ehci_dbg (ehci, "irq normal %ld err %ld reclaim %ld (lost %ld)\n",
+ 		ehci->stats.normal, ehci->stats.error, ehci->stats.reclaim,
+@@ -537,6 +545,8 @@ static int ehci_init(struct usb_hcd *hcd)
+ 	ehci->iaa_watchdog.function = ehci_iaa_watchdog;
+ 	ehci->iaa_watchdog.data = (unsigned long) ehci;
+ 
++	hcc_params = ehci_readl(ehci, &ehci->caps->hcc_params);
++
+ 	/*
+ 	 * hw default: 1K periodic list heads, one per frame.
+ 	 * periodic_size can shrink by USBCMD update if hcc_params allows.
+@@ -544,11 +554,20 @@ static int ehci_init(struct usb_hcd *hcd)
+ 	ehci->periodic_size = DEFAULT_I_TDPS;
+ 	INIT_LIST_HEAD(&ehci->cached_itd_list);
+ 	INIT_LIST_HEAD(&ehci->cached_sitd_list);
++
++	if (HCC_PGM_FRAMELISTLEN(hcc_params)) {
++		/* periodic schedule size can be smaller than default */
++		switch (EHCI_TUNE_FLS) {
++		case 0: ehci->periodic_size = 1024; break;
++		case 1: ehci->periodic_size = 512; break;
++		case 2: ehci->periodic_size = 256; break;
++		default:	BUG();
++		}
++	}
+ 	if ((retval = ehci_mem_init(ehci, GFP_KERNEL)) < 0)
+ 		return retval;
+ 
+ 	/* controllers may cache some of the periodic schedule ... */
+-	hcc_params = ehci_readl(ehci, &ehci->caps->hcc_params);
+ 	if (HCC_ISOC_CACHE(hcc_params))		// full frame cache
+ 		ehci->i_thresh = 8;
+ 	else					// N microframes cached
+@@ -597,12 +616,6 @@ static int ehci_init(struct usb_hcd *hcd)
+ 		/* periodic schedule size can be smaller than default */
+ 		temp &= ~(3 << 2);
+ 		temp |= (EHCI_TUNE_FLS << 2);
+-		switch (EHCI_TUNE_FLS) {
+-		case 0: ehci->periodic_size = 1024; break;
+-		case 1: ehci->periodic_size = 512; break;
+-		case 2: ehci->periodic_size = 256; break;
+-		default:	BUG();
+-		}
+ 	}
+ 	ehci->command = temp;
+ 
+diff --git a/drivers/usb/host/ehci-pci.c b/drivers/usb/host/ehci-pci.c
+index ead5f4f..d72b121 100644
+--- a/drivers/usb/host/ehci-pci.c
++++ b/drivers/usb/host/ehci-pci.c
+@@ -41,6 +41,42 @@ static int ehci_pci_reinit(struct ehci_hcd *ehci, struct pci_dev *pdev)
+ 	return 0;
+ }
+ 
++static int ehci_quirk_amd_hudson(struct ehci_hcd *ehci)
++{
++	struct pci_dev *amd_smbus_dev;
++	u8 rev = 0;
++
++	amd_smbus_dev = pci_get_device(PCI_VENDOR_ID_ATI, 0x4385, NULL);
++	if (amd_smbus_dev) {
++		pci_read_config_byte(amd_smbus_dev, PCI_REVISION_ID, &rev);
++		if (rev < 0x40) {
++			pci_dev_put(amd_smbus_dev);
++			amd_smbus_dev = NULL;
++			return 0;
++		}
++	} else {
++		amd_smbus_dev = pci_get_device(PCI_VENDOR_ID_AMD, 0x780b, NULL);
++		if (!amd_smbus_dev)
++			return 0;
++		pci_read_config_byte(amd_smbus_dev, PCI_REVISION_ID, &rev);
++		if (rev < 0x11 || rev > 0x18) {
++			pci_dev_put(amd_smbus_dev);
++			amd_smbus_dev = NULL;
++			return 0;
++		}
++	}
++
++	if (!amd_nb_dev)
++		amd_nb_dev = pci_get_device(PCI_VENDOR_ID_AMD, 0x1510, NULL);
++
++	ehci_info(ehci, "QUIRK: Enable exception for AMD Hudson ASPM\n");
++
++	pci_dev_put(amd_smbus_dev);
++	amd_smbus_dev = NULL;
++
++	return 1;
++}
++
+ /* called during probe() after chip reset completes */
+ static int ehci_pci_setup(struct usb_hcd *hcd)
+ {
+@@ -99,6 +135,9 @@ static int ehci_pci_setup(struct usb_hcd *hcd)
+ 	/* cache this readonly data; minimize chip reads */
+ 	ehci->hcs_params = ehci_readl(ehci, &ehci->caps->hcs_params);
+ 
++	if (ehci_quirk_amd_hudson(ehci))
++		ehci->amd_l1_fix = 1;
++
+ 	retval = ehci_halt(ehci);
+ 	if (retval)
+ 		return retval;
+diff --git a/drivers/usb/host/ehci-sched.c b/drivers/usb/host/ehci-sched.c
+index 6746a8a..072f368 100644
+--- a/drivers/usb/host/ehci-sched.c
++++ b/drivers/usb/host/ehci-sched.c
+@@ -1576,6 +1576,63 @@ itd_link (struct ehci_hcd *ehci, unsigned frame, struct ehci_itd *itd)
+ 	*hw_p = cpu_to_hc32(ehci, itd->itd_dma | Q_TYPE_ITD);
+ }
+ 
++#define AB_REG_BAR_LOW 0xe0
++#define AB_REG_BAR_HIGH 0xe1
++#define AB_INDX(addr) ((addr) + 0x00)
++#define AB_DATA(addr) ((addr) + 0x04)
++#define NB_PCIE_INDX_ADDR 0xe0
++#define NB_PCIE_INDX_DATA 0xe4
++#define NB_PIF0_PWRDOWN_0 0x01100012
++#define NB_PIF0_PWRDOWN_1 0x01100013
++
++static void ehci_quirk_amd_L1(struct ehci_hcd *ehci, int disable)
++{
++	u32 addr, addr_low, addr_high, val;
++
++	outb_p(AB_REG_BAR_LOW, 0xcd6);
++	addr_low = inb_p(0xcd7);
++	outb_p(AB_REG_BAR_HIGH, 0xcd6);
++	addr_high = inb_p(0xcd7);
++	addr = addr_high << 8 | addr_low;
++	outl_p(0x30, AB_INDX(addr));
++	outl_p(0x40, AB_DATA(addr));
++	outl_p(0x34, AB_INDX(addr));
++	val = inl_p(AB_DATA(addr));
++
++	if (disable) {
++		val &= ~0x8;
++		val |= (1 << 4) | (1 << 9);
++	} else {
++		val |= 0x8;
++		val &= ~((1 << 4) | (1 << 9));
++	}
++	outl_p(val, AB_DATA(addr));
++
++	if (amd_nb_dev) {
++		addr = NB_PIF0_PWRDOWN_0;
++		pci_write_config_dword(amd_nb_dev, NB_PCIE_INDX_ADDR, addr);
++		pci_read_config_dword(amd_nb_dev, NB_PCIE_INDX_DATA, &val);
++		if (disable)
++			val &= ~(0x3f << 7);
++		else
++			val |= 0x3f << 7;
++
++		pci_write_config_dword(amd_nb_dev, NB_PCIE_INDX_DATA, val);
++
++		addr = NB_PIF0_PWRDOWN_1;
++		pci_write_config_dword(amd_nb_dev, NB_PCIE_INDX_ADDR, addr);
++		pci_read_config_dword(amd_nb_dev, NB_PCIE_INDX_DATA, &val);
++		if (disable)
++			val &= ~(0x3f << 7);
++		else
++			val |= 0x3f << 7;
++
++		pci_write_config_dword(amd_nb_dev, NB_PCIE_INDX_DATA, val);
++	}
++
++	return;
++}
++
+ /* fit urb's itds into the selected schedule slot; activate as needed */
+ static int
+ itd_link_urb (
+@@ -1603,6 +1660,12 @@ itd_link_urb (
+ 			next_uframe >> 3, next_uframe & 0x7);
+ 		stream->start = jiffies;
+ 	}
++
++	if (ehci_to_hcd(ehci)->self.bandwidth_isoc_reqs == 0) {
++		if (ehci->amd_l1_fix == 1)
++			ehci_quirk_amd_L1(ehci, 1);
++	}
++
+ 	ehci_to_hcd(ehci)->self.bandwidth_isoc_reqs++;
+ 
+ 	/* fill iTDs uframe by uframe */
+@@ -1729,6 +1792,11 @@ itd_complete (
+ 	(void) disable_periodic(ehci);
+ 	ehci_to_hcd(ehci)->self.bandwidth_isoc_reqs--;
+ 
++	if (ehci_to_hcd(ehci)->self.bandwidth_isoc_reqs == 0) {
++		if (ehci->amd_l1_fix == 1)
++			ehci_quirk_amd_L1(ehci, 0);
++	}
++
+ 	if (unlikely(list_is_singular(&stream->td_list))) {
+ 		ehci_to_hcd(ehci)->self.bandwidth_allocated
+ 				-= stream->bandwidth;
+@@ -2016,6 +2084,12 @@ sitd_link_urb (
+ 			stream->interval, hc32_to_cpu(ehci, stream->splits));
+ 		stream->start = jiffies;
+ 	}
++
++	if (ehci_to_hcd(ehci)->self.bandwidth_isoc_reqs == 0) {
++		if (ehci->amd_l1_fix == 1)
++			ehci_quirk_amd_L1(ehci, 1);
++	}
++
+ 	ehci_to_hcd(ehci)->self.bandwidth_isoc_reqs++;
+ 
+ 	/* fill sITDs frame by frame */
+@@ -2118,6 +2192,11 @@ sitd_complete (
+ 	(void) disable_periodic(ehci);
+ 	ehci_to_hcd(ehci)->self.bandwidth_isoc_reqs--;
+ 
++	if (ehci_to_hcd(ehci)->self.bandwidth_isoc_reqs == 0) {
++		if (ehci->amd_l1_fix == 1)
++			ehci_quirk_amd_L1(ehci, 0);
++	}
++
+ 	if (list_is_singular(&stream->td_list)) {
+ 		ehci_to_hcd(ehci)->self.bandwidth_allocated
+ 				-= stream->bandwidth;
+diff --git a/drivers/usb/host/ehci.h b/drivers/usb/host/ehci.h
+index 556c0b4..ac321ef 100644
+--- a/drivers/usb/host/ehci.h
++++ b/drivers/usb/host/ehci.h
+@@ -130,6 +130,7 @@ struct ehci_hcd {			/* one per controller */
+ 	unsigned		has_amcc_usb23:1;
+ 	unsigned		need_io_watchdog:1;
+ 	unsigned		broken_periodic:1;
++	unsigned		amd_l1_fix:1;
+ 
+ 	/* required for usb32 quirk */
+ 	#define OHCI_CTRL_HCFS          (3 << 6)
+diff --git a/drivers/usb/serial/ch341.c b/drivers/usb/serial/ch341.c
+index 59eff72..e50823a 100644
+--- a/drivers/usb/serial/ch341.c
++++ b/drivers/usb/serial/ch341.c
+@@ -479,12 +479,22 @@ static void ch341_read_int_callback(struct urb *urb)
+ 	if (actual_length >= 4) {
+ 		struct ch341_private *priv = usb_get_serial_port_data(port);
+ 		unsigned long flags;
++		u8 prev_line_status = priv->line_status;
+ 
+ 		spin_lock_irqsave(&priv->lock, flags);
+ 		priv->line_status = (~(data[2])) & CH341_BITS_MODEM_STAT;
+ 		if ((data[1] & CH341_MULT_STAT))
+ 			priv->multi_status_change = 1;
+ 		spin_unlock_irqrestore(&priv->lock, flags);
++
++		if ((priv->line_status ^ prev_line_status) & CH341_BIT_DCD) {
++			struct tty_struct *tty = tty_port_tty_get(&port->port);
++			if (tty)
++				usb_serial_handle_dcd_change(port, tty,
++					    priv->line_status & CH341_BIT_DCD);
++			tty_kref_put(tty);
++		}
++
+ 		wake_up_interruptible(&priv->delta_msr_wait);
+ 	}
+ 
+diff --git a/drivers/usb/serial/cp210x.c b/drivers/usb/serial/cp210x.c
+index 9f8f0d0..05afb5c 100644
+--- a/drivers/usb/serial/cp210x.c
++++ b/drivers/usb/serial/cp210x.c
+@@ -51,7 +51,6 @@ static void cp210x_break_ctl(struct tty_struct *, int);
+ static int cp210x_startup(struct usb_serial *);
+ static void cp210x_disconnect(struct usb_serial *);
+ static void cp210x_dtr_rts(struct usb_serial_port *p, int on);
+-static int cp210x_carrier_raised(struct usb_serial_port *p);
+ 
+ static int debug;
+ 
+@@ -88,7 +87,6 @@ static struct usb_device_id id_table [] = {
+ 	{ USB_DEVICE(0x10C4, 0x8115) }, /* Arygon NFC/Mifare Reader */
+ 	{ USB_DEVICE(0x10C4, 0x813D) }, /* Burnside Telecom Deskmobile */
+ 	{ USB_DEVICE(0x10C4, 0x813F) }, /* Tams Master Easy Control */
+-	{ USB_DEVICE(0x10C4, 0x8149) }, /* West Mountain Radio Computerized Battery Analyzer */
+ 	{ USB_DEVICE(0x10C4, 0x814A) }, /* West Mountain Radio RIGblaster P&P */
+ 	{ USB_DEVICE(0x10C4, 0x814B) }, /* West Mountain Radio RIGtalk */
+ 	{ USB_DEVICE(0x10C4, 0x8156) }, /* B&G H3000 link cable */
+@@ -111,7 +109,9 @@ static struct usb_device_id id_table [] = {
+ 	{ USB_DEVICE(0x10C4, 0x8341) }, /* Siemens MC35PU GPRS Modem */
+ 	{ USB_DEVICE(0x10C4, 0x8382) }, /* Cygnal Integrated Products, Inc. */
+ 	{ USB_DEVICE(0x10C4, 0x83A8) }, /* Amber Wireless AMB2560 */
++	{ USB_DEVICE(0x10C4, 0x83D8) }, /* DekTec DTA Plus VHF/UHF Booster/Attenuator */
+ 	{ USB_DEVICE(0x10C4, 0x8411) }, /* Kyocera GPS Module */
++	{ USB_DEVICE(0x10C4, 0x8418) }, /* IRZ Automation Teleport SG-10 GSM/GPRS Modem */
+ 	{ USB_DEVICE(0x10C4, 0x846E) }, /* BEI USB Sensor Interface (VCP) */
+ 	{ USB_DEVICE(0x10C4, 0x8477) }, /* Balluff RFID */
+ 	{ USB_DEVICE(0x10C4, 0xEA60) }, /* Silicon Labs factory default */
+@@ -165,8 +165,7 @@ static struct usb_serial_driver cp210x_device = {
+ 	.tiocmset		= cp210x_tiocmset,
+ 	.attach			= cp210x_startup,
+ 	.disconnect		= cp210x_disconnect,
+-	.dtr_rts		= cp210x_dtr_rts,
+-	.carrier_raised		= cp210x_carrier_raised
++	.dtr_rts		= cp210x_dtr_rts
+ };
+ 
+ /* Config request types */
+@@ -800,15 +799,6 @@ static int cp210x_tiocmget (struct tty_struct *tty, struct file *file)
+ 	return result;
+ }
+ 
+-static int cp210x_carrier_raised(struct usb_serial_port *p)
+-{
+-	unsigned int control;
+-	cp210x_get_config(p, CP210X_GET_MDMSTS, &control, 1);
+-	if (control & CONTROL_DCD)
+-		return 1;
+-	return 0;
+-}
+-
+ static void cp210x_break_ctl (struct tty_struct *tty, int break_state)
+ {
+ 	struct usb_serial_port *port = tty->driver_data;
+diff --git a/drivers/usb/serial/digi_acceleport.c b/drivers/usb/serial/digi_acceleport.c
+index 68e80be..2acfb38 100644
+--- a/drivers/usb/serial/digi_acceleport.c
++++ b/drivers/usb/serial/digi_acceleport.c
+@@ -455,7 +455,6 @@ static int digi_write_room(struct tty_struct *tty);
+ static int digi_chars_in_buffer(struct tty_struct *tty);
+ static int digi_open(struct tty_struct *tty, struct usb_serial_port *port);
+ static void digi_close(struct usb_serial_port *port);
+-static int digi_carrier_raised(struct usb_serial_port *port);
+ static void digi_dtr_rts(struct usb_serial_port *port, int on);
+ static int digi_startup_device(struct usb_serial *serial);
+ static int digi_startup(struct usb_serial *serial);
+@@ -511,7 +510,6 @@ static struct usb_serial_driver digi_acceleport_2_device = {
+ 	.open =				digi_open,
+ 	.close =			digi_close,
+ 	.dtr_rts =			digi_dtr_rts,
+-	.carrier_raised =		digi_carrier_raised,
+ 	.write =			digi_write,
+ 	.write_room =			digi_write_room,
+ 	.write_bulk_callback = 		digi_write_bulk_callback,
+@@ -1338,14 +1336,6 @@ static void digi_dtr_rts(struct usb_serial_port *port, int on)
+ 	digi_set_modem_signals(port, on * (TIOCM_DTR|TIOCM_RTS), 1);
+ }
+ 
+-static int digi_carrier_raised(struct usb_serial_port *port)
+-{
+-	struct digi_port *priv = usb_get_serial_port_data(port);
+-	if (priv->dp_modem_signals & TIOCM_CD)
+-		return 1;
+-	return 0;
+-}
+-
+ static int digi_open(struct tty_struct *tty, struct usb_serial_port *port)
+ {
+ 	int ret;
+diff --git a/drivers/usb/serial/ftdi_sio.c b/drivers/usb/serial/ftdi_sio.c
+index df9c632..e371888 100644
+--- a/drivers/usb/serial/ftdi_sio.c
++++ b/drivers/usb/serial/ftdi_sio.c
+@@ -104,6 +104,7 @@ struct ftdi_sio_quirk {
+ static int   ftdi_jtag_probe(struct usb_serial *serial);
+ static int   ftdi_mtxorb_hack_setup(struct usb_serial *serial);
+ static int   ftdi_NDI_device_setup(struct usb_serial *serial);
++static int   ftdi_stmclite_probe(struct usb_serial *serial);
+ static void  ftdi_USB_UIRT_setup(struct ftdi_private *priv);
+ static void  ftdi_HE_TIRA1_setup(struct ftdi_private *priv);
+ 
+@@ -127,6 +128,10 @@ static struct ftdi_sio_quirk ftdi_HE_TIRA1_quirk = {
+ 	.port_probe = ftdi_HE_TIRA1_setup,
+ };
+ 
++static struct ftdi_sio_quirk ftdi_stmclite_quirk = {
++	.probe	= ftdi_stmclite_probe,
++};
++
+ /*
+  * The 8U232AM has the same API as the sio except for:
+  * - it can support MUCH higher baudrates; up to:
+@@ -620,6 +625,7 @@ static struct usb_device_id id_table_combined [] = {
+ 	{ USB_DEVICE(FTDI_VID, FTDI_OCEANIC_PID) },
+ 	{ USB_DEVICE(TTI_VID, TTI_QL355P_PID) },
+ 	{ USB_DEVICE(FTDI_VID, FTDI_RM_CANVIEW_PID) },
++	{ USB_DEVICE(ACTON_VID, ACTON_SPECTRAPRO_PID) },
+ 	{ USB_DEVICE(CONTEC_VID, CONTEC_COM1USBH_PID) },
+ 	{ USB_DEVICE(BANDB_VID, BANDB_USOTL4_PID) },
+ 	{ USB_DEVICE(BANDB_VID, BANDB_USTL4_PID) },
+@@ -681,7 +687,17 @@ static struct usb_device_id id_table_combined [] = {
+ 	{ USB_DEVICE(FTDI_VID, FTDI_PCDJ_DAC2_PID) },
+ 	{ USB_DEVICE(FTDI_VID, FTDI_RRCIRKITS_LOCOBUFFER_PID) },
+ 	{ USB_DEVICE(FTDI_VID, FTDI_ASK_RDR400_PID) },
+-	{ USB_DEVICE(ICOM_ID1_VID, ICOM_ID1_PID) },
++	{ USB_DEVICE(ICOM_VID, ICOM_ID_1_PID) },
++	{ USB_DEVICE(ICOM_VID, ICOM_OPC_U_UC_PID) },
++	{ USB_DEVICE(ICOM_VID, ICOM_ID_RP2C1_PID) },
++	{ USB_DEVICE(ICOM_VID, ICOM_ID_RP2C2_PID) },
++	{ USB_DEVICE(ICOM_VID, ICOM_ID_RP2D_PID) },
++	{ USB_DEVICE(ICOM_VID, ICOM_ID_RP2VT_PID) },
++	{ USB_DEVICE(ICOM_VID, ICOM_ID_RP2VR_PID) },
++	{ USB_DEVICE(ICOM_VID, ICOM_ID_RP4KVT_PID) },
++	{ USB_DEVICE(ICOM_VID, ICOM_ID_RP4KVR_PID) },
++	{ USB_DEVICE(ICOM_VID, ICOM_ID_RP2KVT_PID) },
++	{ USB_DEVICE(ICOM_VID, ICOM_ID_RP2KVR_PID) },
+ 	{ USB_DEVICE(FTDI_VID, FTDI_ACG_HFDUAL_PID) },
+ 	{ USB_DEVICE(FTDI_VID, FTDI_YEI_SERVOCENTER31_PID) },
+ 	{ USB_DEVICE(FTDI_VID, FTDI_THORLABS_PID) },
+@@ -805,6 +821,8 @@ static struct usb_device_id id_table_combined [] = {
+ 	{ USB_DEVICE(FTDI_VID, FTDI_DOTEC_PID) },
+ 	{ USB_DEVICE(QIHARDWARE_VID, MILKYMISTONE_JTAGSERIAL_PID),
+ 		.driver_info = (kernel_ulong_t)&ftdi_jtag_quirk },
++	{ USB_DEVICE(ST_VID, ST_STMCLT1030_PID),
++		.driver_info = (kernel_ulong_t)&ftdi_stmclite_quirk },
+ 	{ },					/* Optional parameter entry */
+ 	{ }					/* Terminating entry */
+ };
+@@ -1738,6 +1756,25 @@ static int ftdi_jtag_probe(struct usb_serial *serial)
+ }
+ 
+ /*
++ * First and second port on STMCLiteadaptors is reserved for JTAG interface
++ * and the forth port for pio
++ */
++static int ftdi_stmclite_probe(struct usb_serial *serial)
++{
++	struct usb_device *udev = serial->dev;
++	struct usb_interface *interface = serial->interface;
++
++	dbg("%s", __func__);
++
++	if (interface == udev->actconfig->interface[2])
++		return 0;
++
++	dev_info(&udev->dev, "Ignoring serial port reserved for JTAG\n");
++
++	return -ENODEV;
++}
++
++/*
+  * The Matrix Orbital VK204-25-USB has an invalid IN endpoint.
+  * We have to correct it if we want to read from it.
+  */
+diff --git a/drivers/usb/serial/ftdi_sio_ids.h b/drivers/usb/serial/ftdi_sio_ids.h
+index 7d28f1c..c8d0fec 100644
+--- a/drivers/usb/serial/ftdi_sio_ids.h
++++ b/drivers/usb/serial/ftdi_sio_ids.h
+@@ -518,6 +518,12 @@
+ #define RATOC_PRODUCT_ID_USB60F	0xb020
+ 
+ /*
++ * Acton Research Corp.
++ */
++#define ACTON_VID		0x0647	/* Vendor ID */
++#define ACTON_SPECTRAPRO_PID	0x0100
++
++/*
+  * Contec products (http://www.contec.com)
+  * Submitted by Daniel Sangorrin
+  */
+@@ -576,11 +582,23 @@
+ #define OCT_US101_PID		0x0421	/* OCT US101 USB to RS-232 */
+ 
+ /*
+- * Icom ID-1 digital transceiver
++ * Definitions for Icom Inc. devices
+  */
+-
+-#define ICOM_ID1_VID            0x0C26
+-#define ICOM_ID1_PID            0x0004
++#define ICOM_VID		0x0C26 /* Icom vendor ID */
++/* Note: ID-1 is a communications tranceiver for HAM-radio operators */
++#define ICOM_ID_1_PID		0x0004 /* ID-1 USB to RS-232 */
++/* Note: OPC is an Optional cable to connect an Icom Tranceiver */
++#define ICOM_OPC_U_UC_PID	0x0018 /* OPC-478UC, OPC-1122U cloning cable */
++/* Note: ID-RP* devices are Icom Repeater Devices for HAM-radio */
++#define ICOM_ID_RP2C1_PID	0x0009 /* ID-RP2C Asset 1 to RS-232 */
++#define ICOM_ID_RP2C2_PID	0x000A /* ID-RP2C Asset 2 to RS-232 */
++#define ICOM_ID_RP2D_PID	0x000B /* ID-RP2D configuration port*/
++#define ICOM_ID_RP2VT_PID	0x000C /* ID-RP2V Transmit config port */
++#define ICOM_ID_RP2VR_PID	0x000D /* ID-RP2V Receive config port */
++#define ICOM_ID_RP4KVT_PID	0x0010 /* ID-RP4000V Transmit config port */
++#define ICOM_ID_RP4KVR_PID	0x0011 /* ID-RP4000V Receive config port */
++#define ICOM_ID_RP2KVT_PID	0x0012 /* ID-RP2000V Transmit config port */
++#define ICOM_ID_RP2KVR_PID	0x0013 /* ID-RP2000V Receive config port */
+ 
+ /*
+  * GN Otometrics (http://www.otometrics.com)
+@@ -1029,6 +1047,12 @@
+ #define WHT_PID			0x0004 /* Wireless Handheld Terminal */
+ 
+ /*
++ * STMicroelectonics
++ */
++#define ST_VID			0x0483
++#define ST_STMCLT1030_PID	0x3747 /* ST Micro Connect Lite STMCLT1030 */
++
++/*
+  * Papouch products (http://www.papouch.com/)
+  * Submitted by Folkert van Heusden
+  */
+diff --git a/drivers/usb/serial/generic.c b/drivers/usb/serial/generic.c
+index e0fb294..a7b8a55 100644
+--- a/drivers/usb/serial/generic.c
++++ b/drivers/usb/serial/generic.c
+@@ -578,6 +578,26 @@ int usb_serial_handle_break(struct usb_serial_port *port)
+ }
+ EXPORT_SYMBOL_GPL(usb_serial_handle_break);
+ 
++/**
++ *	usb_serial_handle_dcd_change - handle a change of carrier detect state
++ *	@port: usb_serial_port structure for the open port
++ *	@tty: tty_struct structure for the port
++ *	@status: new carrier detect status, nonzero if active
++ */
++void usb_serial_handle_dcd_change(struct usb_serial_port *usb_port,
++				struct tty_struct *tty, unsigned int status)
++{
++	struct tty_port *port = &usb_port->port;
++
++	dbg("%s - port %d, status %d", __func__, usb_port->number, status);
++
++	if (status)
++		wake_up_interruptible(&port->open_wait);
++	else if (tty && !C_CLOCAL(tty))
++		tty_hangup(tty);
++}
++EXPORT_SYMBOL_GPL(usb_serial_handle_dcd_change);
++
+ int usb_serial_generic_resume(struct usb_serial *serial)
+ {
+ 	struct usb_serial_port *port;
+diff --git a/drivers/usb/serial/io_edgeport.c b/drivers/usb/serial/io_edgeport.c
+index b97960a..72b256c 100644
+--- a/drivers/usb/serial/io_edgeport.c
++++ b/drivers/usb/serial/io_edgeport.c
+@@ -2935,8 +2935,8 @@ static void load_application_firmware(struct edgeport_serial *edge_serial)
+ 
+ 	dbg("%s %d.%d.%d", fw_info, rec->data[0], rec->data[1], build);
+ 
+-	edge_serial->product_info.FirmwareMajorVersion = fw->data[0];
+-	edge_serial->product_info.FirmwareMinorVersion = fw->data[1];
++	edge_serial->product_info.FirmwareMajorVersion = rec->data[0];
++	edge_serial->product_info.FirmwareMinorVersion = rec->data[1];
+ 	edge_serial->product_info.FirmwareBuildNumber = cpu_to_le16(build);
+ 
+ 	for (rec = ihex_next_binrec(rec); rec;
+diff --git a/drivers/usb/serial/keyspan_pda.c b/drivers/usb/serial/keyspan_pda.c
+index 1296a09..0761b5a 100644
+--- a/drivers/usb/serial/keyspan_pda.c
++++ b/drivers/usb/serial/keyspan_pda.c
+@@ -663,22 +663,6 @@ static void keyspan_pda_dtr_rts(struct usb_serial_port *port, int on)
+ 	}
+ }
+ 
+-static int keyspan_pda_carrier_raised(struct usb_serial_port *port)
+-{
+-	struct usb_serial *serial = port->serial;
+-	unsigned char modembits;
+-
+-	/* If we can read the modem status and the DCD is low then
+-	   carrier is not raised yet */
+-	if (keyspan_pda_get_modem_info(serial, &modembits) >= 0) {
+-		if (!(modembits & (1>>6)))
+-			return 0;
+-	}
+-	/* Carrier raised, or we failed (eg disconnected) so
+-	   progress accordingly */
+-	return 1;
+-}
+-
+ 
+ static int keyspan_pda_open(struct tty_struct *tty,
+ 					struct usb_serial_port *port)
+@@ -854,7 +838,6 @@ static struct usb_serial_driver keyspan_pda_device = {
+ 	.id_table =		id_table_std,
+ 	.num_ports =		1,
+ 	.dtr_rts =		keyspan_pda_dtr_rts,
+-	.carrier_raised	=	keyspan_pda_carrier_raised,
+ 	.open =			keyspan_pda_open,
+ 	.close =		keyspan_pda_close,
+ 	.write =		keyspan_pda_write,
+diff --git a/drivers/usb/serial/option.c b/drivers/usb/serial/option.c
+index c2e6983..cf5ff7d 100644
+--- a/drivers/usb/serial/option.c
++++ b/drivers/usb/serial/option.c
+@@ -369,7 +369,16 @@ static int  option_resume(struct usb_serial *serial);
+ #define HAIER_VENDOR_ID				0x201e
+ #define HAIER_PRODUCT_CE100			0x2009
+ 
+-#define CINTERION_VENDOR_ID			0x0681
++/* Cinterion (formerly Siemens) products */
++#define SIEMENS_VENDOR_ID				0x0681
++#define CINTERION_VENDOR_ID				0x1e2d
++#define CINTERION_PRODUCT_HC25_MDM		0x0047
++#define CINTERION_PRODUCT_HC25_MDMNET	0x0040
++#define CINTERION_PRODUCT_HC28_MDM		0x004C
++#define CINTERION_PRODUCT_HC28_MDMNET	0x004A /* same for HC28J */
++#define CINTERION_PRODUCT_EU3_E			0x0051
++#define CINTERION_PRODUCT_EU3_P			0x0052
++#define CINTERION_PRODUCT_PH8			0x0053
+ 
+ /* Olivetti products */
+ #define OLIVETTI_VENDOR_ID			0x0b3c
+@@ -895,7 +904,17 @@ static struct usb_device_id option_ids[] = {
+ 	{ USB_DEVICE(PIRELLI_VENDOR_ID, PIRELLI_PRODUCT_100F) },
+ 	{ USB_DEVICE(PIRELLI_VENDOR_ID, PIRELLI_PRODUCT_1011)},
+ 	{ USB_DEVICE(PIRELLI_VENDOR_ID, PIRELLI_PRODUCT_1012)},
+-	{ USB_DEVICE(CINTERION_VENDOR_ID, 0x0047) },
++	/* Cinterion */
++	{ USB_DEVICE(CINTERION_VENDOR_ID, CINTERION_PRODUCT_EU3_E) },
++	{ USB_DEVICE(CINTERION_VENDOR_ID, CINTERION_PRODUCT_EU3_P) },
++	{ USB_DEVICE(CINTERION_VENDOR_ID, CINTERION_PRODUCT_PH8) },
++	{ USB_DEVICE(CINTERION_VENDOR_ID, CINTERION_PRODUCT_HC28_MDM) },
++	{ USB_DEVICE(CINTERION_VENDOR_ID, CINTERION_PRODUCT_HC28_MDMNET) },
++	{ USB_DEVICE(SIEMENS_VENDOR_ID, CINTERION_PRODUCT_HC25_MDM) },
++	{ USB_DEVICE(SIEMENS_VENDOR_ID, CINTERION_PRODUCT_HC25_MDMNET) },
++	{ USB_DEVICE(SIEMENS_VENDOR_ID, CINTERION_PRODUCT_HC28_MDM) }, /* HC28 enumerates with Siemens or Cinterion VID depending on FW revision */
++	{ USB_DEVICE(SIEMENS_VENDOR_ID, CINTERION_PRODUCT_HC28_MDMNET) },
++
+ 	{ USB_DEVICE(OLIVETTI_VENDOR_ID, OLIVETTI_PRODUCT_OLICARD100) },
+ 	{ USB_DEVICE(CELOT_VENDOR_ID, CELOT_PRODUCT_CT680M) }, /* CT-650 CDMA 450 1xEVDO modem */
+ 	{ } /* Terminating entry */
+diff --git a/drivers/usb/serial/pl2303.c b/drivers/usb/serial/pl2303.c
+index ecb1708..b336017 100644
+--- a/drivers/usb/serial/pl2303.c
++++ b/drivers/usb/serial/pl2303.c
+@@ -59,6 +59,8 @@ static struct usb_device_id id_table [] = {
+ 	{ USB_DEVICE(PL2303_VENDOR_ID, PL2303_PRODUCT_ID_ALDIGA) },
+ 	{ USB_DEVICE(PL2303_VENDOR_ID, PL2303_PRODUCT_ID_MMX) },
+ 	{ USB_DEVICE(PL2303_VENDOR_ID, PL2303_PRODUCT_ID_GPRS) },
++	{ USB_DEVICE(PL2303_VENDOR_ID, PL2303_PRODUCT_ID_HCR331) },
++	{ USB_DEVICE(PL2303_VENDOR_ID, PL2303_PRODUCT_ID_MOTOROLA) },
+ 	{ USB_DEVICE(IODATA_VENDOR_ID, IODATA_PRODUCT_ID) },
+ 	{ USB_DEVICE(IODATA_VENDOR_ID, IODATA_PRODUCT_ID_RSAQ5) },
+ 	{ USB_DEVICE(ATEN_VENDOR_ID, ATEN_PRODUCT_ID) },
+@@ -955,9 +957,11 @@ static void pl2303_update_line_status(struct usb_serial_port *port,
+ {
+ 
+ 	struct pl2303_private *priv = usb_get_serial_port_data(port);
++	struct tty_struct *tty;
+ 	unsigned long flags;
+ 	u8 status_idx = UART_STATE;
+ 	u8 length = UART_STATE + 1;
++	u8 prev_line_status;
+ 	u16 idv, idp;
+ 
+ 	idv = le16_to_cpu(port->serial->dev->descriptor.idVendor);
+@@ -979,11 +983,20 @@ static void pl2303_update_line_status(struct usb_serial_port *port,
+ 
+ 	/* Save off the uart status for others to look at */
+ 	spin_lock_irqsave(&priv->lock, flags);
++	prev_line_status = priv->line_status;
+ 	priv->line_status = data[status_idx];
+ 	spin_unlock_irqrestore(&priv->lock, flags);
+ 	if (priv->line_status & UART_BREAK_ERROR)
+ 		usb_serial_handle_break(port);
+ 	wake_up_interruptible(&priv->delta_msr_wait);
++
++	tty = tty_port_tty_get(&port->port);
++	if (!tty)
++		return;
++	if ((priv->line_status ^ prev_line_status) & UART_DCD)
++		usb_serial_handle_dcd_change(port, tty,
++				priv->line_status & UART_DCD);
++	tty_kref_put(tty);
+ }
+ 
+ static void pl2303_read_int_callback(struct urb *urb)
+diff --git a/drivers/usb/serial/pl2303.h b/drivers/usb/serial/pl2303.h
+index 01bc64b..4d043e4 100644
+--- a/drivers/usb/serial/pl2303.h
++++ b/drivers/usb/serial/pl2303.h
+@@ -20,6 +20,8 @@
+ #define PL2303_PRODUCT_ID_ALDIGA	0x0611
+ #define PL2303_PRODUCT_ID_MMX		0x0612
+ #define PL2303_PRODUCT_ID_GPRS		0x0609
++#define PL2303_PRODUCT_ID_HCR331	0x331a
++#define PL2303_PRODUCT_ID_MOTOROLA	0x0307
+ 
+ #define ATEN_VENDOR_ID		0x0557
+ #define ATEN_VENDOR_ID2		0x0547
+diff --git a/drivers/usb/serial/spcp8x5.c b/drivers/usb/serial/spcp8x5.c
+index 1e58220..f863d2d 100644
+--- a/drivers/usb/serial/spcp8x5.c
++++ b/drivers/usb/serial/spcp8x5.c
+@@ -137,7 +137,7 @@ struct spcp8x5_usb_ctrl_arg {
+ 
+ /* how come ??? */
+ #define UART_STATE			0x08
+-#define UART_STATE_TRANSIENT_MASK	0x74
++#define UART_STATE_TRANSIENT_MASK	0x75
+ #define UART_DCD			0x01
+ #define UART_DSR			0x02
+ #define UART_BREAK_ERROR		0x04
+@@ -734,6 +734,10 @@ static void spcp8x5_read_bulk_callback(struct urb *urb)
+ 			tty_insert_flip_char(tty, data[i], tty_flag);
+ 		tty_flip_buffer_push(tty);
+ 	}
++
++	if (status & UART_DCD)
++		usb_serial_handle_dcd_change(port, tty,
++			   priv->line_status & MSR_STATUS_LINE_DCD);
+ 	tty_kref_put(tty);
+ 
+ 	/* Schedule the next read _if_ we are still open */
+diff --git a/drivers/usb/serial/ti_usb_3410_5052.c b/drivers/usb/serial/ti_usb_3410_5052.c
+index 1e9dc88..18de038 100644
+--- a/drivers/usb/serial/ti_usb_3410_5052.c
++++ b/drivers/usb/serial/ti_usb_3410_5052.c
+@@ -366,9 +366,9 @@ failed_1port:
+ 
+ static void __exit ti_exit(void)
+ {
++	usb_deregister(&ti_usb_driver);
+ 	usb_serial_deregister(&ti_1port_device);
+ 	usb_serial_deregister(&ti_2port_device);
+-	usb_deregister(&ti_usb_driver);
+ }
+ 
+ 
+diff --git a/drivers/usb/storage/unusual_cypress.h b/drivers/usb/storage/unusual_cypress.h
+index 44be6d7..fba2824 100644
+--- a/drivers/usb/storage/unusual_cypress.h
++++ b/drivers/usb/storage/unusual_cypress.h
+@@ -31,4 +31,9 @@ UNUSUAL_DEV(  0x04b4, 0x6831, 0x0000, 0x9999,
+ 		"Cypress ISD-300LP",
+ 		US_SC_CYP_ATACB, US_PR_DEVICE, NULL, 0),
+ 
++UNUSUAL_DEV( 0x14cd, 0x6116, 0x0000, 0x9999,
++		"Super Top",
++		"USB 2.0  SATA BRIDGE",
++		US_SC_CYP_ATACB, US_PR_DEVICE, NULL, 0),
++
+ #endif /* defined(CONFIG_USB_STORAGE_CYPRESS_ATACB) || ... */
+diff --git a/drivers/usb/storage/unusual_devs.h b/drivers/usb/storage/unusual_devs.h
+index 2ca0298..6ca33f2 100644
+--- a/drivers/usb/storage/unusual_devs.h
++++ b/drivers/usb/storage/unusual_devs.h
+@@ -1043,6 +1043,15 @@ UNUSUAL_DEV(  0x084d, 0x0011, 0x0110, 0x0110,
+ 		US_SC_DEVICE, US_PR_DEVICE, NULL,
+ 		US_FL_BULK32),
+ 
++/* Reported by <ttkspam@free.fr>
++ * The device reports a vendor-specific device class, requiring an
++ * explicit vendor/product match.
++ */
++UNUSUAL_DEV(  0x0851, 0x1542, 0x0002, 0x0002,
++		"MagicPixel",
++		"FW_Omega2",
++		US_SC_DEVICE, US_PR_DEVICE, NULL, 0),
++
+ /* Andrew Lunn <andrew@lunn.ch>
+  * PanDigital Digital Picture Frame. Does not like ALLOW_MEDIUM_REMOVAL
+  * on LUN 4.
+@@ -1401,6 +1410,13 @@ UNUSUAL_DEV(  0x0fca, 0x0006, 0x0001, 0x0001,
+ 		US_FL_IGNORE_DEVICE ),
+ #endif
+ 
++/* Submitted by Nick Holloway */
++UNUSUAL_DEV( 0x0f88, 0x042e, 0x0100, 0x0100,
++		"VTech",
++		"Kidizoom",
++		US_SC_DEVICE, US_PR_DEVICE, NULL,
++		US_FL_FIX_CAPACITY ),
++
+ /* Reported by Michael Stattmann <michael@stattmann.com> */
+ UNUSUAL_DEV(  0x0fce, 0xd008, 0x0000, 0x0000,
+ 		"Sony Ericsson",
+@@ -1880,6 +1896,22 @@ UNUSUAL_DEV( 0x1908, 0x1320, 0x0000, 0x0000,
+ 		US_SC_DEVICE, US_PR_DEVICE, NULL,
+ 		US_FL_BAD_SENSE ),
+ 
++/* Patch by Richard Schütz <r.schtz@t-online.de>
++ * This external hard drive enclosure uses a JMicron chip which
++ * needs the US_FL_IGNORE_RESIDUE flag to work properly. */
++UNUSUAL_DEV(  0x1e68, 0x001b, 0x0000, 0x0000,
++		"TrekStor GmbH & Co. KG",
++		"DataStation maxi g.u",
++		US_SC_DEVICE, US_PR_DEVICE, NULL,
++		US_FL_IGNORE_RESIDUE | US_FL_SANE_SENSE ),
++
++/* Reported by Jasper Mackenzie <scarletpimpernal@hotmail.com> */
++UNUSUAL_DEV( 0x1e74, 0x4621, 0x0000, 0x0000,
++		"Coby Electronics",
++		"MP3 Player",
++		US_SC_DEVICE, US_PR_DEVICE, NULL,
++		US_FL_BULK_IGNORE_TAG | US_FL_MAX_SECTORS_64 ),
++
+ UNUSUAL_DEV( 0x2116, 0x0320, 0x0001, 0x0001,
+ 		"ST",
+ 		"2A",
+diff --git a/drivers/virtio/virtio_pci.c b/drivers/virtio/virtio_pci.c
+index d43859f..5fed283 100644
+--- a/drivers/virtio/virtio_pci.c
++++ b/drivers/virtio/virtio_pci.c
+@@ -95,11 +95,6 @@ static struct pci_device_id virtio_pci_id_table[] = {
+ 
+ MODULE_DEVICE_TABLE(pci, virtio_pci_id_table);
+ 
+-/* A PCI device has it's own struct device and so does a virtio device so
+- * we create a place for the virtio devices to show up in sysfs.  I think it
+- * would make more sense for virtio to not insist on having it's own device. */
+-static struct device *virtio_pci_root;
+-
+ /* Convert a generic virtio device to our structure */
+ static struct virtio_pci_device *to_vp_device(struct virtio_device *vdev)
+ {
+@@ -628,7 +623,7 @@ static int __devinit virtio_pci_probe(struct pci_dev *pci_dev,
+ 	if (vp_dev == NULL)
+ 		return -ENOMEM;
+ 
+-	vp_dev->vdev.dev.parent = virtio_pci_root;
++	vp_dev->vdev.dev.parent = &pci_dev->dev;
+ 	vp_dev->vdev.dev.release = virtio_pci_release_dev;
+ 	vp_dev->vdev.config = &virtio_pci_config_ops;
+ 	vp_dev->pci_dev = pci_dev;
+@@ -715,17 +710,7 @@ static struct pci_driver virtio_pci_driver = {
+ 
+ static int __init virtio_pci_init(void)
+ {
+-	int err;
+-
+-	virtio_pci_root = root_device_register("virtio-pci");
+-	if (IS_ERR(virtio_pci_root))
+-		return PTR_ERR(virtio_pci_root);
+-
+-	err = pci_register_driver(&virtio_pci_driver);
+-	if (err)
+-		root_device_unregister(virtio_pci_root);
+-
+-	return err;
++	return pci_register_driver(&virtio_pci_driver);
+ }
+ 
+ module_init(virtio_pci_init);
+@@ -733,7 +718,6 @@ module_init(virtio_pci_init);
+ static void __exit virtio_pci_exit(void)
+ {
+ 	pci_unregister_driver(&virtio_pci_driver);
+-	root_device_unregister(virtio_pci_root);
+ }
+ 
+ module_exit(virtio_pci_exit);
+diff --git a/fs/nfs/direct.c b/fs/nfs/direct.c
+index 0d28982..e74a670 100644
+--- a/fs/nfs/direct.c
++++ b/fs/nfs/direct.c
+@@ -401,15 +401,18 @@ static ssize_t nfs_direct_read_schedule_iovec(struct nfs_direct_req *dreq,
+ 		pos += vec->iov_len;
+ 	}
+ 
++	/*
++	 * If no bytes were started, return the error, and let the
++	 * generic layer handle the completion.
++	 */
++	if (requested_bytes == 0) {
++		nfs_direct_req_release(dreq);
++		return result < 0 ? result : -EIO;
++	}
++
+ 	if (put_dreq(dreq))
+ 		nfs_direct_complete(dreq);
+-
+-	if (requested_bytes != 0)
+-		return 0;
+-
+-	if (result < 0)
+-		return result;
+-	return -EIO;
++	return 0;
+ }
+ 
+ static ssize_t nfs_direct_read(struct kiocb *iocb, const struct iovec *iov,
+@@ -829,15 +832,18 @@ static ssize_t nfs_direct_write_schedule_iovec(struct nfs_direct_req *dreq,
+ 		pos += vec->iov_len;
+ 	}
+ 
++	/*
++	 * If no bytes were started, return the error, and let the
++	 * generic layer handle the completion.
++	 */
++	if (requested_bytes == 0) {
++		nfs_direct_req_release(dreq);
++		return result < 0 ? result : -EIO;
++	}
++
+ 	if (put_dreq(dreq))
+ 		nfs_direct_write_complete(dreq, dreq->inode);
+-
+-	if (requested_bytes != 0)
+-		return 0;
+-
+-	if (result < 0)
+-		return result;
+-	return -EIO;
++	return 0;
+ }
+ 
+ static ssize_t nfs_direct_write(struct kiocb *iocb, const struct iovec *iov,
+diff --git a/include/drm/drm_pciids.h b/include/drm/drm_pciids.h
+index 3d016e9..d2674f9 100644
+diff --git a/include/linux/hardirq.h b/include/linux/hardirq.h
+index 6d527ee..a75d3a0 100644
+--- a/include/linux/hardirq.h
++++ b/include/linux/hardirq.h
+@@ -64,6 +64,8 @@
+ #define HARDIRQ_OFFSET	(1UL << HARDIRQ_SHIFT)
+ #define NMI_OFFSET	(1UL << NMI_SHIFT)
+ 
++#define SOFTIRQ_DISABLE_OFFSET	(2 * SOFTIRQ_OFFSET)
++
+ #ifndef PREEMPT_ACTIVE
+ #define PREEMPT_ACTIVE_BITS	1
+ #define PREEMPT_ACTIVE_SHIFT	(NMI_SHIFT + NMI_BITS)
+@@ -82,10 +84,13 @@
+ /*
+  * Are we doing bottom half or hardware interrupt processing?
+  * Are we in a softirq context? Interrupt context?
++ * in_softirq - Are we currently processing softirq or have bh disabled?
++ * in_serving_softirq - Are we currently processing softirq?
+  */
+ #define in_irq()		(hardirq_count())
+ #define in_softirq()		(softirq_count())
+ #define in_interrupt()		(irq_count())
++#define in_serving_softirq()	(softirq_count() & SOFTIRQ_OFFSET)
+ 
+ /*
+  * Are we in NMI context?
+@@ -132,10 +137,12 @@ extern void synchronize_irq(unsigned int irq);
+ 
+ struct task_struct;
+ 
+-#ifndef CONFIG_VIRT_CPU_ACCOUNTING
++#if !defined(CONFIG_VIRT_CPU_ACCOUNTING) && !defined(CONFIG_IRQ_TIME_ACCOUNTING)
+ static inline void account_system_vtime(struct task_struct *tsk)
+ {
+ }
++#else
++extern void account_system_vtime(struct task_struct *tsk);
+ #endif
+ 
+ #if defined(CONFIG_NO_HZ)
+diff --git a/include/linux/ieee80211.h b/include/linux/ieee80211.h
+index e766072..a1c9e21 100644
+--- a/include/linux/ieee80211.h
++++ b/include/linux/ieee80211.h
+@@ -872,7 +872,7 @@ struct ieee80211_ht_info {
+ /* block-ack parameters */
+ #define IEEE80211_ADDBA_PARAM_POLICY_MASK 0x0002
+ #define IEEE80211_ADDBA_PARAM_TID_MASK 0x003C
+-#define IEEE80211_ADDBA_PARAM_BUF_SIZE_MASK 0xFFA0
++#define IEEE80211_ADDBA_PARAM_BUF_SIZE_MASK 0xFFC0
+ #define IEEE80211_DELBA_PARAM_TID_MASK 0xF000
+ #define IEEE80211_DELBA_PARAM_INITIATOR_MASK 0x0800
+ 
+diff --git a/include/linux/klist.h b/include/linux/klist.h
+index e91a4e5..a370ce5 100644
+--- a/include/linux/klist.h
++++ b/include/linux/klist.h
+@@ -22,7 +22,7 @@ struct klist {
+ 	struct list_head	k_list;
+ 	void			(*get)(struct klist_node *);
+ 	void			(*put)(struct klist_node *);
+-} __attribute__ ((aligned (4)));
++} __attribute__ ((aligned (sizeof(void *))));
+ 
+ #define KLIST_INIT(_name, _get, _put)					\
+ 	{ .k_lock	= __SPIN_LOCK_UNLOCKED(_name.k_lock),		\
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index 957a25f..71849bf 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -728,14 +728,6 @@ struct user_struct {
+ 	uid_t uid;
+ 	struct user_namespace *user_ns;
+ 
+-#ifdef CONFIG_USER_SCHED
+-	struct task_group *tg;
+-#ifdef CONFIG_SYSFS
+-	struct kobject kobj;
+-	struct delayed_work work;
+-#endif
+-#endif
+-
+ #ifdef CONFIG_PERF_EVENTS
+ 	atomic_long_t locked_vm;
+ #endif
+@@ -902,6 +894,7 @@ struct sched_group {
+ 	 * single CPU.
+ 	 */
+ 	unsigned int cpu_power;
++	unsigned int group_weight;
+ 
+ 	/*
+ 	 * The CPUs this group covers.
+@@ -1121,7 +1114,7 @@ struct sched_class {
+ 					 struct task_struct *task);
+ 
+ #ifdef CONFIG_FAIR_GROUP_SCHED
+-	void (*moved_group) (struct task_struct *p, int on_rq);
++	void (*task_move_group) (struct task_struct *p, int on_rq);
+ #endif
+ };
+ 
+@@ -1736,8 +1729,7 @@ extern void thread_group_times(struct task_struct *p, cputime_t *ut, cputime_t *
+ /*
+  * Per process flags
+  */
+-#define PF_ALIGNWARN	0x00000001	/* Print alignment warning msgs */
+-					/* Not implemented yet, only for 486*/
++#define PF_KSOFTIRQD	0x00000001	/* I am ksoftirqd */
+ #define PF_STARTING	0x00000002	/* being created */
+ #define PF_EXITING	0x00000004	/* getting shut down */
+ #define PF_EXITPIDONE	0x00000008	/* pi exit done on shut down */
+@@ -1874,6 +1866,19 @@ extern void sched_clock_idle_wakeup_event(u64 delta_ns);
+  */
+ extern unsigned long long cpu_clock(int cpu);
+ 
++#ifdef CONFIG_IRQ_TIME_ACCOUNTING
++/*
++ * An i/f to runtime opt-in for irq time accounting based off of sched_clock.
++ * The reason for this explicit opt-in is not to have perf penalty with
++ * slow sched_clocks.
++ */
++extern void enable_sched_clock_irqtime(void);
++extern void disable_sched_clock_irqtime(void);
++#else
++static inline void enable_sched_clock_irqtime(void) {}
++static inline void disable_sched_clock_irqtime(void) {}
++#endif
++
+ extern unsigned long long
+ task_sched_runtime(struct task_struct *task);
+ extern unsigned long long thread_group_sched_runtime(struct task_struct *task);
+@@ -2409,9 +2414,9 @@ extern int __cond_resched_lock(spinlock_t *lock);
+ 
+ extern int __cond_resched_softirq(void);
+ 
+-#define cond_resched_softirq() ({				\
+-	__might_sleep(__FILE__, __LINE__, SOFTIRQ_OFFSET);	\
+-	__cond_resched_softirq();				\
++#define cond_resched_softirq() ({					\
++	__might_sleep(__FILE__, __LINE__, SOFTIRQ_DISABLE_OFFSET);	\
++	__cond_resched_softirq();					\
+ })
+ 
+ /*
+@@ -2500,13 +2505,9 @@ extern long sched_getaffinity(pid_t pid, struct cpumask *mask);
+ 
+ extern void normalize_rt_tasks(void);
+ 
+-#ifdef CONFIG_GROUP_SCHED
++#ifdef CONFIG_CGROUP_SCHED
+ 
+ extern struct task_group init_task_group;
+-#ifdef CONFIG_USER_SCHED
+-extern struct task_group root_task_group;
+-extern void set_tg_uid(struct user_struct *user);
+-#endif
+ 
+ extern struct task_group *sched_create_group(struct task_group *parent);
+ extern void sched_destroy_group(struct task_group *tg);
+diff --git a/include/linux/usb/serial.h b/include/linux/usb/serial.h
+index ce911eb..bb911e3 100644
+--- a/include/linux/usb/serial.h
++++ b/include/linux/usb/serial.h
+@@ -326,6 +326,9 @@ extern int usb_serial_handle_sysrq_char(struct tty_struct *tty,
+ 					struct usb_serial_port *port,
+ 					unsigned int ch);
+ extern int usb_serial_handle_break(struct usb_serial_port *port);
++extern void usb_serial_handle_dcd_change(struct usb_serial_port *usb_port,
++					 struct tty_struct *tty,
++					 unsigned int status);
+ 
+ 
+ extern int usb_serial_bus_register(struct usb_serial_driver *device);
+diff --git a/init/Kconfig b/init/Kconfig
+index eb4b337..0d6388a 100644
+--- a/init/Kconfig
++++ b/init/Kconfig
+@@ -426,57 +426,6 @@ config LOG_BUF_SHIFT
+ config HAVE_UNSTABLE_SCHED_CLOCK
+ 	bool
+ 
+-config GROUP_SCHED
+-	bool "Group CPU scheduler"
+-	depends on EXPERIMENTAL
+-	default n
+-	help
+-	  This feature lets CPU scheduler recognize task groups and control CPU
+-	  bandwidth allocation to such task groups.
+-	  In order to create a group from arbitrary set of processes, use
+-	  CONFIG_CGROUPS. (See Control Group support.)
+-
+-config FAIR_GROUP_SCHED
+-	bool "Group scheduling for SCHED_OTHER"
+-	depends on GROUP_SCHED
+-	default GROUP_SCHED
+-
+-config RT_GROUP_SCHED
+-	bool "Group scheduling for SCHED_RR/FIFO"
+-	depends on EXPERIMENTAL
+-	depends on GROUP_SCHED
+-	default n
+-	help
+-	  This feature lets you explicitly allocate real CPU bandwidth
+-	  to users or control groups (depending on the "Basis for grouping tasks"
+-	  setting below. If enabled, it will also make it impossible to
+-	  schedule realtime tasks for non-root users until you allocate
+-	  realtime bandwidth for them.
+-	  See Documentation/scheduler/sched-rt-group.txt for more information.
+-
+-choice
+-	depends on GROUP_SCHED
+-	prompt "Basis for grouping tasks"
+-	default USER_SCHED
+-
+-config USER_SCHED
+-	bool "user id"
+-	help
+-	  This option will choose userid as the basis for grouping
+-	  tasks, thus providing equal CPU bandwidth to each user.
+-
+-config CGROUP_SCHED
+-	bool "Control groups"
+- 	depends on CGROUPS
+- 	help
+-	  This option allows you to create arbitrary task groups
+-	  using the "cgroup" pseudo filesystem and control
+-	  the cpu bandwidth allocated to each such task group.
+-	  Refer to Documentation/cgroups/cgroups.txt for more
+-	  information on "cgroup" pseudo filesystem.
+-
+-endchoice
+-
+ menuconfig CGROUPS
+ 	boolean "Control Group support"
+ 	help
+@@ -597,6 +546,35 @@ config CGROUP_MEM_RES_CTLR_SWAP
+ 	  Now, memory usage of swap_cgroup is 2 bytes per entry. If swap page
+ 	  size is 4096bytes, 512k per 1Gbytes of swap.
+ 
++menuconfig CGROUP_SCHED
++	bool "Group CPU scheduler"
++	depends on EXPERIMENTAL && CGROUPS
++	default n
++	help
++	  This feature lets CPU scheduler recognize task groups and control CPU
++	  bandwidth allocation to such task groups. It uses cgroups to group
++	  tasks.
++
++if CGROUP_SCHED
++config FAIR_GROUP_SCHED
++	bool "Group scheduling for SCHED_OTHER"
++	depends on CGROUP_SCHED
++	default CGROUP_SCHED
++
++config RT_GROUP_SCHED
++	bool "Group scheduling for SCHED_RR/FIFO"
++	depends on EXPERIMENTAL
++	depends on CGROUP_SCHED
++	default n
++	help
++	  This feature lets you explicitly allocate real CPU bandwidth
++	  to task groups. If enabled, it will also make it impossible to
++	  schedule realtime tasks for non-root users until you allocate
++	  realtime bandwidth for them.
++	  See Documentation/scheduler/sched-rt-group.txt for more information.
++
++endif #CGROUP_SCHED
++
+ endif # CGROUPS
+ 
+ config MM_OWNER
+diff --git a/init/calibrate.c b/init/calibrate.c
+index 6eb48e5..24fe022 100644
+--- a/init/calibrate.c
++++ b/init/calibrate.c
+@@ -66,7 +66,7 @@ static unsigned long __cpuinit calibrate_delay_direct(void)
+ 		pre_start = 0;
+ 		read_current_timer(&start);
+ 		start_jiffies = jiffies;
+-		while (jiffies <= (start_jiffies + 1)) {
++		while (time_before_eq(jiffies, start_jiffies + 1)) {
+ 			pre_start = start;
+ 			read_current_timer(&start);
+ 		}
+@@ -74,8 +74,8 @@ static unsigned long __cpuinit calibrate_delay_direct(void)
+ 
+ 		pre_end = 0;
+ 		end = post_start;
+-		while (jiffies <=
+-		       (start_jiffies + 1 + DELAY_CALIBRATION_TICKS)) {
++		while (time_before_eq(jiffies, start_jiffies + 1 +
++					       DELAY_CALIBRATION_TICKS)) {
+ 			pre_end = end;
+ 			read_current_timer(&end);
+ 		}
+diff --git a/kernel/capability.c b/kernel/capability.c
+index 4e17041..8a944f5 100644
+--- a/kernel/capability.c
++++ b/kernel/capability.c
+@@ -15,7 +15,6 @@
+ #include <linux/syscalls.h>
+ #include <linux/pid_namespace.h>
+ #include <asm/uaccess.h>
+-#include "cred-internals.h"
+ 
+ /*
+  * Leveraged for setting/resetting capabilities
+diff --git a/kernel/cred-internals.h b/kernel/cred-internals.h
+deleted file mode 100644
+index 2dc4fc2..0000000
+--- a/kernel/cred-internals.h
++++ /dev/null
+@@ -1,21 +0,0 @@
+-/* Internal credentials stuff
+- *
+- * Copyright (C) 2008 Red Hat, Inc. All Rights Reserved.
+- * Written by David Howells (dhowells@redhat.com)
+- *
+- * This program is free software; you can redistribute it and/or
+- * modify it under the terms of the GNU General Public Licence
+- * as published by the Free Software Foundation; either version
+- * 2 of the Licence, or (at your option) any later version.
+- */
+-
+-/*
+- * user.c
+- */
+-static inline void sched_switch_user(struct task_struct *p)
+-{
+-#ifdef CONFIG_USER_SCHED
+-	sched_move_task(p);
+-#endif	/* CONFIG_USER_SCHED */
+-}
+-
+diff --git a/kernel/cred.c b/kernel/cred.c
+index 099f5e6..5fce398 100644
+--- a/kernel/cred.c
++++ b/kernel/cred.c
+@@ -16,7 +16,6 @@
+ #include <linux/init_task.h>
+ #include <linux/security.h>
+ #include <linux/cn_proc.h>
+-#include "cred-internals.h"
+ 
+ #if 0
+ #define kdebug(FMT, ...) \
+@@ -553,8 +552,6 @@ int commit_creds(struct cred *new)
+ 		atomic_dec(&old->user->processes);
+ 	alter_cred_subscribers(old, -2);
+ 
+-	sched_switch_user(task);
+-
+ 	/* send notifications */
+ 	if (new->uid   != old->uid  ||
+ 	    new->euid  != old->euid ||
+diff --git a/kernel/exit.c b/kernel/exit.c
+index d890628..0f8fae3 100644
+--- a/kernel/exit.c
++++ b/kernel/exit.c
+@@ -54,7 +54,6 @@
+ #include <asm/unistd.h>
+ #include <asm/pgtable.h>
+ #include <asm/mmu_context.h>
+-#include "cred-internals.h"
+ 
+ static void exit_mm(struct task_struct * tsk);
+ 
+diff --git a/kernel/ksysfs.c b/kernel/ksysfs.c
+index 528dd78..9cd2b1c 100644
+--- a/kernel/ksysfs.c
++++ b/kernel/ksysfs.c
+@@ -176,16 +176,8 @@ static int __init ksysfs_init(void)
+ 			goto group_exit;
+ 	}
+ 
+-	/* create the /sys/kernel/uids/ directory */
+-	error = uids_sysfs_init();
+-	if (error)
+-		goto notes_exit;
+-
+ 	return 0;
+ 
+-notes_exit:
+-	if (notes_size > 0)
+-		sysfs_remove_bin_file(kernel_kobj, &notes_attr);
+ group_exit:
+ 	sysfs_remove_group(kernel_kobj, &kernel_attr_group);
+ kset_exit:
+diff --git a/kernel/ptrace.c b/kernel/ptrace.c
+index 23bd09c..05625f6 100644
+--- a/kernel/ptrace.c
++++ b/kernel/ptrace.c
+@@ -314,7 +314,7 @@ int ptrace_detach(struct task_struct *child, unsigned int data)
+ 		child->exit_code = data;
+ 		dead = __ptrace_detach(current, child);
+ 		if (!child->exit_state)
+-			wake_up_process(child);
++			wake_up_state(child, TASK_TRACED | TASK_STOPPED);
+ 	}
+ 	write_unlock_irq(&tasklist_lock);
+ 
+diff --git a/kernel/sched.c b/kernel/sched.c
+index 9652eca..df16a0a 100644
+--- a/kernel/sched.c
++++ b/kernel/sched.c
+@@ -233,7 +233,7 @@ static void destroy_rt_bandwidth(struct rt_bandwidth *rt_b)
+  */
+ static DEFINE_MUTEX(sched_domains_mutex);
+ 
+-#ifdef CONFIG_GROUP_SCHED
++#ifdef CONFIG_CGROUP_SCHED
+ 
+ #include <linux/cgroup.h>
+ 
+@@ -243,13 +243,7 @@ static LIST_HEAD(task_groups);
+ 
+ /* task group related information */
+ struct task_group {
+-#ifdef CONFIG_CGROUP_SCHED
+ 	struct cgroup_subsys_state css;
+-#endif
+-
+-#ifdef CONFIG_USER_SCHED
+-	uid_t uid;
+-#endif
+ 
+ #ifdef CONFIG_FAIR_GROUP_SCHED
+ 	/* schedulable entities of this group on each cpu */
+@@ -274,35 +268,7 @@ struct task_group {
+ 	struct list_head children;
+ };
+ 
+-#ifdef CONFIG_USER_SCHED
+-
+-/* Helper function to pass uid information to create_sched_user() */
+-void set_tg_uid(struct user_struct *user)
+-{
+-	user->tg->uid = user->uid;
+-}
+-
+-/*
+- * Root task group.
+- *	Every UID task group (including init_task_group aka UID-0) will
+- *	be a child to this group.
+- */
+-struct task_group root_task_group;
+-
+-#ifdef CONFIG_FAIR_GROUP_SCHED
+-/* Default task group's sched entity on each cpu */
+-static DEFINE_PER_CPU(struct sched_entity, init_sched_entity);
+-/* Default task group's cfs_rq on each cpu */
+-static DEFINE_PER_CPU_SHARED_ALIGNED(struct cfs_rq, init_tg_cfs_rq);
+-#endif /* CONFIG_FAIR_GROUP_SCHED */
+-
+-#ifdef CONFIG_RT_GROUP_SCHED
+-static DEFINE_PER_CPU(struct sched_rt_entity, init_sched_rt_entity);
+-static DEFINE_PER_CPU_SHARED_ALIGNED(struct rt_rq, init_rt_rq);
+-#endif /* CONFIG_RT_GROUP_SCHED */
+-#else /* !CONFIG_USER_SCHED */
+ #define root_task_group init_task_group
+-#endif /* CONFIG_USER_SCHED */
+ 
+ /* task_group_lock serializes add/remove of task groups and also changes to
+  * a task group's cpu shares.
+@@ -318,11 +284,7 @@ static int root_task_group_empty(void)
+ }
+ #endif
+ 
+-#ifdef CONFIG_USER_SCHED
+-# define INIT_TASK_GROUP_LOAD	(2*NICE_0_LOAD)
+-#else /* !CONFIG_USER_SCHED */
+ # define INIT_TASK_GROUP_LOAD	NICE_0_LOAD
+-#endif /* CONFIG_USER_SCHED */
+ 
+ /*
+  * A weight of 0 or 1 can cause arithmetics problems.
+@@ -348,11 +310,7 @@ static inline struct task_group *task_group(struct task_struct *p)
+ {
+ 	struct task_group *tg;
+ 
+-#ifdef CONFIG_USER_SCHED
+-	rcu_read_lock();
+-	tg = __task_cred(p)->user->tg;
+-	rcu_read_unlock();
+-#elif defined(CONFIG_CGROUP_SCHED)
++#ifdef CONFIG_CGROUP_SCHED
+ 	tg = container_of(task_subsys_state(p, cpu_cgroup_subsys_id),
+ 				struct task_group, css);
+ #else
+@@ -383,7 +341,7 @@ static inline struct task_group *task_group(struct task_struct *p)
+ 	return NULL;
+ }
+ 
+-#endif	/* CONFIG_GROUP_SCHED */
++#endif	/* CONFIG_CGROUP_SCHED */
+ 
+ /* CFS-related fields in a runqueue */
+ struct cfs_rq {
+@@ -567,6 +525,7 @@ struct rq {
+ 	struct mm_struct *prev_mm;
+ 
+ 	u64 clock;
++	u64 clock_task;
+ 
+ 	atomic_t nr_iowait;
+ 
+@@ -574,6 +533,8 @@ struct rq {
+ 	struct root_domain *rd;
+ 	struct sched_domain *sd;
+ 
++	unsigned long cpu_power;
++
+ 	unsigned char idle_at_tick;
+ 	/* For active balancing */
+ 	int post_schedule;
+@@ -594,6 +555,10 @@ struct rq {
+ 	u64 avg_idle;
+ #endif
+ 
++#ifdef CONFIG_IRQ_TIME_ACCOUNTING
++	u64 prev_irq_time;
++#endif
++
+ 	/* calc_load related fields */
+ 	unsigned long calc_load_update;
+ 	long calc_load_active;
+@@ -631,11 +596,7 @@ struct rq {
+ 
+ static DEFINE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
+ 
+-static inline
+-void check_preempt_curr(struct rq *rq, struct task_struct *p, int flags)
+-{
+-	rq->curr->sched_class->check_preempt_curr(rq, p, flags);
+-}
++static void check_preempt_curr(struct rq *rq, struct task_struct *p, int flags);
+ 
+ static inline int cpu_of(struct rq *rq)
+ {
+@@ -662,9 +623,20 @@ static inline int cpu_of(struct rq *rq)
+ #define cpu_curr(cpu)		(cpu_rq(cpu)->curr)
+ #define raw_rq()		(&__raw_get_cpu_var(runqueues))
+ 
++static u64 irq_time_cpu(int cpu);
++static void sched_irq_time_avg_update(struct rq *rq, u64 irq_time);
++
+ inline void update_rq_clock(struct rq *rq)
+ {
++	int cpu = cpu_of(rq);
++	u64 irq_time;
++
+ 	rq->clock = sched_clock_cpu(cpu_of(rq));
++	irq_time = irq_time_cpu(cpu);
++	if (rq->clock - irq_time > rq->clock_task)
++		rq->clock_task = rq->clock - irq_time;
++
++	sched_irq_time_avg_update(rq, irq_time);
+ }
+ 
+ /*
+@@ -1297,6 +1269,10 @@ static void resched_task(struct task_struct *p)
+ static void sched_rt_avg_update(struct rq *rq, u64 rt_delta)
+ {
+ }
++
++static void sched_avg_update(struct rq *rq)
++{
++}
+ #endif /* CONFIG_SMP */
+ 
+ #if BITS_PER_LONG == 32
+@@ -1546,24 +1522,9 @@ static unsigned long target_load(int cpu, int type)
+ 	return max(rq->cpu_load[type-1], total);
+ }
+ 
+-static struct sched_group *group_of(int cpu)
+-{
+-	struct sched_domain *sd = rcu_dereference(cpu_rq(cpu)->sd);
+-
+-	if (!sd)
+-		return NULL;
+-
+-	return sd->groups;
+-}
+-
+ static unsigned long power_of(int cpu)
+ {
+-	struct sched_group *group = group_of(cpu);
+-
+-	if (!group)
+-		return SCHED_LOAD_SCALE;
+-
+-	return group->cpu_power;
++	return cpu_rq(cpu)->cpu_power;
+ }
+ 
+ static int task_hot(struct task_struct *p, u64 now, struct sched_domain *sd);
+@@ -1845,6 +1806,94 @@ static inline void __set_task_cpu(struct task_struct *p, unsigned int cpu)
+ #endif
+ }
+ 
++#ifdef CONFIG_IRQ_TIME_ACCOUNTING
++
++/*
++ * There are no locks covering percpu hardirq/softirq time.
++ * They are only modified in account_system_vtime, on corresponding CPU
++ * with interrupts disabled. So, writes are safe.
++ * They are read and saved off onto struct rq in update_rq_clock().
++ * This may result in other CPU reading this CPU's irq time and can
++ * race with irq/account_system_vtime on this CPU. We would either get old
++ * or new value (or semi updated value on 32 bit) with a side effect of
++ * accounting a slice of irq time to wrong task when irq is in progress
++ * while we read rq->clock. That is a worthy compromise in place of having
++ * locks on each irq in account_system_time.
++ */
++static DEFINE_PER_CPU(u64, cpu_hardirq_time);
++static DEFINE_PER_CPU(u64, cpu_softirq_time);
++
++static DEFINE_PER_CPU(u64, irq_start_time);
++static int sched_clock_irqtime;
++
++void enable_sched_clock_irqtime(void)
++{
++	sched_clock_irqtime = 1;
++}
++
++void disable_sched_clock_irqtime(void)
++{
++	sched_clock_irqtime = 0;
++}
++
++static u64 irq_time_cpu(int cpu)
++{
++	if (!sched_clock_irqtime)
++		return 0;
++
++	return per_cpu(cpu_softirq_time, cpu) + per_cpu(cpu_hardirq_time, cpu);
++}
++
++void account_system_vtime(struct task_struct *curr)
++{
++	unsigned long flags;
++	int cpu;
++	u64 now, delta;
++
++	if (!sched_clock_irqtime)
++		return;
++
++	local_irq_save(flags);
++
++	cpu = smp_processor_id();
++	now = sched_clock_cpu(cpu);
++	delta = now - per_cpu(irq_start_time, cpu);
++	per_cpu(irq_start_time, cpu) = now;
++	/*
++	 * We do not account for softirq time from ksoftirqd here.
++	 * We want to continue accounting softirq time to ksoftirqd thread
++	 * in that case, so as not to confuse scheduler with a special task
++	 * that do not consume any time, but still wants to run.
++	 */
++	if (hardirq_count())
++		per_cpu(cpu_hardirq_time, cpu) += delta;
++	else if (in_serving_softirq() && !(curr->flags & PF_KSOFTIRQD))
++		per_cpu(cpu_softirq_time, cpu) += delta;
++
++	local_irq_restore(flags);
++}
++EXPORT_SYMBOL_GPL(account_system_vtime);
++
++static void sched_irq_time_avg_update(struct rq *rq, u64 curr_irq_time)
++{
++	if (sched_clock_irqtime && sched_feat(NONIRQ_POWER)) {
++		u64 delta_irq = curr_irq_time - rq->prev_irq_time;
++		rq->prev_irq_time = curr_irq_time;
++		sched_rt_avg_update(rq, delta_irq);
++	}
++}
++
++#else
++
++static u64 irq_time_cpu(int cpu)
++{
++	return 0;
++}
++
++static void sched_irq_time_avg_update(struct rq *rq, u64 curr_irq_time) { }
++
++#endif
++
+ #include "sched_stats.h"
+ #include "sched_idletask.c"
+ #include "sched_fair.c"
+@@ -1870,8 +1919,8 @@ static void dec_nr_running(struct rq *rq)
+ static void set_load_weight(struct task_struct *p)
+ {
+ 	if (task_has_rt_policy(p)) {
+-		p->se.load.weight = prio_to_weight[0] * 2;
+-		p->se.load.inv_weight = prio_to_wmult[0] >> 1;
++		p->se.load.weight = 0;
++		p->se.load.inv_weight = WMULT_CONST;
+ 		return;
+ 	}
+ 
+@@ -2052,6 +2101,9 @@ task_hot(struct task_struct *p, u64 now, struct sched_domain *sd)
+ 	if (p->sched_class != &fair_sched_class)
+ 		return 0;
+ 
++	if (unlikely(p->policy == SCHED_IDLE))
++		return 0;
++
+ 	/*
+ 	 * Buddy candidates are cache hot:
+ 	 */
+@@ -2323,6 +2375,24 @@ void task_oncpu_function_call(struct task_struct *p,
+ 	preempt_enable();
+ }
+ 
++static void check_preempt_curr(struct rq *rq, struct task_struct *p, int flags)
++{
++	const struct sched_class *class;
++
++	if (p->sched_class == rq->curr->sched_class) {
++		rq->curr->sched_class->check_preempt_curr(rq, p, flags);
++	} else {
++		for_each_class(class) {
++			if (class == rq->curr->sched_class)
++				break;
++			if (class == p->sched_class) {
++				resched_task(rq->curr);
++				break;
++			}
++		}
++	}
++}
++
+ #ifdef CONFIG_SMP
+ /*
+  * ->cpus_allowed is protected by either TASK_WAKING or rq->lock held.
+@@ -3144,6 +3214,8 @@ static void update_cpu_load(struct rq *this_rq)
+ 		this_rq->calc_load_update += LOAD_FREQ;
+ 		calc_load_account_active(this_rq);
+ 	}
++
++	sched_avg_update(this_rq);
+ }
+ 
+ #ifdef CONFIG_SMP
+@@ -3275,7 +3347,7 @@ int can_migrate_task(struct task_struct *p, struct rq *rq, int this_cpu,
+ 	 * 2) too many balance attempts have failed.
+ 	 */
+ 
+-	tsk_cache_hot = task_hot(p, rq->clock, sd);
++	tsk_cache_hot = task_hot(p, rq->clock_task, sd);
+ 	if (!tsk_cache_hot ||
+ 		sd->nr_balance_failed > sd->cache_nice_tries) {
+ #ifdef CONFIG_SCHEDSTATS
+@@ -3458,12 +3530,17 @@ struct sd_lb_stats {
+ 	unsigned long this_load;
+ 	unsigned long this_load_per_task;
+ 	unsigned long this_nr_running;
++	unsigned long this_has_capacity;
++	unsigned int  this_idle_cpus;
+ 
+ 	/* Statistics of the busiest group */
++	unsigned int  busiest_idle_cpus;
+ 	unsigned long max_load;
+ 	unsigned long busiest_load_per_task;
+ 	unsigned long busiest_nr_running;
+ 	unsigned long busiest_group_capacity;
++	unsigned long busiest_has_capacity;
++	unsigned int  busiest_group_weight;
+ 
+ 	int group_imb; /* Is there imbalance in this sd */
+ #if defined(CONFIG_SCHED_MC) || defined(CONFIG_SCHED_SMT)
+@@ -3485,7 +3562,10 @@ struct sg_lb_stats {
+ 	unsigned long sum_nr_running; /* Nr tasks running in the group */
+ 	unsigned long sum_weighted_load; /* Weighted load of group's tasks */
+ 	unsigned long group_capacity;
++	unsigned long idle_cpus;
++	unsigned long group_weight;
+ 	int group_imb; /* Is there an imbalance in the group ? */
++	int group_has_capacity; /* Is there extra capacity in the group? */
+ };
+ 
+ /**
+@@ -3695,10 +3775,14 @@ unsigned long scale_rt_power(int cpu)
+ 	struct rq *rq = cpu_rq(cpu);
+ 	u64 total, available;
+ 
+-	sched_avg_update(rq);
+-
+ 	total = sched_avg_period() + (rq->clock - rq->age_stamp);
+-	available = total - rq->rt_avg;
++
++	if (unlikely(total < rq->rt_avg)) {
++		/* Ensures that power won't end up being negative */
++		available = 0;
++	} else {
++		available = total - rq->rt_avg;
++	}
+ 
+ 	if (unlikely((s64)total < SCHED_LOAD_SCALE))
+ 		total = SCHED_LOAD_SCALE;
+@@ -3736,6 +3820,7 @@ static void update_cpu_power(struct sched_domain *sd, int cpu)
+ 	if (!power)
+ 		power = 1;
+ 
++	cpu_rq(cpu)->cpu_power = power;
+ 	sdg->cpu_power = power;
+ }
+ 
+@@ -3780,7 +3865,7 @@ static inline void update_sg_lb_stats(struct sched_domain *sd,
+ 			int local_group, const struct cpumask *cpus,
+ 			int *balance, struct sg_lb_stats *sgs)
+ {
+-	unsigned long load, max_cpu_load, min_cpu_load;
++	unsigned long load, max_cpu_load, min_cpu_load, max_nr_running;
+ 	int i;
+ 	unsigned int balance_cpu = -1, first_idle_cpu = 0;
+ 	unsigned long avg_load_per_task = 0;
+@@ -3794,6 +3879,7 @@ static inline void update_sg_lb_stats(struct sched_domain *sd,
+ 	/* Tally up the load of all CPUs in the group */
+ 	max_cpu_load = 0;
+ 	min_cpu_load = ~0UL;
++	max_nr_running = 0;
+ 
+ 	for_each_cpu_and(i, sched_group_cpus(group), cpus) {
+ 		struct rq *rq = cpu_rq(i);
+@@ -3811,8 +3897,10 @@ static inline void update_sg_lb_stats(struct sched_domain *sd,
+ 			load = target_load(i, load_idx);
+ 		} else {
+ 			load = source_load(i, load_idx);
+-			if (load > max_cpu_load)
++			if (load > max_cpu_load) {
+ 				max_cpu_load = load;
++				max_nr_running = rq->nr_running;
++			}
+ 			if (min_cpu_load > load)
+ 				min_cpu_load = load;
+ 		}
+@@ -3820,7 +3908,8 @@ static inline void update_sg_lb_stats(struct sched_domain *sd,
+ 		sgs->group_load += load;
+ 		sgs->sum_nr_running += rq->nr_running;
+ 		sgs->sum_weighted_load += weighted_cpuload(i);
+-
++		if (idle_cpu(i))
++			sgs->idle_cpus++;
+ 	}
+ 
+ 	/*
+@@ -3850,11 +3939,14 @@ static inline void update_sg_lb_stats(struct sched_domain *sd,
+ 	if (sgs->sum_nr_running)
+ 		avg_load_per_task = sgs->sum_weighted_load / sgs->sum_nr_running;
+ 
+-	if ((max_cpu_load - min_cpu_load) > 2*avg_load_per_task)
++	if ((max_cpu_load - min_cpu_load) > 2*avg_load_per_task && max_nr_running > 1)
+ 		sgs->group_imb = 1;
+ 
+-	sgs->group_capacity =
+-		DIV_ROUND_CLOSEST(group->cpu_power, SCHED_LOAD_SCALE);
++	sgs->group_capacity = DIV_ROUND_CLOSEST(group->cpu_power, SCHED_LOAD_SCALE);
++	sgs->group_weight = group->group_weight;
++
++	if (sgs->group_capacity > sgs->sum_nr_running)
++		sgs->group_has_capacity = 1;
+ }
+ 
+ /**
+@@ -3901,9 +3993,14 @@ static inline void update_sd_lb_stats(struct sched_domain *sd, int this_cpu,
+ 		/*
+ 		 * In case the child domain prefers tasks go to siblings
+ 		 * first, lower the group capacity to one so that we'll try
+-		 * and move all the excess tasks away.
++		 * and move all the excess tasks away. We lower the capacity
++		 * of a group only if the local group has the capacity to fit
++		 * these excess tasks, i.e. nr_running < group_capacity. The
++		 * extra check prevents the case where you always pull from the
++		 * heaviest group when it is already under-utilized (possible
++		 * with a large weight task outweighs the tasks on the system).
+ 		 */
+-		if (prefer_sibling)
++		if (prefer_sibling && !local_group && sds->this_has_capacity)
+ 			sgs.group_capacity = min(sgs.group_capacity, 1UL);
+ 
+ 		if (local_group) {
+@@ -3911,14 +4008,19 @@ static inline void update_sd_lb_stats(struct sched_domain *sd, int this_cpu,
+ 			sds->this = group;
+ 			sds->this_nr_running = sgs.sum_nr_running;
+ 			sds->this_load_per_task = sgs.sum_weighted_load;
++			sds->this_has_capacity = sgs.group_has_capacity;
++			sds->this_idle_cpus = sgs.idle_cpus;
+ 		} else if (sgs.avg_load > sds->max_load &&
+ 			   (sgs.sum_nr_running > sgs.group_capacity ||
+ 				sgs.group_imb)) {
+ 			sds->max_load = sgs.avg_load;
+ 			sds->busiest = group;
+ 			sds->busiest_nr_running = sgs.sum_nr_running;
++			sds->busiest_idle_cpus = sgs.idle_cpus;
+ 			sds->busiest_group_capacity = sgs.group_capacity;
++			sds->busiest_group_weight = sgs.group_weight;
+ 			sds->busiest_load_per_task = sgs.sum_weighted_load;
++			sds->busiest_has_capacity = sgs.group_has_capacity;
+ 			sds->group_imb = sgs.group_imb;
+ 		}
+ 
+@@ -4064,6 +4166,7 @@ static inline void calculate_imbalance(struct sd_lb_stats *sds, int this_cpu,
+ 		return fix_small_imbalance(sds, this_cpu, imbalance);
+ 
+ }
++
+ /******* find_busiest_group() helpers end here *********************/
+ 
+ /**
+@@ -4115,6 +4218,11 @@ find_busiest_group(struct sched_domain *sd, int this_cpu,
+ 	 * 4) This group is more busy than the avg busieness at this
+ 	 *    sched_domain.
+ 	 * 5) The imbalance is within the specified limit.
++	 *
++	 * Note: when doing newidle balance, if the local group has excess
++	 * capacity (i.e. nr_running < group_capacity) and the busiest group
++	 * does not have any capacity, we force a load balance to pull tasks
++	 * to the local group. In this case, we skip past checks 3, 4 and 5.
+ 	 */
+ 	if (balance && !(*balance))
+ 		goto ret;
+@@ -4122,6 +4230,11 @@ find_busiest_group(struct sched_domain *sd, int this_cpu,
+ 	if (!sds.busiest || sds.busiest_nr_running == 0)
+ 		goto out_balanced;
+ 
++	/*  SD_BALANCE_NEWIDLE trumps SMP nice when underutilized */
++	if (idle == CPU_NEWLY_IDLE && sds.this_has_capacity &&
++			!sds.busiest_has_capacity)
++		goto force_balance;
++
+ 	if (sds.this_load >= sds.max_load)
+ 		goto out_balanced;
+ 
+@@ -4130,9 +4243,28 @@ find_busiest_group(struct sched_domain *sd, int this_cpu,
+ 	if (sds.this_load >= sds.avg_load)
+ 		goto out_balanced;
+ 
+-	if (100 * sds.max_load <= sd->imbalance_pct * sds.this_load)
+-		goto out_balanced;
++	/*
++	 * In the CPU_NEWLY_IDLE, use imbalance_pct to be conservative.
++	 * And to check for busy balance use !idle_cpu instead of
++	 * CPU_NOT_IDLE. This is because HT siblings will use CPU_NOT_IDLE
++	 * even when they are idle.
++	 */
++	if (idle == CPU_NEWLY_IDLE || !idle_cpu(this_cpu)) {
++		if (100 * sds.max_load <= sd->imbalance_pct * sds.this_load)
++			goto out_balanced;
++	} else {
++		/*
++		 * This cpu is idle. If the busiest group load doesn't
++		 * have more tasks than the number of available cpu's and
++		 * there is no imbalance between this and busiest group
++		 * wrt to idle cpu's, it is balanced.
++		 */
++		if ((sds.this_idle_cpus  <= sds.busiest_idle_cpus + 1) &&
++		    sds.busiest_nr_running <= sds.busiest_group_weight)
++			goto out_balanced;
++	}
+ 
++force_balance:
+ 	/* Looks like there is an imbalance. Compute it */
+ 	calculate_imbalance(&sds, this_cpu, imbalance);
+ 	return sds.busiest;
+@@ -4288,7 +4420,14 @@ redo:
+ 
+ 	if (!ld_moved) {
+ 		schedstat_inc(sd, lb_failed[idle]);
+-		sd->nr_balance_failed++;
++		/*
++		 * Increment the failure counter only on periodic balance.
++		 * We do not want newidle balance, which can be very
++		 * frequent, pollute the failure counter causing
++		 * excessive cache_hot migrations and active balances.
++		 */
++		if (idle != CPU_NEWLY_IDLE)
++			sd->nr_balance_failed++;
+ 
+ 		if (unlikely(sd->nr_balance_failed > sd->cache_nice_tries+2)) {
+ 
+@@ -5033,7 +5172,7 @@ static u64 do_task_delta_exec(struct task_struct *p, struct rq *rq)
+ 
+ 	if (task_current(rq, p)) {
+ 		update_rq_clock(rq);
+-		ns = rq->clock - p->se.exec_start;
++		ns = rq->clock_task - p->se.exec_start;
+ 		if ((s64)ns < 0)
+ 			ns = 0;
+ 	}
+@@ -5177,7 +5316,7 @@ void account_system_time(struct task_struct *p, int hardirq_offset,
+ 	tmp = cputime_to_cputime64(cputime);
+ 	if (hardirq_count() - hardirq_offset)
+ 		cpustat->irq = cputime64_add(cpustat->irq, tmp);
+-	else if (softirq_count())
++	else if (in_serving_softirq())
+ 		cpustat->softirq = cputime64_add(cpustat->softirq, tmp);
+ 	else
+ 		cpustat->system = cputime64_add(cpustat->system, tmp);
+@@ -7121,7 +7260,19 @@ void __cpuinit init_idle(struct task_struct *idle, int cpu)
+ 	idle->se.exec_start = sched_clock();
+ 
+ 	cpumask_copy(&idle->cpus_allowed, cpumask_of(cpu));
++	/*
++	 * We're having a chicken and egg problem, even though we are
++	 * holding rq->lock, the cpu isn't yet set to this cpu so the
++	 * lockdep check in task_group() will fail.
++	 *
++	 * Similar case to sched_fork(). / Alternatively we could
++	 * use task_rq_lock() here and obtain the other rq->lock.
++	 *
++	 * Silence PROVE_RCU
++	 */
++	rcu_read_lock();
+ 	__set_task_cpu(idle, cpu);
++	rcu_read_unlock();
+ 
+ 	rq->curr = rq->idle = idle;
+ #if defined(CONFIG_SMP) && defined(__ARCH_WANT_UNLOCKED_CTXSW)
+@@ -8628,6 +8779,8 @@ static void init_sched_groups_power(int cpu, struct sched_domain *sd)
+ 	if (cpu != group_first_cpu(sd->groups))
+ 		return;
+ 
++	sd->groups->group_weight = cpumask_weight(sched_group_cpus(sd->groups));
++
+ 	child = sd->child;
+ 
+ 	sd->groups->cpu_power = 0;
+@@ -9511,9 +9664,6 @@ void __init sched_init(void)
+ #ifdef CONFIG_RT_GROUP_SCHED
+ 	alloc_size += 2 * nr_cpu_ids * sizeof(void **);
+ #endif
+-#ifdef CONFIG_USER_SCHED
+-	alloc_size *= 2;
+-#endif
+ #ifdef CONFIG_CPUMASK_OFFSTACK
+ 	alloc_size += num_possible_cpus() * cpumask_size();
+ #endif
+@@ -9531,13 +9681,6 @@ void __init sched_init(void)
+ 		init_task_group.cfs_rq = (struct cfs_rq **)ptr;
+ 		ptr += nr_cpu_ids * sizeof(void **);
+ 
+-#ifdef CONFIG_USER_SCHED
+-		root_task_group.se = (struct sched_entity **)ptr;
+-		ptr += nr_cpu_ids * sizeof(void **);
+-
+-		root_task_group.cfs_rq = (struct cfs_rq **)ptr;
+-		ptr += nr_cpu_ids * sizeof(void **);
+-#endif /* CONFIG_USER_SCHED */
+ #endif /* CONFIG_FAIR_GROUP_SCHED */
+ #ifdef CONFIG_RT_GROUP_SCHED
+ 		init_task_group.rt_se = (struct sched_rt_entity **)ptr;
+@@ -9546,13 +9689,6 @@ void __init sched_init(void)
+ 		init_task_group.rt_rq = (struct rt_rq **)ptr;
+ 		ptr += nr_cpu_ids * sizeof(void **);
+ 
+-#ifdef CONFIG_USER_SCHED
+-		root_task_group.rt_se = (struct sched_rt_entity **)ptr;
+-		ptr += nr_cpu_ids * sizeof(void **);
+-
+-		root_task_group.rt_rq = (struct rt_rq **)ptr;
+-		ptr += nr_cpu_ids * sizeof(void **);
+-#endif /* CONFIG_USER_SCHED */
+ #endif /* CONFIG_RT_GROUP_SCHED */
+ #ifdef CONFIG_CPUMASK_OFFSTACK
+ 		for_each_possible_cpu(i) {
+@@ -9572,22 +9708,13 @@ void __init sched_init(void)
+ #ifdef CONFIG_RT_GROUP_SCHED
+ 	init_rt_bandwidth(&init_task_group.rt_bandwidth,
+ 			global_rt_period(), global_rt_runtime());
+-#ifdef CONFIG_USER_SCHED
+-	init_rt_bandwidth(&root_task_group.rt_bandwidth,
+-			global_rt_period(), RUNTIME_INF);
+-#endif /* CONFIG_USER_SCHED */
+ #endif /* CONFIG_RT_GROUP_SCHED */
+ 
+-#ifdef CONFIG_GROUP_SCHED
++#ifdef CONFIG_CGROUP_SCHED
+ 	list_add(&init_task_group.list, &task_groups);
+ 	INIT_LIST_HEAD(&init_task_group.children);
+ 
+-#ifdef CONFIG_USER_SCHED
+-	INIT_LIST_HEAD(&root_task_group.children);
+-	init_task_group.parent = &root_task_group;
+-	list_add(&init_task_group.siblings, &root_task_group.children);
+-#endif /* CONFIG_USER_SCHED */
+-#endif /* CONFIG_GROUP_SCHED */
++#endif /* CONFIG_CGROUP_SCHED */
+ 
+ #if defined CONFIG_FAIR_GROUP_SCHED && defined CONFIG_SMP
+ 	update_shares_data = __alloc_percpu(nr_cpu_ids * sizeof(unsigned long),
+@@ -9627,25 +9754,6 @@ void __init sched_init(void)
+ 		 * directly in rq->cfs (i.e init_task_group->se[] = NULL).
+ 		 */
+ 		init_tg_cfs_entry(&init_task_group, &rq->cfs, NULL, i, 1, NULL);
+-#elif defined CONFIG_USER_SCHED
+-		root_task_group.shares = NICE_0_LOAD;
+-		init_tg_cfs_entry(&root_task_group, &rq->cfs, NULL, i, 0, NULL);
+-		/*
+-		 * In case of task-groups formed thr' the user id of tasks,
+-		 * init_task_group represents tasks belonging to root user.
+-		 * Hence it forms a sibling of all subsequent groups formed.
+-		 * In this case, init_task_group gets only a fraction of overall
+-		 * system cpu resource, based on the weight assigned to root
+-		 * user's cpu share (INIT_TASK_GROUP_LOAD). This is accomplished
+-		 * by letting tasks of init_task_group sit in a separate cfs_rq
+-		 * (init_tg_cfs_rq) and having one entity represent this group of
+-		 * tasks in rq->cfs (i.e init_task_group->se[] != NULL).
+-		 */
+-		init_tg_cfs_entry(&init_task_group,
+-				&per_cpu(init_tg_cfs_rq, i),
+-				&per_cpu(init_sched_entity, i), i, 1,
+-				root_task_group.se[i]);
+-
+ #endif
+ #endif /* CONFIG_FAIR_GROUP_SCHED */
+ 
+@@ -9668,6 +9776,7 @@ void __init sched_init(void)
+ #ifdef CONFIG_SMP
+ 		rq->sd = NULL;
+ 		rq->rd = NULL;
++		rq->cpu_power = SCHED_LOAD_SCALE;
+ 		rq->post_schedule = 0;
+ 		rq->active_balance = 0;
+ 		rq->next_balance = jiffies;
+@@ -10051,7 +10160,7 @@ static inline void unregister_rt_sched_group(struct task_group *tg, int cpu)
+ }
+ #endif /* CONFIG_RT_GROUP_SCHED */
+ 
+-#ifdef CONFIG_GROUP_SCHED
++#ifdef CONFIG_CGROUP_SCHED
+ static void free_sched_group(struct task_group *tg)
+ {
+ 	free_fair_sched_group(tg);
+@@ -10146,12 +10255,12 @@ void sched_move_task(struct task_struct *tsk)
+ 	if (unlikely(running))
+ 		tsk->sched_class->put_prev_task(rq, tsk);
+ 
+-	set_task_rq(tsk, task_cpu(tsk));
+-
+ #ifdef CONFIG_FAIR_GROUP_SCHED
+-	if (tsk->sched_class->moved_group)
+-		tsk->sched_class->moved_group(tsk, on_rq);
++	if (tsk->sched_class->task_move_group)
++		tsk->sched_class->task_move_group(tsk, on_rq);
++	else
+ #endif
++		set_task_rq(tsk, task_cpu(tsk));
+ 
+ 	if (unlikely(running))
+ 		tsk->sched_class->set_curr_task(rq);
+@@ -10160,7 +10269,7 @@ void sched_move_task(struct task_struct *tsk)
+ 
+ 	task_rq_unlock(rq, &flags);
+ }
+-#endif /* CONFIG_GROUP_SCHED */
++#endif /* CONFIG_CGROUP_SCHED */
+ 
+ #ifdef CONFIG_FAIR_GROUP_SCHED
+ static void __set_se_shares(struct sched_entity *se, unsigned long shares)
+@@ -10302,13 +10411,6 @@ static int tg_schedulable(struct task_group *tg, void *data)
+ 		runtime = d->rt_runtime;
+ 	}
+ 
+-#ifdef CONFIG_USER_SCHED
+-	if (tg == &root_task_group) {
+-		period = global_rt_period();
+-		runtime = global_rt_runtime();
+-	}
+-#endif
+-
+ 	/*
+ 	 * Cannot have more runtime than the period.
+ 	 */
+diff --git a/kernel/sched_debug.c b/kernel/sched_debug.c
+index 6f836a8..f9724c0 100644
+--- a/kernel/sched_debug.c
++++ b/kernel/sched_debug.c
+@@ -173,11 +173,6 @@ void print_cfs_rq(struct seq_file *m, int cpu, struct cfs_rq *cfs_rq)
+ 	task_group_path(tg, path, sizeof(path));
+ 
+ 	SEQ_printf(m, "\ncfs_rq[%d]:%s\n", cpu, path);
+-#elif defined(CONFIG_USER_SCHED) && defined(CONFIG_FAIR_GROUP_SCHED)
+-	{
+-		uid_t uid = cfs_rq->tg->uid;
+-		SEQ_printf(m, "\ncfs_rq[%d] for UID: %u\n", cpu, uid);
+-	}
+ #else
+ 	SEQ_printf(m, "\ncfs_rq[%d]:\n", cpu);
+ #endif
+diff --git a/kernel/sched_fair.c b/kernel/sched_fair.c
+index 01e311e..cd9a40b 100644
+--- a/kernel/sched_fair.c
++++ b/kernel/sched_fair.c
+@@ -496,7 +496,7 @@ __update_curr(struct cfs_rq *cfs_rq, struct sched_entity *curr,
+ static void update_curr(struct cfs_rq *cfs_rq)
+ {
+ 	struct sched_entity *curr = cfs_rq->curr;
+-	u64 now = rq_of(cfs_rq)->clock;
++	u64 now = rq_of(cfs_rq)->clock_task;
+ 	unsigned long delta_exec;
+ 
+ 	if (unlikely(!curr))
+@@ -579,7 +579,7 @@ update_stats_curr_start(struct cfs_rq *cfs_rq, struct sched_entity *se)
+ 	/*
+ 	 * We are starting a new run period:
+ 	 */
+-	se->exec_start = rq_of(cfs_rq)->clock;
++	se->exec_start = rq_of(cfs_rq)->clock_task;
+ }
+ 
+ /**************************************************
+@@ -1222,7 +1222,6 @@ static int wake_affine(struct sched_domain *sd, struct task_struct *p, int sync)
+ 	unsigned long this_load, load;
+ 	int idx, this_cpu, prev_cpu;
+ 	unsigned long tl_per_task;
+-	unsigned int imbalance;
+ 	struct task_group *tg;
+ 	unsigned long weight;
+ 	int balanced;
+@@ -1262,8 +1261,6 @@ static int wake_affine(struct sched_domain *sd, struct task_struct *p, int sync)
+ 	tg = task_group(p);
+ 	weight = p->se.load.weight;
+ 
+-	imbalance = 100 + (sd->imbalance_pct - 100) / 2;
+-
+ 	/*
+ 	 * In low-load situations, where prev_cpu is idle and this_cpu is idle
+ 	 * due to the sync cause above having dropped this_load to 0, we'll
+@@ -1273,9 +1270,22 @@ static int wake_affine(struct sched_domain *sd, struct task_struct *p, int sync)
+ 	 * Otherwise check if either cpus are near enough in load to allow this
+ 	 * task to be woken on this_cpu.
+ 	 */
+-	balanced = !this_load ||
+-		100*(this_load + effective_load(tg, this_cpu, weight, weight)) <=
+-		imbalance*(load + effective_load(tg, prev_cpu, 0, weight));
++	if (this_load) {
++		unsigned long this_eff_load, prev_eff_load;
++
++		this_eff_load = 100;
++		this_eff_load *= power_of(prev_cpu);
++		this_eff_load *= this_load +
++			effective_load(tg, this_cpu, weight, weight);
++
++		prev_eff_load = 100 + (sd->imbalance_pct - 100) / 2;
++		prev_eff_load *= power_of(this_cpu);
++		prev_eff_load *= load + effective_load(tg, prev_cpu, 0, weight);
++
++		balanced = this_eff_load <= prev_eff_load;
++	} else
++		balanced = true;
++
+ 	rcu_read_unlock();
+ 
+ 	/*
+@@ -1992,8 +2002,11 @@ static void task_fork_fair(struct task_struct *p)
+ 
+ 	update_rq_clock(rq);
+ 
+-	if (unlikely(task_cpu(p) != this_cpu))
++	if (unlikely(task_cpu(p) != this_cpu)) {
++		rcu_read_lock();
+ 		__set_task_cpu(p, this_cpu);
++		rcu_read_unlock();
++	}
+ 
+ 	update_curr(cfs_rq);
+ 
+@@ -2065,13 +2078,26 @@ static void set_curr_task_fair(struct rq *rq)
+ }
+ 
+ #ifdef CONFIG_FAIR_GROUP_SCHED
+-static void moved_group_fair(struct task_struct *p, int on_rq)
++static void task_move_group_fair(struct task_struct *p, int on_rq)
+ {
+-	struct cfs_rq *cfs_rq = task_cfs_rq(p);
+-
+-	update_curr(cfs_rq);
++	/*
++	 * If the task was not on the rq at the time of this cgroup movement
++	 * it must have been asleep, sleeping tasks keep their ->vruntime
++	 * absolute on their old rq until wakeup (needed for the fair sleeper
++	 * bonus in place_entity()).
++	 *
++	 * If it was on the rq, we've just 'preempted' it, which does convert
++	 * ->vruntime to a relative base.
++	 *
++	 * Make sure both cases convert their relative position when migrating
++	 * to another cgroup's rq. This does somewhat interfere with the
++	 * fair sleeper stuff for the first placement, but who cares.
++	 */
++	if (!on_rq)
++		p->se.vruntime -= cfs_rq_of(&p->se)->min_vruntime;
++	set_task_rq(p, task_cpu(p));
+ 	if (!on_rq)
+-		place_entity(cfs_rq, &p->se, 1);
++		p->se.vruntime += cfs_rq_of(&p->se)->min_vruntime;
+ }
+ #endif
+ 
+@@ -2125,7 +2151,7 @@ static const struct sched_class fair_sched_class = {
+ 	.get_rr_interval	= get_rr_interval_fair,
+ 
+ #ifdef CONFIG_FAIR_GROUP_SCHED
+-	.moved_group		= moved_group_fair,
++	.task_move_group	= task_move_group_fair,
+ #endif
+ };
+ 
+diff --git a/kernel/sched_features.h b/kernel/sched_features.h
+index 0d94083..f8df3ee 100644
+--- a/kernel/sched_features.h
++++ b/kernel/sched_features.h
+@@ -121,3 +121,8 @@ SCHED_FEAT(ASYM_EFF_LOAD, 1)
+  * release the lock. Decreases scheduling overhead.
+  */
+ SCHED_FEAT(OWNER_SPIN, 1)
++
++/*
++ * Decrement CPU power based on irq activity
++ */
++SCHED_FEAT(NONIRQ_POWER, 1)
+diff --git a/kernel/sched_rt.c b/kernel/sched_rt.c
+index af24fab..9d9a7b1 100644
+--- a/kernel/sched_rt.c
++++ b/kernel/sched_rt.c
+@@ -603,7 +603,7 @@ static void update_curr_rt(struct rq *rq)
+ 	if (!task_has_rt_policy(curr))
+ 		return;
+ 
+-	delta_exec = rq->clock - curr->se.exec_start;
++	delta_exec = rq->clock_task - curr->se.exec_start;
+ 	if (unlikely((s64)delta_exec < 0))
+ 		delta_exec = 0;
+ 
+@@ -612,7 +612,7 @@ static void update_curr_rt(struct rq *rq)
+ 	curr->se.sum_exec_runtime += delta_exec;
+ 	account_group_exec_runtime(curr, delta_exec);
+ 
+-	curr->se.exec_start = rq->clock;
++	curr->se.exec_start = rq->clock_task;
+ 	cpuacct_charge(curr, delta_exec);
+ 
+ 	sched_rt_avg_update(rq, delta_exec);
+@@ -954,18 +954,19 @@ select_task_rq_rt(struct rq *rq, struct task_struct *p, int sd_flag, int flags)
+ 	 * runqueue. Otherwise simply start this RT task
+ 	 * on its current runqueue.
+ 	 *
+-	 * We want to avoid overloading runqueues. Even if
+-	 * the RT task is of higher priority than the current RT task.
+-	 * RT tasks behave differently than other tasks. If
+-	 * one gets preempted, we try to push it off to another queue.
+-	 * So trying to keep a preempting RT task on the same
+-	 * cache hot CPU will force the running RT task to
+-	 * a cold CPU. So we waste all the cache for the lower
+-	 * RT task in hopes of saving some of a RT task
+-	 * that is just being woken and probably will have
+-	 * cold cache anyway.
++	 * We want to avoid overloading runqueues. If the woken
++	 * task is a higher priority, then it will stay on this CPU
++	 * and the lower prio task should be moved to another CPU.
++	 * Even though this will probably make the lower prio task
++	 * lose its cache, we do not want to bounce a higher task
++	 * around just because it gave up its CPU, perhaps for a
++	 * lock?
++	 *
++	 * For equal prio tasks, we just let the scheduler sort it out.
+ 	 */
+ 	if (unlikely(rt_task(rq->curr)) &&
++	    (rq->curr->rt.nr_cpus_allowed < 2 ||
++	     rq->curr->prio < p->prio) &&
+ 	    (p->rt.nr_cpus_allowed > 1)) {
+ 		int cpu = find_lowest_rq(p);
+ 
+@@ -1068,7 +1069,7 @@ static struct task_struct *_pick_next_task_rt(struct rq *rq)
+ 	} while (rt_rq);
+ 
+ 	p = rt_task_of(rt_se);
+-	p->se.exec_start = rq->clock;
++	p->se.exec_start = rq->clock_task;
+ 
+ 	return p;
+ }
+@@ -1493,7 +1494,10 @@ static void task_woken_rt(struct rq *rq, struct task_struct *p)
+ 	if (!task_running(rq, p) &&
+ 	    !test_tsk_need_resched(rq->curr) &&
+ 	    has_pushable_tasks(rq) &&
+-	    p->rt.nr_cpus_allowed > 1)
++	    p->rt.nr_cpus_allowed > 1 &&
++	    rt_task(rq->curr) &&
++	    (rq->curr->rt.nr_cpus_allowed < 2 ||
++	     rq->curr->prio < p->prio))
+ 		push_rt_tasks(rq);
+ }
+ 
+@@ -1731,7 +1735,7 @@ static void set_curr_task_rt(struct rq *rq)
+ {
+ 	struct task_struct *p = rq->curr;
+ 
+-	p->se.exec_start = rq->clock;
++	p->se.exec_start = rq->clock_task;
+ 
+ 	/* The running task is never eligible for pushing */
+ 	dequeue_pushable_task(rq, p);
+diff --git a/kernel/smp.c b/kernel/smp.c
+index c9d1c78..ea5dc8f 100644
+--- a/kernel/smp.c
++++ b/kernel/smp.c
+@@ -193,6 +193,24 @@ void generic_smp_call_function_interrupt(void)
+ 	list_for_each_entry_rcu(data, &call_function.queue, csd.list) {
+ 		int refs;
+ 
++		/*
++		 * Since we walk the list without any locks, we might
++		 * see an entry that was completed, removed from the
++		 * list and is in the process of being reused.
++		 *
++		 * We must check that the cpu is in the cpumask before
++		 * checking the refs, and both must be set before
++		 * executing the callback on this cpu.
++		 */
++
++		if (!cpumask_test_cpu(cpu, data->cpumask))
++			continue;
++
++		smp_rmb();
++
++		if (atomic_read(&data->refs) == 0)
++			continue;
++
+ 		if (!cpumask_test_and_clear_cpu(cpu, data->cpumask))
+ 			continue;
+ 
+@@ -201,6 +219,8 @@ void generic_smp_call_function_interrupt(void)
+ 		refs = atomic_dec_return(&data->refs);
+ 		WARN_ON(refs < 0);
+ 		if (!refs) {
++			WARN_ON(!cpumask_empty(data->cpumask));
++
+ 			spin_lock(&call_function.lock);
+ 			list_del_rcu(&data->csd.list);
+ 			spin_unlock(&call_function.lock);
+@@ -401,11 +421,21 @@ void smp_call_function_many(const struct cpumask *mask,
+ 
+ 	data = &__get_cpu_var(cfd_data);
+ 	csd_lock(&data->csd);
++	BUG_ON(atomic_read(&data->refs) || !cpumask_empty(data->cpumask));
+ 
+ 	data->csd.func = func;
+ 	data->csd.info = info;
+ 	cpumask_and(data->cpumask, mask, cpu_online_mask);
+ 	cpumask_clear_cpu(this_cpu, data->cpumask);
++
++	/*
++	 * To ensure the interrupt handler gets an complete view
++	 * we order the cpumask and refs writes and order the read
++	 * of them in the interrupt handler.  In addition we may
++	 * only clear our own cpu bit from the mask.
++	 */
++	smp_wmb();
++
+ 	atomic_set(&data->refs, cpumask_weight(data->cpumask));
+ 
+ 	spin_lock_irqsave(&call_function.lock, flags);
+diff --git a/kernel/softirq.c b/kernel/softirq.c
+index f8749e5..04a0252 100644
+--- a/kernel/softirq.c
++++ b/kernel/softirq.c
+@@ -77,11 +77,21 @@ void wakeup_softirqd(void)
+ }
+ 
+ /*
++ * preempt_count and SOFTIRQ_OFFSET usage:
++ * - preempt_count is changed by SOFTIRQ_OFFSET on entering or leaving
++ *   softirq processing.
++ * - preempt_count is changed by SOFTIRQ_DISABLE_OFFSET (= 2 * SOFTIRQ_OFFSET)
++ *   on local_bh_disable or local_bh_enable.
++ * This lets us distinguish between whether we are currently processing
++ * softirq and whether we just have bh disabled.
++ */
++
++/*
+  * This one is for softirq.c-internal use,
+  * where hardirqs are disabled legitimately:
+  */
+ #ifdef CONFIG_TRACE_IRQFLAGS
+-static void __local_bh_disable(unsigned long ip)
++static void __local_bh_disable(unsigned long ip, unsigned int cnt)
+ {
+ 	unsigned long flags;
+ 
+@@ -95,32 +105,43 @@ static void __local_bh_disable(unsigned long ip)
+ 	 * We must manually increment preempt_count here and manually
+ 	 * call the trace_preempt_off later.
+ 	 */
+-	preempt_count() += SOFTIRQ_OFFSET;
++	preempt_count() += cnt;
+ 	/*
+ 	 * Were softirqs turned off above:
+ 	 */
+-	if (softirq_count() == SOFTIRQ_OFFSET)
++	if (softirq_count() == cnt)
+ 		trace_softirqs_off(ip);
+ 	raw_local_irq_restore(flags);
+ 
+-	if (preempt_count() == SOFTIRQ_OFFSET)
++	if (preempt_count() == cnt)
+ 		trace_preempt_off(CALLER_ADDR0, get_parent_ip(CALLER_ADDR1));
+ }
+ #else /* !CONFIG_TRACE_IRQFLAGS */
+-static inline void __local_bh_disable(unsigned long ip)
++static inline void __local_bh_disable(unsigned long ip, unsigned int cnt)
+ {
+-	add_preempt_count(SOFTIRQ_OFFSET);
++	add_preempt_count(cnt);
+ 	barrier();
+ }
+ #endif /* CONFIG_TRACE_IRQFLAGS */
+ 
+ void local_bh_disable(void)
+ {
+-	__local_bh_disable((unsigned long)__builtin_return_address(0));
++	__local_bh_disable((unsigned long)__builtin_return_address(0),
++				SOFTIRQ_DISABLE_OFFSET);
+ }
+ 
+ EXPORT_SYMBOL(local_bh_disable);
+ 
++static void __local_bh_enable(unsigned int cnt)
++{
++	WARN_ON_ONCE(in_irq());
++	WARN_ON_ONCE(!irqs_disabled());
++
++	if (softirq_count() == cnt)
++		trace_softirqs_on((unsigned long)__builtin_return_address(0));
++	sub_preempt_count(cnt);
++}
++
+ /*
+  * Special-case - softirqs can safely be enabled in
+  * cond_resched_softirq(), or by __do_softirq(),
+@@ -128,12 +149,7 @@ EXPORT_SYMBOL(local_bh_disable);
+  */
+ void _local_bh_enable(void)
+ {
+-	WARN_ON_ONCE(in_irq());
+-	WARN_ON_ONCE(!irqs_disabled());
+-
+-	if (softirq_count() == SOFTIRQ_OFFSET)
+-		trace_softirqs_on((unsigned long)__builtin_return_address(0));
+-	sub_preempt_count(SOFTIRQ_OFFSET);
++	__local_bh_enable(SOFTIRQ_DISABLE_OFFSET);
+ }
+ 
+ EXPORT_SYMBOL(_local_bh_enable);
+@@ -147,13 +163,13 @@ static inline void _local_bh_enable_ip(unsigned long ip)
+ 	/*
+ 	 * Are softirqs going to be turned on now:
+ 	 */
+-	if (softirq_count() == SOFTIRQ_OFFSET)
++	if (softirq_count() == SOFTIRQ_DISABLE_OFFSET)
+ 		trace_softirqs_on(ip);
+ 	/*
+ 	 * Keep preemption disabled until we are done with
+ 	 * softirq processing:
+  	 */
+- 	sub_preempt_count(SOFTIRQ_OFFSET - 1);
++	sub_preempt_count(SOFTIRQ_DISABLE_OFFSET - 1);
+ 
+ 	if (unlikely(!in_interrupt() && local_softirq_pending()))
+ 		do_softirq();
+@@ -198,7 +214,8 @@ asmlinkage void __do_softirq(void)
+ 	pending = local_softirq_pending();
+ 	account_system_vtime(current);
+ 
+-	__local_bh_disable((unsigned long)__builtin_return_address(0));
++	__local_bh_disable((unsigned long)__builtin_return_address(0),
++				SOFTIRQ_OFFSET);
+ 	lockdep_softirq_enter();
+ 
+ 	cpu = smp_processor_id();
+@@ -245,7 +262,7 @@ restart:
+ 	lockdep_softirq_exit();
+ 
+ 	account_system_vtime(current);
+-	_local_bh_enable();
++	__local_bh_enable(SOFTIRQ_OFFSET);
+ }
+ 
+ #ifndef __ARCH_HAS_DO_SOFTIRQ
+@@ -279,10 +296,16 @@ void irq_enter(void)
+ 
+ 	rcu_irq_enter();
+ 	if (idle_cpu(cpu) && !in_interrupt()) {
+-		__irq_enter();
++		/*
++		 * Prevent raise_softirq from needlessly waking up ksoftirqd
++		 * here, as softirq will be serviced on return from interrupt.
++		 */
++		local_bh_disable();
+ 		tick_check_idle(cpu);
+-	} else
+-		__irq_enter();
++		_local_bh_enable();
++	}
++
++	__irq_enter();
+ }
+ 
+ #ifdef __ARCH_IRQ_EXIT_IRQS_DISABLED
+@@ -701,6 +724,7 @@ static int ksoftirqd(void * __bind_cpu)
+ {
+ 	set_current_state(TASK_INTERRUPTIBLE);
+ 
++	current->flags |= PF_KSOFTIRQD;
+ 	while (!kthread_should_stop()) {
+ 		preempt_disable();
+ 		if (!local_softirq_pending()) {
+diff --git a/kernel/sys.c b/kernel/sys.c
+index 440ca69..e9512b1 100644
+--- a/kernel/sys.c
++++ b/kernel/sys.c
+@@ -567,11 +567,6 @@ static int set_user(struct cred *new)
+ 	if (!new_user)
+ 		return -EAGAIN;
+ 
+-	if (!task_can_switch_user(new_user, current)) {
+-		free_uid(new_user);
+-		return -EINVAL;
+-	}
+-
+ 	if (atomic_read(&new_user->processes) >=
+ 				current->signal->rlim[RLIMIT_NPROC].rlim_cur &&
+ 			new_user != INIT_USER) {
+diff --git a/kernel/user.c b/kernel/user.c
+index 46d0165..1b91701 100644
+--- a/kernel/user.c
++++ b/kernel/user.c
+@@ -16,7 +16,6 @@
+ #include <linux/interrupt.h>
+ #include <linux/module.h>
+ #include <linux/user_namespace.h>
+-#include "cred-internals.h"
+ 
+ struct user_namespace init_user_ns = {
+ 	.kref = {
+@@ -56,9 +55,6 @@ struct user_struct root_user = {
+ 	.sigpending	= ATOMIC_INIT(0),
+ 	.locked_shm     = 0,
+ 	.user_ns	= &init_user_ns,
+-#ifdef CONFIG_USER_SCHED
+-	.tg		= &init_task_group,
+-#endif
+ };
+ 
+ /*
+@@ -75,268 +71,6 @@ static void uid_hash_remove(struct user_struct *up)
+ 	put_user_ns(up->user_ns);
+ }
+ 
+-#ifdef CONFIG_USER_SCHED
+-
+-static void sched_destroy_user(struct user_struct *up)
+-{
+-	sched_destroy_group(up->tg);
+-}
+-
+-static int sched_create_user(struct user_struct *up)
+-{
+-	int rc = 0;
+-
+-	up->tg = sched_create_group(&root_task_group);
+-	if (IS_ERR(up->tg))
+-		rc = -ENOMEM;
+-
+-	set_tg_uid(up);
+-
+-	return rc;
+-}
+-
+-#else	/* CONFIG_USER_SCHED */
+-
+-static void sched_destroy_user(struct user_struct *up) { }
+-static int sched_create_user(struct user_struct *up) { return 0; }
+-
+-#endif	/* CONFIG_USER_SCHED */
+-
+-#if defined(CONFIG_USER_SCHED) && defined(CONFIG_SYSFS)
+-
+-static struct user_struct *uid_hash_find(uid_t uid, struct hlist_head *hashent)
+-{
+-	struct user_struct *user;
+-	struct hlist_node *h;
+-
+-	hlist_for_each_entry(user, h, hashent, uidhash_node) {
+-		if (user->uid == uid) {
+-			/* possibly resurrect an "almost deleted" object */
+-			if (atomic_inc_return(&user->__count) == 1)
+-				cancel_delayed_work(&user->work);
+-			return user;
+-		}
+-	}
+-
+-	return NULL;
+-}
+-
+-static struct kset *uids_kset; /* represents the /sys/kernel/uids/ directory */
+-static DEFINE_MUTEX(uids_mutex);
+-
+-static inline void uids_mutex_lock(void)
+-{
+-	mutex_lock(&uids_mutex);
+-}
+-
+-static inline void uids_mutex_unlock(void)
+-{
+-	mutex_unlock(&uids_mutex);
+-}
+-
+-/* uid directory attributes */
+-#ifdef CONFIG_FAIR_GROUP_SCHED
+-static ssize_t cpu_shares_show(struct kobject *kobj,
+-			       struct kobj_attribute *attr,
+-			       char *buf)
+-{
+-	struct user_struct *up = container_of(kobj, struct user_struct, kobj);
+-
+-	return sprintf(buf, "%lu\n", sched_group_shares(up->tg));
+-}
+-
+-static ssize_t cpu_shares_store(struct kobject *kobj,
+-				struct kobj_attribute *attr,
+-				const char *buf, size_t size)
+-{
+-	struct user_struct *up = container_of(kobj, struct user_struct, kobj);
+-	unsigned long shares;
+-	int rc;
+-
+-	sscanf(buf, "%lu", &shares);
+-
+-	rc = sched_group_set_shares(up->tg, shares);
+-
+-	return (rc ? rc : size);
+-}
+-
+-static struct kobj_attribute cpu_share_attr =
+-	__ATTR(cpu_share, 0644, cpu_shares_show, cpu_shares_store);
+-#endif
+-
+-#ifdef CONFIG_RT_GROUP_SCHED
+-static ssize_t cpu_rt_runtime_show(struct kobject *kobj,
+-				   struct kobj_attribute *attr,
+-				   char *buf)
+-{
+-	struct user_struct *up = container_of(kobj, struct user_struct, kobj);
+-
+-	return sprintf(buf, "%ld\n", sched_group_rt_runtime(up->tg));
+-}
+-
+-static ssize_t cpu_rt_runtime_store(struct kobject *kobj,
+-				    struct kobj_attribute *attr,
+-				    const char *buf, size_t size)
+-{
+-	struct user_struct *up = container_of(kobj, struct user_struct, kobj);
+-	unsigned long rt_runtime;
+-	int rc;
+-
+-	sscanf(buf, "%ld", &rt_runtime);
+-
+-	rc = sched_group_set_rt_runtime(up->tg, rt_runtime);
+-
+-	return (rc ? rc : size);
+-}
+-
+-static struct kobj_attribute cpu_rt_runtime_attr =
+-	__ATTR(cpu_rt_runtime, 0644, cpu_rt_runtime_show, cpu_rt_runtime_store);
+-
+-static ssize_t cpu_rt_period_show(struct kobject *kobj,
+-				   struct kobj_attribute *attr,
+-				   char *buf)
+-{
+-	struct user_struct *up = container_of(kobj, struct user_struct, kobj);
+-
+-	return sprintf(buf, "%lu\n", sched_group_rt_period(up->tg));
+-}
+-
+-static ssize_t cpu_rt_period_store(struct kobject *kobj,
+-				    struct kobj_attribute *attr,
+-				    const char *buf, size_t size)
+-{
+-	struct user_struct *up = container_of(kobj, struct user_struct, kobj);
+-	unsigned long rt_period;
+-	int rc;
+-
+-	sscanf(buf, "%lu", &rt_period);
+-
+-	rc = sched_group_set_rt_period(up->tg, rt_period);
+-
+-	return (rc ? rc : size);
+-}
+-
+-static struct kobj_attribute cpu_rt_period_attr =
+-	__ATTR(cpu_rt_period, 0644, cpu_rt_period_show, cpu_rt_period_store);
+-#endif
+-
+-/* default attributes per uid directory */
+-static struct attribute *uids_attributes[] = {
+-#ifdef CONFIG_FAIR_GROUP_SCHED
+-	&cpu_share_attr.attr,
+-#endif
+-#ifdef CONFIG_RT_GROUP_SCHED
+-	&cpu_rt_runtime_attr.attr,
+-	&cpu_rt_period_attr.attr,
+-#endif
+-	NULL
+-};
+-
+-/* the lifetime of user_struct is not managed by the core (now) */
+-static void uids_release(struct kobject *kobj)
+-{
+-	return;
+-}
+-
+-static struct kobj_type uids_ktype = {
+-	.sysfs_ops = &kobj_sysfs_ops,
+-	.default_attrs = uids_attributes,
+-	.release = uids_release,
+-};
+-
+-/*
+- * Create /sys/kernel/uids/<uid>/cpu_share file for this user
+- * We do not create this file for users in a user namespace (until
+- * sysfs tagging is implemented).
+- *
+- * See Documentation/scheduler/sched-design-CFS.txt for ramifications.
+- */
+-static int uids_user_create(struct user_struct *up)
+-{
+-	struct kobject *kobj = &up->kobj;
+-	int error;
+-
+-	memset(kobj, 0, sizeof(struct kobject));
+-	if (up->user_ns != &init_user_ns)
+-		return 0;
+-	kobj->kset = uids_kset;
+-	error = kobject_init_and_add(kobj, &uids_ktype, NULL, "%d", up->uid);
+-	if (error) {
+-		kobject_put(kobj);
+-		goto done;
+-	}
+-
+-	kobject_uevent(kobj, KOBJ_ADD);
+-done:
+-	return error;
+-}
+-
+-/* create these entries in sysfs:
+- * 	"/sys/kernel/uids" directory
+- * 	"/sys/kernel/uids/0" directory (for root user)
+- * 	"/sys/kernel/uids/0/cpu_share" file (for root user)
+- */
+-int __init uids_sysfs_init(void)
+-{
+-	uids_kset = kset_create_and_add("uids", NULL, kernel_kobj);
+-	if (!uids_kset)
+-		return -ENOMEM;
+-
+-	return uids_user_create(&root_user);
+-}
+-
+-/* delayed work function to remove sysfs directory for a user and free up
+- * corresponding structures.
+- */
+-static void cleanup_user_struct(struct work_struct *w)
+-{
+-	struct user_struct *up = container_of(w, struct user_struct, work.work);
+-	unsigned long flags;
+-	int remove_user = 0;
+-
+-	/* Make uid_hash_remove() + sysfs_remove_file() + kobject_del()
+-	 * atomic.
+-	 */
+-	uids_mutex_lock();
+-
+-	spin_lock_irqsave(&uidhash_lock, flags);
+-	if (atomic_read(&up->__count) == 0) {
+-		uid_hash_remove(up);
+-		remove_user = 1;
+-	}
+-	spin_unlock_irqrestore(&uidhash_lock, flags);
+-
+-	if (!remove_user)
+-		goto done;
+-
+-	if (up->user_ns == &init_user_ns) {
+-		kobject_uevent(&up->kobj, KOBJ_REMOVE);
+-		kobject_del(&up->kobj);
+-		kobject_put(&up->kobj);
+-	}
+-
+-	sched_destroy_user(up);
+-	key_put(up->uid_keyring);
+-	key_put(up->session_keyring);
+-	kmem_cache_free(uid_cachep, up);
+-
+-done:
+-	uids_mutex_unlock();
+-}
+-
+-/* IRQs are disabled and uidhash_lock is held upon function entry.
+- * IRQ state (as stored in flags) is restored and uidhash_lock released
+- * upon function exit.
+- */
+-static void free_user(struct user_struct *up, unsigned long flags)
+-{
+-	INIT_DELAYED_WORK(&up->work, cleanup_user_struct);
+-	schedule_delayed_work(&up->work, msecs_to_jiffies(1000));
+-	spin_unlock_irqrestore(&uidhash_lock, flags);
+-}
+-
+-#else	/* CONFIG_USER_SCHED && CONFIG_SYSFS */
+-
+ static struct user_struct *uid_hash_find(uid_t uid, struct hlist_head *hashent)
+ {
+ 	struct user_struct *user;
+@@ -352,45 +86,20 @@ static struct user_struct *uid_hash_find(uid_t uid, struct hlist_head *hashent)
+ 	return NULL;
+ }
+ 
+-int uids_sysfs_init(void) { return 0; }
+-static inline int uids_user_create(struct user_struct *up) { return 0; }
+-static inline void uids_mutex_lock(void) { }
+-static inline void uids_mutex_unlock(void) { }
+-
+ /* IRQs are disabled and uidhash_lock is held upon function entry.
+  * IRQ state (as stored in flags) is restored and uidhash_lock released
+  * upon function exit.
+  */
+ static void free_user(struct user_struct *up, unsigned long flags)
++	__releases(&uidhash_lock)
+ {
+ 	uid_hash_remove(up);
+ 	spin_unlock_irqrestore(&uidhash_lock, flags);
+-	sched_destroy_user(up);
+ 	key_put(up->uid_keyring);
+ 	key_put(up->session_keyring);
+ 	kmem_cache_free(uid_cachep, up);
+ }
+ 
+-#endif
+-
+-#if defined(CONFIG_RT_GROUP_SCHED) && defined(CONFIG_USER_SCHED)
+-/*
+- * We need to check if a setuid can take place. This function should be called
+- * before successfully completing the setuid.
+- */
+-int task_can_switch_user(struct user_struct *up, struct task_struct *tsk)
+-{
+-
+-	return sched_rt_can_attach(up->tg, tsk);
+-
+-}
+-#else
+-int task_can_switch_user(struct user_struct *up, struct task_struct *tsk)
+-{
+-	return 1;
+-}
+-#endif
+-
+ /*
+  * Locate the user_struct for the passed UID.  If found, take a ref on it.  The
+  * caller must undo that ref with free_uid().
+@@ -428,11 +137,7 @@ struct user_struct *alloc_uid(struct user_namespace *ns, uid_t uid)
+ 	struct hlist_head *hashent = uidhashentry(ns, uid);
+ 	struct user_struct *up, *new;
+ 
+-	/* Make uid_hash_find() + uids_user_create() + uid_hash_insert()
+-	 * atomic.
+-	 */
+-	uids_mutex_lock();
+-
++	/* Make uid_hash_find() + uid_hash_insert() atomic. */
+ 	spin_lock_irq(&uidhash_lock);
+ 	up = uid_hash_find(uid, hashent);
+ 	spin_unlock_irq(&uidhash_lock);
+@@ -445,14 +150,8 @@ struct user_struct *alloc_uid(struct user_namespace *ns, uid_t uid)
+ 		new->uid = uid;
+ 		atomic_set(&new->__count, 1);
+ 
+-		if (sched_create_user(new) < 0)
+-			goto out_free_user;
+-
+ 		new->user_ns = get_user_ns(ns);
+ 
+-		if (uids_user_create(new))
+-			goto out_destoy_sched;
+-
+ 		/*
+ 		 * Before adding this, check whether we raced
+ 		 * on adding the same user already..
+@@ -460,11 +159,6 @@ struct user_struct *alloc_uid(struct user_namespace *ns, uid_t uid)
+ 		spin_lock_irq(&uidhash_lock);
+ 		up = uid_hash_find(uid, hashent);
+ 		if (up) {
+-			/* This case is not possible when CONFIG_USER_SCHED
+-			 * is defined, since we serialize alloc_uid() using
+-			 * uids_mutex. Hence no need to call
+-			 * sched_destroy_user() or remove_user_sysfs_dir().
+-			 */
+ 			key_put(new->uid_keyring);
+ 			key_put(new->session_keyring);
+ 			kmem_cache_free(uid_cachep, new);
+@@ -475,17 +169,9 @@ struct user_struct *alloc_uid(struct user_namespace *ns, uid_t uid)
+ 		spin_unlock_irq(&uidhash_lock);
+ 	}
+ 
+-	uids_mutex_unlock();
+-
+ 	return up;
+ 
+-out_destoy_sched:
+-	sched_destroy_user(new);
+-	put_user_ns(new->user_ns);
+-out_free_user:
+-	kmem_cache_free(uid_cachep, new);
+ out_unlock:
+-	uids_mutex_unlock();
+ 	return NULL;
+ }
+ 
+diff --git a/net/sched/cls_cgroup.c b/net/sched/cls_cgroup.c
+index e4877ca..f4f0231 100644
+--- a/net/sched/cls_cgroup.c
++++ b/net/sched/cls_cgroup.c
+@@ -110,7 +110,7 @@ static int cls_cgroup_classify(struct sk_buff *skb, struct tcf_proto *tp,
+ 	 * calls by looking at the number of nested bh disable calls because
+ 	 * softirqs always disables bh.
+ 	 */
+-	if (softirq_count() != SOFTIRQ_OFFSET)
++	if (in_serving_softirq())
+ 		return -1;
+ 
+ 	rcu_read_lock();
+diff --git a/security/selinux/hooks.c b/security/selinux/hooks.c
+index 36d9e25..0b90dc9 100644
+--- a/security/selinux/hooks.c
++++ b/security/selinux/hooks.c
+@@ -2601,7 +2601,10 @@ static int selinux_inode_init_security(struct inode *inode, struct inode *dir,
+ 	sid = tsec->sid;
+ 	newsid = tsec->create_sid;
+ 
+-	if (!newsid || !(sbsec->flags & SE_SBLABELSUPP)) {
++	if ((sbsec->flags & SE_SBINITIALIZED) &&
++	    (sbsec->behavior == SECURITY_FS_USE_MNTPOINT))
++		newsid = sbsec->mntpoint_sid;
++	else if (!newsid || !(sbsec->flags & SE_SBLABELSUPP)) {
+ 		rc = security_transition_sid(sid, dsec->sid,
+ 					     inode_mode_to_security_class(inode->i_mode),
+ 					     &newsid);
+diff --git a/security/selinux/nlmsgtab.c b/security/selinux/nlmsgtab.c
+index dd7cc6d..24b958c 100644
+--- a/security/selinux/nlmsgtab.c
++++ b/security/selinux/nlmsgtab.c
+@@ -66,6 +66,8 @@ static struct nlmsg_perm nlmsg_route_perms[] =
+ 	{ RTM_NEWADDRLABEL,	NETLINK_ROUTE_SOCKET__NLMSG_WRITE },
+ 	{ RTM_DELADDRLABEL,	NETLINK_ROUTE_SOCKET__NLMSG_WRITE },
+ 	{ RTM_GETADDRLABEL,	NETLINK_ROUTE_SOCKET__NLMSG_READ  },
++	{ RTM_GETDCB,		NETLINK_ROUTE_SOCKET__NLMSG_READ  },
++	{ RTM_SETDCB,		NETLINK_ROUTE_SOCKET__NLMSG_WRITE },
+ };
+ 
+ static struct nlmsg_perm nlmsg_firewall_perms[] =
+diff --git a/sound/core/hrtimer.c b/sound/core/hrtimer.c
+index 7f4d744..2475bda 100644
+--- a/sound/core/hrtimer.c
++++ b/sound/core/hrtimer.c
+@@ -44,12 +44,13 @@ static enum hrtimer_restart snd_hrtimer_callback(struct hrtimer *hrt)
+ {
+ 	struct snd_hrtimer *stime = container_of(hrt, struct snd_hrtimer, hrt);
+ 	struct snd_timer *t = stime->timer;
++	unsigned long oruns;
+ 
+ 	if (!atomic_read(&stime->running))
+ 		return HRTIMER_NORESTART;
+ 
+-	hrtimer_forward_now(hrt, ns_to_ktime(t->sticks * resolution));
+-	snd_timer_interrupt(stime->timer, t->sticks);
++	oruns = hrtimer_forward_now(hrt, ns_to_ktime(t->sticks * resolution));
++	snd_timer_interrupt(stime->timer, t->sticks * oruns);
+ 
+ 	if (!atomic_read(&stime->running))
+ 		return HRTIMER_NORESTART;
+diff --git a/sound/pci/au88x0/au88x0_pcm.c b/sound/pci/au88x0/au88x0_pcm.c
+index b9d2f20..5439d66 100644
+--- a/sound/pci/au88x0/au88x0_pcm.c
++++ b/sound/pci/au88x0/au88x0_pcm.c
+@@ -42,11 +42,7 @@ static struct snd_pcm_hardware snd_vortex_playback_hw_adb = {
+ 	.rate_min = 5000,
+ 	.rate_max = 48000,
+ 	.channels_min = 1,
+-#ifdef CHIP_AU8830
+-	.channels_max = 4,
+-#else
+ 	.channels_max = 2,
+-#endif
+ 	.buffer_bytes_max = 0x10000,
+ 	.period_bytes_min = 0x1,
+ 	.period_bytes_max = 0x1000,
+@@ -115,6 +111,17 @@ static struct snd_pcm_hardware snd_vortex_playback_hw_wt = {
+ 	.periods_max = 64,
+ };
+ #endif
++#ifdef CHIP_AU8830
++static unsigned int au8830_channels[3] = {
++	1, 2, 4,
++};
++
++static struct snd_pcm_hw_constraint_list hw_constraints_au8830_channels = {
++	.count = ARRAY_SIZE(au8830_channels),
++	.list = au8830_channels,
++	.mask = 0,
++};
++#endif
+ /* open callback */
+ static int snd_vortex_pcm_open(struct snd_pcm_substream *substream)
+ {
+@@ -156,6 +163,15 @@ static int snd_vortex_pcm_open(struct snd_pcm_substream *substream)
+ 		if (VORTEX_PCM_TYPE(substream->pcm) == VORTEX_PCM_ADB
+ 		    || VORTEX_PCM_TYPE(substream->pcm) == VORTEX_PCM_I2S)
+ 			runtime->hw = snd_vortex_playback_hw_adb;
++#ifdef CHIP_AU8830
++		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK &&
++			VORTEX_PCM_TYPE(substream->pcm) == VORTEX_PCM_ADB) {
++			runtime->hw.channels_max = 4;
++			snd_pcm_hw_constraint_list(runtime, 0,
++				SNDRV_PCM_HW_PARAM_CHANNELS,
++				&hw_constraints_au8830_channels);
++		}
++#endif
+ 		substream->runtime->private_data = NULL;
+ 	}
+ #ifndef CHIP_AU8810
+diff --git a/sound/pci/hda/hda_eld.c b/sound/pci/hda/hda_eld.c
+index 9446a5a..634c604 100644
+--- a/sound/pci/hda/hda_eld.c
++++ b/sound/pci/hda/hda_eld.c
+@@ -383,7 +383,7 @@ static void hdmi_show_short_audio_desc(struct cea_sad *a)
+ 	snd_print_pcm_rates(a->rates, buf, sizeof(buf));
+ 
+ 	if (a->format == AUDIO_CODING_TYPE_LPCM)
+-		snd_print_pcm_bits(a->sample_bits, buf2 + 8, sizeof(buf2 - 8));
++		snd_print_pcm_bits(a->sample_bits, buf2 + 8, sizeof(buf2) - 8);
+ 	else if (a->max_bitrate)
+ 		snprintf(buf2, sizeof(buf2),
+ 				", max bitrate = %d", a->max_bitrate);
+diff --git a/sound/pci/hda/patch_conexant.c b/sound/pci/hda/patch_conexant.c
+index 9d855f4..d68aaf4 100644
+--- a/sound/pci/hda/patch_conexant.c
++++ b/sound/pci/hda/patch_conexant.c
+@@ -366,10 +366,16 @@ static int conexant_add_jack(struct hda_codec *codec,
+ 	struct conexant_spec *spec;
+ 	struct conexant_jack *jack;
+ 	const char *name;
+-	int err;
++	int i, err;
+ 
+ 	spec = codec->spec;
+ 	snd_array_init(&spec->jacks, sizeof(*jack), 32);
++
++	jack = spec->jacks.list;
++	for (i = 0; i < spec->jacks.used; i++, jack++)
++		if (jack->nid == nid)
++			return 0 ; /* already present */
++
+ 	jack = snd_array_new(&spec->jacks);
+ 	name = (type == SND_JACK_HEADPHONE) ? "Headphone" : "Mic" ;
+ 
+diff --git a/sound/soc/blackfin/bf5xx-ac97.c b/sound/soc/blackfin/bf5xx-ac97.c
+index e693229..488593f 100644
+--- a/sound/soc/blackfin/bf5xx-ac97.c
++++ b/sound/soc/blackfin/bf5xx-ac97.c
+@@ -260,9 +260,9 @@ static int bf5xx_ac97_suspend(struct snd_soc_dai *dai)
+ 	pr_debug("%s : sport %d\n", __func__, dai->id);
+ 	if (!dai->active)
+ 		return 0;
+-	if (dai->capture.active)
++	if (dai->capture_active)
+ 		sport_rx_stop(sport);
+-	if (dai->playback.active)
++	if (dai->playback_active)
+ 		sport_tx_stop(sport);
+ 	return 0;
+ }
+diff --git a/sound/soc/codecs/wm8990.c b/sound/soc/codecs/wm8990.c
+index 253159c..5b47d39 100644
+--- a/sound/soc/codecs/wm8990.c
++++ b/sound/soc/codecs/wm8990.c
+@@ -1185,7 +1185,7 @@ static int wm8990_set_bias_level(struct snd_soc_codec *codec,
+ 				     WM8990_VMIDTOG);
+ 
+ 			/* Delay to allow output caps to discharge */
+-			msleep(msecs_to_jiffies(300));
++			msleep(300);
+ 
+ 			/* Disable VMIDTOG */
+ 			snd_soc_write(codec, WM8990_ANTIPOP2, WM8990_SOFTST |
+@@ -1197,17 +1197,17 @@ static int wm8990_set_bias_level(struct snd_soc_codec *codec,
+ 			/* Enable outputs */
+ 			snd_soc_write(codec, WM8990_POWER_MANAGEMENT_1, 0x1b00);
+ 
+-			msleep(msecs_to_jiffies(50));
++			msleep(50);
+ 
+ 			/* Enable VMID at 2x50k */
+ 			snd_soc_write(codec, WM8990_POWER_MANAGEMENT_1, 0x1f02);
+ 
+-			msleep(msecs_to_jiffies(100));
++			msleep(100);
+ 
+ 			/* Enable VREF */
+ 			snd_soc_write(codec, WM8990_POWER_MANAGEMENT_1, 0x1f03);
+ 
+-			msleep(msecs_to_jiffies(600));
++			msleep(600);
+ 
+ 			/* Enable BUFIOEN */
+ 			snd_soc_write(codec, WM8990_ANTIPOP2, WM8990_SOFTST |
+@@ -1252,7 +1252,7 @@ static int wm8990_set_bias_level(struct snd_soc_codec *codec,
+ 		/* Disable VMID */
+ 		snd_soc_write(codec, WM8990_POWER_MANAGEMENT_1, 0x1f01);
+ 
+-		msleep(msecs_to_jiffies(300));
++		msleep(300);
+ 
+ 		/* Enable all output discharge bits */
+ 		snd_soc_write(codec, WM8990_ANTIPOP1, WM8990_DIS_LLINE |
+diff --git a/sound/usb/usx2y/us122l.c b/sound/usb/usx2y/us122l.c
+index 99f3376..74078d9 100644
+--- a/sound/usb/usx2y/us122l.c
++++ b/sound/usb/usx2y/us122l.c
+@@ -234,29 +234,26 @@ static unsigned int usb_stream_hwdep_poll(struct snd_hwdep *hw,
+ 					  struct file *file, poll_table *wait)
+ {
+ 	struct us122l	*us122l = hw->private_data;
+-	struct usb_stream *s = us122l->sk.s;
+ 	unsigned	*polled;
+ 	unsigned int	mask;
+ 
+ 	poll_wait(file, &us122l->sk.sleep, wait);
+ 
+-	switch (s->state) {
+-	case usb_stream_ready:
+-		if (us122l->first == file)
+-			polled = &s->periods_polled;
+-		else
+-			polled = &us122l->second_periods_polled;
+-		if (*polled != s->periods_done) {
+-			*polled = s->periods_done;
+-			mask = POLLIN | POLLOUT | POLLWRNORM;
+-			break;
++	mask = POLLIN | POLLOUT | POLLWRNORM | POLLERR;
++	if (mutex_trylock(&us122l->mutex)) {
++		struct usb_stream *s = us122l->sk.s;
++		if (s && s->state == usb_stream_ready) {
++			if (us122l->first == file)
++				polled = &s->periods_polled;
++			else
++				polled = &us122l->second_periods_polled;
++			if (*polled != s->periods_done) {
++				*polled = s->periods_done;
++				mask = POLLIN | POLLOUT | POLLWRNORM;
++			} else
++				mask = 0;
+ 		}
+-		/* Fall through */
+-		mask = 0;
+-		break;
+-	default:
+-		mask = POLLIN | POLLOUT | POLLWRNORM | POLLERR;
+-		break;
++		mutex_unlock(&us122l->mutex);
+ 	}
+ 	return mask;
+ }
+@@ -342,6 +339,7 @@ static int usb_stream_hwdep_ioctl(struct snd_hwdep *hw, struct file *file,
+ {
+ 	struct usb_stream_config *cfg;
+ 	struct us122l *us122l = hw->private_data;
++	struct usb_stream *s;
+ 	unsigned min_period_frames;
+ 	int err = 0;
+ 	bool high_speed;
+@@ -387,18 +385,18 @@ static int usb_stream_hwdep_ioctl(struct snd_hwdep *hw, struct file *file,
+ 	snd_power_wait(hw->card, SNDRV_CTL_POWER_D0);
+ 
+ 	mutex_lock(&us122l->mutex);
++	s = us122l->sk.s;
+ 	if (!us122l->master)
+ 		us122l->master = file;
+ 	else if (us122l->master != file) {
+-		if (memcmp(cfg, &us122l->sk.s->cfg, sizeof(*cfg))) {
++		if (!s || memcmp(cfg, &s->cfg, sizeof(*cfg))) {
+ 			err = -EIO;
+ 			goto unlock;
+ 		}
+ 		us122l->slave = file;
+ 	}
+-	if (!us122l->sk.s ||
+-	    memcmp(cfg, &us122l->sk.s->cfg, sizeof(*cfg)) ||
+-	    us122l->sk.s->state == usb_stream_xrun) {
++	if (!s || memcmp(cfg, &s->cfg, sizeof(*cfg)) ||
++	    s->state == usb_stream_xrun) {
+ 		us122l_stop(us122l);
+ 		if (!us122l_start(us122l, cfg->sample_rate, cfg->period_frames))
+ 			err = -EIO;
+@@ -409,6 +407,7 @@ unlock:
+ 	mutex_unlock(&us122l->mutex);
+ free:
+ 	kfree(cfg);
++	wake_up_all(&us122l->sk.sleep);
+ 	return err;
+ }
+ 

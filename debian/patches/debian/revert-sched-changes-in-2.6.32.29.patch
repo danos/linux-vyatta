@@ -1,0 +1,1992 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Subject: [PATCH] Revert sched changes in 2.6.32.29
+
+These conflict with OpenVZ and VServer.  Defer them until those
+projects have resolved the conflict.
+
+--- a/Documentation/kernel-parameters.txt
++++ b/Documentation/kernel-parameters.txt
+@@ -2578,10 +2578,6 @@
+ 			disables clocksource verification at runtime.
+ 			Used to enable high-resolution timer mode on older
+ 			hardware, and in virtualized environment.
+-			[x86] noirqtime: Do not use TSC to do irq accounting.
+-			Used to run time disable IRQ_TIME_ACCOUNTING on any
+-			platforms where RDTSC is slow and this accounting
+-			can add overhead.
+ 
+ 	turbografx.map[2|3]=	[HW,JOY]
+ 			TurboGraFX parallel port interface
+--- a/arch/ia64/include/asm/system.h
++++ b/arch/ia64/include/asm/system.h
+@@ -281,6 +281,10 @@
+ 
+ void default_idle(void);
+ 
++#ifdef CONFIG_VIRT_CPU_ACCOUNTING
++extern void account_system_vtime(struct task_struct *);
++#endif
++
+ #endif /* __KERNEL__ */
+ 
+ #endif /* __ASSEMBLY__ */
+--- a/arch/powerpc/include/asm/system.h
++++ b/arch/powerpc/include/asm/system.h
+@@ -540,6 +540,10 @@
+ 
+ #define PTRRELOC(x)	((typeof(x)) add_reloc_offset((unsigned long)(x)))
+ 
++#ifdef CONFIG_VIRT_CPU_ACCOUNTING
++extern void account_system_vtime(struct task_struct *);
++#endif
++
+ extern struct dentry *powerpc_debugfs_root;
+ 
+ #endif /* __KERNEL__ */
+--- a/arch/s390/include/asm/system.h
++++ b/arch/s390/include/asm/system.h
+@@ -97,6 +97,7 @@
+ 
+ extern void account_vtime(struct task_struct *, struct task_struct *);
+ extern void account_tick_vtime(struct task_struct *);
++extern void account_system_vtime(struct task_struct *);
+ 
+ #ifdef CONFIG_PFAULT
+ extern void pfault_irq_init(void);
+--- a/arch/x86/Kconfig
++++ b/arch/x86/Kconfig
+@@ -753,17 +753,6 @@
+ 	  making when dealing with multi-core CPU chips at a cost of slightly
+ 	  increased overhead in some places. If unsure say N here.
+ 
+-config IRQ_TIME_ACCOUNTING
+-	bool "Fine granularity task level IRQ time accounting"
+-	default n
+-	---help---
+-	  Select this option to enable fine granularity task irq time
+-	  accounting. This is done by reading a timestamp on each
+-	  transitions between softirq and hardirq state, so there can be a
+-	  small performance impact.
+-
+-	  If in doubt, say N here.
+-
+ source "kernel/Kconfig.preempt"
+ 
+ config X86_UP_APIC
+--- a/arch/x86/kernel/tsc.c
++++ b/arch/x86/kernel/tsc.c
+@@ -104,14 +104,10 @@
+ 
+ __setup("notsc", notsc_setup);
+ 
+-static int no_sched_irq_time;
+-
+ static int __init tsc_setup(char *str)
+ {
+ 	if (!strcmp(str, "reliable"))
+ 		tsc_clocksource_reliable = 1;
+-	if (!strncmp(str, "noirqtime", 9))
+-		no_sched_irq_time = 1;
+ 	return 1;
+ }
+ 
+@@ -806,7 +802,6 @@
+ 	if (!tsc_unstable) {
+ 		tsc_unstable = 1;
+ 		sched_clock_stable = 0;
+-		disable_sched_clock_irqtime();
+ 		printk(KERN_INFO "Marking TSC unstable due to %s\n", reason);
+ 		/* Change only the rating, when not registered */
+ 		if (clocksource_tsc.mult)
+@@ -995,9 +990,6 @@
+ 	/* now allow native_sched_clock() to use rdtsc */
+ 	tsc_disabled = 0;
+ 
+-	if (!no_sched_irq_time)
+-		enable_sched_clock_irqtime();
+-
+ 	lpj = ((u64)tsc_khz * 1000);
+ 	do_div(lpj, HZ);
+ 	lpj_fine = lpj;
+--- a/include/linux/hardirq.h
++++ b/include/linux/hardirq.h
+@@ -64,8 +64,6 @@
+ #define HARDIRQ_OFFSET	(1UL << HARDIRQ_SHIFT)
+ #define NMI_OFFSET	(1UL << NMI_SHIFT)
+ 
+-#define SOFTIRQ_DISABLE_OFFSET	(2 * SOFTIRQ_OFFSET)
+-
+ #ifndef PREEMPT_ACTIVE
+ #define PREEMPT_ACTIVE_BITS	1
+ #define PREEMPT_ACTIVE_SHIFT	(NMI_SHIFT + NMI_BITS)
+@@ -84,13 +82,10 @@
+ /*
+  * Are we doing bottom half or hardware interrupt processing?
+  * Are we in a softirq context? Interrupt context?
+- * in_softirq - Are we currently processing softirq or have bh disabled?
+- * in_serving_softirq - Are we currently processing softirq?
+  */
+ #define in_irq()		(hardirq_count())
+ #define in_softirq()		(softirq_count())
+ #define in_interrupt()		(irq_count())
+-#define in_serving_softirq()	(softirq_count() & SOFTIRQ_OFFSET)
+ 
+ /*
+  * Are we in NMI context?
+@@ -137,12 +132,10 @@
+ 
+ struct task_struct;
+ 
+-#if !defined(CONFIG_VIRT_CPU_ACCOUNTING) && !defined(CONFIG_IRQ_TIME_ACCOUNTING)
++#ifndef CONFIG_VIRT_CPU_ACCOUNTING
+ static inline void account_system_vtime(struct task_struct *tsk)
+ {
+ }
+-#else
+-extern void account_system_vtime(struct task_struct *tsk);
+ #endif
+ 
+ #if defined(CONFIG_NO_HZ)
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -728,6 +728,14 @@
+ 	uid_t uid;
+ 	struct user_namespace *user_ns;
+ 
++#ifdef CONFIG_USER_SCHED
++	struct task_group *tg;
++#ifdef CONFIG_SYSFS
++	struct kobject kobj;
++	struct delayed_work work;
++#endif
++#endif
++
+ #ifdef CONFIG_PERF_EVENTS
+ 	atomic_long_t locked_vm;
+ #endif
+@@ -894,9 +902,6 @@
+ 	 * single CPU.
+ 	 */
+ 	unsigned int cpu_power;
+-#ifndef __GENKSYMS__
+-	unsigned int group_weight;
+-#endif
+ 
+ 	/*
+ 	 * The CPUs this group covers.
+@@ -1114,7 +1121,7 @@
+ 					 struct task_struct *task);
+ 
+ #ifdef CONFIG_FAIR_GROUP_SCHED
+-	void (*task_move_group) (struct task_struct *p, int on_rq);
++	void (*moved_group) (struct task_struct *p, int on_rq);
+ #endif
+ };
+ 
+@@ -1729,7 +1736,8 @@
+ /*
+  * Per process flags
+  */
+-#define PF_KSOFTIRQD	0x00000001	/* I am ksoftirqd */
++#define PF_ALIGNWARN	0x00000001	/* Print alignment warning msgs */
++					/* Not implemented yet, only for 486*/
+ #define PF_STARTING	0x00000002	/* being created */
+ #define PF_EXITING	0x00000004	/* getting shut down */
+ #define PF_EXITPIDONE	0x00000008	/* pi exit done on shut down */
+@@ -1866,19 +1874,6 @@
+  */
+ extern unsigned long long cpu_clock(int cpu);
+ 
+-#ifdef CONFIG_IRQ_TIME_ACCOUNTING
+-/*
+- * An i/f to runtime opt-in for irq time accounting based off of sched_clock.
+- * The reason for this explicit opt-in is not to have perf penalty with
+- * slow sched_clocks.
+- */
+-extern void enable_sched_clock_irqtime(void);
+-extern void disable_sched_clock_irqtime(void);
+-#else
+-static inline void enable_sched_clock_irqtime(void) {}
+-static inline void disable_sched_clock_irqtime(void) {}
+-#endif
+-
+ extern unsigned long long
+ task_sched_runtime(struct task_struct *task);
+ extern unsigned long long thread_group_sched_runtime(struct task_struct *task);
+@@ -2414,9 +2409,9 @@
+ 
+ extern int __cond_resched_softirq(void);
+ 
+-#define cond_resched_softirq() ({					\
+-	__might_sleep(__FILE__, __LINE__, SOFTIRQ_DISABLE_OFFSET);	\
+-	__cond_resched_softirq();					\
++#define cond_resched_softirq() ({				\
++	__might_sleep(__FILE__, __LINE__, SOFTIRQ_OFFSET);	\
++	__cond_resched_softirq();				\
+ })
+ 
+ /*
+@@ -2505,9 +2500,13 @@
+ 
+ extern void normalize_rt_tasks(void);
+ 
+-#ifdef CONFIG_CGROUP_SCHED
++#ifdef CONFIG_GROUP_SCHED
+ 
+ extern struct task_group init_task_group;
++#ifdef CONFIG_USER_SCHED
++extern struct task_group root_task_group;
++extern void set_tg_uid(struct user_struct *user);
++#endif
+ 
+ extern struct task_group *sched_create_group(struct task_group *parent);
+ extern void sched_destroy_group(struct task_group *tg);
+--- a/init/Kconfig
++++ b/init/Kconfig
+@@ -426,6 +426,57 @@
+ config HAVE_UNSTABLE_SCHED_CLOCK
+ 	bool
+ 
++config GROUP_SCHED
++	bool "Group CPU scheduler"
++	depends on EXPERIMENTAL
++	default n
++	help
++	  This feature lets CPU scheduler recognize task groups and control CPU
++	  bandwidth allocation to such task groups.
++	  In order to create a group from arbitrary set of processes, use
++	  CONFIG_CGROUPS. (See Control Group support.)
++
++config FAIR_GROUP_SCHED
++	bool "Group scheduling for SCHED_OTHER"
++	depends on GROUP_SCHED
++	default GROUP_SCHED
++
++config RT_GROUP_SCHED
++	bool "Group scheduling for SCHED_RR/FIFO"
++	depends on EXPERIMENTAL
++	depends on GROUP_SCHED
++	default n
++	help
++	  This feature lets you explicitly allocate real CPU bandwidth
++	  to users or control groups (depending on the "Basis for grouping tasks"
++	  setting below. If enabled, it will also make it impossible to
++	  schedule realtime tasks for non-root users until you allocate
++	  realtime bandwidth for them.
++	  See Documentation/scheduler/sched-rt-group.txt for more information.
++
++choice
++	depends on GROUP_SCHED
++	prompt "Basis for grouping tasks"
++	default USER_SCHED
++
++config USER_SCHED
++	bool "user id"
++	help
++	  This option will choose userid as the basis for grouping
++	  tasks, thus providing equal CPU bandwidth to each user.
++
++config CGROUP_SCHED
++	bool "Control groups"
++ 	depends on CGROUPS
++ 	help
++	  This option allows you to create arbitrary task groups
++	  using the "cgroup" pseudo filesystem and control
++	  the cpu bandwidth allocated to each such task group.
++	  Refer to Documentation/cgroups/cgroups.txt for more
++	  information on "cgroup" pseudo filesystem.
++
++endchoice
++
+ menuconfig CGROUPS
+ 	boolean "Control Group support"
+ 	help
+@@ -546,35 +597,6 @@
+ 	  Now, memory usage of swap_cgroup is 2 bytes per entry. If swap page
+ 	  size is 4096bytes, 512k per 1Gbytes of swap.
+ 
+-menuconfig CGROUP_SCHED
+-	bool "Group CPU scheduler"
+-	depends on EXPERIMENTAL && CGROUPS
+-	default n
+-	help
+-	  This feature lets CPU scheduler recognize task groups and control CPU
+-	  bandwidth allocation to such task groups. It uses cgroups to group
+-	  tasks.
+-
+-if CGROUP_SCHED
+-config FAIR_GROUP_SCHED
+-	bool "Group scheduling for SCHED_OTHER"
+-	depends on CGROUP_SCHED
+-	default CGROUP_SCHED
+-
+-config RT_GROUP_SCHED
+-	bool "Group scheduling for SCHED_RR/FIFO"
+-	depends on EXPERIMENTAL
+-	depends on CGROUP_SCHED
+-	default n
+-	help
+-	  This feature lets you explicitly allocate real CPU bandwidth
+-	  to task groups. If enabled, it will also make it impossible to
+-	  schedule realtime tasks for non-root users until you allocate
+-	  realtime bandwidth for them.
+-	  See Documentation/scheduler/sched-rt-group.txt for more information.
+-
+-endif #CGROUP_SCHED
+-
+ endif # CGROUPS
+ 
+ config MM_OWNER
+--- b/kernel/capability.c
++++ a/kernel/capability.c
+@@ -15,6 +15,7 @@
+ #include <linux/syscalls.h>
+ #include <linux/pid_namespace.h>
+ #include <asm/uaccess.h>
++#include "cred-internals.h"
+ 
+ /*
+  * Leveraged for setting/resetting capabilities
+--- /dev/null
++++ a/kernel/cred-internals.h
+@@ -0,0 +1,21 @@
++/* Internal credentials stuff
++ *
++ * Copyright (C) 2008 Red Hat, Inc. All Rights Reserved.
++ * Written by David Howells (dhowells@redhat.com)
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public Licence
++ * as published by the Free Software Foundation; either version
++ * 2 of the Licence, or (at your option) any later version.
++ */
++
++/*
++ * user.c
++ */
++static inline void sched_switch_user(struct task_struct *p)
++{
++#ifdef CONFIG_USER_SCHED
++	sched_move_task(p);
++#endif	/* CONFIG_USER_SCHED */
++}
++
+--- b/kernel/cred.c
++++ a/kernel/cred.c
+@@ -16,6 +16,7 @@
+ #include <linux/init_task.h>
+ #include <linux/security.h>
+ #include <linux/cn_proc.h>
++#include "cred-internals.h"
+ 
+ #if 0
+ #define kdebug(FMT, ...) \
+@@ -552,6 +553,8 @@
+ 		atomic_dec(&old->user->processes);
+ 	alter_cred_subscribers(old, -2);
+ 
++	sched_switch_user(task);
++
+ 	/* send notifications */
+ 	if (new->uid   != old->uid  ||
+ 	    new->euid  != old->euid ||
+--- b/kernel/exit.c
++++ a/kernel/exit.c
+@@ -54,6 +54,7 @@
+ #include <asm/unistd.h>
+ #include <asm/pgtable.h>
+ #include <asm/mmu_context.h>
++#include "cred-internals.h"
+ 
+ static void exit_mm(struct task_struct * tsk);
+ 
+--- b/kernel/ksysfs.c
++++ a/kernel/ksysfs.c
+@@ -176,8 +176,16 @@
+ 			goto group_exit;
+ 	}
+ 
++	/* create the /sys/kernel/uids/ directory */
++	error = uids_sysfs_init();
++	if (error)
++		goto notes_exit;
++
+ 	return 0;
+ 
++notes_exit:
++	if (notes_size > 0)
++		sysfs_remove_bin_file(kernel_kobj, &notes_attr);
+ group_exit:
+ 	sysfs_remove_group(kernel_kobj, &kernel_attr_group);
+ kset_exit:
+--- b/kernel/sched.c
++++ a/kernel/sched.c
+@@ -233,7 +233,7 @@
+  */
+ static DEFINE_MUTEX(sched_domains_mutex);
+ 
+-#ifdef CONFIG_CGROUP_SCHED
++#ifdef CONFIG_GROUP_SCHED
+ 
+ #include <linux/cgroup.h>
+ 
+@@ -243,7 +243,13 @@
+ 
+ /* task group related information */
+ struct task_group {
++#ifdef CONFIG_CGROUP_SCHED
+ 	struct cgroup_subsys_state css;
++#endif
++
++#ifdef CONFIG_USER_SCHED
++	uid_t uid;
++#endif
+ 
+ #ifdef CONFIG_FAIR_GROUP_SCHED
+ 	/* schedulable entities of this group on each cpu */
+@@ -268,7 +274,35 @@
+ 	struct list_head children;
+ };
+ 
++#ifdef CONFIG_USER_SCHED
++
++/* Helper function to pass uid information to create_sched_user() */
++void set_tg_uid(struct user_struct *user)
++{
++	user->tg->uid = user->uid;
++}
++
++/*
++ * Root task group.
++ *	Every UID task group (including init_task_group aka UID-0) will
++ *	be a child to this group.
++ */
++struct task_group root_task_group;
++
++#ifdef CONFIG_FAIR_GROUP_SCHED
++/* Default task group's sched entity on each cpu */
++static DEFINE_PER_CPU(struct sched_entity, init_sched_entity);
++/* Default task group's cfs_rq on each cpu */
++static DEFINE_PER_CPU_SHARED_ALIGNED(struct cfs_rq, init_tg_cfs_rq);
++#endif /* CONFIG_FAIR_GROUP_SCHED */
++
++#ifdef CONFIG_RT_GROUP_SCHED
++static DEFINE_PER_CPU(struct sched_rt_entity, init_sched_rt_entity);
++static DEFINE_PER_CPU_SHARED_ALIGNED(struct rt_rq, init_rt_rq);
++#endif /* CONFIG_RT_GROUP_SCHED */
++#else /* !CONFIG_USER_SCHED */
+ #define root_task_group init_task_group
++#endif /* CONFIG_USER_SCHED */
+ 
+ /* task_group_lock serializes add/remove of task groups and also changes to
+  * a task group's cpu shares.
+@@ -284,7 +318,11 @@
+ }
+ #endif
+ 
++#ifdef CONFIG_USER_SCHED
++# define INIT_TASK_GROUP_LOAD	(2*NICE_0_LOAD)
++#else /* !CONFIG_USER_SCHED */
+ # define INIT_TASK_GROUP_LOAD	NICE_0_LOAD
++#endif /* CONFIG_USER_SCHED */
+ 
+ /*
+  * A weight of 0 or 1 can cause arithmetics problems.
+@@ -310,7 +348,11 @@
+ {
+ 	struct task_group *tg;
+ 
+-#ifdef CONFIG_CGROUP_SCHED
++#ifdef CONFIG_USER_SCHED
++	rcu_read_lock();
++	tg = __task_cred(p)->user->tg;
++	rcu_read_unlock();
++#elif defined(CONFIG_CGROUP_SCHED)
+ 	tg = container_of(task_subsys_state(p, cpu_cgroup_subsys_id),
+ 				struct task_group, css);
+ #else
+@@ -341,7 +383,7 @@
+ 	return NULL;
+ }
+ 
+-#endif	/* CONFIG_CGROUP_SCHED */
++#endif	/* CONFIG_GROUP_SCHED */
+ 
+ /* CFS-related fields in a runqueue */
+ struct cfs_rq {
+@@ -525,9 +567,6 @@
+ 	struct mm_struct *prev_mm;
+ 
+ 	u64 clock;
+-#ifndef __GENKSYMS__
+-	u64 clock_task;
+-#endif
+ 
+ 	atomic_t nr_iowait;
+ 
+@@ -533,10 +574,6 @@
+ 	struct root_domain *rd;
+ 	struct sched_domain *sd;
+ 
+-#ifndef __GENKSYMS__
+-	unsigned long cpu_power;
+-#endif
+-
+ 	unsigned char idle_at_tick;
+ 	/* For active balancing */
+ 	int post_schedule;
+@@ -555,10 +594,6 @@
+ 	u64 avg_idle;
+ #endif
+ 
+-#ifdef CONFIG_IRQ_TIME_ACCOUNTING
+-	u64 prev_irq_time;
+-#endif
+-
+ 	/* calc_load related fields */
+ 	unsigned long calc_load_update;
+ 	long calc_load_active;
+@@ -596,7 +631,11 @@
+ 
+ static DEFINE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
+ 
++static inline
++void check_preempt_curr(struct rq *rq, struct task_struct *p, int flags)
++{
++	rq->curr->sched_class->check_preempt_curr(rq, p, flags);
++}
+-static void check_preempt_curr(struct rq *rq, struct task_struct *p, int flags);
+ 
+ static inline int cpu_of(struct rq *rq)
+ {
+@@ -623,20 +662,9 @@
+ #define cpu_curr(cpu)		(cpu_rq(cpu)->curr)
+ #define raw_rq()		(&__raw_get_cpu_var(runqueues))
+ 
+-static u64 irq_time_cpu(int cpu);
+-static void sched_irq_time_avg_update(struct rq *rq, u64 irq_time);
+-
+ inline void update_rq_clock(struct rq *rq)
+ {
+-	int cpu = cpu_of(rq);
+-	u64 irq_time;
+-
+ 	rq->clock = sched_clock_cpu(cpu_of(rq));
+-	irq_time = irq_time_cpu(cpu);
+-	if (rq->clock - irq_time > rq->clock_task)
+-		rq->clock_task = rq->clock - irq_time;
+-
+-	sched_irq_time_avg_update(rq, irq_time);
+ }
+ 
+ /*
+@@ -1269,10 +1297,6 @@
+ static void sched_rt_avg_update(struct rq *rq, u64 rt_delta)
+ {
+ }
+-
+-static void sched_avg_update(struct rq *rq)
+-{
+-}
+ #endif /* CONFIG_SMP */
+ 
+ #if BITS_PER_LONG == 32
+@@ -1522,9 +1546,24 @@
+ 	return max(rq->cpu_load[type-1], total);
+ }
+ 
++static struct sched_group *group_of(int cpu)
++{
++	struct sched_domain *sd = rcu_dereference(cpu_rq(cpu)->sd);
++
++	if (!sd)
++		return NULL;
++
++	return sd->groups;
++}
++
+ static unsigned long power_of(int cpu)
+ {
+-	return cpu_rq(cpu)->cpu_power;
++	struct sched_group *group = group_of(cpu);
++
++	if (!group)
++		return SCHED_LOAD_SCALE;
++
++	return group->cpu_power;
+ }
+ 
+ static int task_hot(struct task_struct *p, u64 now, struct sched_domain *sd);
+@@ -1806,94 +1845,6 @@
+ #endif
+ }
+ 
+-#ifdef CONFIG_IRQ_TIME_ACCOUNTING
+-
+-/*
+- * There are no locks covering percpu hardirq/softirq time.
+- * They are only modified in account_system_vtime, on corresponding CPU
+- * with interrupts disabled. So, writes are safe.
+- * They are read and saved off onto struct rq in update_rq_clock().
+- * This may result in other CPU reading this CPU's irq time and can
+- * race with irq/account_system_vtime on this CPU. We would either get old
+- * or new value (or semi updated value on 32 bit) with a side effect of
+- * accounting a slice of irq time to wrong task when irq is in progress
+- * while we read rq->clock. That is a worthy compromise in place of having
+- * locks on each irq in account_system_time.
+- */
+-static DEFINE_PER_CPU(u64, cpu_hardirq_time);
+-static DEFINE_PER_CPU(u64, cpu_softirq_time);
+-
+-static DEFINE_PER_CPU(u64, irq_start_time);
+-static int sched_clock_irqtime;
+-
+-void enable_sched_clock_irqtime(void)
+-{
+-	sched_clock_irqtime = 1;
+-}
+-
+-void disable_sched_clock_irqtime(void)
+-{
+-	sched_clock_irqtime = 0;
+-}
+-
+-static u64 irq_time_cpu(int cpu)
+-{
+-	if (!sched_clock_irqtime)
+-		return 0;
+-
+-	return per_cpu(cpu_softirq_time, cpu) + per_cpu(cpu_hardirq_time, cpu);
+-}
+-
+-void account_system_vtime(struct task_struct *curr)
+-{
+-	unsigned long flags;
+-	int cpu;
+-	u64 now, delta;
+-
+-	if (!sched_clock_irqtime)
+-		return;
+-
+-	local_irq_save(flags);
+-
+-	cpu = smp_processor_id();
+-	now = sched_clock_cpu(cpu);
+-	delta = now - per_cpu(irq_start_time, cpu);
+-	per_cpu(irq_start_time, cpu) = now;
+-	/*
+-	 * We do not account for softirq time from ksoftirqd here.
+-	 * We want to continue accounting softirq time to ksoftirqd thread
+-	 * in that case, so as not to confuse scheduler with a special task
+-	 * that do not consume any time, but still wants to run.
+-	 */
+-	if (hardirq_count())
+-		per_cpu(cpu_hardirq_time, cpu) += delta;
+-	else if (in_serving_softirq() && !(curr->flags & PF_KSOFTIRQD))
+-		per_cpu(cpu_softirq_time, cpu) += delta;
+-
+-	local_irq_restore(flags);
+-}
+-EXPORT_SYMBOL_GPL(account_system_vtime);
+-
+-static void sched_irq_time_avg_update(struct rq *rq, u64 curr_irq_time)
+-{
+-	if (sched_clock_irqtime && sched_feat(NONIRQ_POWER)) {
+-		u64 delta_irq = curr_irq_time - rq->prev_irq_time;
+-		rq->prev_irq_time = curr_irq_time;
+-		sched_rt_avg_update(rq, delta_irq);
+-	}
+-}
+-
+-#else
+-
+-static u64 irq_time_cpu(int cpu)
+-{
+-	return 0;
+-}
+-
+-static void sched_irq_time_avg_update(struct rq *rq, u64 curr_irq_time) { }
+-
+-#endif
+-
+ #include "sched_stats.h"
+ #include "sched_idletask.c"
+ #include "sched_fair.c"
+@@ -1919,8 +1870,8 @@
+ static void set_load_weight(struct task_struct *p)
+ {
+ 	if (task_has_rt_policy(p)) {
++		p->se.load.weight = prio_to_weight[0] * 2;
++		p->se.load.inv_weight = prio_to_wmult[0] >> 1;
+-		p->se.load.weight = 0;
+-		p->se.load.inv_weight = WMULT_CONST;
+ 		return;
+ 	}
+ 
+@@ -2101,9 +2052,6 @@
+ 	if (p->sched_class != &fair_sched_class)
+ 		return 0;
+ 
+-	if (unlikely(p->policy == SCHED_IDLE))
+-		return 0;
+-
+ 	/*
+ 	 * Buddy candidates are cache hot:
+ 	 */
+@@ -2375,24 +2323,6 @@
+ 	preempt_enable();
+ }
+ 
+-static void check_preempt_curr(struct rq *rq, struct task_struct *p, int flags)
+-{
+-	const struct sched_class *class;
+-
+-	if (p->sched_class == rq->curr->sched_class) {
+-		rq->curr->sched_class->check_preempt_curr(rq, p, flags);
+-	} else {
+-		for_each_class(class) {
+-			if (class == rq->curr->sched_class)
+-				break;
+-			if (class == p->sched_class) {
+-				resched_task(rq->curr);
+-				break;
+-			}
+-		}
+-	}
+-}
+-
+ #ifdef CONFIG_SMP
+ /*
+  * ->cpus_allowed is protected by either TASK_WAKING or rq->lock held.
+@@ -3214,8 +3144,6 @@
+ 		this_rq->calc_load_update += LOAD_FREQ;
+ 		calc_load_account_active(this_rq);
+ 	}
+-
+-	sched_avg_update(this_rq);
+ }
+ 
+ #ifdef CONFIG_SMP
+@@ -3347,7 +3275,7 @@
+ 	 * 2) too many balance attempts have failed.
+ 	 */
+ 
++	tsk_cache_hot = task_hot(p, rq->clock, sd);
+-	tsk_cache_hot = task_hot(p, rq->clock_task, sd);
+ 	if (!tsk_cache_hot ||
+ 		sd->nr_balance_failed > sd->cache_nice_tries) {
+ #ifdef CONFIG_SCHEDSTATS
+@@ -3530,17 +3458,12 @@
+ 	unsigned long this_load;
+ 	unsigned long this_load_per_task;
+ 	unsigned long this_nr_running;
+-	unsigned long this_has_capacity;
+-	unsigned int  this_idle_cpus;
+ 
+ 	/* Statistics of the busiest group */
+-	unsigned int  busiest_idle_cpus;
+ 	unsigned long max_load;
+ 	unsigned long busiest_load_per_task;
+ 	unsigned long busiest_nr_running;
+ 	unsigned long busiest_group_capacity;
+-	unsigned long busiest_has_capacity;
+-	unsigned int  busiest_group_weight;
+ 
+ 	int group_imb; /* Is there imbalance in this sd */
+ #if defined(CONFIG_SCHED_MC) || defined(CONFIG_SCHED_SMT)
+@@ -3562,10 +3485,7 @@
+ 	unsigned long sum_nr_running; /* Nr tasks running in the group */
+ 	unsigned long sum_weighted_load; /* Weighted load of group's tasks */
+ 	unsigned long group_capacity;
+-	unsigned long idle_cpus;
+-	unsigned long group_weight;
+ 	int group_imb; /* Is there an imbalance in the group ? */
+-	int group_has_capacity; /* Is there extra capacity in the group? */
+ };
+ 
+ /**
+@@ -3775,14 +3695,10 @@
+ 	struct rq *rq = cpu_rq(cpu);
+ 	u64 total, available;
+ 
++	sched_avg_update(rq);
++
+ 	total = sched_avg_period() + (rq->clock - rq->age_stamp);
+-
+-	if (unlikely(total < rq->rt_avg)) {
+-		/* Ensures that power won't end up being negative */
+-		available = 0;
+-	} else {
+-		available = total - rq->rt_avg;
+-	}
++	available = total - rq->rt_avg;
+ 
+ 	if (unlikely((s64)total < SCHED_LOAD_SCALE))
+ 		total = SCHED_LOAD_SCALE;
+@@ -3820,7 +3736,6 @@
+ 	if (!power)
+ 		power = 1;
+ 
+-	cpu_rq(cpu)->cpu_power = power;
+ 	sdg->cpu_power = power;
+ }
+ 
+@@ -3865,7 +3780,7 @@
+ 			int local_group, const struct cpumask *cpus,
+ 			int *balance, struct sg_lb_stats *sgs)
+ {
+-	unsigned long load, max_cpu_load, min_cpu_load, max_nr_running;
++	unsigned long load, max_cpu_load, min_cpu_load;
+ 	int i;
+ 	unsigned int balance_cpu = -1, first_idle_cpu = 0;
+ 	unsigned long avg_load_per_task = 0;
+@@ -3879,7 +3794,6 @@
+ 	/* Tally up the load of all CPUs in the group */
+ 	max_cpu_load = 0;
+ 	min_cpu_load = ~0UL;
+-	max_nr_running = 0;
+ 
+ 	for_each_cpu_and(i, sched_group_cpus(group), cpus) {
+ 		struct rq *rq = cpu_rq(i);
+@@ -3897,10 +3811,8 @@
+ 			load = target_load(i, load_idx);
+ 		} else {
+ 			load = source_load(i, load_idx);
+-			if (load > max_cpu_load) {
++			if (load > max_cpu_load)
+ 				max_cpu_load = load;
+-				max_nr_running = rq->nr_running;
+-			}
+ 			if (min_cpu_load > load)
+ 				min_cpu_load = load;
+ 		}
+@@ -3908,8 +3820,7 @@
+ 		sgs->group_load += load;
+ 		sgs->sum_nr_running += rq->nr_running;
+ 		sgs->sum_weighted_load += weighted_cpuload(i);
+-		if (idle_cpu(i))
+-			sgs->idle_cpus++;
++
+ 	}
+ 
+ 	/*
+@@ -3939,14 +3850,11 @@
+ 	if (sgs->sum_nr_running)
+ 		avg_load_per_task = sgs->sum_weighted_load / sgs->sum_nr_running;
+ 
+-	if ((max_cpu_load - min_cpu_load) > 2*avg_load_per_task && max_nr_running > 1)
++	if ((max_cpu_load - min_cpu_load) > 2*avg_load_per_task)
+ 		sgs->group_imb = 1;
+ 
+-	sgs->group_capacity = DIV_ROUND_CLOSEST(group->cpu_power, SCHED_LOAD_SCALE);
+-	sgs->group_weight = group->group_weight;
+-
+-	if (sgs->group_capacity > sgs->sum_nr_running)
+-		sgs->group_has_capacity = 1;
++	sgs->group_capacity =
++		DIV_ROUND_CLOSEST(group->cpu_power, SCHED_LOAD_SCALE);
+ }
+ 
+ /**
+@@ -3993,14 +3901,9 @@
+ 		/*
+ 		 * In case the child domain prefers tasks go to siblings
+ 		 * first, lower the group capacity to one so that we'll try
+-		 * and move all the excess tasks away. We lower the capacity
+-		 * of a group only if the local group has the capacity to fit
+-		 * these excess tasks, i.e. nr_running < group_capacity. The
+-		 * extra check prevents the case where you always pull from the
+-		 * heaviest group when it is already under-utilized (possible
+-		 * with a large weight task outweighs the tasks on the system).
++		 * and move all the excess tasks away.
+ 		 */
+-		if (prefer_sibling && !local_group && sds->this_has_capacity)
++		if (prefer_sibling)
+ 			sgs.group_capacity = min(sgs.group_capacity, 1UL);
+ 
+ 		if (local_group) {
+@@ -4008,19 +3911,14 @@
+ 			sds->this = group;
+ 			sds->this_nr_running = sgs.sum_nr_running;
+ 			sds->this_load_per_task = sgs.sum_weighted_load;
+-			sds->this_has_capacity = sgs.group_has_capacity;
+-			sds->this_idle_cpus = sgs.idle_cpus;
+ 		} else if (sgs.avg_load > sds->max_load &&
+ 			   (sgs.sum_nr_running > sgs.group_capacity ||
+ 				sgs.group_imb)) {
+ 			sds->max_load = sgs.avg_load;
+ 			sds->busiest = group;
+ 			sds->busiest_nr_running = sgs.sum_nr_running;
+-			sds->busiest_idle_cpus = sgs.idle_cpus;
+ 			sds->busiest_group_capacity = sgs.group_capacity;
+-			sds->busiest_group_weight = sgs.group_weight;
+ 			sds->busiest_load_per_task = sgs.sum_weighted_load;
+-			sds->busiest_has_capacity = sgs.group_has_capacity;
+ 			sds->group_imb = sgs.group_imb;
+ 		}
+ 
+@@ -4166,7 +4064,6 @@
+ 		return fix_small_imbalance(sds, this_cpu, imbalance);
+ 
+ }
+-
+ /******* find_busiest_group() helpers end here *********************/
+ 
+ /**
+@@ -4218,11 +4115,6 @@
+ 	 * 4) This group is more busy than the avg busieness at this
+ 	 *    sched_domain.
+ 	 * 5) The imbalance is within the specified limit.
+-	 *
+-	 * Note: when doing newidle balance, if the local group has excess
+-	 * capacity (i.e. nr_running < group_capacity) and the busiest group
+-	 * does not have any capacity, we force a load balance to pull tasks
+-	 * to the local group. In this case, we skip past checks 3, 4 and 5.
+ 	 */
+ 	if (balance && !(*balance))
+ 		goto ret;
+@@ -4230,11 +4122,6 @@
+ 	if (!sds.busiest || sds.busiest_nr_running == 0)
+ 		goto out_balanced;
+ 
+-	/*  SD_BALANCE_NEWIDLE trumps SMP nice when underutilized */
+-	if (idle == CPU_NEWLY_IDLE && sds.this_has_capacity &&
+-			!sds.busiest_has_capacity)
+-		goto force_balance;
+-
+ 	if (sds.this_load >= sds.max_load)
+ 		goto out_balanced;
+ 
+@@ -4243,28 +4130,9 @@
+ 	if (sds.this_load >= sds.avg_load)
+ 		goto out_balanced;
+ 
+-	/*
+-	 * In the CPU_NEWLY_IDLE, use imbalance_pct to be conservative.
+-	 * And to check for busy balance use !idle_cpu instead of
+-	 * CPU_NOT_IDLE. This is because HT siblings will use CPU_NOT_IDLE
+-	 * even when they are idle.
+-	 */
+-	if (idle == CPU_NEWLY_IDLE || !idle_cpu(this_cpu)) {
+-		if (100 * sds.max_load <= sd->imbalance_pct * sds.this_load)
+-			goto out_balanced;
+-	} else {
+-		/*
+-		 * This cpu is idle. If the busiest group load doesn't
+-		 * have more tasks than the number of available cpu's and
+-		 * there is no imbalance between this and busiest group
+-		 * wrt to idle cpu's, it is balanced.
+-		 */
+-		if ((sds.this_idle_cpus  <= sds.busiest_idle_cpus + 1) &&
+-		    sds.busiest_nr_running <= sds.busiest_group_weight)
+-			goto out_balanced;
+-	}
++	if (100 * sds.max_load <= sd->imbalance_pct * sds.this_load)
++		goto out_balanced;
+ 
+-force_balance:
+ 	/* Looks like there is an imbalance. Compute it */
+ 	calculate_imbalance(&sds, this_cpu, imbalance);
+ 	return sds.busiest;
+@@ -4420,14 +4288,7 @@
+ 
+ 	if (!ld_moved) {
+ 		schedstat_inc(sd, lb_failed[idle]);
+-		/*
+-		 * Increment the failure counter only on periodic balance.
+-		 * We do not want newidle balance, which can be very
+-		 * frequent, pollute the failure counter causing
+-		 * excessive cache_hot migrations and active balances.
+-		 */
+-		if (idle != CPU_NEWLY_IDLE)
+-			sd->nr_balance_failed++;
++		sd->nr_balance_failed++;
+ 
+ 		if (unlikely(sd->nr_balance_failed > sd->cache_nice_tries+2)) {
+ 
+@@ -5172,7 +5033,7 @@
+ 
+ 	if (task_current(rq, p)) {
+ 		update_rq_clock(rq);
+-		ns = rq->clock_task - p->se.exec_start;
++		ns = rq->clock - p->se.exec_start;
+ 		if ((s64)ns < 0)
+ 			ns = 0;
+ 	}
+@@ -5316,7 +5177,7 @@
+ 	tmp = cputime_to_cputime64(cputime);
+ 	if (hardirq_count() - hardirq_offset)
+ 		cpustat->irq = cputime64_add(cpustat->irq, tmp);
+-	else if (in_serving_softirq())
++	else if (softirq_count())
+ 		cpustat->softirq = cputime64_add(cpustat->softirq, tmp);
+ 	else
+ 		cpustat->system = cputime64_add(cpustat->system, tmp);
+@@ -7260,19 +7121,7 @@
+ 	idle->se.exec_start = sched_clock();
+ 
+ 	cpumask_copy(&idle->cpus_allowed, cpumask_of(cpu));
+-	/*
+-	 * We're having a chicken and egg problem, even though we are
+-	 * holding rq->lock, the cpu isn't yet set to this cpu so the
+-	 * lockdep check in task_group() will fail.
+-	 *
+-	 * Similar case to sched_fork(). / Alternatively we could
+-	 * use task_rq_lock() here and obtain the other rq->lock.
+-	 *
+-	 * Silence PROVE_RCU
+-	 */
+-	rcu_read_lock();
+ 	__set_task_cpu(idle, cpu);
+-	rcu_read_unlock();
+ 
+ 	rq->curr = rq->idle = idle;
+ #if defined(CONFIG_SMP) && defined(__ARCH_WANT_UNLOCKED_CTXSW)
+@@ -8779,8 +8628,6 @@
+ 	if (cpu != group_first_cpu(sd->groups))
+ 		return;
+ 
+-	sd->groups->group_weight = cpumask_weight(sched_group_cpus(sd->groups));
+-
+ 	child = sd->child;
+ 
+ 	sd->groups->cpu_power = 0;
+@@ -9664,6 +9511,9 @@
+ #ifdef CONFIG_RT_GROUP_SCHED
+ 	alloc_size += 2 * nr_cpu_ids * sizeof(void **);
+ #endif
++#ifdef CONFIG_USER_SCHED
++	alloc_size *= 2;
++#endif
+ #ifdef CONFIG_CPUMASK_OFFSTACK
+ 	alloc_size += num_possible_cpus() * cpumask_size();
+ #endif
+@@ -9681,6 +9531,13 @@
+ 		init_task_group.cfs_rq = (struct cfs_rq **)ptr;
+ 		ptr += nr_cpu_ids * sizeof(void **);
+ 
++#ifdef CONFIG_USER_SCHED
++		root_task_group.se = (struct sched_entity **)ptr;
++		ptr += nr_cpu_ids * sizeof(void **);
++
++		root_task_group.cfs_rq = (struct cfs_rq **)ptr;
++		ptr += nr_cpu_ids * sizeof(void **);
++#endif /* CONFIG_USER_SCHED */
+ #endif /* CONFIG_FAIR_GROUP_SCHED */
+ #ifdef CONFIG_RT_GROUP_SCHED
+ 		init_task_group.rt_se = (struct sched_rt_entity **)ptr;
+@@ -9689,6 +9546,13 @@
+ 		init_task_group.rt_rq = (struct rt_rq **)ptr;
+ 		ptr += nr_cpu_ids * sizeof(void **);
+ 
++#ifdef CONFIG_USER_SCHED
++		root_task_group.rt_se = (struct sched_rt_entity **)ptr;
++		ptr += nr_cpu_ids * sizeof(void **);
++
++		root_task_group.rt_rq = (struct rt_rq **)ptr;
++		ptr += nr_cpu_ids * sizeof(void **);
++#endif /* CONFIG_USER_SCHED */
+ #endif /* CONFIG_RT_GROUP_SCHED */
+ #ifdef CONFIG_CPUMASK_OFFSTACK
+ 		for_each_possible_cpu(i) {
+@@ -9708,13 +9572,22 @@
+ #ifdef CONFIG_RT_GROUP_SCHED
+ 	init_rt_bandwidth(&init_task_group.rt_bandwidth,
+ 			global_rt_period(), global_rt_runtime());
++#ifdef CONFIG_USER_SCHED
++	init_rt_bandwidth(&root_task_group.rt_bandwidth,
++			global_rt_period(), RUNTIME_INF);
++#endif /* CONFIG_USER_SCHED */
+ #endif /* CONFIG_RT_GROUP_SCHED */
+ 
+-#ifdef CONFIG_CGROUP_SCHED
++#ifdef CONFIG_GROUP_SCHED
+ 	list_add(&init_task_group.list, &task_groups);
+ 	INIT_LIST_HEAD(&init_task_group.children);
+ 
+-#endif /* CONFIG_CGROUP_SCHED */
++#ifdef CONFIG_USER_SCHED
++	INIT_LIST_HEAD(&root_task_group.children);
++	init_task_group.parent = &root_task_group;
++	list_add(&init_task_group.siblings, &root_task_group.children);
++#endif /* CONFIG_USER_SCHED */
++#endif /* CONFIG_GROUP_SCHED */
+ 
+ #if defined CONFIG_FAIR_GROUP_SCHED && defined CONFIG_SMP
+ 	update_shares_data = __alloc_percpu(nr_cpu_ids * sizeof(unsigned long),
+@@ -9754,6 +9627,25 @@
+ 		 * directly in rq->cfs (i.e init_task_group->se[] = NULL).
+ 		 */
+ 		init_tg_cfs_entry(&init_task_group, &rq->cfs, NULL, i, 1, NULL);
++#elif defined CONFIG_USER_SCHED
++		root_task_group.shares = NICE_0_LOAD;
++		init_tg_cfs_entry(&root_task_group, &rq->cfs, NULL, i, 0, NULL);
++		/*
++		 * In case of task-groups formed thr' the user id of tasks,
++		 * init_task_group represents tasks belonging to root user.
++		 * Hence it forms a sibling of all subsequent groups formed.
++		 * In this case, init_task_group gets only a fraction of overall
++		 * system cpu resource, based on the weight assigned to root
++		 * user's cpu share (INIT_TASK_GROUP_LOAD). This is accomplished
++		 * by letting tasks of init_task_group sit in a separate cfs_rq
++		 * (init_tg_cfs_rq) and having one entity represent this group of
++		 * tasks in rq->cfs (i.e init_task_group->se[] != NULL).
++		 */
++		init_tg_cfs_entry(&init_task_group,
++				&per_cpu(init_tg_cfs_rq, i),
++				&per_cpu(init_sched_entity, i), i, 1,
++				root_task_group.se[i]);
++
+ #endif
+ #endif /* CONFIG_FAIR_GROUP_SCHED */
+ 
+@@ -9776,7 +9668,6 @@
+ #ifdef CONFIG_SMP
+ 		rq->sd = NULL;
+ 		rq->rd = NULL;
+-		rq->cpu_power = SCHED_LOAD_SCALE;
+ 		rq->post_schedule = 0;
+ 		rq->active_balance = 0;
+ 		rq->next_balance = jiffies;
+@@ -10160,7 +10051,7 @@
+ }
+ #endif /* CONFIG_RT_GROUP_SCHED */
+ 
+-#ifdef CONFIG_CGROUP_SCHED
++#ifdef CONFIG_GROUP_SCHED
+ static void free_sched_group(struct task_group *tg)
+ {
+ 	free_fair_sched_group(tg);
+@@ -10255,12 +10146,12 @@
+ 	if (unlikely(running))
+ 		tsk->sched_class->put_prev_task(rq, tsk);
+ 
++	set_task_rq(tsk, task_cpu(tsk));
++
+ #ifdef CONFIG_FAIR_GROUP_SCHED
+-	if (tsk->sched_class->task_move_group)
+-		tsk->sched_class->task_move_group(tsk, on_rq);
+-	else
++	if (tsk->sched_class->moved_group)
++		tsk->sched_class->moved_group(tsk, on_rq);
+ #endif
+-		set_task_rq(tsk, task_cpu(tsk));
+ 
+ 	if (unlikely(running))
+ 		tsk->sched_class->set_curr_task(rq);
+@@ -10269,7 +10160,7 @@
+ 
+ 	task_rq_unlock(rq, &flags);
+ }
+-#endif /* CONFIG_CGROUP_SCHED */
++#endif /* CONFIG_GROUP_SCHED */
+ 
+ #ifdef CONFIG_FAIR_GROUP_SCHED
+ static void __set_se_shares(struct sched_entity *se, unsigned long shares)
+@@ -10411,6 +10302,13 @@
+ 		runtime = d->rt_runtime;
+ 	}
+ 
++#ifdef CONFIG_USER_SCHED
++	if (tg == &root_task_group) {
++		period = global_rt_period();
++		runtime = global_rt_runtime();
++	}
++#endif
++
+ 	/*
+ 	 * Cannot have more runtime than the period.
+ 	 */
+--- b/kernel/sched_debug.c
++++ a/kernel/sched_debug.c
+@@ -173,6 +173,11 @@
+ 	task_group_path(tg, path, sizeof(path));
+ 
+ 	SEQ_printf(m, "\ncfs_rq[%d]:%s\n", cpu, path);
++#elif defined(CONFIG_USER_SCHED) && defined(CONFIG_FAIR_GROUP_SCHED)
++	{
++		uid_t uid = cfs_rq->tg->uid;
++		SEQ_printf(m, "\ncfs_rq[%d] for UID: %u\n", cpu, uid);
++	}
+ #else
+ 	SEQ_printf(m, "\ncfs_rq[%d]:\n", cpu);
+ #endif
+--- b/kernel/sched_fair.c
++++ a/kernel/sched_fair.c
+@@ -496,7 +496,7 @@
+ static void update_curr(struct cfs_rq *cfs_rq)
+ {
+ 	struct sched_entity *curr = cfs_rq->curr;
+-	u64 now = rq_of(cfs_rq)->clock_task;
++	u64 now = rq_of(cfs_rq)->clock;
+ 	unsigned long delta_exec;
+ 
+ 	if (unlikely(!curr))
+@@ -579,7 +579,7 @@
+ 	/*
+ 	 * We are starting a new run period:
+ 	 */
+-	se->exec_start = rq_of(cfs_rq)->clock_task;
++	se->exec_start = rq_of(cfs_rq)->clock;
+ }
+ 
+ /**************************************************
+@@ -1222,6 +1222,7 @@
+ 	unsigned long this_load, load;
+ 	int idx, this_cpu, prev_cpu;
+ 	unsigned long tl_per_task;
++	unsigned int imbalance;
+ 	struct task_group *tg;
+ 	unsigned long weight;
+ 	int balanced;
+@@ -1261,6 +1262,8 @@
+ 	tg = task_group(p);
+ 	weight = p->se.load.weight;
+ 
++	imbalance = 100 + (sd->imbalance_pct - 100) / 2;
++
+ 	/*
+ 	 * In low-load situations, where prev_cpu is idle and this_cpu is idle
+ 	 * due to the sync cause above having dropped this_load to 0, we'll
+@@ -1270,22 +1273,9 @@
+ 	 * Otherwise check if either cpus are near enough in load to allow this
+ 	 * task to be woken on this_cpu.
+ 	 */
+-	if (this_load) {
+-		unsigned long this_eff_load, prev_eff_load;
+-
+-		this_eff_load = 100;
+-		this_eff_load *= power_of(prev_cpu);
+-		this_eff_load *= this_load +
+-			effective_load(tg, this_cpu, weight, weight);
+-
+-		prev_eff_load = 100 + (sd->imbalance_pct - 100) / 2;
+-		prev_eff_load *= power_of(this_cpu);
+-		prev_eff_load *= load + effective_load(tg, prev_cpu, 0, weight);
+-
+-		balanced = this_eff_load <= prev_eff_load;
+-	} else
+-		balanced = true;
+-
++	balanced = !this_load ||
++		100*(this_load + effective_load(tg, this_cpu, weight, weight)) <=
++		imbalance*(load + effective_load(tg, prev_cpu, 0, weight));
+ 	rcu_read_unlock();
+ 
+ 	/*
+@@ -2002,11 +1992,8 @@
+ 
+ 	update_rq_clock(rq);
+ 
+-	if (unlikely(task_cpu(p) != this_cpu)) {
+-		rcu_read_lock();
++	if (unlikely(task_cpu(p) != this_cpu))
+ 		__set_task_cpu(p, this_cpu);
+-		rcu_read_unlock();
+-	}
+ 
+ 	update_curr(cfs_rq);
+ 
+@@ -2078,26 +2065,13 @@
+ }
+ 
+ #ifdef CONFIG_FAIR_GROUP_SCHED
+-static void task_move_group_fair(struct task_struct *p, int on_rq)
++static void moved_group_fair(struct task_struct *p, int on_rq)
+ {
+-	/*
+-	 * If the task was not on the rq at the time of this cgroup movement
+-	 * it must have been asleep, sleeping tasks keep their ->vruntime
+-	 * absolute on their old rq until wakeup (needed for the fair sleeper
+-	 * bonus in place_entity()).
+-	 *
+-	 * If it was on the rq, we've just 'preempted' it, which does convert
+-	 * ->vruntime to a relative base.
+-	 *
+-	 * Make sure both cases convert their relative position when migrating
+-	 * to another cgroup's rq. This does somewhat interfere with the
+-	 * fair sleeper stuff for the first placement, but who cares.
+-	 */
+-	if (!on_rq)
+-		p->se.vruntime -= cfs_rq_of(&p->se)->min_vruntime;
+-	set_task_rq(p, task_cpu(p));
++	struct cfs_rq *cfs_rq = task_cfs_rq(p);
++
++	update_curr(cfs_rq);
+ 	if (!on_rq)
+-		p->se.vruntime += cfs_rq_of(&p->se)->min_vruntime;
++		place_entity(cfs_rq, &p->se, 1);
+ }
+ #endif
+ 
+@@ -2151,7 +2125,7 @@
+ 	.get_rr_interval	= get_rr_interval_fair,
+ 
+ #ifdef CONFIG_FAIR_GROUP_SCHED
+-	.task_move_group	= task_move_group_fair,
++	.moved_group		= moved_group_fair,
+ #endif
+ };
+ 
+--- a/kernel/sched_features.h
++++ b/kernel/sched_features.h
+@@ -121,8 +121,3 @@
+  * release the lock. Decreases scheduling overhead.
+  */
+ SCHED_FEAT(OWNER_SPIN, 1)
+-
+-/*
+- * Decrement CPU power based on irq activity
+- */
+-SCHED_FEAT(NONIRQ_POWER, 1)
+--- a/kernel/sched_rt.c
++++ b/kernel/sched_rt.c
+@@ -603,7 +603,7 @@
+ 	if (!task_has_rt_policy(curr))
+ 		return;
+ 
+-	delta_exec = rq->clock_task - curr->se.exec_start;
++	delta_exec = rq->clock - curr->se.exec_start;
+ 	if (unlikely((s64)delta_exec < 0))
+ 		delta_exec = 0;
+ 
+@@ -612,7 +612,7 @@
+ 	curr->se.sum_exec_runtime += delta_exec;
+ 	account_group_exec_runtime(curr, delta_exec);
+ 
+-	curr->se.exec_start = rq->clock_task;
++	curr->se.exec_start = rq->clock;
+ 	cpuacct_charge(curr, delta_exec);
+ 
+ 	sched_rt_avg_update(rq, delta_exec);
+@@ -954,19 +954,18 @@
+ 	 * runqueue. Otherwise simply start this RT task
+ 	 * on its current runqueue.
+ 	 *
+-	 * We want to avoid overloading runqueues. If the woken
+-	 * task is a higher priority, then it will stay on this CPU
+-	 * and the lower prio task should be moved to another CPU.
+-	 * Even though this will probably make the lower prio task
+-	 * lose its cache, we do not want to bounce a higher task
+-	 * around just because it gave up its CPU, perhaps for a
+-	 * lock?
+-	 *
+-	 * For equal prio tasks, we just let the scheduler sort it out.
++	 * We want to avoid overloading runqueues. Even if
++	 * the RT task is of higher priority than the current RT task.
++	 * RT tasks behave differently than other tasks. If
++	 * one gets preempted, we try to push it off to another queue.
++	 * So trying to keep a preempting RT task on the same
++	 * cache hot CPU will force the running RT task to
++	 * a cold CPU. So we waste all the cache for the lower
++	 * RT task in hopes of saving some of a RT task
++	 * that is just being woken and probably will have
++	 * cold cache anyway.
+ 	 */
+ 	if (unlikely(rt_task(rq->curr)) &&
+-	    (rq->curr->rt.nr_cpus_allowed < 2 ||
+-	     rq->curr->prio < p->prio) &&
+ 	    (p->rt.nr_cpus_allowed > 1)) {
+ 		int cpu = find_lowest_rq(p);
+ 
+@@ -1069,7 +1068,7 @@
+ 	} while (rt_rq);
+ 
+ 	p = rt_task_of(rt_se);
+-	p->se.exec_start = rq->clock_task;
++	p->se.exec_start = rq->clock;
+ 
+ 	return p;
+ }
+@@ -1494,10 +1493,7 @@
+ 	if (!task_running(rq, p) &&
+ 	    !test_tsk_need_resched(rq->curr) &&
+ 	    has_pushable_tasks(rq) &&
+-	    p->rt.nr_cpus_allowed > 1 &&
+-	    rt_task(rq->curr) &&
+-	    (rq->curr->rt.nr_cpus_allowed < 2 ||
+-	     rq->curr->prio < p->prio))
++	    p->rt.nr_cpus_allowed > 1)
+ 		push_rt_tasks(rq);
+ }
+ 
+@@ -1735,7 +1731,7 @@
+ {
+ 	struct task_struct *p = rq->curr;
+ 
+-	p->se.exec_start = rq->clock_task;
++	p->se.exec_start = rq->clock;
+ 
+ 	/* The running task is never eligible for pushing */
+ 	dequeue_pushable_task(rq, p);
+--- a/kernel/softirq.c
++++ b/kernel/softirq.c
+@@ -77,21 +77,11 @@
+ }
+ 
+ /*
+- * preempt_count and SOFTIRQ_OFFSET usage:
+- * - preempt_count is changed by SOFTIRQ_OFFSET on entering or leaving
+- *   softirq processing.
+- * - preempt_count is changed by SOFTIRQ_DISABLE_OFFSET (= 2 * SOFTIRQ_OFFSET)
+- *   on local_bh_disable or local_bh_enable.
+- * This lets us distinguish between whether we are currently processing
+- * softirq and whether we just have bh disabled.
+- */
+-
+-/*
+  * This one is for softirq.c-internal use,
+  * where hardirqs are disabled legitimately:
+  */
+ #ifdef CONFIG_TRACE_IRQFLAGS
+-static void __local_bh_disable(unsigned long ip, unsigned int cnt)
++static void __local_bh_disable(unsigned long ip)
+ {
+ 	unsigned long flags;
+ 
+@@ -105,43 +95,32 @@
+ 	 * We must manually increment preempt_count here and manually
+ 	 * call the trace_preempt_off later.
+ 	 */
+-	preempt_count() += cnt;
++	preempt_count() += SOFTIRQ_OFFSET;
+ 	/*
+ 	 * Were softirqs turned off above:
+ 	 */
+-	if (softirq_count() == cnt)
++	if (softirq_count() == SOFTIRQ_OFFSET)
+ 		trace_softirqs_off(ip);
+ 	raw_local_irq_restore(flags);
+ 
+-	if (preempt_count() == cnt)
++	if (preempt_count() == SOFTIRQ_OFFSET)
+ 		trace_preempt_off(CALLER_ADDR0, get_parent_ip(CALLER_ADDR1));
+ }
+ #else /* !CONFIG_TRACE_IRQFLAGS */
+-static inline void __local_bh_disable(unsigned long ip, unsigned int cnt)
++static inline void __local_bh_disable(unsigned long ip)
+ {
+-	add_preempt_count(cnt);
++	add_preempt_count(SOFTIRQ_OFFSET);
+ 	barrier();
+ }
+ #endif /* CONFIG_TRACE_IRQFLAGS */
+ 
+ void local_bh_disable(void)
+ {
+-	__local_bh_disable((unsigned long)__builtin_return_address(0),
+-				SOFTIRQ_DISABLE_OFFSET);
++	__local_bh_disable((unsigned long)__builtin_return_address(0));
+ }
+ 
+ EXPORT_SYMBOL(local_bh_disable);
+ 
+-static void __local_bh_enable(unsigned int cnt)
+-{
+-	WARN_ON_ONCE(in_irq());
+-	WARN_ON_ONCE(!irqs_disabled());
+-
+-	if (softirq_count() == cnt)
+-		trace_softirqs_on((unsigned long)__builtin_return_address(0));
+-	sub_preempt_count(cnt);
+-}
+-
+ /*
+  * Special-case - softirqs can safely be enabled in
+  * cond_resched_softirq(), or by __do_softirq(),
+@@ -149,7 +128,12 @@
+  */
+ void _local_bh_enable(void)
+ {
+-	__local_bh_enable(SOFTIRQ_DISABLE_OFFSET);
++	WARN_ON_ONCE(in_irq());
++	WARN_ON_ONCE(!irqs_disabled());
++
++	if (softirq_count() == SOFTIRQ_OFFSET)
++		trace_softirqs_on((unsigned long)__builtin_return_address(0));
++	sub_preempt_count(SOFTIRQ_OFFSET);
+ }
+ 
+ EXPORT_SYMBOL(_local_bh_enable);
+@@ -163,13 +147,13 @@
+ 	/*
+ 	 * Are softirqs going to be turned on now:
+ 	 */
+-	if (softirq_count() == SOFTIRQ_DISABLE_OFFSET)
++	if (softirq_count() == SOFTIRQ_OFFSET)
+ 		trace_softirqs_on(ip);
+ 	/*
+ 	 * Keep preemption disabled until we are done with
+ 	 * softirq processing:
+  	 */
+-	sub_preempt_count(SOFTIRQ_DISABLE_OFFSET - 1);
++ 	sub_preempt_count(SOFTIRQ_OFFSET - 1);
+ 
+ 	if (unlikely(!in_interrupt() && local_softirq_pending()))
+ 		do_softirq();
+@@ -214,8 +198,7 @@
+ 	pending = local_softirq_pending();
+ 	account_system_vtime(current);
+ 
+-	__local_bh_disable((unsigned long)__builtin_return_address(0),
+-				SOFTIRQ_OFFSET);
++	__local_bh_disable((unsigned long)__builtin_return_address(0));
+ 	lockdep_softirq_enter();
+ 
+ 	cpu = smp_processor_id();
+@@ -262,7 +245,7 @@
+ 	lockdep_softirq_exit();
+ 
+ 	account_system_vtime(current);
+-	__local_bh_enable(SOFTIRQ_OFFSET);
++	_local_bh_enable();
+ }
+ 
+ #ifndef __ARCH_HAS_DO_SOFTIRQ
+@@ -296,16 +279,10 @@
+ 
+ 	rcu_irq_enter();
+ 	if (idle_cpu(cpu) && !in_interrupt()) {
+-		/*
+-		 * Prevent raise_softirq from needlessly waking up ksoftirqd
+-		 * here, as softirq will be serviced on return from interrupt.
+-		 */
+-		local_bh_disable();
++		__irq_enter();
+ 		tick_check_idle(cpu);
+-		_local_bh_enable();
+-	}
+-
+-	__irq_enter();
++	} else
++		__irq_enter();
+ }
+ 
+ #ifdef __ARCH_IRQ_EXIT_IRQS_DISABLED
+@@ -724,7 +701,6 @@
+ {
+ 	set_current_state(TASK_INTERRUPTIBLE);
+ 
+-	current->flags |= PF_KSOFTIRQD;
+ 	while (!kthread_should_stop()) {
+ 		preempt_disable();
+ 		if (!local_softirq_pending()) {
+--- a/kernel/sys.c
++++ b/kernel/sys.c
+@@ -567,6 +567,11 @@
+ 	if (!new_user)
+ 		return -EAGAIN;
+ 
++	if (!task_can_switch_user(new_user, current)) {
++		free_uid(new_user);
++		return -EINVAL;
++	}
++
+ 	if (atomic_read(&new_user->processes) >=
+ 				current->signal->rlim[RLIMIT_NPROC].rlim_cur &&
+ 			new_user != INIT_USER) {
+--- a/kernel/user.c
++++ b/kernel/user.c
+@@ -16,6 +16,7 @@
+ #include <linux/interrupt.h>
+ #include <linux/module.h>
+ #include <linux/user_namespace.h>
++#include "cred-internals.h"
+ 
+ struct user_namespace init_user_ns = {
+ 	.kref = {
+@@ -55,6 +56,9 @@
+ 	.sigpending	= ATOMIC_INIT(0),
+ 	.locked_shm     = 0,
+ 	.user_ns	= &init_user_ns,
++#ifdef CONFIG_USER_SCHED
++	.tg		= &init_task_group,
++#endif
+ };
+ 
+ /*
+@@ -71,6 +75,268 @@
+ 	put_user_ns(up->user_ns);
+ }
+ 
++#ifdef CONFIG_USER_SCHED
++
++static void sched_destroy_user(struct user_struct *up)
++{
++	sched_destroy_group(up->tg);
++}
++
++static int sched_create_user(struct user_struct *up)
++{
++	int rc = 0;
++
++	up->tg = sched_create_group(&root_task_group);
++	if (IS_ERR(up->tg))
++		rc = -ENOMEM;
++
++	set_tg_uid(up);
++
++	return rc;
++}
++
++#else	/* CONFIG_USER_SCHED */
++
++static void sched_destroy_user(struct user_struct *up) { }
++static int sched_create_user(struct user_struct *up) { return 0; }
++
++#endif	/* CONFIG_USER_SCHED */
++
++#if defined(CONFIG_USER_SCHED) && defined(CONFIG_SYSFS)
++
++static struct user_struct *uid_hash_find(uid_t uid, struct hlist_head *hashent)
++{
++	struct user_struct *user;
++	struct hlist_node *h;
++
++	hlist_for_each_entry(user, h, hashent, uidhash_node) {
++		if (user->uid == uid) {
++			/* possibly resurrect an "almost deleted" object */
++			if (atomic_inc_return(&user->__count) == 1)
++				cancel_delayed_work(&user->work);
++			return user;
++		}
++	}
++
++	return NULL;
++}
++
++static struct kset *uids_kset; /* represents the /sys/kernel/uids/ directory */
++static DEFINE_MUTEX(uids_mutex);
++
++static inline void uids_mutex_lock(void)
++{
++	mutex_lock(&uids_mutex);
++}
++
++static inline void uids_mutex_unlock(void)
++{
++	mutex_unlock(&uids_mutex);
++}
++
++/* uid directory attributes */
++#ifdef CONFIG_FAIR_GROUP_SCHED
++static ssize_t cpu_shares_show(struct kobject *kobj,
++			       struct kobj_attribute *attr,
++			       char *buf)
++{
++	struct user_struct *up = container_of(kobj, struct user_struct, kobj);
++
++	return sprintf(buf, "%lu\n", sched_group_shares(up->tg));
++}
++
++static ssize_t cpu_shares_store(struct kobject *kobj,
++				struct kobj_attribute *attr,
++				const char *buf, size_t size)
++{
++	struct user_struct *up = container_of(kobj, struct user_struct, kobj);
++	unsigned long shares;
++	int rc;
++
++	sscanf(buf, "%lu", &shares);
++
++	rc = sched_group_set_shares(up->tg, shares);
++
++	return (rc ? rc : size);
++}
++
++static struct kobj_attribute cpu_share_attr =
++	__ATTR(cpu_share, 0644, cpu_shares_show, cpu_shares_store);
++#endif
++
++#ifdef CONFIG_RT_GROUP_SCHED
++static ssize_t cpu_rt_runtime_show(struct kobject *kobj,
++				   struct kobj_attribute *attr,
++				   char *buf)
++{
++	struct user_struct *up = container_of(kobj, struct user_struct, kobj);
++
++	return sprintf(buf, "%ld\n", sched_group_rt_runtime(up->tg));
++}
++
++static ssize_t cpu_rt_runtime_store(struct kobject *kobj,
++				    struct kobj_attribute *attr,
++				    const char *buf, size_t size)
++{
++	struct user_struct *up = container_of(kobj, struct user_struct, kobj);
++	unsigned long rt_runtime;
++	int rc;
++
++	sscanf(buf, "%ld", &rt_runtime);
++
++	rc = sched_group_set_rt_runtime(up->tg, rt_runtime);
++
++	return (rc ? rc : size);
++}
++
++static struct kobj_attribute cpu_rt_runtime_attr =
++	__ATTR(cpu_rt_runtime, 0644, cpu_rt_runtime_show, cpu_rt_runtime_store);
++
++static ssize_t cpu_rt_period_show(struct kobject *kobj,
++				   struct kobj_attribute *attr,
++				   char *buf)
++{
++	struct user_struct *up = container_of(kobj, struct user_struct, kobj);
++
++	return sprintf(buf, "%lu\n", sched_group_rt_period(up->tg));
++}
++
++static ssize_t cpu_rt_period_store(struct kobject *kobj,
++				    struct kobj_attribute *attr,
++				    const char *buf, size_t size)
++{
++	struct user_struct *up = container_of(kobj, struct user_struct, kobj);
++	unsigned long rt_period;
++	int rc;
++
++	sscanf(buf, "%lu", &rt_period);
++
++	rc = sched_group_set_rt_period(up->tg, rt_period);
++
++	return (rc ? rc : size);
++}
++
++static struct kobj_attribute cpu_rt_period_attr =
++	__ATTR(cpu_rt_period, 0644, cpu_rt_period_show, cpu_rt_period_store);
++#endif
++
++/* default attributes per uid directory */
++static struct attribute *uids_attributes[] = {
++#ifdef CONFIG_FAIR_GROUP_SCHED
++	&cpu_share_attr.attr,
++#endif
++#ifdef CONFIG_RT_GROUP_SCHED
++	&cpu_rt_runtime_attr.attr,
++	&cpu_rt_period_attr.attr,
++#endif
++	NULL
++};
++
++/* the lifetime of user_struct is not managed by the core (now) */
++static void uids_release(struct kobject *kobj)
++{
++	return;
++}
++
++static struct kobj_type uids_ktype = {
++	.sysfs_ops = &kobj_sysfs_ops,
++	.default_attrs = uids_attributes,
++	.release = uids_release,
++};
++
++/*
++ * Create /sys/kernel/uids/<uid>/cpu_share file for this user
++ * We do not create this file for users in a user namespace (until
++ * sysfs tagging is implemented).
++ *
++ * See Documentation/scheduler/sched-design-CFS.txt for ramifications.
++ */
++static int uids_user_create(struct user_struct *up)
++{
++	struct kobject *kobj = &up->kobj;
++	int error;
++
++	memset(kobj, 0, sizeof(struct kobject));
++	if (up->user_ns != &init_user_ns)
++		return 0;
++	kobj->kset = uids_kset;
++	error = kobject_init_and_add(kobj, &uids_ktype, NULL, "%d", up->uid);
++	if (error) {
++		kobject_put(kobj);
++		goto done;
++	}
++
++	kobject_uevent(kobj, KOBJ_ADD);
++done:
++	return error;
++}
++
++/* create these entries in sysfs:
++ * 	"/sys/kernel/uids" directory
++ * 	"/sys/kernel/uids/0" directory (for root user)
++ * 	"/sys/kernel/uids/0/cpu_share" file (for root user)
++ */
++int __init uids_sysfs_init(void)
++{
++	uids_kset = kset_create_and_add("uids", NULL, kernel_kobj);
++	if (!uids_kset)
++		return -ENOMEM;
++
++	return uids_user_create(&root_user);
++}
++
++/* delayed work function to remove sysfs directory for a user and free up
++ * corresponding structures.
++ */
++static void cleanup_user_struct(struct work_struct *w)
++{
++	struct user_struct *up = container_of(w, struct user_struct, work.work);
++	unsigned long flags;
++	int remove_user = 0;
++
++	/* Make uid_hash_remove() + sysfs_remove_file() + kobject_del()
++	 * atomic.
++	 */
++	uids_mutex_lock();
++
++	spin_lock_irqsave(&uidhash_lock, flags);
++	if (atomic_read(&up->__count) == 0) {
++		uid_hash_remove(up);
++		remove_user = 1;
++	}
++	spin_unlock_irqrestore(&uidhash_lock, flags);
++
++	if (!remove_user)
++		goto done;
++
++	if (up->user_ns == &init_user_ns) {
++		kobject_uevent(&up->kobj, KOBJ_REMOVE);
++		kobject_del(&up->kobj);
++		kobject_put(&up->kobj);
++	}
++
++	sched_destroy_user(up);
++	key_put(up->uid_keyring);
++	key_put(up->session_keyring);
++	kmem_cache_free(uid_cachep, up);
++
++done:
++	uids_mutex_unlock();
++}
++
++/* IRQs are disabled and uidhash_lock is held upon function entry.
++ * IRQ state (as stored in flags) is restored and uidhash_lock released
++ * upon function exit.
++ */
++static void free_user(struct user_struct *up, unsigned long flags)
++{
++	INIT_DELAYED_WORK(&up->work, cleanup_user_struct);
++	schedule_delayed_work(&up->work, msecs_to_jiffies(1000));
++	spin_unlock_irqrestore(&uidhash_lock, flags);
++}
++
++#else	/* CONFIG_USER_SCHED && CONFIG_SYSFS */
++
+ static struct user_struct *uid_hash_find(uid_t uid, struct hlist_head *hashent)
+ {
+ 	struct user_struct *user;
+@@ -86,20 +352,45 @@
+ 	return NULL;
+ }
+ 
++int uids_sysfs_init(void) { return 0; }
++static inline int uids_user_create(struct user_struct *up) { return 0; }
++static inline void uids_mutex_lock(void) { }
++static inline void uids_mutex_unlock(void) { }
++
+ /* IRQs are disabled and uidhash_lock is held upon function entry.
+  * IRQ state (as stored in flags) is restored and uidhash_lock released
+  * upon function exit.
+  */
+ static void free_user(struct user_struct *up, unsigned long flags)
+-	__releases(&uidhash_lock)
+ {
+ 	uid_hash_remove(up);
+ 	spin_unlock_irqrestore(&uidhash_lock, flags);
++	sched_destroy_user(up);
+ 	key_put(up->uid_keyring);
+ 	key_put(up->session_keyring);
+ 	kmem_cache_free(uid_cachep, up);
+ }
+ 
++#endif
++
++#if defined(CONFIG_RT_GROUP_SCHED) && defined(CONFIG_USER_SCHED)
++/*
++ * We need to check if a setuid can take place. This function should be called
++ * before successfully completing the setuid.
++ */
++int task_can_switch_user(struct user_struct *up, struct task_struct *tsk)
++{
++
++	return sched_rt_can_attach(up->tg, tsk);
++
++}
++#else
++int task_can_switch_user(struct user_struct *up, struct task_struct *tsk)
++{
++	return 1;
++}
++#endif
++
+ /*
+  * Locate the user_struct for the passed UID.  If found, take a ref on it.  The
+  * caller must undo that ref with free_uid().
+@@ -137,7 +428,11 @@
+ 	struct hlist_head *hashent = uidhashentry(ns, uid);
+ 	struct user_struct *up, *new;
+ 
+-	/* Make uid_hash_find() + uid_hash_insert() atomic. */
++	/* Make uid_hash_find() + uids_user_create() + uid_hash_insert()
++	 * atomic.
++	 */
++	uids_mutex_lock();
++
+ 	spin_lock_irq(&uidhash_lock);
+ 	up = uid_hash_find(uid, hashent);
+ 	spin_unlock_irq(&uidhash_lock);
+@@ -150,8 +445,14 @@
+ 		new->uid = uid;
+ 		atomic_set(&new->__count, 1);
+ 
++		if (sched_create_user(new) < 0)
++			goto out_free_user;
++
+ 		new->user_ns = get_user_ns(ns);
+ 
++		if (uids_user_create(new))
++			goto out_destoy_sched;
++
+ 		/*
+ 		 * Before adding this, check whether we raced
+ 		 * on adding the same user already..
+@@ -159,6 +460,11 @@
+ 		spin_lock_irq(&uidhash_lock);
+ 		up = uid_hash_find(uid, hashent);
+ 		if (up) {
++			/* This case is not possible when CONFIG_USER_SCHED
++			 * is defined, since we serialize alloc_uid() using
++			 * uids_mutex. Hence no need to call
++			 * sched_destroy_user() or remove_user_sysfs_dir().
++			 */
+ 			key_put(new->uid_keyring);
+ 			key_put(new->session_keyring);
+ 			kmem_cache_free(uid_cachep, new);
+@@ -169,9 +475,17 @@
+ 		spin_unlock_irq(&uidhash_lock);
+ 	}
+ 
++	uids_mutex_unlock();
++
+ 	return up;
+ 
++out_destoy_sched:
++	sched_destroy_user(new);
++	put_user_ns(new->user_ns);
++out_free_user:
++	kmem_cache_free(uid_cachep, new);
+ out_unlock:
++	uids_mutex_unlock();
+ 	return NULL;
+ }
+ 
+--- a/net/sched/cls_cgroup.c
++++ b/net/sched/cls_cgroup.c
+@@ -110,7 +110,7 @@
+ 	 * calls by looking at the number of nested bh disable calls because
+ 	 * softirqs always disables bh.
+ 	 */
+-	if (in_serving_softirq())
++	if (softirq_count() != SOFTIRQ_OFFSET)
+ 		return -1;
+ 
+ 	rcu_read_lock();
