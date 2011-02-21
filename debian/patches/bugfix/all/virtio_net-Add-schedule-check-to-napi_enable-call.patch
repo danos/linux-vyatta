@@ -1,0 +1,78 @@
+From: Bruce Rogers <brogers@novell.com>
+Date: Thu, 10 Feb 2011 11:03:31 -0800
+Subject: [PATCH] virtio_net: Add schedule check to napi_enable call
+
+commit 3e9d08ec0a68f6faf718d5a7e050fe5ca0ba004f upstream.
+
+Under harsh testing conditions, including low memory, the guest would
+stop receiving packets. With this patch applied we no longer see any
+problems in the driver while performing these tests for extended periods
+of time.
+
+Make sure napi is scheduled subsequent to each napi_enable.
+
+Signed-off-by: Bruce Rogers <brogers@novell.com>
+Signed-off-by: Olaf Kirch <okir@suse.de>
+Signed-off-by: Rusty Russell <rusty@rustcorp.com.au>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+[bwh: Adjust for 2.6.32]
+---
+ drivers/net/virtio_net.c |   27 ++++++++++++++++-----------
+ 1 files changed, 16 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/net/virtio_net.c b/drivers/net/virtio_net.c
+index b6d4028..c1689ba 100644
+--- a/drivers/net/virtio_net.c
++++ b/drivers/net/virtio_net.c
+@@ -446,6 +446,20 @@ static void skb_recv_done(struct virtqueue *rvq)
+ 	}
+ }
+ 
++static void virtnet_napi_enable(struct virtnet_info *vi)
++{
++	napi_enable(&vi->napi);
++
++	/* If all buffers were filled by other side before we napi_enabled, we
++	 * won't get another interrupt, so process any outstanding packets
++	 * now.  virtnet_poll wants re-enable the queue, so we disable here.
++	 * We synchronize against interrupts via NAPI_STATE_SCHED */
++	if (napi_schedule_prep(&vi->napi)) {
++		vi->rvq->vq_ops->disable_cb(vi->rvq);
++		__napi_schedule(&vi->napi);
++	}
++}
++
+ static void refill_work(struct work_struct *work)
+ {
+ 	struct virtnet_info *vi;
+@@ -454,7 +468,7 @@ static void refill_work(struct work_struct *work)
+ 	vi = container_of(work, struct virtnet_info, refill.work);
+ 	napi_disable(&vi->napi);
+ 	still_empty = !try_fill_recv(vi, GFP_KERNEL);
+-	napi_enable(&vi->napi);
++	virtnet_napi_enable(vi);
+ 
+ 	/* In theory, this can happen: if we don't get any buffers in
+ 	 * we will *never* try to fill again. */
+@@ -638,16 +652,7 @@ static int virtnet_open(struct net_device *dev)
+ {
+ 	struct virtnet_info *vi = netdev_priv(dev);
+ 
+-	napi_enable(&vi->napi);
+-
+-	/* If all buffers were filled by other side before we napi_enabled, we
+-	 * won't get another interrupt, so process any outstanding packets
+-	 * now.  virtnet_poll wants re-enable the queue, so we disable here.
+-	 * We synchronize against interrupts via NAPI_STATE_SCHED */
+-	if (napi_schedule_prep(&vi->napi)) {
+-		vi->rvq->vq_ops->disable_cb(vi->rvq);
+-		__napi_schedule(&vi->napi);
+-	}
++	virtnet_napi_enable(vi);
+ 	return 0;
+ }
+ 
+-- 
+1.7.4.1
+

@@ -1,0 +1,65 @@
+From: Rusty Russell <rusty@rustcorp.com.au>
+Date: Fri, 2 Jul 2010 16:34:01 +0000
+Subject: [PATCH] virtio_net: fix oom handling on tx
+
+commit 58eba97d0774c69b1cf3e5a8ac74419409d1abbf upstream.
+
+virtio net will never try to overflow the TX ring, so the only reason
+add_buf may fail is out of memory. Thus, we can not stop the
+device until some request completes - there's no guarantee anything
+at all is outstanding.
+
+Make the error message clearer as well: error here does not
+indicate queue full.
+
+Signed-off-by: Michael S. Tsirkin <mst@redhat.com>
+Signed-off-by: Rusty Russell <rusty@rustcorp.com.au> (...and avoid TX_BUSY)
+Cc: stable@kernel.org  # .34.x (s/virtqueue_/vi->svq->vq_ops->/)
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/virtio_net.c |   21 +++++++++++++--------
+ 1 files changed, 13 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/net/virtio_net.c b/drivers/net/virtio_net.c
+index ee75711..bb6b67f 100644
+--- a/drivers/net/virtio_net.c
++++ b/drivers/net/virtio_net.c
+@@ -562,7 +562,6 @@ static netdev_tx_t start_xmit(struct sk_buff *skb, struct net_device *dev)
+ 	struct virtnet_info *vi = netdev_priv(dev);
+ 	int capacity;
+ 
+-again:
+ 	/* Free up any pending old buffers before queueing new ones. */
+ 	free_old_xmit_skbs(vi);
+ 
+@@ -571,14 +570,20 @@ again:
+ 
+ 	/* This can happen with OOM and indirect buffers. */
+ 	if (unlikely(capacity < 0)) {
+-		netif_stop_queue(dev);
+-		dev_warn(&dev->dev, "Unexpected full queue\n");
+-		if (unlikely(!vi->svq->vq_ops->enable_cb(vi->svq))) {
+-			vi->svq->vq_ops->disable_cb(vi->svq);
+-			netif_start_queue(dev);
+-			goto again;
++		if (net_ratelimit()) {
++			if (likely(capacity == -ENOMEM)) {
++				dev_warn(&dev->dev,
++					 "TX queue failure: out of memory\n");
++			} else {
++				dev->stats.tx_fifo_errors++;
++				dev_warn(&dev->dev,
++					 "Unexpected TX queue failure: %d\n",
++					 capacity);
++			}
+ 		}
+-		return NETDEV_TX_BUSY;
++		dev->stats.tx_dropped++;
++		kfree_skb(skb);
++		return NETDEV_TX_OK;
+ 	}
+ 	vi->svq->vq_ops->kick(vi->svq);
+ 
+-- 
+1.7.4.1
+
