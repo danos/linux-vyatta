@@ -1,0 +1,834 @@
+From 837466b643a74e0e61f5a3af09ef8c98f8f256a6 Mon Sep 17 00:00:00 2001
+From: Stanislav Kinsbursky <skinsbursky@parallels.com>
+Date: Mon, 14 Feb 2011 17:44:55 +0300
+Subject: [PATCH 2/2] venfs: Backport some patches from rhel6 branch
+
+Combined NFS patch consist of:
+
+diff-ve-nfs-printk-veid-in-error-msgs
+diff-ve-nfs-safe-iterator-on-lockd-shutdown
+diff-ve-nfs-lockd-stop-fix-hosts-count-20081124-3
+diff-ve-nfs-superblock-list-20090312
+diff-ve-nfs-fix-sb_lock-usage-20090217
+diff-ve-nfs-abort-hard-at-init-death-20090210
+diff-ve-sanitize-feature-bits
+diff-ve-lockd-per-ct-grace-detection
+diff-ve-nfs-dont-make-xprt-sock-disapear-20090512
+diff-ve-nfs-remove-goto-restart
+diff-ve-nfs-clients-killing-helper
+diff-ve-nfs-shutdown-acl-client
+diff-ve-nfs-serialize-async-rpc-exec-vs-kill
+diff-ve-nfs-handle-rpc-task-errors-in-callbacks-tmp
+diff-ve-nfs-rpc-kill-task-if-clnt-is-broken
+diff-ve-nfs-stop-rework
+diff-nfs-dont-check-clnt-in-rpc-run-task
+diff-ve-nfs-lockd_down-at-proper-context
+diff-ve-nfs-dont-break-from-lockd-loop
+diff-ve-nfs-sunrpc-more-debug
+diff-ve-nfs-cleanup-clnt-task-killing
+diff-ve-nfs-lockd-stop-before-rpc
+diff-ve-umount-nfs-at-stop-20100112-2
+
+http://bugzilla.openvz.org/show_bug.cgi?id=1626
+
+Signed-off-by: Stanislav Kinsbursky <skinsbursky@parallels.com>
+Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+---
+ fs/filesystems.c             |    2 +-
+ fs/lockd/clntlock.c          |    4 +++
+ fs/lockd/grace.c             |   16 ++++++++++++
+ fs/lockd/host.c              |   55 ++++++++++++++++++++++++++++-------------
+ fs/lockd/svc.c               |   31 ++++++++++++-----------
+ fs/namespace.c               |    5 +++-
+ fs/nfs/super.c               |   37 ++++++++++++++++------------
+ include/linux/fs.h           |    2 +-
+ include/linux/sunrpc/sched.h |    2 +
+ include/linux/ve.h           |    1 +
+ include/linux/ve_proto.h     |    1 +
+ include/linux/vzcalluser.h   |    1 +
+ kernel/pid_namespace.c       |   27 ++++++++++++--------
+ kernel/ve/ve.c               |    3 +-
+ net/bridge/br.c              |    2 -
+ net/sunrpc/clnt.c            |   37 +++++++++-------------------
+ net/sunrpc/sched.c           |   27 ++++++++++++++++++++
+ net/sunrpc/xprt.c            |    2 +
+ 18 files changed, 163 insertions(+), 92 deletions(-)
+
+diff --git a/fs/filesystems.c b/fs/filesystems.c
+index bd5c213..da9f5ff 100644
+--- a/fs/filesystems.c
++++ b/fs/filesystems.c
+@@ -209,7 +209,7 @@ void unregister_ve_fs_type(struct file_system_type *local_fs_type,
+ 		return;
+ 
+ 	unregister_filesystem(local_fs_type);
+-	umount_ve_fs_type(local_fs_type);
++	umount_ve_fs_type(local_fs_type, -1);
+ 	if (local_fs_mount)
+ 		kern_umount(local_fs_mount); /* alias to mntput, drop our ref */
+ 	put_filesystem(local_fs_type);
+diff --git a/fs/lockd/clntlock.c b/fs/lockd/clntlock.c
+index fc9032d..d54a216 100644
+--- a/fs/lockd/clntlock.c
++++ b/fs/lockd/clntlock.c
+@@ -78,8 +78,12 @@ EXPORT_SYMBOL_GPL(nlmclnt_init);
+  */
+ void nlmclnt_done(struct nlm_host *host)
+ {
++	struct ve_struct *old_ve;
++
+ 	nlm_release_host(host);
++	old_ve = set_exec_env(host->owner_env);
+ 	lockd_down();
++	(void)set_exec_env(old_ve);
+ }
+ EXPORT_SYMBOL_GPL(nlmclnt_done);
+ 
+diff --git a/fs/lockd/grace.c b/fs/lockd/grace.c
+index 183cc1f..afccd92 100644
+--- a/fs/lockd/grace.c
++++ b/fs/lockd/grace.c
+@@ -4,9 +4,13 @@
+ 
+ #include <linux/module.h>
+ #include <linux/lockd/bind.h>
++#include <linux/sched.h>
++#include <linux/ve.h>
+ 
++#ifndef CONFIG_VE
+ static LIST_HEAD(grace_list);
+ static DEFINE_SPINLOCK(grace_lock);
++#endif
+ 
+ /**
+  * locks_start_grace
+@@ -21,9 +25,13 @@ static DEFINE_SPINLOCK(grace_lock);
+  */
+ void locks_start_grace(struct lock_manager *lm)
+ {
++#ifdef CONFIG_VE
++	atomic_inc(&get_exec_env()->locks_in_grace);
++#else
+ 	spin_lock(&grace_lock);
+ 	list_add(&lm->list, &grace_list);
+ 	spin_unlock(&grace_lock);
++#endif
+ }
+ EXPORT_SYMBOL_GPL(locks_start_grace);
+ 
+@@ -39,9 +47,13 @@ EXPORT_SYMBOL_GPL(locks_start_grace);
+  */
+ void locks_end_grace(struct lock_manager *lm)
+ {
++#ifdef CONFIG_VE
++	atomic_dec(&get_exec_env()->locks_in_grace);
++#else
+ 	spin_lock(&grace_lock);
+ 	list_del_init(&lm->list);
+ 	spin_unlock(&grace_lock);
++#endif
+ }
+ EXPORT_SYMBOL_GPL(locks_end_grace);
+ 
+@@ -54,6 +66,10 @@ EXPORT_SYMBOL_GPL(locks_end_grace);
+  */
+ int locks_in_grace(void)
+ {
++#ifdef CONFIG_VE
++	return atomic_read(&get_exec_env()->locks_in_grace) != 0;
++#else
+ 	return !list_empty(&grace_list);
++#endif
+ }
+ EXPORT_SYMBOL_GPL(locks_in_grace);
+diff --git a/fs/lockd/host.c b/fs/lockd/host.c
+index 55cc770..3373909 100644
+--- a/fs/lockd/host.c
++++ b/fs/lockd/host.c
+@@ -30,7 +30,7 @@ static unsigned long		next_gc;
+ static int			nrhosts;
+ static DEFINE_MUTEX(nlm_host_mutex);
+ 
+-static void			nlm_gc_hosts(void);
++static int			nlm_gc_hosts(struct ve_struct *ve);
+ 
+ struct nlm_lookup_host_info {
+ 	const int		server;		/* search for server|client */
+@@ -98,10 +98,11 @@ static struct nlm_host *nlm_lookup_host(struct nlm_lookup_host_info *ni)
+ 	struct nsm_handle *nsm = NULL;
+ 	struct ve_struct *ve;
+ 
++	ve = get_exec_env();
+ 	mutex_lock(&nlm_host_mutex);
+ 
+ 	if (time_after_eq(jiffies, next_gc))
+-		nlm_gc_hosts();
++		nlm_gc_hosts(ve);
+ 
+ 	/* We may keep several nlm_host objects for a peer, because each
+ 	 * nlm_host is identified by
+@@ -111,7 +112,6 @@ static struct nlm_host *nlm_lookup_host(struct nlm_lookup_host_info *ni)
+ 	 * This would allow us to have one nlm_host per address.
+ 	 */
+ 
+-	ve = get_exec_env();
+ 	chain = &nlm_hosts[nlm_hash_address(ni->sap)];
+ 	hlist_for_each_entry(host, pos, chain, h_hash) {
+ 		if (!rpc_cmp_addr(nlm_addr(host), ni->sap))
+@@ -499,6 +499,11 @@ nlm_shutdown_hosts(void)
+ 	struct hlist_head *chain;
+ 	struct hlist_node *pos;
+ 	struct nlm_host	*host;
++	int nr_hosts_local;
++	struct ve_struct *ve;
++
++	ve = get_exec_env();
++	nr_hosts_local = 0;
+ 
+ 	dprintk("lockd: shutting down host module\n");
+ 	mutex_lock(&nlm_host_mutex);
+@@ -507,24 +512,29 @@ nlm_shutdown_hosts(void)
+ 	dprintk("lockd: nuking all hosts...\n");
+ 	for (chain = nlm_hosts; chain < nlm_hosts + NLM_HOST_NRHASH; ++chain) {
+ 		hlist_for_each_entry(host, pos, chain, h_hash) {
++			if (!ve_accessible_strict(host->owner_env, ve))
++				continue;
+ 			host->h_expires = jiffies - 1;
+ 			if (host->h_rpcclnt) {
+ 				rpc_shutdown_client(host->h_rpcclnt);
+ 				host->h_rpcclnt = NULL;
+ 			}
++			nr_hosts_local++;
+ 		}
+ 	}
+ 
+ 	/* Then, perform a garbage collection pass */
+-	nlm_gc_hosts();
++	nr_hosts_local -= nlm_gc_hosts(ve);
+ 	mutex_unlock(&nlm_host_mutex);
+ 
+ 	/* complain if any hosts are left */
+-	if (nrhosts) {
++	if (nr_hosts_local) {
+ 		printk(KERN_WARNING "lockd: couldn't shutdown host module!\n");
+-		dprintk("lockd: %d hosts left:\n", nrhosts);
++		dprintk("lockd: %d hosts left:\n", nr_hosts_local);
+ 		for (chain = nlm_hosts; chain < nlm_hosts + NLM_HOST_NRHASH; ++chain) {
+ 			hlist_for_each_entry(host, pos, chain, h_hash) {
++				if (!ve_accessible_strict(host->owner_env, ve))
++					continue;
+ 				dprintk("       %s (cnt %d use %d exp %ld)\n",
+ 					host->h_name, atomic_read(&host->h_count),
+ 					host->h_inuse, host->h_expires);
+@@ -538,17 +548,23 @@ nlm_shutdown_hosts(void)
+  * This GC combines reference counting for async operations with
+  * mark & sweep for resources held by remote clients.
+  */
+-static void
+-nlm_gc_hosts(void)
++static int
++nlm_gc_hosts(struct ve_struct *ve)
+ {
+ 	struct hlist_head *chain;
+ 	struct hlist_node *pos, *next;
+ 	struct nlm_host	*host;
++	int freed;
++
++	freed = 0;
+ 
+ 	dprintk("lockd: host garbage collection\n");
+ 	for (chain = nlm_hosts; chain < nlm_hosts + NLM_HOST_NRHASH; ++chain) {
+-		hlist_for_each_entry(host, pos, chain, h_hash)
++		hlist_for_each_entry(host, pos, chain, h_hash) {
++			if (!ve_accessible_strict(host->owner_env, ve))
++				continue;
+ 			host->h_inuse = 0;
++		}
+ 	}
+ 
+ 	/* Mark all hosts that hold locks, blocks or shares */
+@@ -557,7 +573,8 @@ nlm_gc_hosts(void)
+ 	for (chain = nlm_hosts; chain < nlm_hosts + NLM_HOST_NRHASH; ++chain) {
+ 		hlist_for_each_entry_safe(host, pos, next, chain, h_hash) {
+ 			if (atomic_read(&host->h_count) || host->h_inuse
+-			 || time_before(jiffies, host->h_expires)) {
++			 || time_before(jiffies, host->h_expires)
++			 || !ve_accessible_strict(host->owner_env, ve)) {
+ 				dprintk("nlm_gc_hosts skipping %s (cnt %d use %d exp %ld)\n",
+ 					host->h_name, atomic_read(&host->h_count),
+ 					host->h_inuse, host->h_expires);
+@@ -568,10 +585,12 @@ nlm_gc_hosts(void)
+ 
+ 			nlm_destroy_host(host);
+ 			nrhosts--;
++			freed++;
+ 		}
+ 	}
+ 
+ 	next_gc = jiffies + NLM_HOST_COLLECT;
++	return freed;
+ }
+ 
+ #ifdef CONFIG_VE
+@@ -583,12 +602,15 @@ void ve_nlm_shutdown_hosts(struct ve_struct *ve)
+ 	dprintk("lockd: shutting down host module for ve %d\n", veid);
+ 	mutex_lock(&nlm_host_mutex);
+ 
++	/* Make sure no async RPC task is in progress */
++	down_write(&rpc_async_task_lock);
++
+ 	/* Perform a garbage collection pass */
+ 	for (i = 0; i < NLM_HOST_NRHASH; i++) {
+ 		struct nlm_host	*host;
+-		struct hlist_node *pos;
++		struct hlist_node *pos, *tmp;
+ 
+-		hlist_for_each_entry(host, pos, &nlm_hosts[i], h_hash) {
++		hlist_for_each_entry_safe(host, pos, tmp, &nlm_hosts[i], h_hash) {
+ 			struct rpc_clnt	*clnt;
+ 
+ 			if (ve != host->owner_env)
+@@ -601,14 +623,9 @@ void ve_nlm_shutdown_hosts(struct ve_struct *ve)
+ 				veid);
+ 			if ((clnt = host->h_rpcclnt) != NULL) {
+ 				if (!list_empty(&clnt->cl_tasks)) {
+-					struct rpc_xprt *xprt;
+-
+ 					printk(KERN_WARNING
+ 						"lockd: active RPC handle\n");
+-					rpc_killall_tasks(clnt);
+-					xprt = clnt->cl_xprt;
+-					xprt_disconnect_done(xprt);
+-					xprt->ops->close(xprt);
++					rpc_kill_client(clnt);
+ 				} else
+ 					rpc_shutdown_client(clnt);
+ 			}
+@@ -617,6 +634,8 @@ void ve_nlm_shutdown_hosts(struct ve_struct *ve)
+ 		}
+ 	}
+ 
++	up_write(&rpc_async_task_lock);
++
+ 	mutex_unlock(&nlm_host_mutex);
+ }
+ #endif
+diff --git a/fs/lockd/svc.c b/fs/lockd/svc.c
+index b0cde74..e9e884a 100644
+--- a/fs/lockd/svc.c
++++ b/fs/lockd/svc.c
+@@ -176,17 +176,14 @@ lockd(void *vrqstp)
+ 		 */
+ 		err = svc_recv(rqstp, timeout);
+ 		if (err == -EAGAIN || err == -EINTR) {
+-#ifdef CONFIG_VE
+-			if (!get_exec_env()->is_running)
+-				break;
+-#endif
+ 			preverr = err;
+ 			continue;
+ 		}
+ 		if (err < 0) {
+ 			if (err != preverr) {
+-				printk(KERN_WARNING "%s: unexpected error "
+-					"from svc_recv (%d)\n", __func__, err);
++				printk(KERN_WARNING "%s: ct%d unexpected error "
++					"from svc_recv (%d)\n", __func__,
++					get_exec_env()->veid, err);
+ 				preverr = err;
+ 			}
+ 			schedule_timeout_interruptible(HZ);
+@@ -289,12 +286,14 @@ int lockd_up(void)
+ 	 */
+ 	if (nlmsvc_users)
+ 		printk(KERN_WARNING
+-			"lockd_up: no pid, %d users??\n", nlmsvc_users);
++			"lockd_up: ct%d no pid, %d users??\n",
++			get_exec_env()->veid, nlmsvc_users);
+ 
+ 	error = -ENOMEM;
+ 	serv = svc_create(&nlmsvc_program, LOCKD_BUFSIZE, NULL);
+ 	if (!serv) {
+-		printk(KERN_WARNING "lockd_up: create service failed\n");
++		printk(KERN_WARNING "lockd_up: ct%d create service failed\n",
++				get_exec_env()->veid);
+ 		goto out;
+ 	}
+ 
+@@ -310,8 +309,8 @@ int lockd_up(void)
+ 		error = PTR_ERR(nlmsvc_rqst);
+ 		nlmsvc_rqst = NULL;
+ 		printk(KERN_WARNING
+-			"lockd_up: svc_rqst allocation failed, error=%d\n",
+-			error);
++			"lockd_up: ct%d svc_rqst allocation failed, error=%d\n",
++			get_exec_env()->veid, error);
+ 		goto destroy_and_out;
+ 	}
+ 
+@@ -325,7 +324,8 @@ int lockd_up(void)
+ 		nlmsvc_task = NULL;
+ 		nlmsvc_rqst = NULL;
+ 		printk(KERN_WARNING
+-			"lockd_up: kthread_run failed, error=%d\n", error);
++			"lockd_up: ct%d kthread_run failed, error=%d\n",
++			get_exec_env()->veid, error);
+ 		goto destroy_and_out;
+ 	}
+ 
+@@ -354,13 +354,14 @@ lockd_down(void)
+ 		if (--nlmsvc_users)
+ 			goto out;
+ 	} else {
+-		printk(KERN_ERR "lockd_down: no users! task=%p\n",
+-			nlmsvc_task);
++		printk(KERN_ERR "lockd_down: ct%d no users! task=%p\n",
++			get_exec_env()->veid, nlmsvc_task);
+ 		goto out;
+ 	}
+ 
+ 	if (!nlmsvc_task) {
+-		printk(KERN_ERR "lockd_down: no lockd running.\n");
++		printk(KERN_ERR "lockd_down: ct%d no lockd running.\n",
++				get_exec_env()->veid);
+ 		goto out;
+ 	}
+ 	kthread_stop(nlmsvc_task);
+@@ -526,7 +527,7 @@ static struct ve_hook lockd_hook = {
+ 	.init	  = ve_lockd_start,
+ 	.fini	  = ve_lockd_stop,
+ 	.owner	  = THIS_MODULE,
+-	.priority = HOOK_PRIO_FS,
++	.priority = HOOK_PRIO_NET,
+ };
+ #endif
+ 
+diff --git a/fs/namespace.c b/fs/namespace.c
+index b76df5d..d19de10 100644
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -1158,7 +1158,7 @@ static int do_umount(struct vfsmount *mnt, int flags)
+ }
+ 
+ #ifdef CONFIG_VE
+-void umount_ve_fs_type(struct file_system_type *local_fs_type)
++void umount_ve_fs_type(struct file_system_type *local_fs_type, int veid)
+ {
+ 	struct vfsmount *mnt;
+ 	struct list_head *p, *q;
+@@ -1171,6 +1171,8 @@ void umount_ve_fs_type(struct file_system_type *local_fs_type)
+ 		mnt = list_entry(p, struct vfsmount, mnt_list);
+ 		if (mnt->mnt_sb->s_type != local_fs_type)
+ 			continue;
++		if (veid >= 0 && mnt->owner != veid)
++			continue;
+ 		list_del(p);
+ 		list_add(p, &kill);
+ 	}
+@@ -1185,6 +1187,7 @@ void umount_ve_fs_type(struct file_system_type *local_fs_type)
+ 	up_write(&namespace_sem);
+ 	release_mounts(&umount_list);
+ }
++EXPORT_SYMBOL(umount_ve_fs_type);
+ #endif
+ 
+ /*
+diff --git a/fs/nfs/super.c b/fs/nfs/super.c
+index 8ffb55b..724133c 100644
+--- a/fs/nfs/super.c
++++ b/fs/nfs/super.c
+@@ -375,24 +375,29 @@ static void ve_nfs_stop(void *data)
+ 	   force the client to stop.
+ 	   Lock daemon is already dead.
+ 	   Only superblock client remains. Den */
++
++	down_write(&rpc_async_task_lock);
++
+ 	spin_lock(&sb_lock);
+-	list_for_each_entry(sb, &super_blocks, s_list) {
+-		struct rpc_clnt *clnt;
+-		struct rpc_xprt *xprt;
+-		if (sb->s_type != &nfs_fs_type)
+-			continue;
+-		clnt = NFS_SB(sb)->client;
+-		if (!ve_accessible_strict(clnt->cl_xprt->owner_env, ve))
+-			continue;
+-		clnt->cl_broken = 1;
+-		rpc_killall_tasks(clnt);
++	list_for_each_entry(sb, &nfs_fs_type.fs_supers, s_instances) {
++		struct nfs_server *srv;
++		struct ve_struct *owner_env;
+ 
+-		xprt = clnt->cl_xprt;
+-		xprt_disconnect_done(xprt);
+-		xprt->ops->close(xprt);
++		srv = NFS_SB(sb);
++		owner_env = srv->client->cl_xprt->owner_env;
++
++		if (ve_accessible_strict(owner_env, ve)) {
++			rpc_kill_client(srv->client);
++			rpc_kill_client(srv->client_acl);
++		}
+ 	}
+ 	spin_unlock(&sb_lock);
+ 
++	/* Make sure no async RPC task is in progress */
++	up_write(&rpc_async_task_lock);
++
++	umount_ve_fs_type(&nfs_fs_type, ve->veid);
++
+ 	flush_scheduled_work();
+ }
+ 
+@@ -424,7 +429,7 @@ int __init register_nfs_fs(void)
+ 		goto error_2;
+ #endif
+ 	register_shrinker(&acl_shrinker);
+-	ve_hook_register(VE_SS_CHAIN, &nfs_hook);
++	ve_hook_register(VE_INIT_EXIT_CHAIN, &nfs_hook);
+ 	return 0;
+ 
+ #ifdef CONFIG_NFS_V4
+@@ -2196,7 +2201,7 @@ static int nfs_get_sb(struct file_system_type *fs_type,
+ 	struct ve_struct *ve;
+ 
+ 	ve = get_exec_env();
+-	if (!ve_is_super(ve) && !(ve->features & VE_FEATURE_NFS))
++	if (!(ve->features & VE_FEATURE_NFS))
+ 		return -ENODEV;
+ 
+ 	data = nfs_alloc_parsed_mount_data(3);
+@@ -2331,7 +2336,7 @@ static int nfs_xdev_get_sb(struct file_system_type *fs_type, int flags,
+ 	struct ve_struct *ve;
+ 
+ 	ve = get_exec_env();
+-	if (!ve_is_super(ve) && !(ve->features & VE_FEATURE_NFS))
++	if (!(ve->features & VE_FEATURE_NFS))
+ 		return -ENODEV;
+ 
+ 	dprintk("--> nfs_xdev_get_sb()\n");
+diff --git a/include/linux/fs.h b/include/linux/fs.h
+index 6c4a03b..c4f5e61 100644
+--- a/include/linux/fs.h
++++ b/include/linux/fs.h
+@@ -1836,7 +1836,7 @@ extern struct vfsmount *kern_mount_data(struct file_system_type *, void *data);
+ extern int register_ve_fs_type(struct ve_struct *, struct file_system_type *,
+ 		struct file_system_type **, struct vfsmount **);
+ extern void unregister_ve_fs_type(struct file_system_type *, struct vfsmount *);
+-extern void umount_ve_fs_type(struct file_system_type *local_fs_type);
++extern void umount_ve_fs_type(struct file_system_type *local_fs_type, int veid);
+ #define kern_umount mntput
+ extern int may_umount_tree(struct vfsmount *);
+ extern struct vfsmount *next_mnt(struct vfsmount *p, struct vfsmount *root);
+diff --git a/include/linux/sunrpc/sched.h b/include/linux/sunrpc/sched.h
+index 4010977..b378ef3 100644
+--- a/include/linux/sunrpc/sched.h
++++ b/include/linux/sunrpc/sched.h
+@@ -216,6 +216,7 @@ void		rpc_put_task(struct rpc_task *);
+ void		rpc_exit_task(struct rpc_task *);
+ void		rpc_release_calldata(const struct rpc_call_ops *, void *);
+ void		rpc_killall_tasks(struct rpc_clnt *);
++void		rpc_kill_client(struct rpc_clnt *);
+ void		rpc_execute(struct rpc_task *);
+ void		rpc_init_priority_wait_queue(struct rpc_wait_queue *, const char *);
+ void		rpc_init_wait_queue(struct rpc_wait_queue *, const char *);
+@@ -239,6 +240,7 @@ void		rpc_show_tasks(void);
+ int		rpc_init_mempool(void);
+ void		rpc_destroy_mempool(void);
+ extern struct workqueue_struct *rpciod_workqueue;
++extern struct rw_semaphore rpc_async_task_lock;
+ void		rpc_prepare_task(struct rpc_task *task);
+ 
+ static inline void rpc_exit(struct rpc_task *task, int status)
+diff --git a/include/linux/ve.h b/include/linux/ve.h
+index c4ba1d0..c9a59e2 100644
+--- a/include/linux/ve.h
++++ b/include/linux/ve.h
+@@ -281,6 +281,7 @@ struct ve_struct {
+ 	int			bm_entry_count;
+ 	struct list_head	bm_entries;
+ #endif
++	atomic_t		locks_in_grace;
+ 
+ 	struct nsproxy		*ve_ns;
+ 	struct user_namespace	*user_ns;
+diff --git a/include/linux/ve_proto.h b/include/linux/ve_proto.h
+index 5bb93e8..001c72f 100644
+--- a/include/linux/ve_proto.h
++++ b/include/linux/ve_proto.h
+@@ -50,6 +50,7 @@ int devperms_seq_show(struct seq_file *m, void *v);
+ 
+ enum {
+ 	VE_SS_CHAIN,
++	VE_INIT_EXIT_CHAIN,
+ 
+ 	VE_MAX_CHAINS
+ };
+diff --git a/include/linux/vzcalluser.h b/include/linux/vzcalluser.h
+index d093112..c55f977 100644
+--- a/include/linux/vzcalluser.h
++++ b/include/linux/vzcalluser.h
+@@ -109,6 +109,7 @@ struct env_create_param3 {
+ #define VE_FEATURE_PPP		(1ULL << 5)
+ #define VE_FEATURE_IPGRE	(1ULL << 6)
+ #define VE_FEATURE_BRIDGE	(1ULL << 7)
++#define VE_FEATURE_NFSD		(1ULL << 8)
+ 
+ #define VE_FEATURES_OLD		(VE_FEATURE_SYSFS)
+ #define VE_FEATURES_DEF		(VE_FEATURE_SYSFS | \
+diff --git a/kernel/pid_namespace.c b/kernel/pid_namespace.c
+index 6d3f029..19a9c6a 100644
+--- a/kernel/pid_namespace.c
++++ b/kernel/pid_namespace.c
+@@ -14,6 +14,7 @@
+ #include <linux/err.h>
+ #include <linux/acct.h>
+ #include <linux/module.h>
++#include <linux/ve_proto.h>
+ 
+ #include <bc/kmem.h>
+ 
+@@ -241,17 +242,6 @@ static noinline void show_lost_task(struct task_struct *p)
+ 
+ static void zap_ve_processes(struct ve_struct *env)
+ {
+-	/*
+-	 * Here the VE changes its state into "not running".
+-	 * op_sem taken for write is a barrier to all VE manipulations from
+-	 * ioctl: it waits for operations currently in progress and blocks all
+-	 * subsequent operations until is_running is set to 0 and op_sem is
+-	 * released.
+-	 */
+-	down_write(&env->op_sem);
+-	env->is_running = 0;
+-	up_write(&env->op_sem);
+-
+ 	/* wait for all init childs exit */
+ 	while (atomic_read(&env->pcounter) > 1) {
+ 		struct task_struct *g, *p;
+@@ -294,6 +284,21 @@ void zap_pid_ns_processes(struct pid_namespace *pid_ns)
+ 	int nr;
+ 	int rc;
+ 	struct task_struct *task;
++	struct ve_struct *env = get_exec_env();
++
++	/*
++	 * Here the VE changes its state into "not running".
++	 * op_sem taken for write is a barrier to all VE manipulations from
++	 * ioctl: it waits for operations currently in progress and blocks all
++	 * subsequent operations until is_running is set to 0 and op_sem is
++	 * released.
++	 */
++
++	down_write(&env->op_sem);
++	env->is_running = 0;
++	up_write(&env->op_sem);
++
++	ve_hook_iterate_fini(VE_INIT_EXIT_CHAIN, env);
+ 
+ 	/*
+ 	 * The last thread in the cgroup-init thread group is terminating.
+diff --git a/kernel/ve/ve.c b/kernel/ve/ve.c
+index 907d944..ce829c7 100644
+--- a/kernel/ve/ve.c
++++ b/kernel/ve/ve.c
+@@ -79,8 +79,7 @@ struct ve_struct ve0 = {
+ 	.ipt_mask 		= VE_IP_ALL,
+ 	._iptables_modules	= VE_IP_ALL,
+ #endif
+-	.features		= VE_FEATURE_SIT | VE_FEATURE_IPIP |
+-				VE_FEATURE_PPP,
++	.features		= -1,
+ 	._randomize_va_space	=
+ #ifdef CONFIG_COMPAT_BRK
+ 					1,
+diff --git a/net/bridge/br.c b/net/bridge/br.c
+index 455a4e6..fedf0dc 100644
+--- a/net/bridge/br.c
++++ b/net/bridge/br.c
+@@ -62,8 +62,6 @@ static int __init br_init(void)
+ 	if (err)
+ 		goto err_out4;
+ 
+-	get_ve0()->features |= VE_FEATURE_BRIDGE;
+-
+ 	brioctl_set(br_ioctl_deviceless_stub);
+ 	br_handle_frame_hook = br_handle_frame;
+ 	br_hard_xmit_hook = br_xmit;
+diff --git a/net/sunrpc/clnt.c b/net/sunrpc/clnt.c
+index fad3e2b..b32b4ce 100644
+--- a/net/sunrpc/clnt.c
++++ b/net/sunrpc/clnt.c
+@@ -115,6 +115,9 @@ static int rpc_abort_hard(struct rpc_task *task)
+ 	if (time_before(jiffies, clnt->cl_pr_time + xprt_abort_timeout * HZ))
+ 		return 0;
+ 
++	printk(KERN_ERR "CT#%u: RPC client %p (server %s) is marked 'broken'. "
++		"Unmount/mount to get it working again.\n",
++		get_exec_env()->veid, clnt, clnt->cl_server);
+ 	clnt->cl_broken = 1;
+ 	rpc_killall_tasks(clnt);
+ 	return -ETIMEDOUT;
+@@ -591,9 +594,6 @@ struct rpc_task *rpc_run_task(const struct rpc_task_setup *task_setup_data)
+ {
+ 	struct rpc_task *task, *ret;
+ 
+-	if (task_setup_data->rpc_client->cl_broken)
+-		return ERR_PTR(-EIO);
+-
+ 	task = rpc_new_task(task_setup_data);
+ 	if (task == NULL) {
+ 		rpc_release_calldata(task_setup_data->callback_ops,
+@@ -1364,8 +1364,8 @@ call_status(struct rpc_task *task)
+ 		break;
+ 	default:
+ 		if (clnt->cl_chatty)
+-			printk("%s: RPC call returned error %d\n",
+-			       clnt->cl_protname, -status);
++			printk("ct%d %s: RPC call returned error %d\n",
++			       get_exec_env()->veid, clnt->cl_protname, -status);
+ 		rpc_exit(task, status);
+ 	}
+ }
+@@ -1390,8 +1390,8 @@ call_timeout(struct rpc_task *task)
+ 
+ 	if (RPC_IS_SOFT(task) || rpc_abort_hard(task)) {
+ 		if (clnt->cl_chatty)
+-			printk(KERN_NOTICE "%s: server %s not responding, timed out\n",
+-				clnt->cl_protname, clnt->cl_server);
++			printk(KERN_NOTICE "ct%d %s: server %s not responding, timed out\n",
++				get_exec_env()->veid, clnt->cl_protname, clnt->cl_server);
+ 		rpc_exit(task, -EIO);
+ 		return;
+ 	}
+@@ -1399,8 +1399,8 @@ call_timeout(struct rpc_task *task)
+ 	if (!(task->tk_flags & RPC_CALL_MAJORSEEN)) {
+ 		task->tk_flags |= RPC_CALL_MAJORSEEN;
+ 		if (clnt->cl_chatty)
+-			printk(KERN_NOTICE "%s: server %s not responding, still trying\n",
+-			clnt->cl_protname, clnt->cl_server);
++			printk(KERN_NOTICE "ct%d %s: server %s not responding, still trying\n",
++			get_exec_env()->veid, clnt->cl_protname, clnt->cl_server);
+ 	}
+ 	rpc_force_rebind(clnt);
+ 	/*
+@@ -1431,8 +1431,8 @@ call_decode(struct rpc_task *task)
+ 
+ 	if (task->tk_flags & RPC_CALL_MAJORSEEN) {
+ 		if (clnt->cl_chatty)
+-			printk(KERN_NOTICE "%s: server %s OK\n",
+-				clnt->cl_protname, clnt->cl_server);
++			printk(KERN_NOTICE "ct%d %s: server %s OK\n",
++				get_exec_env()->veid, clnt->cl_protname, clnt->cl_server);
+ 		task->tk_flags &= ~RPC_CALL_MAJORSEEN;
+ 	}
+ 
+@@ -1808,7 +1808,6 @@ void ve_sunrpc_stop(void *data)
+ {
+ 	struct ve_struct *ve = (struct ve_struct *)data;
+ 	struct rpc_clnt *clnt;
+-	struct rpc_task	*rovr;
+ 
+ 	dprintk("RPC:       killing all tasks for VE %d\n", ve->veid);
+ 
+@@ -1817,19 +1816,7 @@ void ve_sunrpc_stop(void *data)
+ 		if (clnt->cl_xprt->owner_env != ve)
+ 			continue;
+ 
+-		spin_lock(&clnt->cl_lock);
+-		list_for_each_entry(rovr, &clnt->cl_tasks, tk_task) {
+-			if (!RPC_IS_ACTIVATED(rovr))
+-				continue;
+-			printk(KERN_WARNING "RPC: Killing task %d client %p\n",
+-			       rovr->tk_pid, clnt);
+-
+-			rovr->tk_flags |= RPC_TASK_KILLED;
+-			rpc_exit(rovr, -EIO);
+-			 rpc_wake_up_queued_task(rovr->tk_waitqueue, rovr);
+-		}
+-		schedule_work(&clnt->cl_xprt->task_cleanup);
+-		spin_unlock(&clnt->cl_lock);
++		rpc_killall_tasks(clnt);
+ 	}
+ 	spin_unlock(&rpc_client_lock);
+ 
+diff --git a/net/sunrpc/sched.c b/net/sunrpc/sched.c
+index fba30fe..2f64305 100644
+--- a/net/sunrpc/sched.c
++++ b/net/sunrpc/sched.c
+@@ -52,6 +52,8 @@ static struct rpc_wait_queue delay_queue;
+  * rpciod-related stuff
+  */
+ struct workqueue_struct *rpciod_workqueue;
++DECLARE_RWSEM(rpc_async_task_lock);
++EXPORT_SYMBOL(rpc_async_task_lock);
+ 
+ /*
+  * Disable the timer for a given RPC task. Should be called with
+@@ -617,6 +619,19 @@ static void __rpc_execute(struct rpc_task *task)
+ 	for (;;) {
+ 
+ 		/*
++		 * Finish this task with error state if RPC client is already
++		 * broken.
++		 */
++		if (task->tk_client->cl_broken) {
++			dprintk("RPC: client 0x%p is broken. Drop task %d "
++				"with EIO.",
++					task->tk_client, task->tk_pid);
++			task->tk_flags |= RPC_TASK_KILLED;
++			rpc_exit(task, -EIO);
++			break;
++		}	
++
++		/*
+ 		 * Execute any pending callback.
+ 		 */
+ 		if (task->tk_callback) {
+@@ -715,7 +730,9 @@ void rpc_execute(struct rpc_task *task)
+ 
+ static void rpc_async_schedule(struct work_struct *work)
+ {
++	down_read(&rpc_async_task_lock);
+ 	__rpc_execute(container_of(work, struct rpc_task, u.tk_work));
++	up_read(&rpc_async_task_lock);
+ }
+ 
+ /**
+@@ -951,6 +968,16 @@ void rpc_killall_tasks(struct rpc_clnt *clnt)
+ }
+ EXPORT_SYMBOL_GPL(rpc_killall_tasks);
+ 
++void rpc_kill_client(struct rpc_clnt *clnt)
++{
++	if (!IS_ERR(clnt)) {
++		clnt->cl_broken = 1;
++		clnt->cl_pr_time = jiffies - xprt_abort_timeout * HZ - 1;
++		rpc_killall_tasks(clnt);
++	}
++}
++EXPORT_SYMBOL_GPL(rpc_kill_client);
++
+ int rpciod_up(void)
+ {
+ 	return try_module_get(THIS_MODULE) ? 0 : -EINVAL;
+diff --git a/net/sunrpc/xprt.c b/net/sunrpc/xprt.c
+index 48d4f3e..0268167 100644
+--- a/net/sunrpc/xprt.c
++++ b/net/sunrpc/xprt.c
+@@ -1154,6 +1154,7 @@ void xprt_put(struct rpc_xprt *xprt)
+ {
+ 	kref_put(&xprt->kref, xprt_destroy);
+ }
++EXPORT_SYMBOL(xprt_put);
+ 
+ /**
+  * xprt_get - return a reference to an RPC transport.
+@@ -1165,3 +1166,4 @@ struct rpc_xprt *xprt_get(struct rpc_xprt *xprt)
+ 	kref_get(&xprt->kref);
+ 	return xprt;
+ }
++EXPORT_SYMBOL(xprt_get);
+-- 
+1.7.4.1
+
