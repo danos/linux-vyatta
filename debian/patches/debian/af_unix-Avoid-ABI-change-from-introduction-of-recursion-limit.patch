@@ -1,0 +1,44 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Mon, 28 Feb 2011 03:31:55 +0000
+Subject: [PATCH] af_unix: Avoid ABI change from introduction of recursion limit
+
+---
+ include/net/af_unix.h |    5 ++++-
+ net/unix/af_unix.c    |    5 +++--
+ 2 files changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/include/net/af_unix.h b/include/net/af_unix.h
+index 861045f..12e5f05 100644
+--- a/include/net/af_unix.h
++++ b/include/net/af_unix.h
+@@ -57,7 +57,10 @@ struct unix_sock {
+         spinlock_t		lock;
+ 	unsigned int		gc_candidate : 1;
+ 	unsigned int		gc_maybe_cycle : 1;
+-	unsigned char		recursion_level;
++#ifndef __GENKSYSMS__
++	unsigned int		: 6;
++	unsigned int		recursion_level : 8;
++#endif
+         wait_queue_head_t       peer_wait;
+ };
+ #define unix_sk(__sk) ((struct unix_sock *)__sk)
+diff --git a/net/unix/af_unix.c b/net/unix/af_unix.c
+index e707e26..e64ee65 100644
+--- a/net/unix/af_unix.c
++++ b/net/unix/af_unix.c
+@@ -1336,8 +1336,9 @@ static int unix_attach_fds(struct scm_cookie *scm, struct sk_buff *skb)
+ 
+ 		if (sk) {
+ 			unix_sock_count++;
+-			max_level = max(max_level,
+-					unix_sk(sk)->recursion_level);
++			max_level = max_t(unsigned char,
++					  max_level,
++					  unix_sk(sk)->recursion_level);
+ 		}
+ 	}
+ 	if (unlikely(max_level > MAX_RECURSION_LEVEL))
+-- 
+1.7.4.1
+
