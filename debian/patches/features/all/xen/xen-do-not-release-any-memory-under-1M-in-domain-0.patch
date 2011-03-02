@@ -1,0 +1,75 @@
+From: Ian Campbell <ian.campbell@citrix.com>
+Date: Thu, 28 Oct 2010 11:32:29 -0700
+Subject: [PATCH] xen: do not release any memory under 1M in domain 0
+
+commit 9ec23a7f6d2537faf14368e066e307c06812c4ca upstream.
+
+We already deliberately setup a 1-1 P2M for the region up to 1M in
+order to allow code which assumes this region is already mapped to
+work without having to convert everything to ioremap.
+
+Domain 0 should not return any apparently unused memory regions
+(reserved or otherwise) in this region to Xen since the e820 may not
+accurately reflect what the BIOS has stashed in this region.
+
+Signed-off-by: Ian Campbell <ian.campbell@citrix.com>
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+---
+ arch/x86/xen/setup.c |   18 +++++++++++-------
+ 1 files changed, 11 insertions(+), 7 deletions(-)
+
+diff --git a/arch/x86/xen/setup.c b/arch/x86/xen/setup.c
+index b1dbdaa..769c4b0 100644
+--- a/arch/x86/xen/setup.c
++++ b/arch/x86/xen/setup.c
+@@ -118,16 +118,18 @@ static unsigned long __init xen_return_unused_memory(unsigned long max_pfn,
+ 						     const struct e820map *e820)
+ {
+ 	phys_addr_t max_addr = PFN_PHYS(max_pfn);
+-	phys_addr_t last_end = 0;
++	phys_addr_t last_end = ISA_END_ADDRESS;
+ 	unsigned long released = 0;
+ 	int i;
+ 
++	/* Free any unused memory above the low 1Mbyte. */
+ 	for (i = 0; i < e820->nr_map && last_end < max_addr; i++) {
+ 		phys_addr_t end = e820->map[i].addr;
+ 		end = min(max_addr, end);
+ 
+-		released += xen_release_chunk(last_end, end);
+-		last_end = e820->map[i].addr + e820->map[i].size;
++		if (last_end < end)
++			released += xen_release_chunk(last_end, end);
++		last_end = max(last_end, e820->map[i].addr + e820->map[i].size);
+ 	}
+ 
+ 	if (last_end < max_addr)
+@@ -164,6 +166,7 @@ char * __init xen_memory_setup(void)
+ 		XENMEM_memory_map;
+ 	rc = HYPERVISOR_memory_op(op, &memmap);
+ 	if (rc == -ENOSYS) {
++		BUG_ON(xen_initial_domain());
+ 		memmap.nr_entries = 1;
+ 		map[0].addr = 0ULL;
+ 		map[0].size = mem_end;
+@@ -201,12 +204,13 @@ char * __init xen_memory_setup(void)
+ 	}
+ 
+ 	/*
+-	 * Even though this is normal, usable memory under Xen, reserve
+-	 * ISA memory anyway because too many things think they can poke
++	 * In domU, the ISA region is normal, usable memory, but we
++	 * reserve ISA memory anyway because too many things poke
+ 	 * about in there.
+ 	 *
+-	 * In a dom0 kernel, this region is identity mapped with the
+-	 * hardware ISA area, so it really is out of bounds.
++	 * In Dom0, the host E820 information can leave gaps in the
++	 * ISA range, which would cause us to release those pages.  To
++	 * avoid this, we unconditionally reserve them here.
+ 	 */
+ 	e820_add_region(ISA_START_ADDRESS, ISA_END_ADDRESS - ISA_START_ADDRESS,
+ 			E820_RESERVED);
+-- 
+1.7.2.3
+
