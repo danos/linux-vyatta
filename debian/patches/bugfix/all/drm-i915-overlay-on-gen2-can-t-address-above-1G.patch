@@ -1,0 +1,46 @@
+From 7f61c474281d7cecced9f270e74d48a17ddd8cdf Mon Sep 17 00:00:00 2001
+From: Daniel Vetter <daniel.vetter@ffwll.ch>
+Date: Mon, 30 Aug 2010 21:25:23 +0200
+Subject: [PATCH 1/2] drm/i915: overlay on gen2 can't address above 1G
+
+commit 9f82d23846146990d475f6753be733e55788d88d upstream.
+
+So set the coherent dma mask accordingly. This dma mask is only used
+for physical objects, so it won't really matter allocation-wise.
+
+Now this never really surfaced because sane 32bit kernels only have 1G
+of lowmem. But some eager testers (distros?) still carry around the patch
+to adjust lowmem via a kconfig option. And the kernel seems to favour
+high allocations on boot-up, hence the overlay blowing up reliably.
+
+Because the patch is tiny and nicely shows how broken gen2 is it's imho
+worth to merge despite the fact that mucking around with the lowmem/
+highmem division is (no longer) supported.
+
+Bugzilla: https://bugs.freedesktop.org/show_bug.cgi?id=28318
+Cc: stable@kernel.org
+Signed-off-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+[bwh: Backport to 2.6.33]
+---
+ drivers/gpu/drm/i915/i915_dma.c |    4 ++++
+ 1 files changed, 4 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_dma.c b/drivers/gpu/drm/i915/i915_dma.c
+index 2b2adb5..c93c98a 100644
+--- a/drivers/gpu/drm/i915/i915_dma.c
++++ b/drivers/gpu/drm/i915/i915_dma.c
+@@ -1407,6 +1407,10 @@ int i915_driver_load(struct drm_device *dev, unsigned long flags)
+ 		goto free_priv;
+ 	}
+ 
++	/* overlay on gen2 is broken and can't address above 1G */
++	if (IS_GEN2(dev))
++		pci_set_consistent_dma_mask(dev->pdev, DMA_BIT_MASK(30));
++
+ 	dev_priv->regs = ioremap(base, size);
+ 	if (!dev_priv->regs) {
+ 		DRM_ERROR("failed to map registers\n");
+-- 
+1.7.4.1
+

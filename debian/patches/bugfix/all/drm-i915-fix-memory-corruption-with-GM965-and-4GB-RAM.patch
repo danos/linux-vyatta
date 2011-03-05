@@ -1,0 +1,56 @@
+From 78c925d9936f54bc654e430ef54eeedc416d32f8 Mon Sep 17 00:00:00 2001
+From: Jan Niehusmann <jan@gondor.com>
+Date: Fri, 4 Mar 2011 00:28:02 +0100
+Subject: [PATCH 2/2] drm/i915: fix memory corruption with GM965 and >4GB RAM
+
+commit 6927faf30920b8c03dfa007e732642a1f1f20089 upstream.
+
+On a Thinkpad x61s, I noticed some memory corruption when
+plugging/unplugging the external VGA connection. The symptoms are that
+4 bytes at the beginning of a page get overwritten by zeroes.
+The address of the corruption varies when rebooting the machine, but
+stays constant while it's running (so it's possible to repeatedly write
+some data and then corrupt it again by plugging the cable).
+
+Further investigation revealed that the corrupted address is
+(dev_priv->status_page_dmah->busaddr & 0xffffffff), ie. the beginning of
+the hardware status page of the i965 graphics card, cut to 32 bits.
+
+So it seems that for some memory access, the hardware uses only 32 bit
+addressing. If the hardware status page is located >4GB, this
+corrupts unrelated memory.
+
+Signed-off-by: Jan Niehusmann <jan@gondor.com>
+Acked-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+[bwh: Backport to 2.6.33]
+---
+ drivers/gpu/drm/i915/i915_dma.c |   11 +++++++++++
+ 1 files changed, 11 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_dma.c b/drivers/gpu/drm/i915/i915_dma.c
+index c93c98a..be27acc 100644
+--- a/drivers/gpu/drm/i915/i915_dma.c
++++ b/drivers/gpu/drm/i915/i915_dma.c
+@@ -1411,6 +1411,17 @@ int i915_driver_load(struct drm_device *dev, unsigned long flags)
+ 	if (IS_GEN2(dev))
+ 		pci_set_consistent_dma_mask(dev->pdev, DMA_BIT_MASK(30));
+ 
++	/* 965GM sometimes incorrectly writes to hardware status page (HWS)
++	 * using 32bit addressing, overwriting memory if HWS is located
++	 * above 4GB.
++	 *
++	 * The documentation also mentions an issue with undefined
++	 * behaviour if any general state is accessed within a page above 4GB,
++	 * which also needs to be handled carefully.
++	 */
++	if (IS_I965G(dev) && !IS_G4X(dev) && !IS_IRONLAKE(dev))
++		pci_set_consistent_dma_mask(dev->pdev, DMA_BIT_MASK(32));
++
+ 	dev_priv->regs = ioremap(base, size);
+ 	if (!dev_priv->regs) {
+ 		DRM_ERROR("failed to map registers\n");
+-- 
+1.7.4.1
+
