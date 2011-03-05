@@ -1,0 +1,710 @@
+diff --git a/arch/x86/include/asm/smpboot_hooks.h b/arch/x86/include/asm/smpboot_hooks.h
+index 1def601..cfdc6c8 100644
+--- a/arch/x86/include/asm/smpboot_hooks.h
++++ b/arch/x86/include/asm/smpboot_hooks.h
+@@ -34,7 +34,7 @@ static inline void smpboot_restore_warm_reset_vector(void)
+ 	 */
+ 	CMOS_WRITE(0, 0xf);
+ 
+-	*((volatile long *)phys_to_virt(apic->trampoline_phys_low)) = 0;
++	*((volatile u32 *)phys_to_virt(apic->trampoline_phys_low)) = 0;
+ }
+ 
+ static inline void __init smpboot_setup_io_apic(void)
+diff --git a/drivers/gpu/drm/drm_irq.c b/drivers/gpu/drm/drm_irq.c
+index 332d743..c8b5a7b 100644
+--- a/drivers/gpu/drm/drm_irq.c
++++ b/drivers/gpu/drm/drm_irq.c
+@@ -540,7 +540,8 @@ int drm_modeset_ctl(struct drm_device *dev, void *data,
+ 		    struct drm_file *file_priv)
+ {
+ 	struct drm_modeset_ctl *modeset = data;
+-	int crtc, ret = 0;
++	int ret = 0;
++	unsigned int crtc;
+ 
+ 	/* If drm_vblank_init() hasn't been called yet, just no-op */
+ 	if (!dev->num_crtcs)
+diff --git a/drivers/hid/hid-core.c b/drivers/hid/hid-core.c
+index 1597863..5e1b522 100644
+--- a/drivers/hid/hid-core.c
++++ b/drivers/hid/hid-core.c
+@@ -1297,6 +1297,7 @@ static const struct hid_device_id hid_blacklist[] = {
+ 	{ HID_USB_DEVICE(USB_VENDOR_ID_CHICONY, USB_DEVICE_ID_CHICONY_TACTICAL_PAD) },
+ 	{ HID_USB_DEVICE(USB_VENDOR_ID_CYPRESS, USB_DEVICE_ID_CYPRESS_BARCODE_1) },
+ 	{ HID_USB_DEVICE(USB_VENDOR_ID_CYPRESS, USB_DEVICE_ID_CYPRESS_BARCODE_2) },
++	{ HID_USB_DEVICE(USB_VENDOR_ID_CYPRESS, USB_DEVICE_ID_CYPRESS_BARCODE_3) },
+ 	{ HID_USB_DEVICE(USB_VENDOR_ID_CYPRESS, USB_DEVICE_ID_CYPRESS_MOUSE) },
+ 	{ HID_USB_DEVICE(USB_VENDOR_ID_DRAGONRISE, 0x0006) },
+ 	{ HID_USB_DEVICE(USB_VENDOR_ID_EZKEY, USB_DEVICE_ID_BTC_8193) },
+diff --git a/drivers/hid/hid-cypress.c b/drivers/hid/hid-cypress.c
+index 62e9cb1..998b6f4 100644
+--- a/drivers/hid/hid-cypress.c
++++ b/drivers/hid/hid-cypress.c
+@@ -126,6 +126,8 @@ static const struct hid_device_id cp_devices[] = {
+ 		.driver_data = CP_RDESC_SWAPPED_MIN_MAX },
+ 	{ HID_USB_DEVICE(USB_VENDOR_ID_CYPRESS, USB_DEVICE_ID_CYPRESS_BARCODE_2),
+ 		.driver_data = CP_RDESC_SWAPPED_MIN_MAX },
++	{ HID_USB_DEVICE(USB_VENDOR_ID_CYPRESS, USB_DEVICE_ID_CYPRESS_BARCODE_3),
++		.driver_data = CP_RDESC_SWAPPED_MIN_MAX },
+ 	{ HID_USB_DEVICE(USB_VENDOR_ID_CYPRESS, USB_DEVICE_ID_CYPRESS_MOUSE),
+ 		.driver_data = CP_2WHEEL_MOUSE_HACK },
+ 	{ }
+diff --git a/drivers/hid/hid-ids.h b/drivers/hid/hid-ids.h
+index 252853d..d993e97 100644
+--- a/drivers/hid/hid-ids.h
++++ b/drivers/hid/hid-ids.h
+@@ -148,6 +148,7 @@
+ #define USB_DEVICE_ID_CYPRESS_ULTRAMOUSE	0x7417
+ #define USB_DEVICE_ID_CYPRESS_BARCODE_1	0xde61
+ #define USB_DEVICE_ID_CYPRESS_BARCODE_2	0xde64
++#define USB_DEVICE_ID_CYPRESS_BARCODE_3	0xbca1
+ 
+ #define USB_VENDOR_ID_DEALEXTREAME	0x10c5
+ #define USB_DEVICE_ID_DEALEXTREAME_RADIO_SI4701	0x819a
+diff --git a/drivers/mfd/ucb1x00-ts.c b/drivers/mfd/ucb1x00-ts.c
+index 61b7d3e..d620293 100644
+--- a/drivers/mfd/ucb1x00-ts.c
++++ b/drivers/mfd/ucb1x00-ts.c
+@@ -385,12 +385,18 @@ static int ucb1x00_ts_add(struct ucb1x00_dev *dev)
+ 	idev->close      = ucb1x00_ts_close;
+ 
+ 	__set_bit(EV_ABS, idev->evbit);
+-	__set_bit(ABS_X, idev->absbit);
+-	__set_bit(ABS_Y, idev->absbit);
+-	__set_bit(ABS_PRESSURE, idev->absbit);
+ 
+ 	input_set_drvdata(idev, ts);
+ 
++	ucb1x00_adc_enable(ts->ucb);
++	ts->x_res = ucb1x00_ts_read_xres(ts);
++	ts->y_res = ucb1x00_ts_read_yres(ts);
++	ucb1x00_adc_disable(ts->ucb);
++
++	input_set_abs_params(idev, ABS_X, 0, ts->x_res, 0, 0);
++	input_set_abs_params(idev, ABS_Y, 0, ts->y_res, 0, 0);
++	input_set_abs_params(idev, ABS_PRESSURE, 0, 0, 0, 0);
++
+ 	err = input_register_device(idev);
+ 	if (err)
+ 		goto fail;
+diff --git a/drivers/net/e1000e/netdev.c b/drivers/net/e1000e/netdev.c
+index d177a02..4920a4e 100644
+--- a/drivers/net/e1000e/netdev.c
++++ b/drivers/net/e1000e/netdev.c
+@@ -5186,7 +5186,8 @@ static int __devinit e1000_probe(struct pci_dev *pdev,
+ 		/* APME bit in EEPROM is mapped to WUC.APME */
+ 		eeprom_data = er32(WUC);
+ 		eeprom_apme_mask = E1000_WUC_APME;
+-		if (eeprom_data & E1000_WUC_PHY_WAKE)
++		if ((hw->mac.type > e1000_ich10lan) &&
++		    (eeprom_data & E1000_WUC_PHY_WAKE))
+ 			adapter->flags2 |= FLAG2_HAS_PHY_WAKEUP;
+ 	} else if (adapter->flags & FLAG_APME_IN_CTRL3) {
+ 		if (adapter->flags & FLAG_APME_CHECK_PORT_B &&
+diff --git a/drivers/net/netxen/netxen_nic_hw.c b/drivers/net/netxen/netxen_nic_hw.c
+index 52a3798..7e494de 100644
+--- a/drivers/net/netxen/netxen_nic_hw.c
++++ b/drivers/net/netxen/netxen_nic_hw.c
+@@ -685,6 +685,9 @@ void netxen_p3_nic_set_multi(struct net_device *netdev)
+ 	struct list_head *head;
+ 	nx_mac_list_t *cur;
+ 
++	if (adapter->is_up != NETXEN_ADAPTER_UP_MAGIC)
++		return;
++
+ 	list_splice_tail_init(&adapter->mac_list, &del_list);
+ 
+ 	nx_p3_nic_add_mac(adapter, adapter->mac_addr, &del_list);
+diff --git a/drivers/net/r8169.c b/drivers/net/r8169.c
+index 7dd2132..7022b1b 100644
+--- a/drivers/net/r8169.c
++++ b/drivers/net/r8169.c
+@@ -23,6 +23,7 @@
+ #include <linux/init.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/firmware.h>
++#include <linux/pci-aspm.h>
+ 
+ #include <asm/system.h>
+ #include <asm/io.h>
+@@ -3030,6 +3031,11 @@ rtl8169_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
+ 	mii->reg_num_mask = 0x1f;
+ 	mii->supports_gmii = !!(cfg->features & RTL_FEATURE_GMII);
+ 
++	/* disable ASPM completely as that cause random device stop working
++	 * problems as well as full system hangs for some PCIe devices users */
++	pci_disable_link_state(pdev, PCIE_LINK_STATE_L0S | PCIE_LINK_STATE_L1 |
++				     PCIE_LINK_STATE_CLKPM);
++
+ 	/* enable device (incl. PCI PM wakeup and hotplug setup) */
+ 	rc = pci_enable_device(pdev);
+ 	if (rc < 0) {
+diff --git a/drivers/net/wireless/p54/p54usb.c b/drivers/net/wireless/p54/p54usb.c
+index d89ee8f..0a2bf5c 100644
+--- a/drivers/net/wireless/p54/p54usb.c
++++ b/drivers/net/wireless/p54/p54usb.c
+@@ -95,6 +95,7 @@ static struct usb_device_id p54u_table[] __devinitdata = {
+ 	{USB_DEVICE(0x1413, 0x5400)},   /* Telsey 802.11g USB2.0 Adapter */
+ 	{USB_DEVICE(0x1435, 0x0427)},	/* Inventel UR054G */
+ 	{USB_DEVICE(0x1668, 0x1050)},	/* Actiontec 802UIG-1 */
++	{USB_DEVICE(0x1740, 0x1000)},	/* Senao NUB-350 */
+ 	{USB_DEVICE(0x2001, 0x3704)},	/* DLink DWL-G122 rev A2 */
+ 	{USB_DEVICE(0x2001, 0x3705)},	/* D-Link DWL-G120 rev C1 */
+ 	{USB_DEVICE(0x413c, 0x5513)},	/* Dell WLA3310 USB Wireless Adapter */
+diff --git a/drivers/usb/misc/iowarrior.c b/drivers/usb/misc/iowarrior.c
+index 02ff040..cfdcbb8 100644
+--- a/drivers/usb/misc/iowarrior.c
++++ b/drivers/usb/misc/iowarrior.c
+@@ -373,7 +373,7 @@ static ssize_t iowarrior_write(struct file *file,
+ 	case USB_DEVICE_ID_CODEMERCS_IOWPV2:
+ 	case USB_DEVICE_ID_CODEMERCS_IOW40:
+ 		/* IOW24 and IOW40 use a synchronous call */
+-		buf = kmalloc(8, GFP_KERNEL);	/* 8 bytes are enough for both products */
++		buf = kmalloc(count, GFP_KERNEL);
+ 		if (!buf) {
+ 			retval = -ENOMEM;
+ 			goto exit;
+diff --git a/drivers/virtio/virtio_pci.c b/drivers/virtio/virtio_pci.c
+index 5fed283..d10c857 100644
+--- a/drivers/virtio/virtio_pci.c
++++ b/drivers/virtio/virtio_pci.c
+@@ -647,6 +647,7 @@ static int __devinit virtio_pci_probe(struct pci_dev *pci_dev,
+ 		goto out_req_regions;
+ 
+ 	pci_set_drvdata(pci_dev, vp_dev);
++	pci_set_master(pci_dev);
+ 
+ 	/* we use the subsystem vendor/device id as the virtio vendor/device
+ 	 * id.  this allows us to use the same PCI vendor/device id for all
+diff --git a/fs/cifs/cifsproto.h b/fs/cifs/cifsproto.h
+index 05a9b77..76d9f64 100644
+--- a/fs/cifs/cifsproto.h
++++ b/fs/cifs/cifsproto.h
+@@ -323,7 +323,7 @@ extern int CIFSSMBLock(const int xid, struct cifsTconInfo *tcon,
+ 			const __u16 netfid, const __u64 len,
+ 			const __u64 offset, const __u32 numUnlock,
+ 			const __u32 numLock, const __u8 lockType,
+-			const bool waitFlag);
++			const bool waitFlag, const __u8 oplock_level);
+ extern int CIFSSMBPosixLock(const int xid, struct cifsTconInfo *tcon,
+ 			const __u16 smb_file_id, const int get_flag,
+ 			const __u64 len, struct file_lock *,
+diff --git a/fs/cifs/cifssmb.c b/fs/cifs/cifssmb.c
+index 4e6dbab..04b755a 100644
+--- a/fs/cifs/cifssmb.c
++++ b/fs/cifs/cifssmb.c
+@@ -1641,7 +1641,8 @@ int
+ CIFSSMBLock(const int xid, struct cifsTconInfo *tcon,
+ 	    const __u16 smb_file_id, const __u64 len,
+ 	    const __u64 offset, const __u32 numUnlock,
+-	    const __u32 numLock, const __u8 lockType, const bool waitFlag)
++	    const __u32 numLock, const __u8 lockType,
++	    const bool waitFlag, const __u8 oplock_level)
+ {
+ 	int rc = 0;
+ 	LOCK_REQ *pSMB = NULL;
+@@ -1669,6 +1670,7 @@ CIFSSMBLock(const int xid, struct cifsTconInfo *tcon,
+ 	pSMB->NumberOfLocks = cpu_to_le16(numLock);
+ 	pSMB->NumberOfUnlocks = cpu_to_le16(numUnlock);
+ 	pSMB->LockType = lockType;
++	pSMB->OplockLevel = oplock_level;
+ 	pSMB->AndXCommand = 0xFF;	/* none */
+ 	pSMB->Fid = smb_file_id; /* netfid stays le */
+ 
+diff --git a/fs/cifs/file.c b/fs/cifs/file.c
+index 5d1099a..a6135ab 100644
+--- a/fs/cifs/file.c
++++ b/fs/cifs/file.c
+@@ -825,12 +825,12 @@ int cifs_lock(struct file *file, int cmd, struct file_lock *pfLock)
+ 
+ 		/* BB we could chain these into one lock request BB */
+ 		rc = CIFSSMBLock(xid, tcon, netfid, length, pfLock->fl_start,
+-				 0, 1, lockType, 0 /* wait flag */ );
++				 0, 1, lockType, 0 /* wait flag */, 0);
+ 		if (rc == 0) {
+ 			rc = CIFSSMBLock(xid, tcon, netfid, length,
+ 					 pfLock->fl_start, 1 /* numUnlock */ ,
+ 					 0 /* numLock */ , lockType,
+-					 0 /* wait flag */ );
++					 0 /* wait flag */, 0);
+ 			pfLock->fl_type = F_UNLCK;
+ 			if (rc != 0)
+ 				cERROR(1, ("Error unlocking previously locked "
+@@ -873,8 +873,8 @@ int cifs_lock(struct file *file, int cmd, struct file_lock *pfLock)
+ 
+ 		if (numLock) {
+ 			rc = CIFSSMBLock(xid, tcon, netfid, length,
+-					pfLock->fl_start,
+-					0, numLock, lockType, wait_flag);
++					 pfLock->fl_start, 0, numLock, lockType,
++					 wait_flag, 0);
+ 
+ 			if (rc == 0) {
+ 				/* For Windows locks we must store them. */
+@@ -894,9 +894,9 @@ int cifs_lock(struct file *file, int cmd, struct file_lock *pfLock)
+ 						(pfLock->fl_start + length) >=
+ 						(li->offset + li->length)) {
+ 					stored_rc = CIFSSMBLock(xid, tcon,
+-							netfid,
+-							li->length, li->offset,
+-							1, 0, li->type, false);
++							netfid, li->length,
++							li->offset, 1, 0,
++							li->type, false, 0);
+ 					if (stored_rc)
+ 						rc = stored_rc;
+ 
+@@ -2314,7 +2314,8 @@ cifs_oplock_break(struct slow_work *work)
+ 	 */
+ 	if (!cfile->closePend && !cfile->oplock_break_cancelled) {
+ 		rc = CIFSSMBLock(0, cifs_sb->tcon, cfile->netfid, 0, 0, 0, 0,
+-				 LOCKING_ANDX_OPLOCK_RELEASE, false);
++				 LOCKING_ANDX_OPLOCK_RELEASE, false,
++				 cinode->clientCanCacheRead ? 1 : 0);
+ 		cFYI(1, ("Oplock release rc = %d", rc));
+ 	}
+ }
+diff --git a/fs/ext2/namei.c b/fs/ext2/namei.c
+index dd7175c..e5618d4 100644
+--- a/fs/ext2/namei.c
++++ b/fs/ext2/namei.c
+@@ -327,7 +327,6 @@ static int ext2_rename (struct inode * old_dir, struct dentry * old_dentry,
+ 		new_de = ext2_find_entry (new_dir, &new_dentry->d_name, &new_page);
+ 		if (!new_de)
+ 			goto out_dir;
+-		inode_inc_link_count(old_inode);
+ 		ext2_set_link(new_dir, new_de, new_page, old_inode, 1);
+ 		new_inode->i_ctime = CURRENT_TIME_SEC;
+ 		if (dir_de)
+@@ -339,12 +338,9 @@ static int ext2_rename (struct inode * old_dir, struct dentry * old_dentry,
+ 			if (new_dir->i_nlink >= EXT2_LINK_MAX)
+ 				goto out_dir;
+ 		}
+-		inode_inc_link_count(old_inode);
+ 		err = ext2_add_link(new_dentry, old_inode);
+-		if (err) {
+-			inode_dec_link_count(old_inode);
++		if (err)
+ 			goto out_dir;
+-		}
+ 		if (dir_de)
+ 			inode_inc_link_count(new_dir);
+ 	}
+@@ -352,12 +348,11 @@ static int ext2_rename (struct inode * old_dir, struct dentry * old_dentry,
+ 	/*
+ 	 * Like most other Unix systems, set the ctime for inodes on a
+  	 * rename.
+-	 * inode_dec_link_count() will mark the inode dirty.
+ 	 */
+ 	old_inode->i_ctime = CURRENT_TIME_SEC;
++	mark_inode_dirty(old_inode);
+ 
+ 	ext2_delete_entry (old_de, old_page);
+-	inode_dec_link_count(old_inode);
+ 
+ 	if (dir_de) {
+ 		if (old_dir != new_dir)
+diff --git a/fs/fuse/file.c b/fs/fuse/file.c
+index edfce0b..f6104a95 100644
+--- a/fs/fuse/file.c
++++ b/fs/fuse/file.c
+@@ -86,18 +86,52 @@ struct fuse_file *fuse_file_get(struct fuse_file *ff)
+ 	return ff;
+ }
+ 
++static void fuse_release_async(struct work_struct *work)
++{
++	struct fuse_req *req;
++	struct fuse_conn *fc;
++	struct path path;
++
++	req = container_of(work, struct fuse_req, misc.release.work);
++	path = req->misc.release.path;
++	fc = get_fuse_conn(path.dentry->d_inode);
++
++	fuse_put_request(fc, req);
++	path_put(&path);
++}
++
+ static void fuse_release_end(struct fuse_conn *fc, struct fuse_req *req)
+ {
+-	path_put(&req->misc.release.path);
++	if (fc->destroy_req) {
++		/*
++		 * If this is a fuseblk mount, then it's possible that
++		 * releasing the path will result in releasing the
++		 * super block and sending the DESTROY request.  If
++		 * the server is single threaded, this would hang.
++		 * For this reason do the path_put() in a separate
++		 * thread.
++		 */
++		atomic_inc(&req->count);
++		INIT_WORK(&req->misc.release.work, fuse_release_async);
++		schedule_work(&req->misc.release.work);
++	} else {
++		path_put(&req->misc.release.path);
++	}
+ }
+ 
+-static void fuse_file_put(struct fuse_file *ff)
++static void fuse_file_put(struct fuse_file *ff, bool sync)
+ {
+ 	if (atomic_dec_and_test(&ff->count)) {
+ 		struct fuse_req *req = ff->reserved_req;
+ 
+-		req->end = fuse_release_end;
+-		fuse_request_send_background(ff->fc, req);
++		if (sync) {
++			fuse_request_send(ff->fc, req);
++			path_put(&req->misc.release.path);
++			fuse_put_request(ff->fc, req);
++		} else {
++			req->end = fuse_release_end;
++			fuse_request_send_background(ff->fc, req);
++		}
+ 		kfree(ff);
+ 	}
+ }
+@@ -219,8 +253,12 @@ void fuse_release_common(struct file *file, int opcode)
+ 	 * Normally this will send the RELEASE request, however if
+ 	 * some asynchronous READ or WRITE requests are outstanding,
+ 	 * the sending will be delayed.
++	 *
++	 * Make the release synchronous if this is a fuseblk mount,
++	 * synchronous RELEASE is allowed (and desirable) in this case
++	 * because the server can be trusted not to screw up.
+ 	 */
+-	fuse_file_put(ff);
++	fuse_file_put(ff, ff->fc->destroy_req != NULL);
+ }
+ 
+ static int fuse_open(struct inode *inode, struct file *file)
+@@ -549,7 +587,7 @@ static void fuse_readpages_end(struct fuse_conn *fc, struct fuse_req *req)
+ 		unlock_page(page);
+ 	}
+ 	if (req->ff)
+-		fuse_file_put(req->ff);
++		fuse_file_put(req->ff, false);
+ }
+ 
+ static void fuse_send_readpages(struct fuse_req *req, struct file *file)
+@@ -1129,7 +1167,7 @@ static ssize_t fuse_direct_write(struct file *file, const char __user *buf,
+ static void fuse_writepage_free(struct fuse_conn *fc, struct fuse_req *req)
+ {
+ 	__free_page(req->pages[0]);
+-	fuse_file_put(req->ff);
++	fuse_file_put(req->ff, false);
+ }
+ 
+ static void fuse_writepage_finish(struct fuse_conn *fc, struct fuse_req *req)
+diff --git a/fs/fuse/fuse_i.h b/fs/fuse/fuse_i.h
+index 01cc462..e6d614d 100644
+--- a/fs/fuse/fuse_i.h
++++ b/fs/fuse/fuse_i.h
+@@ -21,6 +21,7 @@
+ #include <linux/rwsem.h>
+ #include <linux/rbtree.h>
+ #include <linux/poll.h>
++#include <linux/workqueue.h>
+ 
+ /** Max number of pages that can be used in a single read request */
+ #define FUSE_MAX_PAGES_PER_REQ 32
+@@ -254,7 +255,10 @@ struct fuse_req {
+ 	union {
+ 		struct fuse_forget_in forget_in;
+ 		struct {
+-			struct fuse_release_in in;
++			union {
++				struct fuse_release_in in;
++				struct work_struct work;
++			};
+ 			struct path path;
+ 		} release;
+ 		struct fuse_init_in init_in;
+diff --git a/fs/ocfs2/refcounttree.c b/fs/ocfs2/refcounttree.c
+index 10e9527..8371a25 100644
+--- a/fs/ocfs2/refcounttree.c
++++ b/fs/ocfs2/refcounttree.c
+@@ -3236,7 +3236,7 @@ static int ocfs2_make_clusters_writable(struct super_block *sb,
+ 					u32 num_clusters, unsigned int e_flags)
+ {
+ 	int ret, delete, index, credits =  0;
+-	u32 new_bit, new_len;
++	u32 new_bit, new_len, orig_num_clusters;
+ 	unsigned int set_len;
+ 	struct ocfs2_super *osb = OCFS2_SB(sb);
+ 	handle_t *handle;
+@@ -3269,6 +3269,8 @@ static int ocfs2_make_clusters_writable(struct super_block *sb,
+ 		goto out;
+ 	}
+ 
++	orig_num_clusters = num_clusters;
++
+ 	while (num_clusters) {
+ 		ret = ocfs2_get_refcount_rec(ref_ci, context->ref_root_bh,
+ 					     p_cluster, num_clusters,
+@@ -3356,7 +3358,8 @@ static int ocfs2_make_clusters_writable(struct super_block *sb,
+ 	 * in write-back mode.
+ 	 */
+ 	if (context->get_clusters == ocfs2_di_get_clusters) {
+-		ret = ocfs2_cow_sync_writeback(sb, context, cpos, num_clusters);
++		ret = ocfs2_cow_sync_writeback(sb, context, cpos,
++					       orig_num_clusters);
+ 		if (ret)
+ 			mlog_errno(ret);
+ 	}
+diff --git a/include/drm/drmP.h b/include/drm/drmP.h
+index 7ad3faa..66713c6 100644
+--- a/include/drm/drmP.h
++++ b/include/drm/drmP.h
+@@ -1016,7 +1016,7 @@ struct drm_device {
+ 	struct pci_controller *hose;
+ #endif
+ 	struct drm_sg_mem *sg;	/**< Scatter gather memory */
+-	int num_crtcs;                  /**< Number of CRTCs on this device */
++	unsigned int num_crtcs;                  /**< Number of CRTCs on this device */
+ 	void *dev_private;		/**< device private data */
+ 	void *mm_private;
+ 	struct address_space *dev_mapping;
+diff --git a/include/net/sctp/command.h b/include/net/sctp/command.h
+index 8be5135..2c55a7e 100644
+--- a/include/net/sctp/command.h
++++ b/include/net/sctp/command.h
+@@ -107,6 +107,7 @@ typedef enum {
+ 	SCTP_CMD_T1_RETRAN,	 /* Mark for retransmission after T1 timeout  */
+ 	SCTP_CMD_UPDATE_INITTAG, /* Update peer inittag */
+ 	SCTP_CMD_SEND_MSG,	 /* Send the whole use message */
++	SCTP_CMD_SEND_NEXT_ASCONF, /* Send the next ASCONF after ACK */
+ 	SCTP_CMD_LAST
+ } sctp_verb_t;
+ 
+diff --git a/kernel/time/tick-broadcast.c b/kernel/time/tick-broadcast.c
+index c2ec250..49446b1 100644
+--- a/kernel/time/tick-broadcast.c
++++ b/kernel/time/tick-broadcast.c
+@@ -600,4 +600,14 @@ int tick_broadcast_oneshot_active(void)
+ 	return tick_broadcast_device.mode == TICKDEV_MODE_ONESHOT;
+ }
+ 
++/*
++ * Check whether the broadcast device supports oneshot.
++ */
++bool tick_broadcast_oneshot_available(void)
++{
++	struct clock_event_device *bc = tick_broadcast_device.evtdev;
++
++	return bc ? bc->features & CLOCK_EVT_FEAT_ONESHOT : false;
++}
++
+ #endif
+diff --git a/kernel/time/tick-common.c b/kernel/time/tick-common.c
+index 83c4417..a943826 100644
+--- a/kernel/time/tick-common.c
++++ b/kernel/time/tick-common.c
+@@ -51,7 +51,11 @@ int tick_is_oneshot_available(void)
+ {
+ 	struct clock_event_device *dev = __get_cpu_var(tick_cpu_device).evtdev;
+ 
+-	return dev && (dev->features & CLOCK_EVT_FEAT_ONESHOT);
++	if (!dev || !(dev->features & CLOCK_EVT_FEAT_ONESHOT))
++		return 0;
++	if (!(dev->features & CLOCK_EVT_FEAT_C3STOP))
++		return 1;
++	return tick_broadcast_oneshot_available();
+ }
+ 
+ /*
+diff --git a/kernel/time/tick-internal.h b/kernel/time/tick-internal.h
+index b1c05bf..32fbf20 100644
+--- a/kernel/time/tick-internal.h
++++ b/kernel/time/tick-internal.h
+@@ -37,6 +37,7 @@ extern void tick_shutdown_broadcast_oneshot(unsigned int *cpup);
+ extern int tick_resume_broadcast_oneshot(struct clock_event_device *bc);
+ extern int tick_broadcast_oneshot_active(void);
+ extern void tick_check_oneshot_broadcast(int cpu);
++bool tick_broadcast_oneshot_available(void);
+ # else /* BROADCAST */
+ static inline void tick_broadcast_setup_oneshot(struct clock_event_device *bc)
+ {
+@@ -47,6 +48,7 @@ static inline void tick_broadcast_switch_to_oneshot(void) { }
+ static inline void tick_shutdown_broadcast_oneshot(unsigned int *cpup) { }
+ static inline int tick_broadcast_oneshot_active(void) { return 0; }
+ static inline void tick_check_oneshot_broadcast(int cpu) { }
++static inline bool tick_broadcast_oneshot_available(void) { return true; }
+ # endif /* !BROADCAST */
+ 
+ #else /* !ONESHOT */
+@@ -77,6 +79,7 @@ static inline int tick_resume_broadcast_oneshot(struct clock_event_device *bc)
+ 	return 0;
+ }
+ static inline int tick_broadcast_oneshot_active(void) { return 0; }
++static inline bool tick_broadcast_oneshot_available(void) { return false; }
+ #endif /* !TICK_ONESHOT */
+ 
+ /*
+diff --git a/net/dccp/input.c b/net/dccp/input.c
+index 7648f31..26fa731 100644
+--- a/net/dccp/input.c
++++ b/net/dccp/input.c
+@@ -616,6 +616,9 @@ int dccp_rcv_state_process(struct sock *sk, struct sk_buff *skb,
+ 		/* Caller (dccp_v4_do_rcv) will send Reset */
+ 		dcb->dccpd_reset_code = DCCP_RESET_CODE_NO_CONNECTION;
+ 		return 1;
++	} else if (sk->sk_state == DCCP_CLOSED) {
++		dcb->dccpd_reset_code = DCCP_RESET_CODE_NO_CONNECTION;
++		return 1;
+ 	}
+ 
+ 	if (sk->sk_state != DCCP_REQUESTING && sk->sk_state != DCCP_RESPOND) {
+@@ -678,10 +681,6 @@ int dccp_rcv_state_process(struct sock *sk, struct sk_buff *skb,
+ 	}
+ 
+ 	switch (sk->sk_state) {
+-	case DCCP_CLOSED:
+-		dcb->dccpd_reset_code = DCCP_RESET_CODE_NO_CONNECTION;
+-		return 1;
+-
+ 	case DCCP_REQUESTING:
+ 		queued = dccp_rcv_request_sent_state_process(sk, skb, dh, len);
+ 		if (queued >= 0)
+diff --git a/net/ipv4/devinet.c b/net/ipv4/devinet.c
+index f84f6dd..f1e726f 100644
+--- a/net/ipv4/devinet.c
++++ b/net/ipv4/devinet.c
+@@ -1025,6 +1025,21 @@ static inline bool inetdev_valid_mtu(unsigned mtu)
+ 	return mtu >= 68;
+ }
+ 
++static void inetdev_send_gratuitous_arp(struct net_device *dev,
++					struct in_device *in_dev)
++
++{
++	struct in_ifaddr *ifa = in_dev->ifa_list;
++
++	if (!ifa)
++		return;
++
++	arp_send(ARPOP_REQUEST, ETH_P_ARP,
++		 ifa->ifa_address, dev,
++		 ifa->ifa_address, NULL,
++		 dev->dev_addr, NULL);
++}
++
+ /* Called only under RTNL semaphore */
+ 
+ static int inetdev_event(struct notifier_block *this, unsigned long event,
+@@ -1076,18 +1091,13 @@ static int inetdev_event(struct notifier_block *this, unsigned long event,
+ 		}
+ 		ip_mc_up(in_dev);
+ 		/* fall through */
+-	case NETDEV_NOTIFY_PEERS:
+ 	case NETDEV_CHANGEADDR:
++		if (!IN_DEV_ARP_NOTIFY(in_dev))
++			break;
++		/* fall through */
++	case NETDEV_NOTIFY_PEERS:
+ 		/* Send gratuitous ARP to notify of link change */
+-		if (IN_DEV_ARP_NOTIFY(in_dev)) {
+-			struct in_ifaddr *ifa = in_dev->ifa_list;
+-
+-			if (ifa)
+-				arp_send(ARPOP_REQUEST, ETH_P_ARP,
+-					 ifa->ifa_address, dev,
+-					 ifa->ifa_address, NULL,
+-					 dev->dev_addr, NULL);
+-		}
++		inetdev_send_gratuitous_arp(dev, in_dev);
+ 		break;
+ 	case NETDEV_DOWN:
+ 		ip_mc_down(in_dev);
+diff --git a/net/sctp/sm_make_chunk.c b/net/sctp/sm_make_chunk.c
+index 8579b4f..c4cf362 100644
+--- a/net/sctp/sm_make_chunk.c
++++ b/net/sctp/sm_make_chunk.c
+@@ -3361,21 +3361,6 @@ int sctp_process_asconf_ack(struct sctp_association *asoc,
+ 	sctp_chunk_free(asconf);
+ 	asoc->addip_last_asconf = NULL;
+ 
+-	/* Send the next asconf chunk from the addip chunk queue. */
+-	if (!list_empty(&asoc->addip_chunk_list)) {
+-		struct list_head *entry = asoc->addip_chunk_list.next;
+-		asconf = list_entry(entry, struct sctp_chunk, list);
+-
+-		list_del_init(entry);
+-
+-		/* Hold the chunk until an ASCONF_ACK is received. */
+-		sctp_chunk_hold(asconf);
+-		if (sctp_primitive_ASCONF(asoc, asconf))
+-			sctp_chunk_free(asconf);
+-		else
+-			asoc->addip_last_asconf = asconf;
+-	}
+-
+ 	return retval;
+ }
+ 
+diff --git a/net/sctp/sm_sideeffect.c b/net/sctp/sm_sideeffect.c
+index 306bb8b..ed742bf 100644
+--- a/net/sctp/sm_sideeffect.c
++++ b/net/sctp/sm_sideeffect.c
+@@ -997,6 +997,29 @@ static int sctp_cmd_send_msg(struct sctp_association *asoc,
+ }
+ 
+ 
++/* Sent the next ASCONF packet currently stored in the association.
++ * This happens after the ASCONF_ACK was succeffully processed.
++ */
++static void sctp_cmd_send_asconf(struct sctp_association *asoc)
++{
++	/* Send the next asconf chunk from the addip chunk
++	 * queue.
++	 */
++	if (!list_empty(&asoc->addip_chunk_list)) {
++		struct list_head *entry = asoc->addip_chunk_list.next;
++		struct sctp_chunk *asconf = list_entry(entry,
++						struct sctp_chunk, list);
++		list_del_init(entry);
++
++		/* Hold the chunk until an ASCONF_ACK is received. */
++		sctp_chunk_hold(asconf);
++		if (sctp_primitive_ASCONF(asoc, asconf))
++			sctp_chunk_free(asconf);
++		else
++			asoc->addip_last_asconf = asconf;
++	}
++}
++
+ 
+ /* These three macros allow us to pull the debugging code out of the
+  * main flow of sctp_do_sm() to keep attention focused on the real
+@@ -1650,6 +1673,9 @@ static int sctp_cmd_interpreter(sctp_event_t event_type,
+ 			}
+ 			error = sctp_cmd_send_msg(asoc, cmd->obj.msg);
+ 			break;
++		case SCTP_CMD_SEND_NEXT_ASCONF:
++			sctp_cmd_send_asconf(asoc);
++			break;
+ 		default:
+ 			printk(KERN_WARNING "Impossible command: %u, %p\n",
+ 			       cmd->verb, cmd->obj.ptr);
+diff --git a/net/sctp/sm_statefuns.c b/net/sctp/sm_statefuns.c
+index d4df450..2f8e1c8 100644
+--- a/net/sctp/sm_statefuns.c
++++ b/net/sctp/sm_statefuns.c
+@@ -3670,8 +3670,14 @@ sctp_disposition_t sctp_sf_do_asconf_ack(const struct sctp_endpoint *ep,
+ 				SCTP_TO(SCTP_EVENT_TIMEOUT_T4_RTO));
+ 
+ 		if (!sctp_process_asconf_ack((struct sctp_association *)asoc,
+-					     asconf_ack))
++					     asconf_ack)) {
++			/* Successfully processed ASCONF_ACK.  We can
++			 * release the next asconf if we have one.
++			 */
++			sctp_add_cmd_sf(commands, SCTP_CMD_SEND_NEXT_ASCONF,
++					SCTP_NULL());
+ 			return SCTP_DISPOSITION_CONSUME;
++		}
+ 
+ 		abort = sctp_make_abort(asoc, asconf_ack,
+ 					sizeof(sctp_errhdr_t));
