@@ -1,0 +1,70 @@
+From 0b3292ec7942e79842955ed1502ec122563cc67c Mon Sep 17 00:00:00 2001
+From: Stanislav Kinsbursky <skinsbursky@parallels.com>
+Date: Tue, 15 Feb 2011 19:38:21 +0300
+Subject: [PATCH 3/6] VE: shutdown environment only if VE pid ns is destroying
+
+We have to make sure that pid namespace child reaper is current execution
+environment init process before calling any virtual hook and marking
+environment as not running. Otherwise any clonned process with CLONE_NEWPID flag
+will shutdown current execution environment on it's exit.
+
+http://bugzilla.openvz.org/show_bug.cgi?id=1773
+
+Signed-off-by: Stanislav Kinsbursky <skinsbursky@parallels.com>
+Signed-off-by: Pavel Emelyanov <xemul@openvz.org>
+---
+ kernel/pid_namespace.c |   29 +++++++++++++++--------------
+ 1 files changed, 15 insertions(+), 14 deletions(-)
+
+diff --git a/kernel/pid_namespace.c b/kernel/pid_namespace.c
+index 19a9c6a..b3a7b50 100644
+--- a/kernel/pid_namespace.c
++++ b/kernel/pid_namespace.c
+@@ -286,20 +286,21 @@ void zap_pid_ns_processes(struct pid_namespace *pid_ns)
+ 	struct task_struct *task;
+ 	struct ve_struct *env = get_exec_env();
+ 
+-	/*
+-	 * Here the VE changes its state into "not running".
+-	 * op_sem taken for write is a barrier to all VE manipulations from
+-	 * ioctl: it waits for operations currently in progress and blocks all
+-	 * subsequent operations until is_running is set to 0 and op_sem is
+-	 * released.
+-	 */
+-
+-	down_write(&env->op_sem);
+-	env->is_running = 0;
+-	up_write(&env->op_sem);
++	if (pid_ns == env->ve_ns->pid_ns) {
++		/*
++		 * Here the VE changes its state into "not running".
++		 * op_sem taken for write is a barrier to all VE manipulations from
++		 * ioctl: it waits for operations currently in progress and blocks all
++		 * subsequent operations until is_running is set to 0 and op_sem is
++		 * released.
++		 */
+ 
+-	ve_hook_iterate_fini(VE_INIT_EXIT_CHAIN, env);
++		down_write(&env->op_sem);
++		env->is_running = 0;
++		up_write(&env->op_sem);
+ 
++		ve_hook_iterate_fini(VE_INIT_EXIT_CHAIN, env);
++	}
+ 	/*
+ 	 * The last thread in the cgroup-init thread group is terminating.
+ 	 * Find remaining pid_ts in the namespace, signal and wait for them
+@@ -341,8 +342,8 @@ void zap_pid_ns_processes(struct pid_namespace *pid_ns)
+ 	acct_exit_ns(pid_ns);
+ 
+ #ifdef CONFIG_VE
+-	if (get_exec_env()->ve_ns->pid_ns == pid_ns)
+-		zap_ve_processes(get_exec_env());
++	if (pid_ns == env->ve_ns->pid_ns)
++		zap_ve_processes(env);
+ #endif
+ 	return;
+ }
+-- 
+1.7.4.1
+
