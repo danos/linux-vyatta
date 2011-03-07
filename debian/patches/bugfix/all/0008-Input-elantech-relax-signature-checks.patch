@@ -1,0 +1,51 @@
+From: Dmitry Torokhov <dmitry.torokhov@gmail.com>
+Date: Wed, 19 May 2010 10:11:13 -0700
+Subject: [PATCH 08/11] Input: elantech - relax signature checks
+
+commit a083632eaf6231162b33e40561cfec6a9c156945 upstream.
+
+Apparently there are Elantech touchpads that report non-zero in the 2nd byte
+of their signature. Adjust the detection routine so that if 2nd byte is
+zero and 3rd byte contains value that is not a valid report rate, we still
+assume that signature is valid.
+
+Tested-by: Eric Piel <eric.piel@tremplin-utc.net>
+Signed-off-by: Dmitry Torokhov <dtor@mail.ru>
+[bwh: Adjust context for 2.6.32]
+---
+--- a/drivers/input/mouse/elantech.c
++++ b/drivers/input/mouse/elantech.c
+@@ -575,6 +575,24 @@ static struct attribute_group elantech_attr_group = {
+ 	.attrs = elantech_attrs,
+ };
+ 
++static bool elantech_is_signature_valid(const unsigned char *param)
++{
++	static const unsigned char rates[] = { 200, 100, 80, 60, 40, 20, 10 };
++	int i;
++
++	if (param[0] == 0)
++		return false;
++
++	if (param[1] == 0)
++		return true;
++
++	for (i = 0; i < ARRAY_SIZE(rates); i++)
++		if (param[2] == rates[i])
++			return false;
++
++	return true;
++}
++
+ /*
+  * Use magic knock to detect Elantech touchpad
+  */
+@@ -617,7 +635,7 @@ int elantech_detect(struct psmouse *psmouse, bool set_properties)
+ 	pr_debug("elantech.c: Elantech version query result 0x%02x, 0x%02x, 0x%02x.\n",
+ 		 param[0], param[1], param[2]);
+ 
+-	if (param[0] == 0 || param[1] != 0) {
++	if (!elantech_is_signature_valid(param)) {
+ 		if (!force_elantech) {
+ 			pr_debug("elantech.c: Probably not a real Elantech touchpad. Aborting.\n");
+ 			return -1;
