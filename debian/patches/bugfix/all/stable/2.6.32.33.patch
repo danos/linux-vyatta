@@ -1,0 +1,536 @@
+diff --git a/Makefile b/Makefile
+index c3f6287..8b04094 100644
+diff --git a/arch/powerpc/include/asm/hvcall.h b/arch/powerpc/include/asm/hvcall.h
+index 6251a4b..c9dd94f 100644
+--- a/arch/powerpc/include/asm/hvcall.h
++++ b/arch/powerpc/include/asm/hvcall.h
+@@ -268,6 +268,7 @@ long plpar_hcall_raw(unsigned long opcode, unsigned long *retbuf, ...);
+  */
+ #define PLPAR_HCALL9_BUFSIZE 9
+ long plpar_hcall9(unsigned long opcode, unsigned long *retbuf, ...);
++long plpar_hcall9_raw(unsigned long opcode, unsigned long *retbuf, ...);
+ 
+ /* For hcall instrumentation.  One structure per-hcall, per-CPU */
+ struct hcall_stats {
+diff --git a/arch/powerpc/kernel/crash.c b/arch/powerpc/kernel/crash.c
+index 0a8439a..b779818 100644
+--- a/arch/powerpc/kernel/crash.c
++++ b/arch/powerpc/kernel/crash.c
+@@ -347,10 +347,12 @@ int crash_shutdown_unregister(crash_shutdown_t handler)
+ EXPORT_SYMBOL(crash_shutdown_unregister);
+ 
+ static unsigned long crash_shutdown_buf[JMP_BUF_LEN];
++static int crash_shutdown_cpu = -1;
+ 
+ static int handle_fault(struct pt_regs *regs)
+ {
+-	longjmp(crash_shutdown_buf, 1);
++	if (crash_shutdown_cpu == smp_processor_id())
++		longjmp(crash_shutdown_buf, 1);
+ 	return 0;
+ }
+ 
+@@ -375,11 +377,14 @@ void default_machine_crash_shutdown(struct pt_regs *regs)
+ 	for_each_irq(i) {
+ 		struct irq_desc *desc = irq_desc + i;
+ 
++		if (!desc || !desc->chip || !desc->chip->eoi)
++			continue;
++
+ 		if (desc->status & IRQ_INPROGRESS)
+ 			desc->chip->eoi(i);
+ 
+ 		if (!(desc->status & IRQ_DISABLED))
+-			desc->chip->disable(i);
++			desc->chip->shutdown(i);
+ 	}
+ 
+ 	/*
+@@ -388,6 +393,7 @@ void default_machine_crash_shutdown(struct pt_regs *regs)
+ 	 */
+ 	old_handler = __debugger_fault_handler;
+ 	__debugger_fault_handler = handle_fault;
++	crash_shutdown_cpu = smp_processor_id();
+ 	for (i = 0; crash_shutdown_handles[i]; i++) {
+ 		if (setjmp(crash_shutdown_buf) == 0) {
+ 			/*
+@@ -401,6 +407,7 @@ void default_machine_crash_shutdown(struct pt_regs *regs)
+ 			asm volatile("sync; isync");
+ 		}
+ 	}
++	crash_shutdown_cpu = -1;
+ 	__debugger_fault_handler = old_handler;
+ 
+ 	/*
+diff --git a/arch/powerpc/kernel/machine_kexec_64.c b/arch/powerpc/kernel/machine_kexec_64.c
+index 040bd1d..1a8de63 100644
+--- a/arch/powerpc/kernel/machine_kexec_64.c
++++ b/arch/powerpc/kernel/machine_kexec_64.c
+@@ -15,6 +15,7 @@
+ #include <linux/thread_info.h>
+ #include <linux/init_task.h>
+ #include <linux/errno.h>
++#include <linux/cpu.h>
+ 
+ #include <asm/page.h>
+ #include <asm/current.h>
+@@ -169,10 +170,34 @@ static void kexec_smp_down(void *arg)
+ 	/* NOTREACHED */
+ }
+ 
++/*
++ * We need to make sure each present CPU is online.  The next kernel will scan
++ * the device tree and assume primary threads are online and query secondary
++ * threads via RTAS to online them if required.  If we don't online primary
++ * threads, they will be stuck.  However, we also online secondary threads as we
++ * may be using 'cede offline'.  In this case RTAS doesn't see the secondary
++ * threads as offline -- and again, these CPUs will be stuck.
++ *
++ * So, we online all CPUs that should be running, including secondary threads.
++ */
++static void wake_offline_cpus(void)
++{
++	int cpu = 0;
++
++	for_each_present_cpu(cpu) {
++		if (!cpu_online(cpu)) {
++			printk(KERN_INFO "kexec: Waking offline cpu %d.\n",
++					cpu);
++			cpu_up(cpu);
++		}
++	}
++}
++
+ static void kexec_prepare_cpus(void)
+ {
+ 	int my_cpu, i, notified=-1;
+ 
++	wake_offline_cpus();
+ 	smp_call_function(kexec_smp_down, NULL, /* wait */0);
+ 	my_cpu = get_cpu();
+ 
+diff --git a/arch/powerpc/kernel/setup_64.c b/arch/powerpc/kernel/setup_64.c
+index 04f638d..00d3b65 100644
+--- a/arch/powerpc/kernel/setup_64.c
++++ b/arch/powerpc/kernel/setup_64.c
+@@ -432,9 +432,18 @@ void __init setup_system(void)
+ 	DBG(" <- setup_system()\n");
+ }
+ 
++static u64 slb0_limit(void)
++{
++	if (cpu_has_feature(CPU_FTR_1T_SEGMENT)) {
++		return 1UL << SID_SHIFT_1T;
++	}
++	return 1UL << SID_SHIFT;
++}
++
+ #ifdef CONFIG_IRQSTACKS
+ static void __init irqstack_early_init(void)
+ {
++	u64 limit = slb0_limit();
+ 	unsigned int i;
+ 
+ 	/*
+@@ -444,10 +453,10 @@ static void __init irqstack_early_init(void)
+ 	for_each_possible_cpu(i) {
+ 		softirq_ctx[i] = (struct thread_info *)
+ 			__va(lmb_alloc_base(THREAD_SIZE,
+-					    THREAD_SIZE, 0x10000000));
++					    THREAD_SIZE, limit));
+ 		hardirq_ctx[i] = (struct thread_info *)
+ 			__va(lmb_alloc_base(THREAD_SIZE,
+-					    THREAD_SIZE, 0x10000000));
++					    THREAD_SIZE, limit));
+ 	}
+ }
+ #else
+@@ -478,7 +487,7 @@ static void __init exc_lvl_early_init(void)
+  */
+ static void __init emergency_stack_init(void)
+ {
+-	unsigned long limit;
++	u64 limit;
+ 	unsigned int i;
+ 
+ 	/*
+@@ -490,7 +499,7 @@ static void __init emergency_stack_init(void)
+ 	 * bringup, we need to get at them in real mode. This means they
+ 	 * must also be within the RMO region.
+ 	 */
+-	limit = min(0x10000000ULL, lmb.rmo_size);
++	limit = min(slb0_limit(), lmb.rmo_size);
+ 
+ 	for_each_possible_cpu(i) {
+ 		unsigned long sp;
+diff --git a/arch/powerpc/platforms/pseries/hvCall.S b/arch/powerpc/platforms/pseries/hvCall.S
+index c1427b3..34c76a52 100644
+--- a/arch/powerpc/platforms/pseries/hvCall.S
++++ b/arch/powerpc/platforms/pseries/hvCall.S
+@@ -202,3 +202,41 @@ _GLOBAL(plpar_hcall9)
+ 	mtcrf	0xff,r0
+ 
+ 	blr				/* return r3 = status */
++
++/* See plpar_hcall_raw to see why this is needed */
++_GLOBAL(plpar_hcall9_raw)
++	HMT_MEDIUM
++
++	mfcr	r0
++	stw	r0,8(r1)
++
++	std     r4,STK_PARM(r4)(r1)     /* Save ret buffer */
++
++	mr	r4,r5
++	mr	r5,r6
++	mr	r6,r7
++	mr	r7,r8
++	mr	r8,r9
++	mr	r9,r10
++	ld	r10,STK_PARM(r11)(r1)	 /* put arg7 in R10 */
++	ld	r11,STK_PARM(r12)(r1)	 /* put arg8 in R11 */
++	ld	r12,STK_PARM(r13)(r1)    /* put arg9 in R12 */
++
++	HVSC				/* invoke the hypervisor */
++
++	mr	r0,r12
++	ld	r12,STK_PARM(r4)(r1)
++	std	r4,  0(r12)
++	std	r5,  8(r12)
++	std	r6, 16(r12)
++	std	r7, 24(r12)
++	std	r8, 32(r12)
++	std	r9, 40(r12)
++	std	r10,48(r12)
++	std	r11,56(r12)
++	std	r0, 64(r12)
++
++	lwz	r0,8(r1)
++	mtcrf	0xff,r0
++
++	blr				/* return r3 = status */
+diff --git a/arch/powerpc/platforms/pseries/lpar.c b/arch/powerpc/platforms/pseries/lpar.c
+index 903eb9e..5f2c511 100644
+--- a/arch/powerpc/platforms/pseries/lpar.c
++++ b/arch/powerpc/platforms/pseries/lpar.c
+@@ -366,21 +366,28 @@ static void pSeries_lpar_hptab_clear(void)
+ {
+ 	unsigned long size_bytes = 1UL << ppc64_pft_size;
+ 	unsigned long hpte_count = size_bytes >> 4;
+-	unsigned long dummy1, dummy2, dword0;
++	struct {
++		unsigned long pteh;
++		unsigned long ptel;
++	} ptes[4];
+ 	long lpar_rc;
+-	int i;
++	int i, j;
+ 
+-	/* TODO: Use bulk call */
+-	for (i = 0; i < hpte_count; i++) {
+-		/* dont remove HPTEs with VRMA mappings */
+-		lpar_rc = plpar_pte_remove_raw(H_ANDCOND, i, HPTE_V_1TB_SEG,
+-						&dummy1, &dummy2);
+-		if (lpar_rc == H_NOT_FOUND) {
+-			lpar_rc = plpar_pte_read_raw(0, i, &dword0, &dummy1);
+-			if (!lpar_rc && ((dword0 & HPTE_V_VRMA_MASK)
+-				!= HPTE_V_VRMA_MASK))
+-				/* Can be hpte for 1TB Seg. So remove it */
+-				plpar_pte_remove_raw(0, i, 0, &dummy1, &dummy2);
++	/* Read in batches of 4,
++	 * invalidate only valid entries not in the VRMA
++	 * hpte_count will be a multiple of 4
++         */
++	for (i = 0; i < hpte_count; i += 4) {
++		lpar_rc = plpar_pte_read_4_raw(0, i, (void *)ptes);
++		if (lpar_rc != H_SUCCESS)
++			continue;
++		for (j = 0; j < 4; j++){
++			if ((ptes[j].pteh & HPTE_V_VRMA_MASK) ==
++				HPTE_V_VRMA_MASK)
++				continue;
++			if (ptes[j].pteh & HPTE_V_VALID)
++				plpar_pte_remove_raw(0, i + j, 0,
++					&(ptes[j].pteh), &(ptes[j].ptel));
+ 		}
+ 	}
+ }
+diff --git a/arch/powerpc/platforms/pseries/plpar_wrappers.h b/arch/powerpc/platforms/pseries/plpar_wrappers.h
+index 45f634c..98d4256 100644
+--- a/arch/powerpc/platforms/pseries/plpar_wrappers.h
++++ b/arch/powerpc/platforms/pseries/plpar_wrappers.h
+@@ -169,6 +169,24 @@ static inline long plpar_pte_read_raw(unsigned long flags, unsigned long ptex,
+ 	return rc;
+ }
+ 
++/*
++ * plpar_pte_read_4_raw can be called in real mode.
++ * ptes must be 8*sizeof(unsigned long)
++ */
++static inline long plpar_pte_read_4_raw(unsigned long flags, unsigned long ptex,
++					unsigned long *ptes)
++
++{
++	long rc;
++	unsigned long retbuf[PLPAR_HCALL9_BUFSIZE];
++
++	rc = plpar_hcall9_raw(H_READ, retbuf, flags | H_READ_4, ptex);
++
++	memcpy(ptes, retbuf, 8*sizeof(unsigned long));
++
++	return rc;
++}
++
+ static inline long plpar_pte_protect(unsigned long flags, unsigned long ptex,
+ 		unsigned long avpn)
+ {
+diff --git a/drivers/net/ixgbe/ixgbe_main.c b/drivers/net/ixgbe/ixgbe_main.c
+index 20db37e..a550d37 100644
+--- a/drivers/net/ixgbe/ixgbe_main.c
++++ b/drivers/net/ixgbe/ixgbe_main.c
+@@ -2134,6 +2134,10 @@ static void ixgbe_configure_rx(struct ixgbe_adapter *adapter)
+ 	/* Decide whether to use packet split mode or not */
+ 	adapter->flags |= IXGBE_FLAG_RX_PS_ENABLED;
+ 
++	/* Disable packet split due to 82599 erratum #45 */
++	if (hw->mac.type == ixgbe_mac_82599EB)
++		adapter->flags &= ~IXGBE_FLAG_RX_PS_ENABLED;
++
+ 	/* Set the RX buffer length according to the mode */
+ 	if (adapter->flags & IXGBE_FLAG_RX_PS_ENABLED) {
+ 		rx_buf_len = IXGBE_RX_HDR_SIZE;
+diff --git a/drivers/net/r8169.c b/drivers/net/r8169.c
+index 7022b1b..3ebe50c 100644
+--- a/drivers/net/r8169.c
++++ b/drivers/net/r8169.c
+@@ -3741,7 +3741,8 @@ static void rtl_hw_start_8168(struct net_device *dev)
+ 	RTL_W16(IntrMitigate, 0x5151);
+ 
+ 	/* Work around for RxFIFO overflow. */
+-	if (tp->mac_version == RTL_GIGA_MAC_VER_11) {
++	if (tp->mac_version == RTL_GIGA_MAC_VER_11 ||
++	    tp->mac_version == RTL_GIGA_MAC_VER_22) {
+ 		tp->intr_event |= RxFIFOOver | PCSTimeout;
+ 		tp->intr_event &= ~RxOverflow;
+ 	}
+@@ -4633,7 +4634,8 @@ static irqreturn_t rtl8169_interrupt(int irq, void *dev_instance)
+ 
+ 		/* Work around for rx fifo overflow */
+ 		if (unlikely(status & RxFIFOOver) &&
+-		(tp->mac_version == RTL_GIGA_MAC_VER_11)) {
++		    (tp->mac_version == RTL_GIGA_MAC_VER_11 ||
++		     tp->mac_version == RTL_GIGA_MAC_VER_22)) {
+ 			netif_stop_queue(dev);
+ 			rtl8169_tx_timeout(dev);
+ 			break;
+diff --git a/drivers/s390/char/keyboard.c b/drivers/s390/char/keyboard.c
+index cee4d4e..1160fca 100644
+--- a/drivers/s390/char/keyboard.c
++++ b/drivers/s390/char/keyboard.c
+@@ -462,7 +462,8 @@ kbd_ioctl(struct kbd_data *kbd, struct file *file,
+ 	  unsigned int cmd, unsigned long arg)
+ {
+ 	void __user *argp;
+-	int ct, perm;
++	unsigned int ct;
++	int perm;
+ 
+ 	argp = (void __user *)arg;
+ 
+diff --git a/drivers/staging/comedi/drivers/jr3_pci.c b/drivers/staging/comedi/drivers/jr3_pci.c
+index 59a6106..1d6385a 100644
+--- a/drivers/staging/comedi/drivers/jr3_pci.c
++++ b/drivers/staging/comedi/drivers/jr3_pci.c
+@@ -856,8 +856,11 @@ static int jr3_pci_attach(struct comedi_device *dev,
+ 	}
+ 
+ 	devpriv->pci_enabled = 1;
+-	devpriv->iobase =
+-	    ioremap(pci_resource_start(card, 0), sizeof(struct jr3_t));
++	devpriv->iobase = ioremap(pci_resource_start(card, 0),
++			offsetof(struct jr3_t, channel[devpriv->n_channels]));
++	if (!devpriv->iobase)
++		return -ENOMEM;
++
+ 	result = alloc_subdevices(dev, devpriv->n_channels);
+ 	if (result < 0)
+ 		goto out;
+diff --git a/fs/nfsd/nfs4xdr.c b/fs/nfsd/nfs4xdr.c
+index e5bab6e..4fde2c5 100644
+--- a/fs/nfsd/nfs4xdr.c
++++ b/fs/nfsd/nfs4xdr.c
+@@ -1114,7 +1114,7 @@ nfsd4_decode_create_session(struct nfsd4_compoundargs *argp,
+ 
+ 	u32 dummy;
+ 	char *machine_name;
+-	int i;
++	int i, j;
+ 	int nr_secflavs;
+ 
+ 	READ_BUF(16);
+@@ -1187,7 +1187,7 @@ nfsd4_decode_create_session(struct nfsd4_compoundargs *argp,
+ 			READ_BUF(4);
+ 			READ32(dummy);
+ 			READ_BUF(dummy * 4);
+-			for (i = 0; i < dummy; ++i)
++			for (j = 0; j < dummy; ++j)
+ 				READ32(dummy);
+ 			break;
+ 		case RPC_AUTH_GSS:
+diff --git a/include/keys/rxrpc-type.h b/include/keys/rxrpc-type.h
+index 5cb86c3..fc48754 100644
+--- a/include/keys/rxrpc-type.h
++++ b/include/keys/rxrpc-type.h
+@@ -99,7 +99,6 @@ struct rxrpc_key_token {
+  * structure of raw payloads passed to add_key() or instantiate key
+  */
+ struct rxrpc_key_data_v1 {
+-	u32		kif_version;		/* 1 */
+ 	u16		security_index;
+ 	u16		ticket_length;
+ 	u32		expiry;			/* time_t */
+diff --git a/include/linux/netdevice.h b/include/linux/netdevice.h
+index ec12f8c2..c27a182 100644
+--- a/include/linux/netdevice.h
++++ b/include/linux/netdevice.h
+@@ -2015,6 +2015,10 @@ static inline u32 dev_ethtool_get_flags(struct net_device *dev)
+ 		return 0;
+ 	return dev->ethtool_ops->get_flags(dev);
+ }
++
++#define MODULE_ALIAS_NETDEV(device) \
++	MODULE_ALIAS("netdev-" device)
++
+ #endif /* __KERNEL__ */
+ 
+ #endif	/* _LINUX_NETDEVICE_H */
+diff --git a/kernel/cpuset.c b/kernel/cpuset.c
+index b120fd0..d091ed3 100644
+--- a/kernel/cpuset.c
++++ b/kernel/cpuset.c
+@@ -1514,8 +1514,10 @@ static int cpuset_write_resmask(struct cgroup *cgrp, struct cftype *cft,
+ 		return -ENODEV;
+ 
+ 	trialcs = alloc_trial_cpuset(cs);
+-	if (!trialcs)
+-		return -ENOMEM;
++	if (!trialcs) {
++		retval = -ENOMEM;
++		goto out;
++	}
+ 
+ 	switch (cft->private) {
+ 	case FILE_CPULIST:
+@@ -1530,6 +1532,7 @@ static int cpuset_write_resmask(struct cgroup *cgrp, struct cftype *cft,
+ 	}
+ 
+ 	free_trial_cpuset(trialcs);
++out:
+ 	cgroup_unlock();
+ 	return retval;
+ }
+diff --git a/mm/mremap.c b/mm/mremap.c
+index 8451908..166b824 100644
+--- a/mm/mremap.c
++++ b/mm/mremap.c
+@@ -92,9 +92,7 @@ static void move_ptes(struct vm_area_struct *vma, pmd_t *old_pmd,
+ 		 */
+ 		mapping = vma->vm_file->f_mapping;
+ 		spin_lock(&mapping->i_mmap_lock);
+-		if (new_vma->vm_truncate_count &&
+-		    new_vma->vm_truncate_count != vma->vm_truncate_count)
+-			new_vma->vm_truncate_count = 0;
++		new_vma->vm_truncate_count = 0;
+ 	}
+ 
+ 	/*
+diff --git a/net/core/dev.c b/net/core/dev.c
+index fd4c1e7..49e3782 100644
+--- a/net/core/dev.c
++++ b/net/core/dev.c
+@@ -1037,13 +1037,21 @@ EXPORT_SYMBOL(netdev_bonding_change);
+ void dev_load(struct net *net, const char *name)
+ {
+ 	struct net_device *dev;
++	int no_module;
+ 
+ 	read_lock(&dev_base_lock);
+ 	dev = __dev_get_by_name(net, name);
+ 	read_unlock(&dev_base_lock);
+ 
+-	if (!dev && capable(CAP_NET_ADMIN))
+-		request_module("%s", name);
++	no_module = !dev;
++	if (no_module && capable(CAP_NET_ADMIN))
++		no_module = request_module("netdev-%s", name);
++	if (no_module && capable(CAP_SYS_MODULE)) {
++		if (!request_module("%s", name))
++			pr_err("Loading kernel module for a network device "
++"with CAP_SYS_MODULE (deprecated).  Use CAP_NET_ADMIN and alias netdev-%s "
++"instead\n", name);
++	}
+ }
+ EXPORT_SYMBOL(dev_load);
+ 
+diff --git a/net/ipv4/ip_gre.c b/net/ipv4/ip_gre.c
+index 1433338..cfab9e4 100644
+--- a/net/ipv4/ip_gre.c
++++ b/net/ipv4/ip_gre.c
+@@ -1708,3 +1708,4 @@ module_exit(ipgre_fini);
+ MODULE_LICENSE("GPL");
+ MODULE_ALIAS_RTNL_LINK("gre");
+ MODULE_ALIAS_RTNL_LINK("gretap");
++MODULE_ALIAS_NETDEV("gre0");
+diff --git a/net/ipv4/ipip.c b/net/ipv4/ipip.c
+index ae40ed1..f37df1a 100644
+--- a/net/ipv4/ipip.c
++++ b/net/ipv4/ipip.c
+@@ -853,3 +853,4 @@ static void __exit ipip_fini(void)
+ module_init(ipip_init);
+ module_exit(ipip_fini);
+ MODULE_LICENSE("GPL");
++MODULE_ALIAS_NETDEV("tunl0");
+diff --git a/net/ipv6/ip6_tunnel.c b/net/ipv6/ip6_tunnel.c
+index c595bbe..9a95c82 100644
+--- a/net/ipv6/ip6_tunnel.c
++++ b/net/ipv6/ip6_tunnel.c
+@@ -56,6 +56,7 @@
+ MODULE_AUTHOR("Ville Nuorvala");
+ MODULE_DESCRIPTION("IPv6 tunneling device");
+ MODULE_LICENSE("GPL");
++MODULE_ALIAS_NETDEV("ip6tnl0");
+ 
+ #define IPV6_TLV_TEL_DST_SIZE 8
+ 
+diff --git a/net/ipv6/sit.c b/net/ipv6/sit.c
+index dbd19a7..de2ffef 100644
+--- a/net/ipv6/sit.c
++++ b/net/ipv6/sit.c
+@@ -1101,4 +1101,4 @@ static int __init sit_init(void)
+ module_init(sit_init);
+ module_exit(sit_cleanup);
+ MODULE_LICENSE("GPL");
+-MODULE_ALIAS("sit0");
++MODULE_ALIAS_NETDEV("sit0");
+diff --git a/net/netfilter/nf_log.c b/net/netfilter/nf_log.c
+index d65d348..e54392e 100644
+--- a/net/netfilter/nf_log.c
++++ b/net/netfilter/nf_log.c
+@@ -83,6 +83,8 @@ EXPORT_SYMBOL(nf_log_unregister);
+ 
+ int nf_log_bind_pf(u_int8_t pf, const struct nf_logger *logger)
+ {
++	if (pf >= ARRAY_SIZE(nf_loggers))
++		return -EINVAL;
+ 	mutex_lock(&nf_log_mutex);
+ 	if (__find_logger(pf, logger->name) == NULL) {
+ 		mutex_unlock(&nf_log_mutex);
+@@ -96,6 +98,8 @@ EXPORT_SYMBOL(nf_log_bind_pf);
+ 
+ void nf_log_unbind_pf(u_int8_t pf)
+ {
++	if (pf >= ARRAY_SIZE(nf_loggers))
++		return;
+ 	mutex_lock(&nf_log_mutex);
+ 	rcu_assign_pointer(nf_loggers[pf], NULL);
+ 	mutex_unlock(&nf_log_mutex);
