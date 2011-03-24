@@ -1,0 +1,1429 @@
+diff --git a/Documentation/i2c/instantiating-devices b/Documentation/i2c/instantiating-devices
+index e894902..ed1779c 100644
+--- a/Documentation/i2c/instantiating-devices
++++ b/Documentation/i2c/instantiating-devices
+@@ -100,7 +100,7 @@ static int __devinit usb_hcd_pnx4008_probe(struct platform_device *pdev)
+ 	(...)
+ 	i2c_adap = i2c_get_adapter(2);
+ 	memset(&i2c_info, 0, sizeof(struct i2c_board_info));
+-	strlcpy(i2c_info.name, "isp1301_pnx", I2C_NAME_SIZE);
++	strlcpy(i2c_info.type, "isp1301_pnx", I2C_NAME_SIZE);
+ 	isp1301_i2c_client = i2c_new_probed_device(i2c_adap, &i2c_info,
+ 						   normal_i2c);
+ 	i2c_put_adapter(i2c_adap);
+diff --git a/Makefile b/Makefile
+index 8b04094..ca59a37 100644
+diff --git a/arch/mips/alchemy/mtx-1/platform.c b/arch/mips/alchemy/mtx-1/platform.c
+index e30e42a..956f946 100644
+--- a/arch/mips/alchemy/mtx-1/platform.c
++++ b/arch/mips/alchemy/mtx-1/platform.c
+@@ -28,6 +28,8 @@
+ #include <linux/mtd/physmap.h>
+ #include <mtd/mtd-abi.h>
+ 
++#include <asm/mach-au1x00/au1xxx_eth.h>
++
+ static struct gpio_keys_button mtx1_gpio_button[] = {
+ 	{
+ 		.gpio = 207,
+@@ -140,10 +142,17 @@ static struct __initdata platform_device * mtx1_devs[] = {
+ 	&mtx1_mtd,
+ };
+ 
++static struct au1000_eth_platform_data mtx1_au1000_eth0_pdata = {
++	.phy_search_highest_addr	= 1,
++	.phy1_search_mac0 		= 1,
++};
++
+ static int __init mtx1_register_devices(void)
+ {
+ 	int rc;
+ 
++	au1xxx_override_eth_cfg(0, &mtx1_au1000_eth0_pdata);
++
+ 	rc = gpio_request(mtx1_gpio_button[0].gpio,
+ 					mtx1_gpio_button[0].desc);
+ 	if (rc < 0) {
+diff --git a/arch/parisc/kernel/irq.c b/arch/parisc/kernel/irq.c
+index 2e7610c..035f568 100644
+--- a/arch/parisc/kernel/irq.c
++++ b/arch/parisc/kernel/irq.c
+@@ -117,7 +117,7 @@ int cpu_check_affinity(unsigned int irq, const struct cpumask *dest)
+ 	int cpu_dest;
+ 
+ 	/* timer and ipi have to always be received on all CPUs */
+-	if (CHECK_IRQ_PER_CPU(irq)) {
++	if (CHECK_IRQ_PER_CPU(irq_to_desc(irq)->status)) {
+ 		/* Bad linux design decision.  The mask has already
+ 		 * been set; we must reset it */
+ 		cpumask_setall(irq_desc[irq].affinity);
+diff --git a/arch/powerpc/include/asm/kexec.h b/arch/powerpc/include/asm/kexec.h
+index 7e06b43..a6ca6da 100644
+--- a/arch/powerpc/include/asm/kexec.h
++++ b/arch/powerpc/include/asm/kexec.h
+@@ -31,6 +31,10 @@
+ #define KEXEC_ARCH KEXEC_ARCH_PPC
+ #endif
+ 
++#define KEXEC_STATE_NONE 0
++#define KEXEC_STATE_IRQS_OFF 1
++#define KEXEC_STATE_REAL_MODE 2
++
+ #ifndef __ASSEMBLY__
+ #include <linux/cpumask.h>
+ #include <asm/reg.h>
+diff --git a/arch/powerpc/include/asm/paca.h b/arch/powerpc/include/asm/paca.h
+index 7d8514c..8108f1e 100644
+--- a/arch/powerpc/include/asm/paca.h
++++ b/arch/powerpc/include/asm/paca.h
+@@ -56,7 +56,7 @@ struct paca_struct {
+ 	struct lppaca *lppaca_ptr;	/* Pointer to LpPaca for PLIC */
+ #endif /* CONFIG_PPC_BOOK3S */
+ 	/*
+-	 * MAGIC: the spinlock functions in arch/powerpc/lib/locks.c 
++	 * MAGIC: the spinlock functions in arch/powerpc/lib/locks.c
+ 	 * load lock_token and paca_index with a single lwz
+ 	 * instruction.  They must travel together and be properly
+ 	 * aligned.
+@@ -76,6 +76,7 @@ struct paca_struct {
+ 	s16 hw_cpu_id;			/* Physical processor number */
+ 	u8 cpu_start;			/* At startup, processor spins until */
+ 					/* this becomes non-zero. */
++	u8 kexec_state;         /* set when kexec down has irqs off */
+ #ifdef CONFIG_PPC_STD_MMU_64
+ 	struct slb_shadow *slb_shadow_ptr;
+ 
+diff --git a/arch/powerpc/include/asm/reg.h b/arch/powerpc/include/asm/reg.h
+index 6315edc..32a7c30 100644
+--- a/arch/powerpc/include/asm/reg.h
++++ b/arch/powerpc/include/asm/reg.h
+@@ -858,6 +858,7 @@
+ #define PV_970		0x0039
+ #define PV_POWER5	0x003A
+ #define PV_POWER5p	0x003B
++#define PV_POWER7	0x003F
+ #define PV_970FX	0x003C
+ #define PV_630		0x0040
+ #define PV_630p	0x0041
+diff --git a/arch/powerpc/kernel/asm-offsets.c b/arch/powerpc/kernel/asm-offsets.c
+index 692c056..7d65650 100644
+--- a/arch/powerpc/kernel/asm-offsets.c
++++ b/arch/powerpc/kernel/asm-offsets.c
+@@ -183,6 +183,7 @@ int main(void)
+ #endif /* CONFIG_PPC_STD_MMU_64 */
+ 	DEFINE(PACAEMERGSP, offsetof(struct paca_struct, emergency_sp));
+ 	DEFINE(PACAHWCPUID, offsetof(struct paca_struct, hw_cpu_id));
++	DEFINE(PACAKEXECSTATE, offsetof(struct paca_struct, kexec_state));
+ 	DEFINE(PACA_STARTPURR, offsetof(struct paca_struct, startpurr));
+ 	DEFINE(PACA_STARTSPURR, offsetof(struct paca_struct, startspurr));
+ 	DEFINE(PACA_USER_TIME, offsetof(struct paca_struct, user_time));
+diff --git a/arch/powerpc/kernel/crash.c b/arch/powerpc/kernel/crash.c
+index b779818..fe02e71 100644
+--- a/arch/powerpc/kernel/crash.c
++++ b/arch/powerpc/kernel/crash.c
+@@ -162,6 +162,32 @@ static void crash_kexec_prepare_cpus(int cpu)
+ 	/* Leave the IPI callback set */
+ }
+ 
++/* wait for all the CPUs to hit real mode but timeout if they don't come in */
++static void crash_kexec_wait_realmode(int cpu)
++{
++	unsigned int msecs;
++	int i;
++
++	msecs = 10000;
++	for (i=0; i < NR_CPUS && msecs > 0; i++) {
++		if (i == cpu)
++			continue;
++
++		while (paca[i].kexec_state < KEXEC_STATE_REAL_MODE) {
++			barrier();
++			if (!cpu_possible(i)) {
++				break;
++			}
++			if (!cpu_online(i)) {
++				break;
++			}
++			msecs--;
++			mdelay(1);
++		}
++	}
++	mb();
++}
++
+ /*
+  * This function will be called by secondary cpus or by kexec cpu
+  * if soft-reset is activated to stop some CPUs.
+@@ -419,6 +445,7 @@ void default_machine_crash_shutdown(struct pt_regs *regs)
+ 	crash_kexec_prepare_cpus(crashing_cpu);
+ 	cpu_set(crashing_cpu, cpus_in_crash);
+ 	crash_kexec_stop_spus();
++	crash_kexec_wait_realmode(crashing_cpu);
+ 	if (ppc_md.kexec_cpu_down)
+ 		ppc_md.kexec_cpu_down(1, 0);
+ }
+diff --git a/arch/powerpc/kernel/machine_kexec_64.c b/arch/powerpc/kernel/machine_kexec_64.c
+index 1a8de63..2e4c61c 100644
+--- a/arch/powerpc/kernel/machine_kexec_64.c
++++ b/arch/powerpc/kernel/machine_kexec_64.c
+@@ -156,16 +156,23 @@ void kexec_copy_flush(struct kimage *image)
+ 
+ #ifdef CONFIG_SMP
+ 
+-/* FIXME: we should schedule this function to be called on all cpus based
+- * on calling the interrupts, but we would like to call it off irq level
+- * so that the interrupt controller is clean.
+- */
++static int kexec_all_irq_disabled;
++
+ static void kexec_smp_down(void *arg)
+ {
++	local_irq_disable();
++	mb(); /* make sure our irqs are disabled before we say they are */
++	get_paca()->kexec_state = KEXEC_STATE_IRQS_OFF;
++	while (kexec_all_irq_disabled == 0)
++		cpu_relax();
++	mb(); /* make sure all irqs are disabled before this */
++	/*
++	 * Now every CPU has IRQs off, we can clear out any pending
++	 * IPIs and be sure that no more will come in after this.
++	 */
+ 	if (ppc_md.kexec_cpu_down)
+ 		ppc_md.kexec_cpu_down(0, 1);
+ 
+-	local_irq_disable();
+ 	kexec_smp_wait();
+ 	/* NOTREACHED */
+ }
+@@ -193,20 +200,18 @@ static void wake_offline_cpus(void)
+ 	}
+ }
+ 
+-static void kexec_prepare_cpus(void)
++static void kexec_prepare_cpus_wait(int wait_state)
+ {
+ 	int my_cpu, i, notified=-1;
+ 
+ 	wake_offline_cpus();
+-	smp_call_function(kexec_smp_down, NULL, /* wait */0);
+ 	my_cpu = get_cpu();
+-
+-	/* check the others cpus are now down (via paca hw cpu id == -1) */
++	/* Make sure each CPU has atleast made it to the state we need */
+ 	for (i=0; i < NR_CPUS; i++) {
+ 		if (i == my_cpu)
+ 			continue;
+ 
+-		while (paca[i].hw_cpu_id != -1) {
++		while (paca[i].kexec_state < wait_state) {
+ 			barrier();
+ 			if (!cpu_possible(i)) {
+ 				printk("kexec: cpu %d hw_cpu_id %d is not"
+@@ -226,20 +231,35 @@ static void kexec_prepare_cpus(void)
+ 			}
+ 			if (i != notified) {
+ 				printk( "kexec: waiting for cpu %d (physical"
+-						" %d) to go down\n",
+-						i, paca[i].hw_cpu_id);
++						" %d) to enter %i state\n",
++					i, paca[i].hw_cpu_id, wait_state);
+ 				notified = i;
+ 			}
+ 		}
+ 	}
++	mb();
++}
++
++static void kexec_prepare_cpus(void)
++{
++
++	smp_call_function(kexec_smp_down, NULL, /* wait */0);
++	local_irq_disable();
++	mb(); /* make sure IRQs are disabled before we say they are */
++	get_paca()->kexec_state = KEXEC_STATE_IRQS_OFF;
++
++	kexec_prepare_cpus_wait(KEXEC_STATE_IRQS_OFF);
++	/* we are sure every CPU has IRQs off at this point */
++	kexec_all_irq_disabled = 1;
+ 
+ 	/* after we tell the others to go down */
+ 	if (ppc_md.kexec_cpu_down)
+ 		ppc_md.kexec_cpu_down(0, 0);
+ 
+-	put_cpu();
++/* Before removing MMU mapings make sure all CPUs have entered real mode */
++	kexec_prepare_cpus_wait(KEXEC_STATE_REAL_MODE);
+ 
+-	local_irq_disable();
++	put_cpu();
+ }
+ 
+ #else /* ! SMP */
+diff --git a/arch/powerpc/kernel/misc_64.S b/arch/powerpc/kernel/misc_64.S
+index a5cf9c1..499a133 100644
+--- a/arch/powerpc/kernel/misc_64.S
++++ b/arch/powerpc/kernel/misc_64.S
+@@ -24,6 +24,7 @@
+ #include <asm/asm-offsets.h>
+ #include <asm/cputable.h>
+ #include <asm/thread_info.h>
++#include <asm/kexec.h>
+ 
+ 	.text
+ 
+@@ -471,6 +472,10 @@ _GLOBAL(kexec_wait)
+ 1:	mflr	r5
+ 	addi	r5,r5,kexec_flag-1b
+ 
++	li      r4,KEXEC_STATE_REAL_MODE
++	stb     r4,PACAKEXECSTATE(r13)
++	SYNC
++
+ 99:	HMT_LOW
+ #ifdef CONFIG_KEXEC		/* use no memory without kexec */
+ 	lwz	r4,0(r5)
+@@ -494,14 +499,11 @@ kexec_flag:
+  * note: this is a terminal routine, it does not save lr
+  *
+  * get phys id from paca
+- * set paca id to -1 to say we got here
+  * switch to real mode
+  * join other cpus in kexec_wait(phys_id)
+  */
+ _GLOBAL(kexec_smp_wait)
+ 	lhz	r3,PACAHWCPUID(r13)
+-	li	r4,-1
+-	sth	r4,PACAHWCPUID(r13)	/* let others know we left */
+ 	bl	real_mode
+ 	b	.kexec_wait
+ 
+diff --git a/arch/powerpc/kernel/paca.c b/arch/powerpc/kernel/paca.c
+index d16b1ea..bf6598d 100644
+--- a/arch/powerpc/kernel/paca.c
++++ b/arch/powerpc/kernel/paca.c
+@@ -14,6 +14,7 @@
+ #include <asm/paca.h>
+ #include <asm/sections.h>
+ #include <asm/pgtable.h>
++#include <asm/kexec.h>
+ 
+ /* This symbol is provided by the linker - let it fill in the paca
+  * field correctly */
+@@ -97,6 +98,7 @@ void __init initialise_pacas(void)
+ 		new_paca->kernelbase = (unsigned long) _stext;
+ 		new_paca->kernel_msr = MSR_KERNEL;
+ 		new_paca->hw_cpu_id = 0xffff;
++		new_paca->kexec_state = KEXEC_STATE_NONE;
+ 		new_paca->__current = &init_task;
+ #ifdef CONFIG_PPC_STD_MMU_64
+ 		new_paca->slb_shadow_ptr = &slb_shadow[cpu];
+diff --git a/arch/powerpc/kernel/perf_event.c b/arch/powerpc/kernel/perf_event.c
+index 87f1663..c3f7ac7 100644
+--- a/arch/powerpc/kernel/perf_event.c
++++ b/arch/powerpc/kernel/perf_event.c
+@@ -1220,6 +1220,28 @@ unsigned long perf_instruction_pointer(struct pt_regs *regs)
+ 	return ip;
+ }
+ 
++static bool pmc_overflow(unsigned long val)
++{
++	if ((int)val < 0)
++		return true;
++
++	/*
++	 * Events on POWER7 can roll back if a speculative event doesn't
++	 * eventually complete. Unfortunately in some rare cases they will
++	 * raise a performance monitor exception. We need to catch this to
++	 * ensure we reset the PMC. In all cases the PMC will be 256 or less
++	 * cycles from overflow.
++	 *
++	 * We only do this if the first pass fails to find any overflowing
++	 * PMCs because a user might set a period of less than 256 and we
++	 * don't want to mistakenly reset them.
++	 */
++	if (__is_processor(PV_POWER7) && ((0x80000000 - val) <= 256))
++		return true;
++
++	return false;
++}
++
+ /*
+  * Performance monitor interrupt stuff
+  */
+@@ -1267,7 +1289,7 @@ static void perf_event_interrupt(struct pt_regs *regs)
+ 			if (is_limited_pmc(i + 1))
+ 				continue;
+ 			val = read_pmc(i + 1);
+-			if ((int)val < 0)
++			if (pmc_overflow(val))
+ 				write_pmc(i + 1, 0);
+ 		}
+ 	}
+diff --git a/arch/powerpc/kernel/rtas_flash.c b/arch/powerpc/kernel/rtas_flash.c
+index 13011a9..266c908 100644
+--- a/arch/powerpc/kernel/rtas_flash.c
++++ b/arch/powerpc/kernel/rtas_flash.c
+@@ -93,12 +93,8 @@ struct flash_block_list {
+ 	struct flash_block_list *next;
+ 	struct flash_block blocks[FLASH_BLOCKS_PER_NODE];
+ };
+-struct flash_block_list_header { /* just the header of flash_block_list */
+-	unsigned long num_blocks;
+-	struct flash_block_list *next;
+-};
+ 
+-static struct flash_block_list_header rtas_firmware_flash_list = {0, NULL};
++static struct flash_block_list *rtas_firmware_flash_list;
+ 
+ /* Use slab cache to guarantee 4k alignment */
+ static struct kmem_cache *flash_block_cache = NULL;
+@@ -107,13 +103,14 @@ static struct kmem_cache *flash_block_cache = NULL;
+ 
+ /* Local copy of the flash block list.
+  * We only allow one open of the flash proc file and create this
+- * list as we go.  This list will be put in the
+- * rtas_firmware_flash_list var once it is fully read.
++ * list as we go.  The rtas_firmware_flash_list varable will be
++ * set once the data is fully read.
+  *
+  * For convenience as we build the list we use virtual addrs,
+  * we do not fill in the version number, and the length field
+  * is treated as the number of entries currently in the block
+- * (i.e. not a byte count).  This is all fixed on release.
++ * (i.e. not a byte count).  This is all fixed when calling
++ * the flash routine.
+  */
+ 
+ /* Status int must be first member of struct */
+@@ -200,16 +197,16 @@ static int rtas_flash_release(struct inode *inode, struct file *file)
+ 	if (uf->flist) {    
+ 		/* File was opened in write mode for a new flash attempt */
+ 		/* Clear saved list */
+-		if (rtas_firmware_flash_list.next) {
+-			free_flash_list(rtas_firmware_flash_list.next);
+-			rtas_firmware_flash_list.next = NULL;
++		if (rtas_firmware_flash_list) {
++			free_flash_list(rtas_firmware_flash_list);
++			rtas_firmware_flash_list = NULL;
+ 		}
+ 
+ 		if (uf->status != FLASH_AUTH)  
+ 			uf->status = flash_list_valid(uf->flist);
+ 
+ 		if (uf->status == FLASH_IMG_READY) 
+-			rtas_firmware_flash_list.next = uf->flist;
++			rtas_firmware_flash_list = uf->flist;
+ 		else
+ 			free_flash_list(uf->flist);
+ 
+@@ -592,7 +589,7 @@ static void rtas_flash_firmware(int reboot_type)
+ 	unsigned long rtas_block_list;
+ 	int i, status, update_token;
+ 
+-	if (rtas_firmware_flash_list.next == NULL)
++	if (rtas_firmware_flash_list == NULL)
+ 		return;		/* nothing to do */
+ 
+ 	if (reboot_type != SYS_RESTART) {
+@@ -609,20 +606,25 @@ static void rtas_flash_firmware(int reboot_type)
+ 		return;
+ 	}
+ 
+-	/* NOTE: the "first" block list is a global var with no data
+-	 * blocks in the kernel data segment.  We do this because
+-	 * we want to ensure this block_list addr is under 4GB.
++	/*
++	 * NOTE: the "first" block must be under 4GB, so we create
++	 * an entry with no data blocks in the reserved buffer in
++	 * the kernel data segment.
+ 	 */
+-	rtas_firmware_flash_list.num_blocks = 0;
+-	flist = (struct flash_block_list *)&rtas_firmware_flash_list;
++	spin_lock(&rtas_data_buf_lock);
++	flist = (struct flash_block_list *)&rtas_data_buf[0];
++	flist->num_blocks = 0;
++	flist->next = rtas_firmware_flash_list;
+ 	rtas_block_list = virt_to_abs(flist);
+ 	if (rtas_block_list >= 4UL*1024*1024*1024) {
+ 		printk(KERN_ALERT "FLASH: kernel bug...flash list header addr above 4GB\n");
++		spin_unlock(&rtas_data_buf_lock);
+ 		return;
+ 	}
+ 
+ 	printk(KERN_ALERT "FLASH: preparing saved firmware image for flash\n");
+ 	/* Update the block_list in place. */
++	rtas_firmware_flash_list = NULL; /* too hard to backout on error */
+ 	image_size = 0;
+ 	for (f = flist; f; f = next) {
+ 		/* Translate data addrs to absolute */
+@@ -663,6 +665,7 @@ static void rtas_flash_firmware(int reboot_type)
+ 		printk(KERN_ALERT "FLASH: unknown flash return code %d\n", status);
+ 		break;
+ 	}
++	spin_unlock(&rtas_data_buf_lock);
+ }
+ 
+ static void remove_flash_pde(struct proc_dir_entry *dp)
+diff --git a/arch/x86/include/asm/pgtable-3level.h b/arch/x86/include/asm/pgtable-3level.h
+index 177b016..33927d2 100644
+--- a/arch/x86/include/asm/pgtable-3level.h
++++ b/arch/x86/include/asm/pgtable-3level.h
+@@ -69,8 +69,6 @@ static inline void native_pmd_clear(pmd_t *pmd)
+ 
+ static inline void pud_clear(pud_t *pudp)
+ {
+-	unsigned long pgd;
+-
+ 	set_pud(pudp, __pud(0));
+ 
+ 	/*
+@@ -79,13 +77,10 @@ static inline void pud_clear(pud_t *pudp)
+ 	 * section 8.1: in PAE mode we explicitly have to flush the
+ 	 * TLB via cr3 if the top-level pgd is changed...
+ 	 *
+-	 * Make sure the pud entry we're updating is within the
+-	 * current pgd to avoid unnecessary TLB flushes.
++	 * Currently all places where pud_clear() is called either have
++	 * flush_tlb_mm() followed or don't need TLB flush (x86_64 code or
++	 * pud_clear_bad()), so we don't need TLB flush here.
+ 	 */
+-	pgd = read_cr3();
+-	if (__pa(pudp) >= pgd && __pa(pudp) <
+-	    (pgd + sizeof(pgd_t)*PTRS_PER_PGD))
+-		write_cr3(pgd);
+ }
+ 
+ #ifdef CONFIG_SMP
+diff --git a/arch/x86/kernel/e820.c b/arch/x86/kernel/e820.c
+index d17d482..a89739a 100644
+--- a/arch/x86/kernel/e820.c
++++ b/arch/x86/kernel/e820.c
+@@ -1236,15 +1236,21 @@ static int __init parse_memopt(char *p)
+ 	if (!p)
+ 		return -EINVAL;
+ 
+-#ifdef CONFIG_X86_32
+ 	if (!strcmp(p, "nopentium")) {
++#ifdef CONFIG_X86_32
+ 		setup_clear_cpu_cap(X86_FEATURE_PSE);
+ 		return 0;
+-	}
++#else
++		printk(KERN_WARNING "mem=nopentium ignored! (only supported on x86_32)\n");
++		return -EINVAL;
+ #endif
++	}
+ 
+ 	userdef = 1;
+ 	mem_size = memparse(p, &p);
++	/* don't remove all of memory when handling "mem={invalid}" param */
++	if (mem_size == 0)
++		return -EINVAL;
+ 	e820_remove_range(mem_size, ULLONG_MAX - mem_size, E820_RAM, 1);
+ 
+ 	return 0;
+diff --git a/arch/x86/kernel/early-quirks.c b/arch/x86/kernel/early-quirks.c
+index ef01d3d..f67a33c7 100644
+--- a/arch/x86/kernel/early-quirks.c
++++ b/arch/x86/kernel/early-quirks.c
+@@ -161,7 +161,12 @@ static void __init ati_bugs_contd(int num, int slot, int func)
+ 	if (rev >= 0x40)
+ 		acpi_fix_pin2_polarity = 1;
+ 
+-	if (rev > 0x13)
++	/*
++	 * SB600: revisions 0x11, 0x12, 0x13, 0x14, ...
++	 * SB700: revisions 0x39, 0x3a, ...
++	 * SB800: revisions 0x40, 0x41, ...
++	 */
++	if (rev >= 0x39)
+ 		return;
+ 
+ 	if (acpi_use_timer_override)
+diff --git a/arch/x86/kernel/entry_64.S b/arch/x86/kernel/entry_64.S
+index b5c061f..34a56a9 100644
+--- a/arch/x86/kernel/entry_64.S
++++ b/arch/x86/kernel/entry_64.S
+@@ -1303,7 +1303,7 @@ ENTRY(xen_do_hypervisor_callback)   # do_hypervisor_callback(struct *pt_regs)
+ 	decl PER_CPU_VAR(irq_count)
+ 	jmp  error_exit
+ 	CFI_ENDPROC
+-END(do_hypervisor_callback)
++END(xen_do_hypervisor_callback)
+ 
+ /*
+  * Hypervisor uses this for application faults while it executes.
+diff --git a/arch/x86/mm/fault.c b/arch/x86/mm/fault.c
+index 1739358..8ac0d76 100644
+--- a/arch/x86/mm/fault.c
++++ b/arch/x86/mm/fault.c
+@@ -830,6 +830,13 @@ mm_fault_error(struct pt_regs *regs, unsigned long error_code,
+ 	       unsigned long address, unsigned int fault)
+ {
+ 	if (fault & VM_FAULT_OOM) {
++		/* Kernel mode? Handle exceptions or die: */
++		if (!(error_code & PF_USER)) {
++			up_read(&current->mm->mmap_sem);
++			no_context(regs, error_code, address);
++			return;
++		}
++
+ 		out_of_memory(regs, error_code, address);
+ 	} else {
+ 		if (fault & (VM_FAULT_SIGBUS|VM_FAULT_HWPOISON))
+diff --git a/arch/x86/mm/pgtable.c b/arch/x86/mm/pgtable.c
+index c9ba9de..e0e6fad 100644
+--- a/arch/x86/mm/pgtable.c
++++ b/arch/x86/mm/pgtable.c
+@@ -159,8 +159,7 @@ void pud_populate(struct mm_struct *mm, pud_t *pudp, pmd_t *pmd)
+ 	 * section 8.1: in PAE mode we explicitly have to flush the
+ 	 * TLB via cr3 if the top-level pgd is changed...
+ 	 */
+-	if (mm == current->active_mm)
+-		write_cr3(read_cr3());
++	flush_tlb_mm(mm);
+ }
+ #else  /* !CONFIG_X86_PAE */
+ 
+diff --git a/drivers/ata/ahci.c b/drivers/ata/ahci.c
+index e3d9816..7f94bd1 100644
+--- a/drivers/ata/ahci.c
++++ b/drivers/ata/ahci.c
+@@ -576,6 +576,11 @@ static const struct pci_device_id ahci_pci_tbl[] = {
+ 	{ PCI_VDEVICE(INTEL, 0x1c05), board_ahci }, /* CPT RAID */
+ 	{ PCI_VDEVICE(INTEL, 0x1c06), board_ahci }, /* CPT RAID */
+ 	{ PCI_VDEVICE(INTEL, 0x1c07), board_ahci }, /* CPT RAID */
++	{ PCI_VDEVICE(INTEL, 0x1d02), board_ahci }, /* PBG AHCI */
++	{ PCI_VDEVICE(INTEL, 0x1d04), board_ahci }, /* PBG RAID */
++	{ PCI_VDEVICE(INTEL, 0x1d06), board_ahci }, /* PBG RAID */
++	{ PCI_VDEVICE(INTEL, 0x2826), board_ahci }, /* PBG RAID */
++	{ PCI_VDEVICE(INTEL, 0x2323), board_ahci }, /* DH89xxCC AHCI */
+ 
+ 	/* JMicron 360/1/3/5/6, match class to avoid IDE function */
+ 	{ PCI_VENDOR_ID_JMICRON, PCI_ANY_ID, PCI_ANY_ID, PCI_ANY_ID,
+diff --git a/drivers/ata/libata-core.c b/drivers/ata/libata-core.c
+index 0963cd6..d4f7f99 100644
+--- a/drivers/ata/libata-core.c
++++ b/drivers/ata/libata-core.c
+@@ -5016,9 +5016,6 @@ static void ata_verify_xfer(struct ata_queued_cmd *qc)
+ {
+ 	struct ata_device *dev = qc->dev;
+ 
+-	if (ata_tag_internal(qc->tag))
+-		return;
+-
+ 	if (ata_is_nodata(qc->tf.protocol))
+ 		return;
+ 
+@@ -5062,14 +5059,23 @@ void ata_qc_complete(struct ata_queued_cmd *qc)
+ 		if (unlikely(qc->err_mask))
+ 			qc->flags |= ATA_QCFLAG_FAILED;
+ 
+-		if (unlikely(qc->flags & ATA_QCFLAG_FAILED)) {
+-			/* always fill result TF for failed qc */
++		/*
++		 * Finish internal commands without any further processing
++		 * and always with the result TF filled.
++		 */
++		if (unlikely(ata_tag_internal(qc->tag))) {
+ 			fill_result_tf(qc);
++			__ata_qc_complete(qc);
++			return;
++		}
+ 
+-			if (!ata_tag_internal(qc->tag))
+-				ata_qc_schedule_eh(qc);
+-			else
+-				__ata_qc_complete(qc);
++		/*
++		 * Non-internal qc has failed.  Fill the result TF and
++		 * summon EH.
++		 */
++		if (unlikely(qc->flags & ATA_QCFLAG_FAILED)) {
++			fill_result_tf(qc);
++			ata_qc_schedule_eh(qc);
+ 			return;
+ 		}
+ 
+diff --git a/drivers/hwmon/f71882fg.c b/drivers/hwmon/f71882fg.c
+index 4146105..efbb602 100644
+--- a/drivers/hwmon/f71882fg.c
++++ b/drivers/hwmon/f71882fg.c
+@@ -2041,7 +2041,6 @@
+ 	int nr_fans = (data->type == f71882fg) ? 4 : 3;
+ 	u8 start_reg = f71882fg_read8(data, F71882FG_REG_START);
+ 
+-	platform_set_drvdata(pdev, NULL);
+ 	if (data->hwmon_dev)
+ 		hwmon_device_unregister(data->hwmon_dev);
+ 
+@@ -2108,6 +2107,7 @@
+ 		}
+ 	}
+ 
++	platform_set_drvdata(pdev, NULL);
+ 	kfree(data);
+ 
+ 	return 0;
+diff --git a/drivers/hwmon/sht15.c b/drivers/hwmon/sht15.c
+index fbc997e..2040507 100644
+--- a/drivers/hwmon/sht15.c
++++ b/drivers/hwmon/sht15.c
+@@ -332,11 +332,11 @@ static inline int sht15_calc_humid(struct sht15_data *data)
+ 
+ 	const int c1 = -4;
+ 	const int c2 = 40500; /* x 10 ^ -6 */
+-	const int c3 = -2800; /* x10 ^ -9 */
++	const int c3 = -28; /* x 10 ^ -7 */
+ 
+ 	RHlinear = c1*1000
+ 		+ c2 * data->val_humid/1000
+-		+ (data->val_humid * data->val_humid * c3)/1000000;
++		+ (data->val_humid * data->val_humid * c3) / 10000;
+ 	return (temp - 25000) * (10000 + 80 * data->val_humid)
+ 		/ 1000000 + RHlinear;
+ }
+diff --git a/drivers/infiniband/core/cm.c b/drivers/infiniband/core/cm.c
+index 5130fc5..a5dea6b 100644
+--- a/drivers/infiniband/core/cm.c
++++ b/drivers/infiniband/core/cm.c
+@@ -2986,6 +2986,7 @@ static int cm_sidr_req_handler(struct cm_work *work)
+ 		goto out; /* No match. */
+ 	}
+ 	atomic_inc(&cur_cm_id_priv->refcount);
++	atomic_inc(&cm_id_priv->refcount);
+ 	spin_unlock_irq(&cm.lock);
+ 
+ 	cm_id_priv->id.cm_handler = cur_cm_id_priv->id.cm_handler;
+diff --git a/drivers/infiniband/core/cma.c b/drivers/infiniband/core/cma.c
+index 0753178..8fd3a6f 100644
+--- a/drivers/infiniband/core/cma.c
++++ b/drivers/infiniband/core/cma.c
+@@ -1138,6 +1138,11 @@ static int cma_req_handler(struct ib_cm_id *cm_id, struct ib_cm_event *ib_event)
+ 	cm_id->context = conn_id;
+ 	cm_id->cm_handler = cma_ib_handler;
+ 
++	/*
++	 * Protect against the user destroying conn_id from another thread
++	 * until we're done accessing it.
++	 */
++	atomic_inc(&conn_id->refcount);
+ 	ret = conn_id->id.event_handler(&conn_id->id, &event);
+ 	if (!ret) {
+ 		/*
+@@ -1150,8 +1155,10 @@ static int cma_req_handler(struct ib_cm_id *cm_id, struct ib_cm_event *ib_event)
+ 			ib_send_cm_mra(cm_id, CMA_CM_MRA_SETTING, NULL, 0);
+ 		mutex_unlock(&lock);
+ 		mutex_unlock(&conn_id->handler_mutex);
++		cma_deref_id(conn_id);
+ 		goto out;
+ 	}
++	cma_deref_id(conn_id);
+ 
+ 	/* Destroy the CM ID by returning a non-zero value. */
+ 	conn_id->cm_id.ib = NULL;
+@@ -1353,17 +1360,25 @@ static int iw_conn_req_handler(struct iw_cm_id *cm_id,
+ 	event.param.conn.private_data_len = iw_event->private_data_len;
+ 	event.param.conn.initiator_depth = attr.max_qp_init_rd_atom;
+ 	event.param.conn.responder_resources = attr.max_qp_rd_atom;
++
++	/*
++	 * Protect against the user destroying conn_id from another thread
++	 * until we're done accessing it.
++	 */
++	atomic_inc(&conn_id->refcount);
+ 	ret = conn_id->id.event_handler(&conn_id->id, &event);
+ 	if (ret) {
+ 		/* User wants to destroy the CM ID */
+ 		conn_id->cm_id.iw = NULL;
+ 		cma_exch(conn_id, CMA_DESTROYING);
+ 		mutex_unlock(&conn_id->handler_mutex);
++		cma_deref_id(conn_id);
+ 		rdma_destroy_id(&conn_id->id);
+ 		goto out;
+ 	}
+ 
+ 	mutex_unlock(&conn_id->handler_mutex);
++	cma_deref_id(conn_id);
+ 
+ out:
+ 	if (dev)
+diff --git a/drivers/isdn/i4l/isdn_tty.c b/drivers/isdn/i4l/isdn_tty.c
+index 2881a66..9f65c9c 100644
+--- a/drivers/isdn/i4l/isdn_tty.c
++++ b/drivers/isdn/i4l/isdn_tty.c
+@@ -2635,12 +2635,6 @@ isdn_tty_modem_result(int code, modem_info * info)
+ 		if ((info->flags & ISDN_ASYNC_CLOSING) || (!info->tty)) {
+ 			return;
+ 		}
+-#ifdef CONFIG_ISDN_AUDIO
+-		if ( !info->vonline )
+-			tty_ldisc_flush(info->tty);
+-#else
+-		tty_ldisc_flush(info->tty);
+-#endif
+ 		if ((info->flags & ISDN_ASYNC_CHECK_CD) &&
+ 		    (!((info->flags & ISDN_ASYNC_CALLOUT_ACTIVE) &&
+ 		       (info->flags & ISDN_ASYNC_CALLOUT_NOHUP)))) {
+diff --git a/drivers/mmc/core/sdio.c b/drivers/mmc/core/sdio.c
+index cdb845b..cc55cd4 100644
+--- a/drivers/mmc/core/sdio.c
++++ b/drivers/mmc/core/sdio.c
+@@ -267,6 +267,14 @@ static int mmc_sdio_init_card(struct mmc_host *host, u32 ocr,
+ 		if (err)
+ 			goto remove;
+ 
++		/*
++		 * Update oldcard with the new RCA received from the SDIO
++		 * device -- we're doing this so that it's updated in the
++		 * "card" struct when oldcard overwrites that later.
++		 */
++		if (oldcard)
++			oldcard->rca = card->rca;
++
+ 		mmc_set_bus_mode(host, MMC_BUSMODE_PUSHPULL);
+ 	}
+ 
+diff --git a/drivers/mtd/nand/omap2.c b/drivers/mtd/nand/omap2.c
+index 090ab87..990184a 100644
+--- a/drivers/mtd/nand/omap2.c
++++ b/drivers/mtd/nand/omap2.c
+@@ -1099,6 +1099,6 @@ static void __exit omap_nand_exit(void)
+ module_init(omap_nand_init);
+ module_exit(omap_nand_exit);
+ 
+-MODULE_ALIAS(DRIVER_NAME);
++MODULE_ALIAS("platform:" DRIVER_NAME);
+ MODULE_LICENSE("GPL");
+ MODULE_DESCRIPTION("Glue layer for NAND flash on TI OMAP boards");
+diff --git a/drivers/mtd/onenand/generic.c b/drivers/mtd/onenand/generic.c
+index e789149..ac08750 100644
+--- a/drivers/mtd/onenand/generic.c
++++ b/drivers/mtd/onenand/generic.c
+@@ -131,7 +131,7 @@ static struct platform_driver generic_onenand_driver = {
+ 	.remove		= __devexit_p(generic_onenand_remove),
+ };
+ 
+-MODULE_ALIAS(DRIVER_NAME);
++MODULE_ALIAS("platform:" DRIVER_NAME);
+ 
+ static int __init generic_onenand_init(void)
+ {
+diff --git a/drivers/mtd/onenand/omap2.c b/drivers/mtd/onenand/omap2.c
+index 0108ed4..8ed531c 100644
+--- a/drivers/mtd/onenand/omap2.c
++++ b/drivers/mtd/onenand/omap2.c
+@@ -800,7 +800,7 @@ static void __exit omap2_onenand_exit(void)
+ module_init(omap2_onenand_init);
+ module_exit(omap2_onenand_exit);
+ 
+-MODULE_ALIAS(DRIVER_NAME);
++MODULE_ALIAS("platform:" DRIVER_NAME);
+ MODULE_LICENSE("GPL");
+ MODULE_AUTHOR("Jarkko Lavinen <jarkko.lavinen@nokia.com>");
+ MODULE_DESCRIPTION("Glue layer for OneNAND flash on OMAP2 / OMAP3");
+diff --git a/drivers/net/wireless/ath/ath9k/hw.c b/drivers/net/wireless/ath/ath9k/hw.c
+index aed75eb..2570b72 100644
+--- a/drivers/net/wireless/ath/ath9k/hw.c
++++ b/drivers/net/wireless/ath/ath9k/hw.c
+@@ -917,6 +917,8 @@ int ath9k_hw_init(struct ath_hw *ah)
+ 	ath9k_hw_init_defaults(ah);
+ 	ath9k_hw_init_config(ah);
+ 
++	ath9k_hw_read_revisions(ah);
++
+ 	if (!ath9k_hw_set_reset_reg(ah, ATH9K_RESET_POWER_ON)) {
+ 		DPRINTF(ah->ah_sc, ATH_DBG_FATAL, "Couldn't reset chip\n");
+ 		return -EIO;
+@@ -1758,8 +1760,6 @@ static bool ath9k_hw_set_reset_power_on(struct ath_hw *ah)
+ 		return false;
+ 	}
+ 
+-	ath9k_hw_read_revisions(ah);
+-
+ 	return ath9k_hw_set_reset(ah, ATH9K_RESET_WARM);
+ }
+ 
+diff --git a/drivers/pci/pci-sysfs.c b/drivers/pci/pci-sysfs.c
+index 3a3b911..0964b4c 100644
+--- a/drivers/pci/pci-sysfs.c
++++ b/drivers/pci/pci-sysfs.c
+@@ -962,7 +962,7 @@ static int pci_create_capabilities_sysfs(struct pci_dev *dev)
+ 		attr->write = write_vpd_attr;
+ 		retval = sysfs_create_bin_file(&dev->dev.kobj, attr);
+ 		if (retval) {
+-			kfree(dev->vpd->attr);
++			kfree(attr);
+ 			return retval;
+ 		}
+ 		dev->vpd->attr = attr;
+diff --git a/drivers/pci/quirks.c b/drivers/pci/quirks.c
+index 448393d..c8ece44 100644
+--- a/drivers/pci/quirks.c
++++ b/drivers/pci/quirks.c
+@@ -506,6 +506,17 @@ static void __devinit quirk_piix4_acpi(struct pci_dev *dev)
+ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82371AB_3,	quirk_piix4_acpi);
+ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82443MX_3,	quirk_piix4_acpi);
+ 
++#define ICH_PMBASE	0x40
++#define ICH_ACPI_CNTL	0x44
++#define  ICH4_ACPI_EN	0x10
++#define  ICH6_ACPI_EN	0x80
++#define ICH4_GPIOBASE	0x58
++#define ICH4_GPIO_CNTL	0x5c
++#define  ICH4_GPIO_EN	0x10
++#define ICH6_GPIOBASE	0x48
++#define ICH6_GPIO_CNTL	0x4c
++#define  ICH6_GPIO_EN	0x10
++
+ /*
+  * ICH4, ICH4-M, ICH5, ICH5-M ACPI: Three IO regions pointed to by longwords at
+  *	0x40 (128 bytes of ACPI, GPIO & TCO registers)
+@@ -514,12 +525,33 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82443MX_3,	qui
+ static void __devinit quirk_ich4_lpc_acpi(struct pci_dev *dev)
+ {
+ 	u32 region;
++	u8 enable;
+ 
+-	pci_read_config_dword(dev, 0x40, &region);
+-	quirk_io_region(dev, region, 128, PCI_BRIDGE_RESOURCES, "ICH4 ACPI/GPIO/TCO");
++	/*
++	 * The check for PCIBIOS_MIN_IO is to ensure we won't create a conflict
++	 * with low legacy (and fixed) ports. We don't know the decoding
++	 * priority and can't tell whether the legacy device or the one created
++	 * here is really at that address.  This happens on boards with broken
++	 * BIOSes.
++	*/
++
++	pci_read_config_byte(dev, ICH_ACPI_CNTL, &enable);
++	if (enable & ICH4_ACPI_EN) {
++		pci_read_config_dword(dev, ICH_PMBASE, &region);
++		region &= PCI_BASE_ADDRESS_IO_MASK;
++		if (region >= PCIBIOS_MIN_IO)
++			quirk_io_region(dev, region, 128, PCI_BRIDGE_RESOURCES,
++					"ICH4 ACPI/GPIO/TCO");
++	}
+ 
+-	pci_read_config_dword(dev, 0x58, &region);
+-	quirk_io_region(dev, region, 64, PCI_BRIDGE_RESOURCES+1, "ICH4 GPIO");
++	pci_read_config_byte(dev, ICH4_GPIO_CNTL, &enable);
++	if (enable & ICH4_GPIO_EN) {
++		pci_read_config_dword(dev, ICH4_GPIOBASE, &region);
++		region &= PCI_BASE_ADDRESS_IO_MASK;
++		if (region >= PCIBIOS_MIN_IO)
++			quirk_io_region(dev, region, 64,
++					PCI_BRIDGE_RESOURCES + 1, "ICH4 GPIO");
++	}
+ }
+ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,    PCI_DEVICE_ID_INTEL_82801AA_0,		quirk_ich4_lpc_acpi);
+ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,    PCI_DEVICE_ID_INTEL_82801AB_0,		quirk_ich4_lpc_acpi);
+@@ -535,12 +567,25 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,    PCI_DEVICE_ID_INTEL_ESB_1,		qui
+ static void __devinit ich6_lpc_acpi_gpio(struct pci_dev *dev)
+ {
+ 	u32 region;
++	u8 enable;
+ 
+-	pci_read_config_dword(dev, 0x40, &region);
+-	quirk_io_region(dev, region, 128, PCI_BRIDGE_RESOURCES, "ICH6 ACPI/GPIO/TCO");
++	pci_read_config_byte(dev, ICH_ACPI_CNTL, &enable);
++	if (enable & ICH6_ACPI_EN) {
++		pci_read_config_dword(dev, ICH_PMBASE, &region);
++		region &= PCI_BASE_ADDRESS_IO_MASK;
++		if (region >= PCIBIOS_MIN_IO)
++			quirk_io_region(dev, region, 128, PCI_BRIDGE_RESOURCES,
++					"ICH6 ACPI/GPIO/TCO");
++	}
+ 
+-	pci_read_config_dword(dev, 0x48, &region);
+-	quirk_io_region(dev, region, 64, PCI_BRIDGE_RESOURCES+1, "ICH6 GPIO");
++	pci_read_config_byte(dev, ICH6_GPIO_CNTL, &enable);
++	if (enable & ICH4_GPIO_EN) {
++		pci_read_config_dword(dev, ICH6_GPIOBASE, &region);
++		region &= PCI_BASE_ADDRESS_IO_MASK;
++		if (region >= PCIBIOS_MIN_IO)
++			quirk_io_region(dev, region, 64,
++					PCI_BRIDGE_RESOURCES + 1, "ICH6 GPIO");
++	}
+ }
+ 
+ static void __devinit ich6_lpc_generic_decode(struct pci_dev *dev, unsigned reg, const char *name, int dynsize)
+@@ -2495,58 +2540,6 @@ DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x4375,
+ 
+ #endif /* CONFIG_PCI_MSI */
+ 
+-#ifdef CONFIG_PCI_IOV
+-
+-/*
+- * For Intel 82576 SR-IOV NIC, if BIOS doesn't allocate resources for the
+- * SR-IOV BARs, zero the Flash BAR and program the SR-IOV BARs to use the
+- * old Flash Memory Space.
+- */
+-static void __devinit quirk_i82576_sriov(struct pci_dev *dev)
+-{
+-	int pos, flags;
+-	u32 bar, start, size;
+-
+-	if (PAGE_SIZE > 0x10000)
+-		return;
+-
+-	flags = pci_resource_flags(dev, 0);
+-	if ((flags & PCI_BASE_ADDRESS_SPACE) !=
+-			PCI_BASE_ADDRESS_SPACE_MEMORY ||
+-	    (flags & PCI_BASE_ADDRESS_MEM_TYPE_MASK) !=
+-			PCI_BASE_ADDRESS_MEM_TYPE_32)
+-		return;
+-
+-	pos = pci_find_ext_capability(dev, PCI_EXT_CAP_ID_SRIOV);
+-	if (!pos)
+-		return;
+-
+-	pci_read_config_dword(dev, pos + PCI_SRIOV_BAR, &bar);
+-	if (bar & PCI_BASE_ADDRESS_MEM_MASK)
+-		return;
+-
+-	start = pci_resource_start(dev, 1);
+-	size = pci_resource_len(dev, 1);
+-	if (!start || size != 0x400000 || start & (size - 1))
+-		return;
+-
+-	pci_resource_flags(dev, 1) = 0;
+-	pci_write_config_dword(dev, PCI_BASE_ADDRESS_1, 0);
+-	pci_write_config_dword(dev, pos + PCI_SRIOV_BAR, start);
+-	pci_write_config_dword(dev, pos + PCI_SRIOV_BAR + 12, start + size / 2);
+-
+-	dev_info(&dev->dev, "use Flash Memory Space for SR-IOV BARs\n");
+-}
+-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10c9, quirk_i82576_sriov);
+-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10e6, quirk_i82576_sriov);
+-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10e7, quirk_i82576_sriov);
+-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10e8, quirk_i82576_sriov);
+-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x150a, quirk_i82576_sriov);
+-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x150d, quirk_i82576_sriov);
+-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x1518, quirk_i82576_sriov);
+-
+-#endif	/* CONFIG_PCI_IOV */
+-
+ static void pci_do_fixups(struct pci_dev *dev, struct pci_fixup *f,
+ 			  struct pci_fixup *end)
+ {
+diff --git a/drivers/usb/host/xhci-ring.c b/drivers/usb/host/xhci-ring.c
+index 974d492..38fb682 100644
+--- a/drivers/usb/host/xhci-ring.c
++++ b/drivers/usb/host/xhci-ring.c
+@@ -417,6 +417,20 @@ void xhci_find_new_dequeue_state(struct xhci_hcd *xhci,
+ 		state->new_cycle_state = ~(state->new_cycle_state) & 0x1;
+ 	next_trb(xhci, ep_ring, &state->new_deq_seg, &state->new_deq_ptr);
+ 
++	/*
++	 * If there is only one segment in a ring, find_trb_seg()'s while loop
++	 * will not run, and it will return before it has a chance to see if it
++	 * needs to toggle the cycle bit.  It can't tell if the stalled transfer
++	 * ended just before the link TRB on a one-segment ring, or if the TD
++	 * wrapped around the top of the ring, because it doesn't have the TD in
++	 * question.  Look for the one-segment case where stalled TRB's address
++	 * is greater than the new dequeue pointer address.
++	 */
++	if (ep_ring->first_seg == ep_ring->first_seg->next &&
++			state->new_deq_ptr < dev->eps[ep_index].stopped_trb)
++		state->new_cycle_state ^= 0x1;
++	xhci_dbg(xhci, "Cycle state = 0x%x\n", state->new_cycle_state);
++
+ 	/* Don't update the ring cycle state for the producer (us). */
+ 	xhci_dbg(xhci, "New dequeue segment = %p (virtual)\n",
+ 			state->new_deq_seg);
+diff --git a/drivers/usb/serial/ch341.c b/drivers/usb/serial/ch341.c
+index e50823a..9fab6fe 100644
+--- a/drivers/usb/serial/ch341.c
++++ b/drivers/usb/serial/ch341.c
+@@ -73,6 +73,7 @@ static int debug;
+ static struct usb_device_id id_table [] = {
+ 	{ USB_DEVICE(0x4348, 0x5523) },
+ 	{ USB_DEVICE(0x1a86, 0x7523) },
++	{ USB_DEVICE(0x1a86, 0x5523) },
+ 	{ },
+ };
+ MODULE_DEVICE_TABLE(usb, id_table);
+diff --git a/drivers/usb/serial/kobil_sct.c b/drivers/usb/serial/kobil_sct.c
+index 9d99e68..929ceb1 100644
+--- a/drivers/usb/serial/kobil_sct.c
++++ b/drivers/usb/serial/kobil_sct.c
+@@ -372,7 +372,7 @@ static void kobil_read_int_callback(struct urb *urb)
+ 	}
+ 
+ 	tty = tty_port_tty_get(&port->port);
+-	if (urb->actual_length) {
++	if (tty && urb->actual_length) {
+ 
+ 		/* BEGIN DEBUG */
+ 		/*
+diff --git a/fs/ext3/namei.c b/fs/ext3/namei.c
+index aad6400..a168780 100644
+--- a/fs/ext3/namei.c
++++ b/fs/ext3/namei.c
+@@ -1550,8 +1550,8 @@ static int ext3_dx_add_entry(handle_t *handle, struct dentry *dentry,
+ 			goto cleanup;
+ 		node2 = (struct dx_node *)(bh2->b_data);
+ 		entries2 = node2->entries;
++		memset(&node2->fake, 0, sizeof(struct fake_dirent));
+ 		node2->fake.rec_len = ext3_rec_len_to_disk(sb->s_blocksize);
+-		node2->fake.inode = 0;
+ 		BUFFER_TRACE(frame->bh, "get_write_access");
+ 		err = ext3_journal_get_write_access(handle, frame->bh);
+ 		if (err)
+diff --git a/include/linux/ftrace.h b/include/linux/ftrace.h
+index 0b4f97d..529a6d1 100644
+--- a/include/linux/ftrace.h
++++ b/include/linux/ftrace.h
+@@ -412,6 +412,7 @@ extern void unregister_ftrace_graph(void);
+ 
+ extern void ftrace_graph_init_task(struct task_struct *t);
+ extern void ftrace_graph_exit_task(struct task_struct *t);
++extern void ftrace_graph_init_idle_task(struct task_struct *t, int cpu);
+ 
+ static inline int task_curr_ret_stack(struct task_struct *t)
+ {
+@@ -435,6 +436,7 @@ static inline void unpause_graph_tracing(void)
+ 
+ static inline void ftrace_graph_init_task(struct task_struct *t) { }
+ static inline void ftrace_graph_exit_task(struct task_struct *t) { }
++static inline void ftrace_graph_init_idle_task(struct task_struct *t, int cpu) { }
+ 
+ static inline int task_curr_ret_stack(struct task_struct *tsk)
+ {
+diff --git a/kernel/perf_event.c b/kernel/perf_event.c
+index 183d437..f9af60f 100644
+--- a/kernel/perf_event.c
++++ b/kernel/perf_event.c
+@@ -4167,6 +4167,8 @@ static void tp_perf_event_destroy(struct perf_event *event)
+ 
+ static const struct pmu *tp_perf_event_init(struct perf_event *event)
+ {
++	if (event->hw.state & PERF_HES_STOPPED)
++		return 0;
+ 	/*
+ 	 * Raw tracepoint data is a severe data leak, only allow root to
+ 	 * have these.
+diff --git a/kernel/sched.c b/kernel/sched.c
+index df16a0a..0591df8 100644
+--- a/kernel/sched.c
++++ b/kernel/sched.c
+@@ -7290,7 +7290,7 @@ void __cpuinit init_idle(struct task_struct *idle, int cpu)
+ 	 * The idle tasks have their own, simple scheduling class:
+ 	 */
+ 	idle->sched_class = &idle_sched_class;
+-	ftrace_graph_init_task(idle);
++	ftrace_graph_init_idle_task(idle, cpu);
+ }
+ 
+ /*
+diff --git a/kernel/smp.c b/kernel/smp.c
+index ea5dc8f..aa9cff3 100644
+--- a/kernel/smp.c
++++ b/kernel/smp.c
+@@ -388,7 +388,7 @@ void smp_call_function_many(const struct cpumask *mask,
+ {
+ 	struct call_function_data *data;
+ 	unsigned long flags;
+-	int cpu, next_cpu, this_cpu = smp_processor_id();
++	int refs, cpu, next_cpu, this_cpu = smp_processor_id();
+ 
+ 	/*
+ 	 * Can deadlock when called with interrupts disabled.
+@@ -399,7 +399,7 @@ void smp_call_function_many(const struct cpumask *mask,
+ 	WARN_ON_ONCE(cpu_online(this_cpu) && irqs_disabled()
+ 		     && !oops_in_progress);
+ 
+-	/* So, what's a CPU they want? Ignoring this one. */
++	/* Try to fastpath.  So, what's a CPU they want? Ignoring this one. */
+ 	cpu = cpumask_first_and(mask, cpu_online_mask);
+ 	if (cpu == this_cpu)
+ 		cpu = cpumask_next_and(cpu, mask, cpu_online_mask);
+@@ -421,22 +421,49 @@ void smp_call_function_many(const struct cpumask *mask,
+ 
+ 	data = &__get_cpu_var(cfd_data);
+ 	csd_lock(&data->csd);
++
++	/* This BUG_ON verifies our reuse assertions and can be removed */
+ 	BUG_ON(atomic_read(&data->refs) || !cpumask_empty(data->cpumask));
+ 
++	/*
++	 * The global call function queue list add and delete are protected
++	 * by a lock, but the list is traversed without any lock, relying
++	 * on the rcu list add and delete to allow safe concurrent traversal.
++	 * We reuse the call function data without waiting for any grace
++	 * period after some other cpu removes it from the global queue.
++	 * This means a cpu might find our data block as it is being
++	 * filled out.
++	 *
++	 * We hold off the interrupt handler on the other cpu by
++	 * ordering our writes to the cpu mask vs our setting of the
++	 * refs counter.  We assert only the cpu owning the data block
++	 * will set a bit in cpumask, and each bit will only be cleared
++	 * by the subject cpu.  Each cpu must first find its bit is
++	 * set and then check that refs is set indicating the element is
++	 * ready to be processed, otherwise it must skip the entry.
++	 *
++	 * On the previous iteration refs was set to 0 by another cpu.
++	 * To avoid the use of transitivity, set the counter to 0 here
++	 * so the wmb will pair with the rmb in the interrupt handler.
++	 */
++	atomic_set(&data->refs, 0);	/* convert 3rd to 1st party write */
++
+ 	data->csd.func = func;
+ 	data->csd.info = info;
+-	cpumask_and(data->cpumask, mask, cpu_online_mask);
+-	cpumask_clear_cpu(this_cpu, data->cpumask);
+ 
+-	/*
+-	 * To ensure the interrupt handler gets an complete view
+-	 * we order the cpumask and refs writes and order the read
+-	 * of them in the interrupt handler.  In addition we may
+-	 * only clear our own cpu bit from the mask.
+-	 */
++	/* Ensure 0 refs is visible before mask.  Also orders func and info */
+ 	smp_wmb();
+ 
+-	atomic_set(&data->refs, cpumask_weight(data->cpumask));
++	/* We rely on the "and" being processed before the store */
++	cpumask_and(data->cpumask, mask, cpu_online_mask);
++	cpumask_clear_cpu(this_cpu, data->cpumask);
++	refs = cpumask_weight(data->cpumask);
++
++	/* Some callers race with other cpus changing the passed mask */
++	if (unlikely(!refs)) {
++		csd_unlock(&data->csd);
++		return;
++	}
+ 
+ 	spin_lock_irqsave(&call_function.lock, flags);
+ 	/*
+@@ -445,6 +472,12 @@ void smp_call_function_many(const struct cpumask *mask,
+ 	 * will not miss any other list entries:
+ 	 */
+ 	list_add_rcu(&data->csd.list, &call_function.queue);
++	/*
++	 * We rely on the wmb() in list_add_rcu to complete our writes
++	 * to the cpumask before this write to refs, which indicates
++	 * data is on the list and is ready to be processed.
++	 */
++	atomic_set(&data->refs, refs);
+ 	spin_unlock_irqrestore(&call_function.lock, flags);
+ 
+ 	/*
+diff --git a/kernel/trace/ftrace.c b/kernel/trace/ftrace.c
+index 22cf21e..0afddc2 100644
+--- a/kernel/trace/ftrace.c
++++ b/kernel/trace/ftrace.c
+@@ -3172,7 +3172,7 @@ static int start_graph_tracing(void)
+ 	/* The cpu_boot init_task->ret_stack will never be freed */
+ 	for_each_online_cpu(cpu) {
+ 		if (!idle_task(cpu)->ret_stack)
+-			ftrace_graph_init_task(idle_task(cpu));
++			ftrace_graph_init_idle_task(idle_task(cpu), cpu);
+ 	}
+ 
+ 	do {
+@@ -3262,6 +3262,49 @@ void unregister_ftrace_graph(void)
+ 	mutex_unlock(&ftrace_lock);
+ }
+ 
++static DEFINE_PER_CPU(struct ftrace_ret_stack *, idle_ret_stack);
++
++static void
++graph_init_task(struct task_struct *t, struct ftrace_ret_stack *ret_stack)
++{
++	atomic_set(&t->tracing_graph_pause, 0);
++	atomic_set(&t->trace_overrun, 0);
++	t->ftrace_timestamp = 0;
++	/* make curr_ret_stack visable before we add the ret_stack */
++	smp_wmb();
++	t->ret_stack = ret_stack;
++}
++
++/*
++ * Allocate a return stack for the idle task. May be the first
++ * time through, or it may be done by CPU hotplug online.
++ */
++void ftrace_graph_init_idle_task(struct task_struct *t, int cpu)
++{
++	t->curr_ret_stack = -1;
++	/*
++	 * The idle task has no parent, it either has its own
++	 * stack or no stack at all.
++	 */
++	if (t->ret_stack)
++		WARN_ON(t->ret_stack != per_cpu(idle_ret_stack, cpu));
++
++	if (ftrace_graph_active) {
++		struct ftrace_ret_stack *ret_stack;
++
++		ret_stack = per_cpu(idle_ret_stack, cpu);
++		if (!ret_stack) {
++			ret_stack = kmalloc(FTRACE_RETFUNC_DEPTH
++					    * sizeof(struct ftrace_ret_stack),
++					    GFP_KERNEL);
++			if (!ret_stack)
++				return;
++			per_cpu(idle_ret_stack, cpu) = ret_stack;
++		}
++		graph_init_task(t, ret_stack);
++	}
++}
++
+ /* Allocate a return stack for newly created task */
+ void ftrace_graph_init_task(struct task_struct *t)
+ {
+@@ -3277,12 +3320,7 @@ void ftrace_graph_init_task(struct task_struct *t)
+ 				GFP_KERNEL);
+ 		if (!ret_stack)
+ 			return;
+-		atomic_set(&t->tracing_graph_pause, 0);
+-		atomic_set(&t->trace_overrun, 0);
+-		t->ftrace_timestamp = 0;
+-		/* make curr_ret_stack visable before we add the ret_stack */
+-		smp_wmb();
+-		t->ret_stack = ret_stack;
++		graph_init_task(t, ret_stack);
+ 	}
+ }
+ 
+diff --git a/net/sunrpc/sched.c b/net/sunrpc/sched.c
+index cef74ba..9191b2f 100644
+--- a/net/sunrpc/sched.c
++++ b/net/sunrpc/sched.c
+@@ -627,14 +627,12 @@ static void __rpc_execute(struct rpc_task *task)
+ 			save_callback = task->tk_callback;
+ 			task->tk_callback = NULL;
+ 			save_callback(task);
+-		}
+-
+-		/*
+-		 * Perform the next FSM step.
+-		 * tk_action may be NULL when the task has been killed
+-		 * by someone else.
+-		 */
+-		if (!RPC_IS_QUEUED(task)) {
++		} else {
++			/*
++			 * Perform the next FSM step.
++			 * tk_action may be NULL when the task has been killed
++			 * by someone else.
++			 */
+ 			if (task->tk_action == NULL)
+ 				break;
+ 			task->tk_action(task);
+diff --git a/sound/pci/ctxfi/ctatc.c b/sound/pci/ctxfi/ctatc.c
+index cb1f533..9969a26 100644
+--- a/sound/pci/ctxfi/ctatc.c
++++ b/sound/pci/ctxfi/ctatc.c
+@@ -868,7 +868,7 @@ spdif_passthru_playback_setup(struct ct_atc *atc, struct ct_atc_pcm *apcm)
+ 	mutex_lock(&atc->atc_mutex);
+ 	dao->ops->get_spos(dao, &status);
+ 	if (((status >> 24) & IEC958_AES3_CON_FS) != iec958_con_fs) {
+-		status &= ((~IEC958_AES3_CON_FS) << 24);
++		status &= ~(IEC958_AES3_CON_FS << 24);
+ 		status |= (iec958_con_fs << 24);
+ 		dao->ops->set_spos(dao, status);
+ 		dao->ops->commit_write(dao);
+diff --git a/sound/pci/ctxfi/ctdaio.c b/sound/pci/ctxfi/ctdaio.c
+index af56eb9..47d9ea9 100644
+--- a/sound/pci/ctxfi/ctdaio.c
++++ b/sound/pci/ctxfi/ctdaio.c
+@@ -176,6 +176,7 @@ static int dao_set_left_input(struct dao *dao, struct rsc *input)
+ 	if (!entry)
+ 		return -ENOMEM;
+ 
++	dao->ops->clear_left_input(dao);
+ 	/* Program master and conjugate resources */
+ 	input->ops->master(input);
+ 	daio->rscl.ops->master(&daio->rscl);
+@@ -204,6 +205,7 @@ static int dao_set_right_input(struct dao *dao, struct rsc *input)
+ 	if (!entry)
+ 		return -ENOMEM;
+ 
++	dao->ops->clear_right_input(dao);
+ 	/* Program master and conjugate resources */
+ 	input->ops->master(input);
+ 	daio->rscr.ops->master(&daio->rscr);
+diff --git a/sound/pci/ctxfi/ctmixer.c b/sound/pci/ctxfi/ctmixer.c
+index 15c1e72..c3519ff 100644
+--- a/sound/pci/ctxfi/ctmixer.c
++++ b/sound/pci/ctxfi/ctmixer.c
+@@ -566,19 +566,6 @@ static int ct_spdif_get_mask(struct snd_kcontrol *kcontrol,
+ 	return 0;
+ }
+ 
+-static int ct_spdif_default_get(struct snd_kcontrol *kcontrol,
+-				struct snd_ctl_elem_value *ucontrol)
+-{
+-	unsigned int status = SNDRV_PCM_DEFAULT_CON_SPDIF;
+-
+-	ucontrol->value.iec958.status[0] = (status >> 0) & 0xff;
+-	ucontrol->value.iec958.status[1] = (status >> 8) & 0xff;
+-	ucontrol->value.iec958.status[2] = (status >> 16) & 0xff;
+-	ucontrol->value.iec958.status[3] = (status >> 24) & 0xff;
+-
+-	return 0;
+-}
+-
+ static int ct_spdif_get(struct snd_kcontrol *kcontrol,
+ 			struct snd_ctl_elem_value *ucontrol)
+ {
+@@ -586,6 +573,10 @@ static int ct_spdif_get(struct snd_kcontrol *kcontrol,
+ 	unsigned int status;
+ 
+ 	atc->spdif_out_get_status(atc, &status);
++
++	if (status == 0)
++		status = SNDRV_PCM_DEFAULT_CON_SPDIF;
++
+ 	ucontrol->value.iec958.status[0] = (status >> 0) & 0xff;
+ 	ucontrol->value.iec958.status[1] = (status >> 8) & 0xff;
+ 	ucontrol->value.iec958.status[2] = (status >> 16) & 0xff;
+@@ -629,7 +620,7 @@ static struct snd_kcontrol_new iec958_default_ctl = {
+ 	.name		= SNDRV_CTL_NAME_IEC958("", PLAYBACK, DEFAULT),
+ 	.count		= 1,
+ 	.info		= ct_spdif_info,
+-	.get		= ct_spdif_default_get,
++	.get		= ct_spdif_get,
+ 	.put		= ct_spdif_put,
+ 	.private_value	= MIXER_IEC958_DEFAULT
+ };
+diff --git a/sound/pci/hda/patch_sigmatel.c b/sound/pci/hda/patch_sigmatel.c
+index a280a68..7e59c34 100644
+--- a/sound/pci/hda/patch_sigmatel.c
++++ b/sound/pci/hda/patch_sigmatel.c
+@@ -727,7 +727,7 @@ static int stac92xx_mux_enum_put(struct snd_kcontrol *kcontrol, struct snd_ctl_e
+ 	struct sigmatel_spec *spec = codec->spec;
+ 	unsigned int adc_idx = snd_ctl_get_ioffidx(kcontrol, &ucontrol->id);
+ 	const struct hda_input_mux *imux = spec->input_mux;
+-	unsigned int idx, prev_idx;
++	unsigned int idx, prev_idx, didx;
+ 
+ 	idx = ucontrol->value.enumerated.item[0];
+ 	if (idx >= imux->num_items)
+@@ -739,7 +739,8 @@ static int stac92xx_mux_enum_put(struct snd_kcontrol *kcontrol, struct snd_ctl_e
+ 		snd_hda_codec_write_cache(codec, spec->mux_nids[adc_idx], 0,
+ 					  AC_VERB_SET_CONNECT_SEL,
+ 					  imux->items[idx].index);
+-		if (prev_idx >= spec->num_analog_muxes) {
++		if (prev_idx >= spec->num_analog_muxes &&
++		    spec->mux_nids[adc_idx] != spec->dmux_nids[adc_idx]) {
+ 			imux = spec->dinput_mux;
+ 			/* 0 = analog */
+ 			snd_hda_codec_write_cache(codec,
+@@ -749,9 +750,13 @@ static int stac92xx_mux_enum_put(struct snd_kcontrol *kcontrol, struct snd_ctl_e
+ 		}
+ 	} else {
+ 		imux = spec->dinput_mux;
++		/* first dimux item is hardcoded to select analog imux,
++		 * so lets skip it
++		 */
++		didx = idx - spec->num_analog_muxes + 1;
+ 		snd_hda_codec_write_cache(codec, spec->dmux_nids[adc_idx], 0,
+ 					  AC_VERB_SET_CONNECT_SEL,
+-					  imux->items[idx - 1].index);
++					  imux->items[didx].index);
+ 	}
+ 	spec->cur_mux[adc_idx] = idx;
+ 	return 1;
