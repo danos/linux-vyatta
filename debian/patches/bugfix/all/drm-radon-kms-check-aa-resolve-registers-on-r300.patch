@@ -1,0 +1,175 @@
+commit fff1ce4dc6113b6fdc4e3a815ca5fd229408f8ef
+Author: Marek Olšák <maraeo@gmail.com>
+Date:   Mon Feb 14 01:01:10 2011 +0100
+
+    drm/radeon/kms: check AA resolve registers on r300
+    
+    This is an important security fix because we allowed arbitrary values
+    to be passed to AARESOLVE_OFFSET. This also puts the right buffer address
+    in the register.
+    
+    Signed-off-by: Marek Olšák <maraeo@gmail.com>
+    Signed-off-by: Dave Airlie <airlied@redhat.com>
+    [dannf: backported to Debian's 2.6.32]
+
+diff -urpN a/drivers/gpu/drm/radeon/r100.c b/drivers/gpu/drm/radeon/r100.c
+--- a/drivers/gpu/drm/radeon/r100.c	2011-03-06 19:33:29.000000000 -0700
++++ b/drivers/gpu/drm/radeon/r100.c	2011-03-24 22:59:45.203267183 -0600
+@@ -2939,6 +2939,27 @@ int r100_cs_track_check(struct radeon_de
+ 			return -EINVAL;
+ 		}
+ 	}
++
++	if (track->aa_dirty && track->aaresolve) {
++		if (track->aa.robj == NULL) {
++			DRM_ERROR("[drm] No buffer for AA resolve buffer %d !\n", i);
++			return -EINVAL;
++		}
++		/* I believe the format comes from colorbuffer0. */
++		size = track->aa.pitch * track->cb[0].cpp * track->maxy;
++		size += track->aa.offset;
++		if (size > radeon_bo_size(track->aa.robj)) {
++			DRM_ERROR("[drm] Buffer too small for AA resolve buffer %d "
++				  "(need %lu have %lu) !\n", i, size,
++				  radeon_bo_size(track->aa.robj));
++			DRM_ERROR("[drm] AA resolve buffer %d (%u %u %u %u)\n",
++				  i, track->aa.pitch, track->cb[0].cpp,
++				  track->aa.offset, track->maxy);
++			return -EINVAL;
++		}
++	}
++	track->aa_dirty = false;
++
+ 	prim_walk = (track->vap_vf_cntl >> 4) & 0x3;
+ 	nverts = (track->vap_vf_cntl >> 16) & 0xFFFF;
+ 	switch (prim_walk) {
+@@ -3000,6 +3021,7 @@ int r100_cs_track_check(struct radeon_de
+ void r100_cs_track_clear(struct radeon_device *rdev, struct r100_cs_track *track)
+ {
+ 	unsigned i, face;
++	track->aa_dirty = true;
+ 
+ 	if (rdev->family < CHIP_R300) {
+ 		track->num_cb = 1;
+@@ -3014,6 +3036,8 @@ void r100_cs_track_clear(struct radeon_d
+ 		track->num_texture = 16;
+ 		track->maxy = 4096;
+ 		track->separate_cube = 0;
++		track->aaresolve = true;
++		track->aa.robj = NULL;
+ 	}
+ 
+ 	for (i = 0; i < track->num_cb; i++) {
+diff -urpN a/drivers/gpu/drm/radeon/r100_track.h b/drivers/gpu/drm/radeon/r100_track.h
+--- a/drivers/gpu/drm/radeon/r100_track.h	2011-03-06 19:33:29.000000000 -0700
++++ b/drivers/gpu/drm/radeon/r100_track.h	2011-03-24 22:44:10.823668674 -0600
+@@ -72,11 +72,14 @@ struct r100_cs_track {
+ 	struct r100_cs_track_array	arrays[11];
+ 	struct r100_cs_track_cb 	cb[R300_MAX_CB];
+ 	struct r100_cs_track_cb 	zb;
++	struct r100_cs_track_cb 	aa;
+ 	struct r100_cs_track_texture	textures[R300_TRACK_MAX_TEXTURE];
+ 	bool				z_enabled;
+ 	bool                            separate_cube;
+ 	bool				fastfill;
+ 	bool				blend_read_enable;
++	bool				aa_dirty;
++	bool				aaresolve;
+ };
+ 
+ int r100_cs_track_check(struct radeon_device *rdev, struct r100_cs_track *track);
+diff -urpN a/drivers/gpu/drm/radeon/r300.c b/drivers/gpu/drm/radeon/r300.c
+--- a/drivers/gpu/drm/radeon/r300.c	2011-03-06 19:33:24.000000000 -0700
++++ b/drivers/gpu/drm/radeon/r300.c	2011-03-24 22:43:02.314812529 -0600
+@@ -1044,6 +1044,27 @@ static int r300_packet0_check(struct rad
+ 		/* RB3D_BLENDCNTL */
+ 		track->blend_read_enable = !!(idx_value & (1 << 2));
+ 		break;
++	case R300_RB3D_AARESOLVE_OFFSET:
++		r = r100_cs_packet_next_reloc(p, &reloc);
++		if (r) {
++			DRM_ERROR("No reloc for ib[%d]=0x%04X\n",
++				  idx, reg);
++			r100_cs_dump_packet(p, pkt);
++			return r;
++		}
++		track->aa.robj = reloc->robj;
++		track->aa.offset = idx_value;
++		track->aa_dirty = true;
++		ib[idx] = idx_value + ((u32)reloc->lobj.gpu_offset);
++		break;
++	case R300_RB3D_AARESOLVE_PITCH:
++		track->aa.pitch = idx_value & 0x3FFE;
++		track->aa_dirty = true;
++		break;
++	case R300_RB3D_AARESOLVE_CTL:
++		track->aaresolve = idx_value & 0x1;
++		track->aa_dirty = true;
++		break;
+ 	case 0x4be8:
+ 		/* valid register only on RV530 */
+ 		if (p->rdev->family == CHIP_RV530)
+diff -urpN a/drivers/gpu/drm/radeon/r300_reg.h b/drivers/gpu/drm/radeon/r300_reg.h
+--- a/drivers/gpu/drm/radeon/r300_reg.h	2011-03-06 19:33:17.000000000 -0700
++++ b/drivers/gpu/drm/radeon/r300_reg.h	2011-03-24 22:59:45.207267232 -0600
+@@ -1369,6 +1369,8 @@
+ #define R300_RB3D_COLORPITCH2               0x4E40 /* GUESS */
+ #define R300_RB3D_COLORPITCH3               0x4E44 /* GUESS */
+ 
++#define R300_RB3D_AARESOLVE_OFFSET          0x4E80
++#define R300_RB3D_AARESOLVE_PITCH           0x4E84
+ #define R300_RB3D_AARESOLVE_CTL             0x4E88
+ /* gap */
+ 
+diff -urpN a/drivers/gpu/drm/radeon/reg_srcs/r300 b/drivers/gpu/drm/radeon/reg_srcs/r300
+--- a/drivers/gpu/drm/radeon/reg_srcs/r300	2009-12-02 20:51:21.000000000 -0700
++++ b/drivers/gpu/drm/radeon/reg_srcs/r300	2011-03-24 22:59:45.207267232 -0600
+@@ -705,9 +705,6 @@ r300 0x4f60
+ 0x4E74 RB3D_CMASK_WRINDEX
+ 0x4E78 RB3D_CMASK_DWORD
+ 0x4E7C RB3D_CMASK_RDINDEX
+-0x4E80 RB3D_AARESOLVE_OFFSET
+-0x4E84 RB3D_AARESOLVE_PITCH
+-0x4E88 RB3D_AARESOLVE_CTL
+ 0x4EA0 RB3D_DISCARD_SRC_PIXEL_LTE_THRESHOLD
+ 0x4EA4 RB3D_DISCARD_SRC_PIXEL_GTE_THRESHOLD
+ 0x4F04 ZB_ZSTENCILCNTL
+diff -urpN a/drivers/gpu/drm/radeon/reg_srcs/r420 b/drivers/gpu/drm/radeon/reg_srcs/r420
+--- a/drivers/gpu/drm/radeon/reg_srcs/r420	2011-03-06 19:33:17.000000000 -0700
++++ b/drivers/gpu/drm/radeon/reg_srcs/r420	2011-03-24 22:59:45.207267232 -0600
+@@ -771,9 +771,6 @@ r420 0x4f60
+ 0x4E74 RB3D_CMASK_WRINDEX
+ 0x4E78 RB3D_CMASK_DWORD
+ 0x4E7C RB3D_CMASK_RDINDEX
+-0x4E80 RB3D_AARESOLVE_OFFSET
+-0x4E84 RB3D_AARESOLVE_PITCH
+-0x4E88 RB3D_AARESOLVE_CTL
+ 0x4EA0 RB3D_DISCARD_SRC_PIXEL_LTE_THRESHOLD
+ 0x4EA4 RB3D_DISCARD_SRC_PIXEL_GTE_THRESHOLD
+ 0x4F04 ZB_ZSTENCILCNTL
+diff -urpN a/drivers/gpu/drm/radeon/reg_srcs/rs600 b/drivers/gpu/drm/radeon/reg_srcs/rs600
+--- a/drivers/gpu/drm/radeon/reg_srcs/rs600	2011-03-06 19:33:17.000000000 -0700
++++ b/drivers/gpu/drm/radeon/reg_srcs/rs600	2011-03-24 22:59:45.207267232 -0600
+@@ -771,9 +771,6 @@ rs600 0x6d40
+ 0x4E74 RB3D_CMASK_WRINDEX
+ 0x4E78 RB3D_CMASK_DWORD
+ 0x4E7C RB3D_CMASK_RDINDEX
+-0x4E80 RB3D_AARESOLVE_OFFSET
+-0x4E84 RB3D_AARESOLVE_PITCH
+-0x4E88 RB3D_AARESOLVE_CTL
+ 0x4EA0 RB3D_DISCARD_SRC_PIXEL_LTE_THRESHOLD
+ 0x4EA4 RB3D_DISCARD_SRC_PIXEL_GTE_THRESHOLD
+ 0x4F04 ZB_ZSTENCILCNTL
+diff -urpN a/drivers/gpu/drm/radeon/reg_srcs/rv515 b/drivers/gpu/drm/radeon/reg_srcs/rv515
+--- a/drivers/gpu/drm/radeon/reg_srcs/rv515	2011-03-06 19:33:17.000000000 -0700
++++ b/drivers/gpu/drm/radeon/reg_srcs/rv515	2011-03-24 22:59:45.207267232 -0600
+@@ -465,9 +465,6 @@ rv515 0x6d40
+ 0x4E74 RB3D_CMASK_WRINDEX
+ 0x4E78 RB3D_CMASK_DWORD
+ 0x4E7C RB3D_CMASK_RDINDEX
+-0x4E80 RB3D_AARESOLVE_OFFSET
+-0x4E84 RB3D_AARESOLVE_PITCH
+-0x4E88 RB3D_AARESOLVE_CTL
+ 0x4EA0 RB3D_DISCARD_SRC_PIXEL_LTE_THRESHOLD
+ 0x4EA4 RB3D_DISCARD_SRC_PIXEL_GTE_THRESHOLD
+ 0x4EF8 RB3D_CONSTANT_COLOR_AR
