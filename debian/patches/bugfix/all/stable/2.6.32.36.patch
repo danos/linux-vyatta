@@ -1,0 +1,615 @@
+diff --git a/Makefile b/Makefile
+index 63fce32..ec428b7 100644
+diff --git a/arch/x86/kernel/head64.c b/arch/x86/kernel/head64.c
+index 0b06cd7..0b08160 100644
+--- a/arch/x86/kernel/head64.c
++++ b/arch/x86/kernel/head64.c
+@@ -76,9 +76,6 @@ void __init x86_64_start_kernel(char * real_mode_data)
+ 	/* Make NULL pointers segfault */
+ 	zap_identity_mappings();
+ 
+-	/* Cleanup the over mapped high alias */
+-	cleanup_highmap();
+-
+ 	for (i = 0; i < NUM_EXCEPTION_VECTORS; i++) {
+ #ifdef CONFIG_EARLY_PRINTK
+ 		set_intr_gate(i, &early_idt_handlers[i]);
+diff --git a/arch/x86/kernel/setup.c b/arch/x86/kernel/setup.c
+index 5449a26..76358ee 100644
+--- a/arch/x86/kernel/setup.c
++++ b/arch/x86/kernel/setup.c
+@@ -294,6 +294,9 @@ static void __init init_gbpages(void)
+ static inline void init_gbpages(void)
+ {
+ }
++static void __init cleanup_highmap(void)
++{
++}
+ #endif
+ 
+ static void __init reserve_brk(void)
+@@ -921,6 +924,8 @@ void __init setup_arch(char **cmdline_p)
+ 
+ 	reserve_brk();
+ 
++	cleanup_highmap();
++
+ 	init_gbpages();
+ 
+ 	/* max_pfn_mapped is updated here */
+diff --git a/arch/x86/mm/init.c b/arch/x86/mm/init.c
+index 73ffd55..6bce215 100644
+--- a/arch/x86/mm/init.c
++++ b/arch/x86/mm/init.c
+@@ -287,25 +287,6 @@ unsigned long __init_refok init_memory_mapping(unsigned long start,
+ 	load_cr3(swapper_pg_dir);
+ #endif
+ 
+-#ifdef CONFIG_X86_64
+-	if (!after_bootmem && !start) {
+-		pud_t *pud;
+-		pmd_t *pmd;
+-
+-		mmu_cr4_features = read_cr4();
+-
+-		/*
+-		 * _brk_end cannot change anymore, but it and _end may be
+-		 * located on different 2M pages. cleanup_highmap(), however,
+-		 * can only consider _end when it runs, so destroy any
+-		 * mappings beyond _brk_end here.
+-		 */
+-		pud = pud_offset(pgd_offset_k(_brk_end), _brk_end);
+-		pmd = pmd_offset(pud, _brk_end - 1);
+-		while (++pmd <= pmd_offset(pud, (unsigned long)_end - 1))
+-			pmd_clear(pmd);
+-	}
+-#endif
+ 	__flush_tlb_all();
+ 
+ 	if (!after_bootmem && e820_table_end > e820_table_start)
+diff --git a/arch/x86/mm/init_64.c b/arch/x86/mm/init_64.c
+index 7d095ad..1584023 100644
+--- a/arch/x86/mm/init_64.c
++++ b/arch/x86/mm/init_64.c
+@@ -49,6 +49,7 @@
+ #include <asm/numa.h>
+ #include <asm/cacheflush.h>
+ #include <asm/init.h>
++#include <asm/setup.h>
+ #include <linux/bootmem.h>
+ 
+ static unsigned long dma_reserve __initdata;
+@@ -257,18 +258,18 @@ void __init init_extra_mapping_uc(unsigned long phys, unsigned long size)
+  * to the compile time generated pmds. This results in invalid pmds up
+  * to the point where we hit the physaddr 0 mapping.
+  *
+- * We limit the mappings to the region from _text to _end.  _end is
+- * rounded up to the 2MB boundary. This catches the invalid pmds as
++ * We limit the mappings to the region from _text to _brk_end.  _brk_end
++ * is rounded up to the 2MB boundary. This catches the invalid pmds as
+  * well, as they are located before _text:
+  */
+ void __init cleanup_highmap(void)
+ {
+ 	unsigned long vaddr = __START_KERNEL_map;
+-	unsigned long end = roundup((unsigned long)_end, PMD_SIZE) - 1;
++	unsigned long vaddr_end = __START_KERNEL_map + (max_pfn_mapped << PAGE_SHIFT);
++	unsigned long end = roundup((unsigned long)_brk_end, PMD_SIZE) - 1;
+ 	pmd_t *pmd = level2_kernel_pgt;
+-	pmd_t *last_pmd = pmd + PTRS_PER_PMD;
+ 
+-	for (; pmd < last_pmd; pmd++, vaddr += PMD_SIZE) {
++	for (; vaddr + PMD_SIZE - 1 < vaddr_end; pmd++, vaddr += PMD_SIZE) {
+ 		if (pmd_none(*pmd))
+ 			continue;
+ 		if (vaddr < (unsigned long) _text || vaddr > end)
+diff --git a/arch/x86/xen/mmu.c b/arch/x86/xen/mmu.c
+index 350a3de..6ec047d 100644
+--- a/arch/x86/xen/mmu.c
++++ b/arch/x86/xen/mmu.c
+@@ -1658,9 +1658,6 @@ static __init void xen_map_identity_early(pmd_t *pmd, unsigned long max_pfn)
+ 		for (pteidx = 0; pteidx < PTRS_PER_PTE; pteidx++, pfn++) {
+ 			pte_t pte;
+ 
+-			if (pfn > max_pfn_mapped)
+-				max_pfn_mapped = pfn;
+-
+ 			if (!pte_none(pte_page[pteidx]))
+ 				continue;
+ 
+@@ -1704,6 +1701,12 @@ __init pgd_t *xen_setup_kernel_pagetable(pgd_t *pgd,
+ 	pud_t *l3;
+ 	pmd_t *l2;
+ 
++	/* max_pfn_mapped is the last pfn mapped in the initial memory
++	 * mappings. Considering that on Xen after the kernel mappings we
++	 * have the mappings of some pages that don't exist in pfn space, we
++	 * set max_pfn_mapped to the last real pfn mapped. */
++	max_pfn_mapped = PFN_DOWN(__pa(xen_start_info->mfn_list));
++
+ 	/* Zap identity mapping */
+ 	init_level4_pgt[0] = __pgd(0);
+ 
+@@ -1767,9 +1770,7 @@ __init pgd_t *xen_setup_kernel_pagetable(pgd_t *pgd,
+ {
+ 	pmd_t *kernel_pmd;
+ 
+-	max_pfn_mapped = PFN_DOWN(__pa(xen_start_info->pt_base) +
+-				  xen_start_info->nr_pt_frames * PAGE_SIZE +
+-				  512*1024);
++	max_pfn_mapped = PFN_DOWN(__pa(xen_start_info->mfn_list));
+ 
+ 	kernel_pmd = m2v(pgd[KERNEL_PGD_BOUNDARY].pgd);
+ 	memcpy(level2_kernel_pgt, kernel_pmd, sizeof(pmd_t) * PTRS_PER_PMD);
+diff --git a/drivers/firmware/dcdbas.c b/drivers/firmware/dcdbas.c
+index 18d65fb..3abb515 100644
+--- a/drivers/firmware/dcdbas.c
++++ b/drivers/firmware/dcdbas.c
+@@ -267,8 +267,10 @@ int dcdbas_smi_request(struct smi_cmd *smi_cmd)
+ 	}
+ 
+ 	/* generate SMI */
++	/* inb to force posted write through and make SMI happen now */
+ 	asm volatile (
+-		"outb %b0,%w1"
++		"outb %b0,%w1\n"
++		"inb %w1"
+ 		: /* no output args */
+ 		: "a" (smi_cmd->command_code),
+ 		  "d" (smi_cmd->command_address),
+diff --git a/drivers/input/xen-kbdfront.c b/drivers/input/xen-kbdfront.c
+index b115726..eb88f40 100644
+--- a/drivers/input/xen-kbdfront.c
++++ b/drivers/input/xen-kbdfront.c
+@@ -105,7 +105,7 @@ static irqreturn_t input_handler(int rq, void *dev_id)
+ static int __devinit xenkbd_probe(struct xenbus_device *dev,
+ 				  const struct xenbus_device_id *id)
+ {
+-	int ret, i;
++	int ret, i, abs;
+ 	struct xenkbd_info *info;
+ 	struct input_dev *kbd, *ptr;
+ 
+@@ -123,6 +123,11 @@ static int __devinit xenkbd_probe(struct xenbus_device *dev,
+ 	if (!info->page)
+ 		goto error_nomem;
+ 
++	if (xenbus_scanf(XBT_NIL, dev->otherend, "feature-abs-pointer", "%d", &abs) < 0)
++		abs = 0;
++	if (abs)
++		xenbus_printf(XBT_NIL, dev->nodename, "request-abs-pointer", "1");
++
+ 	/* keyboard */
+ 	kbd = input_allocate_device();
+ 	if (!kbd)
+@@ -132,11 +137,12 @@ static int __devinit xenkbd_probe(struct xenbus_device *dev,
+ 	kbd->id.bustype = BUS_PCI;
+ 	kbd->id.vendor = 0x5853;
+ 	kbd->id.product = 0xffff;
+-	kbd->evbit[0] = BIT(EV_KEY);
++
++	__set_bit(EV_KEY, kbd->evbit);
+ 	for (i = KEY_ESC; i < KEY_UNKNOWN; i++)
+-		set_bit(i, kbd->keybit);
++		__set_bit(i, kbd->keybit);
+ 	for (i = KEY_OK; i < KEY_MAX; i++)
+-		set_bit(i, kbd->keybit);
++		__set_bit(i, kbd->keybit);
+ 
+ 	ret = input_register_device(kbd);
+ 	if (ret) {
+@@ -155,12 +161,20 @@ static int __devinit xenkbd_probe(struct xenbus_device *dev,
+ 	ptr->id.bustype = BUS_PCI;
+ 	ptr->id.vendor = 0x5853;
+ 	ptr->id.product = 0xfffe;
+-	ptr->evbit[0] = BIT(EV_KEY) | BIT(EV_REL) | BIT(EV_ABS);
++
++	if (abs) {
++		__set_bit(EV_ABS, ptr->evbit);
++		input_set_abs_params(ptr, ABS_X, 0, XENFB_WIDTH, 0, 0);
++		input_set_abs_params(ptr, ABS_Y, 0, XENFB_HEIGHT, 0, 0);
++	} else {
++		input_set_capability(ptr, EV_REL, REL_X);
++		input_set_capability(ptr, EV_REL, REL_Y);
++	}
++	input_set_capability(ptr, EV_REL, REL_WHEEL);
++
++	__set_bit(EV_KEY, ptr->evbit);
+ 	for (i = BTN_LEFT; i <= BTN_TASK; i++)
+-		set_bit(i, ptr->keybit);
+-	ptr->relbit[0] = BIT(REL_X) | BIT(REL_Y) | BIT(REL_WHEEL);
+-	input_set_abs_params(ptr, ABS_X, 0, XENFB_WIDTH, 0, 0);
+-	input_set_abs_params(ptr, ABS_Y, 0, XENFB_HEIGHT, 0, 0);
++		__set_bit(i, ptr->keybit);
+ 
+ 	ret = input_register_device(ptr);
+ 	if (ret) {
+@@ -267,7 +281,7 @@ static void xenkbd_backend_changed(struct xenbus_device *dev,
+ 				   enum xenbus_state backend_state)
+ {
+ 	struct xenkbd_info *info = dev_get_drvdata(&dev->dev);
+-	int ret, val;
++	int val;
+ 
+ 	switch (backend_state) {
+ 	case XenbusStateInitialising:
+@@ -278,17 +292,6 @@ static void xenkbd_backend_changed(struct xenbus_device *dev,
+ 
+ 	case XenbusStateInitWait:
+ InitWait:
+-		ret = xenbus_scanf(XBT_NIL, info->xbdev->otherend,
+-				   "feature-abs-pointer", "%d", &val);
+-		if (ret < 0)
+-			val = 0;
+-		if (val) {
+-			ret = xenbus_printf(XBT_NIL, info->xbdev->nodename,
+-					    "request-abs-pointer", "1");
+-			if (ret)
+-				printk(KERN_WARNING
+-				       "xenkbd: can't request abs-pointer");
+-		}
+ 		xenbus_switch_state(dev, XenbusStateConnected);
+ 		break;
+ 
+diff --git a/drivers/media/video/uvc/uvc_video.c b/drivers/media/video/uvc/uvc_video.c
+index a6e41d1..688598a 100644
+--- a/drivers/media/video/uvc/uvc_video.c
++++ b/drivers/media/video/uvc/uvc_video.c
+@@ -64,15 +64,19 @@ int uvc_query_ctrl(struct uvc_device *dev, __u8 query, __u8 unit,
+ static void uvc_fixup_video_ctrl(struct uvc_streaming *stream,
+ 	struct uvc_streaming_control *ctrl)
+ {
+-	struct uvc_format *format;
++	struct uvc_format *format = NULL;
+ 	struct uvc_frame *frame = NULL;
+ 	unsigned int i;
+ 
+-	if (ctrl->bFormatIndex <= 0 ||
+-	    ctrl->bFormatIndex > stream->nformats)
+-		return;
++	for (i = 0; i < stream->nformats; ++i) {
++		if (stream->format[i].index == ctrl->bFormatIndex) {
++			format = &stream->format[i];
++			break;
++		}
++	}
+ 
+-	format = &stream->format[ctrl->bFormatIndex - 1];
++	if (format == NULL)
++		return;
+ 
+ 	for (i = 0; i < format->nframes; ++i) {
+ 		if (format->frame[i].bFrameIndex == ctrl->bFrameIndex) {
+diff --git a/drivers/pci/hotplug/acpiphp_glue.c b/drivers/pci/hotplug/acpiphp_glue.c
+index 58d25a1..73e7d8e 100644
+--- a/drivers/pci/hotplug/acpiphp_glue.c
++++ b/drivers/pci/hotplug/acpiphp_glue.c
+@@ -213,6 +213,7 @@ register_slot(acpi_handle handle, u32 lvl, void *context, void **rv)
+ 
+ 	pdev = pci_get_slot(pbus, PCI_DEVFN(device, function));
+ 	if (pdev) {
++		pdev->current_state = PCI_D0;
+ 		slot->flags |= (SLOT_ENABLED | SLOT_POWEREDON);
+ 		pci_dev_put(pdev);
+ 	}
+diff --git a/drivers/pci/pci-sysfs.c b/drivers/pci/pci-sysfs.c
+index 0964b4c..8313311 100644
+--- a/drivers/pci/pci-sysfs.c
++++ b/drivers/pci/pci-sysfs.c
+@@ -939,7 +939,12 @@ static ssize_t reset_store(struct device *dev,
+ 
+ 	if (val != 1)
+ 		return -EINVAL;
+-	return pci_reset_function(pdev);
++
++	result = pci_reset_function(pdev);
++	if (result < 0)
++		return result;
++
++	return count;
+ }
+ 
+ static struct device_attribute reset_attr = __ATTR(reset, 0200, NULL, reset_store);
+diff --git a/drivers/usb/class/cdc-acm.c b/drivers/usb/class/cdc-acm.c
+index 399dd67..4e32da6 100644
+--- a/drivers/usb/class/cdc-acm.c
++++ b/drivers/usb/class/cdc-acm.c
+@@ -297,6 +297,8 @@ static void acm_ctrl_irq(struct urb *urb)
+ 	if (!ACM_READY(acm))
+ 		goto exit;
+ 
++	usb_mark_last_busy(acm->dev);
++
+ 	data = (unsigned char *)(dr + 1);
+ 	switch (dr->bNotificationType) {
+ 	case USB_CDC_NOTIFY_NETWORK_CONNECTION:
+@@ -336,7 +338,6 @@ static void acm_ctrl_irq(struct urb *urb)
+ 		break;
+ 	}
+ exit:
+-	usb_mark_last_busy(acm->dev);
+ 	retval = usb_submit_urb(urb, GFP_ATOMIC);
+ 	if (retval)
+ 		dev_err(&urb->dev->dev, "%s - usb_submit_urb failed with "
+@@ -534,6 +535,8 @@ static void acm_softint(struct work_struct *work)
+ 	if (!ACM_READY(acm))
+ 		return;
+ 	tty = tty_port_tty_get(&acm->port);
++	if (!tty)
++		return;
+ 	tty_wakeup(tty);
+ 	tty_kref_put(tty);
+ }
+@@ -652,8 +655,10 @@ static void acm_port_down(struct acm *acm, int drain)
+ 		usb_kill_urb(acm->ctrlurb);
+ 		for (i = 0; i < ACM_NW; i++)
+ 			usb_kill_urb(acm->wb[i].urb);
++		tasklet_disable(&acm->urb_task);
+ 		for (i = 0; i < nr; i++)
+ 			usb_kill_urb(acm->ru[i].urb);
++		tasklet_enable(&acm->urb_task);
+ 		acm->control->needs_remote_wakeup = 0;
+ 		usb_autopm_put_interface(acm->control);
+ 	}
+diff --git a/drivers/usb/host/ehci-q.c b/drivers/usb/host/ehci-q.c
+index c0d4b39..d4bd6ef 100644
+--- a/drivers/usb/host/ehci-q.c
++++ b/drivers/usb/host/ehci-q.c
+@@ -315,7 +315,6 @@ qh_completions (struct ehci_hcd *ehci, struct ehci_qh *qh)
+ 	int			stopped;
+ 	unsigned		count = 0;
+ 	u8			state;
+-	const __le32		halt = HALT_BIT(ehci);
+ 	struct ehci_qh_hw	*hw = qh->hw;
+ 
+ 	if (unlikely (list_empty (&qh->qtd_list)))
+@@ -422,7 +421,6 @@ qh_completions (struct ehci_hcd *ehci, struct ehci_qh *qh)
+ 					&& !(qtd->hw_alt_next
+ 						& EHCI_LIST_END(ehci))) {
+ 				stopped = 1;
+-				goto halt;
+ 			}
+ 
+ 		/* stop scanning when we reach qtds the hc is using */
+@@ -456,16 +454,6 @@ qh_completions (struct ehci_hcd *ehci, struct ehci_qh *qh)
+ 				 */
+ 				ehci_clear_tt_buffer(ehci, qh, urb, token);
+ 			}
+-
+-			/* force halt for unlinked or blocked qh, so we'll
+-			 * patch the qh later and so that completions can't
+-			 * activate it while we "know" it's stopped.
+-			 */
+-			if ((halt & hw->hw_token) == 0) {
+-halt:
+-				hw->hw_token |= halt;
+-				wmb ();
+-			}
+ 		}
+ 
+ 		/* unless we already know the urb's status, collect qtd status
+diff --git a/drivers/usb/misc/uss720.c b/drivers/usb/misc/uss720.c
+index 5a03b2e..56b1e73 100644
+--- a/drivers/usb/misc/uss720.c
++++ b/drivers/usb/misc/uss720.c
+@@ -176,12 +176,11 @@ static struct uss720_async_request *submit_async_request(struct parport_uss720_p
+ 	spin_lock_irqsave(&priv->asynclock, flags);
+ 	list_add_tail(&rq->asynclist, &priv->asynclist);
+ 	spin_unlock_irqrestore(&priv->asynclock, flags);
++	kref_get(&rq->ref_count);
+ 	ret = usb_submit_urb(rq->urb, mem_flags);
+-	if (!ret) {
+-		kref_get(&rq->ref_count);
++	if (!ret)
+ 		return rq;
+-	}
+-	kref_put(&rq->ref_count, destroy_async);
++	destroy_async(&rq->ref_count);
+ 	err("submit_async_request submit_urb failed with %d", ret);
+ 	return NULL;
+ }
+diff --git a/drivers/video/console/tileblit.c b/drivers/video/console/tileblit.c
+index 0056a41..15e8e1a 100644
+--- a/drivers/video/console/tileblit.c
++++ b/drivers/video/console/tileblit.c
+@@ -83,7 +83,7 @@ static void tile_cursor(struct vc_data *vc, struct fb_info *info, int mode,
+ 			int softback_lines, int fg, int bg)
+ {
+ 	struct fb_tilecursor cursor;
+-	int use_sw = (vc->vc_cursor_type & 0x01);
++	int use_sw = (vc->vc_cursor_type & 0x10);
+ 
+ 	cursor.sx = vc->vc_x;
+ 	cursor.sy = vc->vc_y;
+diff --git a/fs/aio.c b/fs/aio.c
+index b84a769..22a19ad 100644
+--- a/fs/aio.c
++++ b/fs/aio.c
+@@ -497,7 +497,7 @@ static inline void really_put_req(struct kioctx *ctx, struct kiocb *req)
+ 	ctx->reqs_active--;
+ 
+ 	if (unlikely(!ctx->reqs_active && ctx->dead))
+-		wake_up(&ctx->wait);
++		wake_up_all(&ctx->wait);
+ }
+ 
+ static void aio_fput_routine(struct work_struct *data)
+@@ -1219,7 +1219,7 @@ static void io_destroy(struct kioctx *ioctx)
+ 	 * by other CPUs at this point.  Right now, we rely on the
+ 	 * locking done by the above calls to ensure this consistency.
+ 	 */
+-	wake_up(&ioctx->wait);
++	wake_up_all(&ioctx->wait);
+ 	put_ioctx(ioctx);	/* once for the lookup */
+ }
+ 
+diff --git a/fs/dcache.c b/fs/dcache.c
+index a100fa3..44c0aea 100644
+--- a/fs/dcache.c
++++ b/fs/dcache.c
+@@ -1175,9 +1175,12 @@ struct dentry *d_obtain_alias(struct inode *inode)
+ 	spin_unlock(&tmp->d_lock);
+ 
+ 	spin_unlock(&dcache_lock);
++	security_d_instantiate(tmp, inode);
+ 	return tmp;
+ 
+  out_iput:
++	if (res && !IS_ERR(res))
++		security_d_instantiate(res, inode);
+ 	iput(inode);
+ 	return res;
+ }
+diff --git a/fs/ext3/super.c b/fs/ext3/super.c
+index ca3068f..9cfa28d 100644
+--- a/fs/ext3/super.c
++++ b/fs/ext3/super.c
+@@ -1404,6 +1404,13 @@ static void ext3_orphan_cleanup (struct super_block * sb,
+ 		return;
+ 	}
+ 
++	/* Check if feature set allows readwrite operations */
++	if (EXT3_HAS_RO_COMPAT_FEATURE(sb, ~EXT3_FEATURE_RO_COMPAT_SUPP)) {
++		printk(KERN_INFO "EXT3-fs: %s: Skipping orphan cleanup due to "
++			 "unknown ROCOMPAT features\n", sb->s_id);
++		return;
++	}
++
+ 	if (EXT3_SB(sb)->s_mount_state & EXT3_ERROR_FS) {
+ 		if (es->s_last_orphan)
+ 			jbd_debug(1, "Errors on filesystem, "
+diff --git a/fs/nfsd/nfs4proc.c b/fs/nfsd/nfs4proc.c
+index bebc0c2..01d83a5 100644
+--- a/fs/nfsd/nfs4proc.c
++++ b/fs/nfsd/nfs4proc.c
+@@ -964,8 +964,8 @@ typedef __be32(*nfsd4op_func)(struct svc_rqst *, struct nfsd4_compound_state *,
+ 			      void *);
+ enum nfsd4_op_flags {
+ 	ALLOWED_WITHOUT_FH = 1 << 0,	/* No current filehandle required */
+-	ALLOWED_ON_ABSENT_FS = 2 << 0,	/* ops processed on absent fs */
+-	ALLOWED_AS_FIRST_OP = 3 << 0,	/* ops reqired first in compound */
++	ALLOWED_ON_ABSENT_FS = 1 << 1,	/* ops processed on absent fs */
++	ALLOWED_AS_FIRST_OP = 1 << 2,	/* ops reqired first in compound */
+ };
+ 
+ struct nfsd4_operation {
+diff --git a/fs/nfsd/nfs4xdr.c b/fs/nfsd/nfs4xdr.c
+index 4fde2c5..4a82a96 100644
+--- a/fs/nfsd/nfs4xdr.c
++++ b/fs/nfsd/nfs4xdr.c
+@@ -1114,7 +1114,7 @@ nfsd4_decode_create_session(struct nfsd4_compoundargs *argp,
+ 
+ 	u32 dummy;
+ 	char *machine_name;
+-	int i, j;
++	int i;
+ 	int nr_secflavs;
+ 
+ 	READ_BUF(16);
+@@ -1187,8 +1187,6 @@ nfsd4_decode_create_session(struct nfsd4_compoundargs *argp,
+ 			READ_BUF(4);
+ 			READ32(dummy);
+ 			READ_BUF(dummy * 4);
+-			for (j = 0; j < dummy; ++j)
+-				READ32(dummy);
+ 			break;
+ 		case RPC_AUTH_GSS:
+ 			dprintk("RPC_AUTH_GSS callback secflavor "
+@@ -1204,7 +1202,6 @@ nfsd4_decode_create_session(struct nfsd4_compoundargs *argp,
+ 			READ_BUF(4);
+ 			READ32(dummy);
+ 			READ_BUF(dummy);
+-			p += XDR_QUADLEN(dummy);
+ 			break;
+ 		default:
+ 			dprintk("Illegal callback secflavor\n");
+diff --git a/fs/proc/array.c b/fs/proc/array.c
+index 2adedda..c5ef152 100644
+--- a/fs/proc/array.c
++++ b/fs/proc/array.c
+@@ -473,8 +473,8 @@ static int do_task_stat(struct seq_file *m, struct pid_namespace *ns,
+ 		vsize,
+ 		mm ? get_mm_rss(mm) : 0,
+ 		rsslim,
+-		mm ? mm->start_code : 0,
+-		mm ? mm->end_code : 0,
++		mm ? (permitted ? mm->start_code : 1) : 0,
++		mm ? (permitted ? mm->end_code : 1) : 0,
+ 		(permitted && mm) ? mm->start_stack : 0,
+ 		esp,
+ 		eip,
+diff --git a/fs/proc/task_mmu.c b/fs/proc/task_mmu.c
+index e10ef04..3b7b82a 100644
+--- a/fs/proc/task_mmu.c
++++ b/fs/proc/task_mmu.c
+@@ -244,8 +244,8 @@ static void show_map_vma(struct seq_file *m, struct vm_area_struct *vma)
+ 		const char *name = arch_vma_name(vma);
+ 		if (!name) {
+ 			if (mm) {
+-				if (vma->vm_start <= mm->start_brk &&
+-						vma->vm_end >= mm->brk) {
++				if (vma->vm_start <= mm->brk &&
++						vma->vm_end >= mm->start_brk) {
+ 					name = "[heap]";
+ 				} else if (vma->vm_start <= mm->start_stack &&
+ 					   vma->vm_end >= mm->start_stack) {
+diff --git a/kernel/signal.c b/kernel/signal.c
+index 423655a..e26d423 100644
+--- a/kernel/signal.c
++++ b/kernel/signal.c
+@@ -2351,9 +2351,13 @@ SYSCALL_DEFINE3(rt_sigqueueinfo, pid_t, pid, int, sig,
+ 		return -EFAULT;
+ 
+ 	/* Not even root can pretend to send signals from the kernel.
+-	   Nor can they impersonate a kill(), which adds source info.  */
+-	if (info.si_code >= 0)
++	 * Nor can they impersonate a kill()/tgkill(), which adds source info.
++	 */
++	if (info.si_code != SI_QUEUE) {
++		/* We used to allow any < 0 si_code */
++		WARN_ON_ONCE(info.si_code < 0);
+ 		return -EPERM;
++	}
+ 	info.si_signo = sig;
+ 
+ 	/* POSIX.1b doesn't mention process groups.  */
+@@ -2367,9 +2371,13 @@ long do_rt_tgsigqueueinfo(pid_t tgid, pid_t pid, int sig, siginfo_t *info)
+ 		return -EINVAL;
+ 
+ 	/* Not even root can pretend to send signals from the kernel.
+-	   Nor can they impersonate a kill(), which adds source info.  */
+-	if (info->si_code >= 0)
++	 * Nor can they impersonate a kill()/tgkill(), which adds source info.
++	 */
++	if (info->si_code != SI_QUEUE) {
++		/* We used to allow any < 0 si_code */
++		WARN_ON_ONCE(info->si_code < 0);
+ 		return -EPERM;
++	}
+ 	info->si_signo = sig;
+ 
+ 	return do_send_specific(tgid, pid, sig, info);
+diff --git a/mm/shmem.c b/mm/shmem.c
+index 356dd99..3e0005b 100644
+--- a/mm/shmem.c
++++ b/mm/shmem.c
+@@ -2691,5 +2691,6 @@ int shmem_zero_setup(struct vm_area_struct *vma)
+ 		fput(vma->vm_file);
+ 	vma->vm_file = file;
+ 	vma->vm_ops = &shmem_vm_ops;
++	vma->vm_flags |= VM_CAN_NONLINEAR;
+ 	return 0;
+ }
+diff --git a/net/sunrpc/xprtsock.c b/net/sunrpc/xprtsock.c
+index b6fcf68..d270403 100644
+--- a/net/sunrpc/xprtsock.c
++++ b/net/sunrpc/xprtsock.c
+@@ -743,6 +743,8 @@ static void xs_reset_transport(struct sock_xprt *transport)
+ 	if (sk == NULL)
+ 		return;
+ 
++	transport->srcport = 0;
++
+ 	write_lock_bh(&sk->sk_callback_lock);
+ 	transport->inet = NULL;
+ 	transport->sock = NULL;
