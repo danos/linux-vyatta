@@ -1,0 +1,67 @@
+From a8bf92faf72dba6e0dd2130256cb81c3e68f672b Mon Sep 17 00:00:00 2001
+From: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+Date: Mon, 29 Nov 2010 11:35:04 -0800
+Subject: [PATCH] vmalloc: eagerly clear ptes on vunmap
+
+When unmapping a region in the vmalloc space, clear the ptes immediately.
+There's no point in deferring this because there's no amortization
+benefit.
+
+The TLBs are left dirty, and they are flushed lazily to amortize the
+cost of the IPIs.
+
+This specific motivation for this patch is a regression since 2.6.36 when
+using NFS under Xen, triggered by the NFS client's use of vm_map_ram()
+introduced in 56e4ebf877b6043c289bda32a5a7385b80c17dee.  XFS also uses
+vm_map_ram() and could cause similar problems.
+
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+Cc: Nick Piggin <npiggin@kernel.dk>
+---
+ mm/vmalloc.c |    8 +++++---
+ 1 files changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/mm/vmalloc.c b/mm/vmalloc.c
+index 0f551a4..370915c 100644
+--- a/mm/vmalloc.c
++++ b/mm/vmalloc.c
+@@ -547,7 +547,6 @@ static void __purge_vmap_area_lazy(unsigned long *start, unsigned long *end,
+ 			if (va->va_end > *end)
+ 				*end = va->va_end;
+ 			nr += (va->va_end - va->va_start) >> PAGE_SHIFT;
+-			unmap_vmap_area(va);
+ 			list_add_tail(&va->purge_list, &valist);
+ 			va->flags |= VM_LAZY_FREEING;
+ 			va->flags &= ~VM_LAZY_FREE;
+@@ -599,6 +598,8 @@ static void purge_vmap_area_lazy(void)
+  */
+ static void free_unmap_vmap_area_noflush(struct vmap_area *va)
+ {
++	unmap_vmap_area(va);
++
+ 	va->flags |= VM_LAZY_FREE;
+ 	atomic_add((va->va_end - va->va_start) >> PAGE_SHIFT, &vmap_lazy_nr);
+ 	if (unlikely(atomic_read(&vmap_lazy_nr) > lazy_max_pages()))
+@@ -869,8 +870,10 @@ static void vb_free(const void *addr, unsigned long size)
+ 		BUG_ON(vb->free || !list_empty(&vb->free_list));
+ 		spin_unlock(&vb->lock);
+ 		free_vmap_block(vb);
+-	} else
++	} else {
+ 		spin_unlock(&vb->lock);
++		vunmap_page_range((unsigned long)addr, (unsigned long)addr + size);
++	}
+ }
+ 
+ /**
+@@ -913,7 +916,6 @@ void vm_unmap_aliases(void)
+ 
+ 				s = vb->va->va_start + (i << PAGE_SHIFT);
+ 				e = vb->va->va_start + (j << PAGE_SHIFT);
+-				vunmap_page_range(s, e);
+ 				flush = 1;
+ 
+ 				if (s < start)
+-- 
+1.7.4.1
+
