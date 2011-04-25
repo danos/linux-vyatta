@@ -1,0 +1,51 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Mon, 25 Apr 2011 04:39:09 +0100
+Subject: [PATCH] drm/kms: Temporarily restore support for connector type name
+ 'DisplayPort'
+
+Commit e76116ca9671e2e5239054a40303b94feab585ad removed spaces from
+connector names, which is fine.  But it also arbitrarily abbreviated
+'DisplayPort' to 'DP', which could invalidate some working command
+lines.  We should continue to support the old names during the
+lifetime of 'squeeze', but warn about the name change.
+---
+ drivers/gpu/drm/drm_fb_helper.c |   20 ++++++++++++++++++--
+ 1 files changed, 18 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/drm_fb_helper.c b/drivers/gpu/drm/drm_fb_helper.c
+index 0f9e905..4ff4e5e 100644
+--- a/drivers/gpu/drm/drm_fb_helper.c
++++ b/drivers/gpu/drm/drm_fb_helper.c
+@@ -222,11 +222,27 @@ int drm_fb_helper_parse_command_line(struct drm_device *dev)
+ 	struct drm_connector *connector;
+ 
+ 	list_for_each_entry(connector, &dev->mode_config.connector_list, head) {
++		char *name;
++		char old_name[32];
+ 		char *option = NULL;
+ 
+ 		/* do something on return - turn off connector maybe */
+-		if (fb_get_options(drm_get_connector_name(connector), &option))
+-			continue;
++		name = drm_get_connector_name(connector);
++		if (fb_get_options(name, &option)) {
++			/* Temporary backward compatibility: 'DP-<n>'
++			 * used to be named 'DisplayPort-<n>'.
++			 */
++			if (connector->connector_type !=
++			    DRM_MODE_CONNECTOR_DisplayPort)
++				continue;
++			snprintf(old_name, sizeof(old_name), "DisplayPort-%d",
++				 connector->connector_type_id);
++			if (fb_get_options(old_name, &option))
++				continue;
++			DRM_ERROR("Connector '%s' is now named '%s' - kernel "
++				  "command line should be updated\n",
++				  old_name, name);
++		}
+ 
+ 		drm_fb_helper_connector_parse_command_line(connector, option);
+ 	}
+-- 
+1.7.4.4
+
