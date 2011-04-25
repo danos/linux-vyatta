@@ -1,0 +1,209 @@
+From 87f4d0a511a647dbb32d2e105a613584c5d8f4a4 Mon Sep 17 00:00:00 2001
+From: Michael Schmitz <schmitzmic@googlemail.com>
+Date: Mon, 1 Nov 2010 18:54:00 +0100
+Subject: [PATCH 8/9] m68k/atari: Reserve some ST-RAM early on for device
+ buffer use
+
+Signed-off-by: Michael Schmitz <schmitz@debian.org>
+[Andreas Schwab <schwab@linux-m68k.org>: Use memparse()]
+Signed-off-by: Geert Uytterhoeven <geert@linux-m68k.org>
+[Thorsten Glaser <tg@debian.org>: avoid trigraph]
+Signed-off-by: Thorsten Glaser <tg@debian.org>
+---
+ arch/m68k/atari/stram.c |  117 +++++++++++++++++++++++++++++++++++++++++++----
+ 1 files changed, 107 insertions(+), 10 deletions(-)
+
+diff --git a/arch/m68k/atari/stram.c b/arch/m68k/atari/stram.c
+index 6ec3b7f..bb6df5c 100644
+--- a/arch/m68k/atari/stram.c
++++ b/arch/m68k/atari/stram.c
+@@ -68,6 +68,23 @@
+  * no provision now for freeing ST-Ram buffers. It seems that isn't
+  * really needed.
+  *
++ * MSch 22/10/10: Because mem_init is now called before device init,
++ * devices that rely on ST-RAM may find all ST-RAM already allocated to
++ * other users by the time device init happens. In particular, a large
++ * initrd RAM disk may use up enough of ST-RAM to cause stram_alloc to
++ * resort to get_dma_pages allocation.
++ * In the current state of Atari memory management, all of RAM is marked
++ * DMA capable, so get_dma_pages may well return RAM that is not in actual
++ * fact DMA capable. Using this for frame buffer or SCSI DMA buffer causes
++ * subtle failure.
++ *
++ * The ST-RAM allocator has been changed to allocate memory from a pool of
++ * reserved ST-RAM of configurable size, set aside on ST-RAM init (i.e.
++ * before mem_init). As long as this pool is not exhausted, allocation of
++ * real ST-RAM can be guaranteed.
++ * Currently, pool ST-RAM freed is not returned to the pool free list so
++ * it will be lost. Code to move such freed ST-RAM from alloc_list to
++ * stram_free_list may be added if needed.
+  */
+ 
+ /* Start and end (virtual) of ST-RAM */
+@@ -91,11 +108,15 @@ typedef struct stram_block {
+ /* values for flags field */
+ #define BLOCK_FREE	0x01	/* free structure in the BLOCKs pool */
+ #define BLOCK_KMALLOCED	0x02	/* structure allocated by kmalloc() */
++#define BLOCK_POOL	0x04	/* block allocated from static pool */
+ #define BLOCK_GFP	0x08	/* block allocated with __get_dma_pages() */
+ 
+ /* list of allocated blocks */
+ static BLOCK *alloc_list;
+ 
++static BLOCK *stram_free_list;
++static unsigned long stram_pool, stram_pool_start, stram_pool_end;
++
+ /* We can't always use kmalloc() to allocate BLOCK structures, since
+  * stram_alloc() can be called rather early. So we need some pool of
+  * statically allocated structures. 20 of them is more than enough, so in most
+@@ -116,6 +137,19 @@ static int remove_region( BLOCK *block );
+ /*							   Public Interface								*/
+ /* ------------------------------------------------------------------------ */
+ 
++static int pool_size = 1024*1024;
++
++static int __init atari_stram_setup(char *arg)
++{
++	if (!MACH_IS_ATARI)
++		return 0;
++
++	pool_size = memparse(arg, NULL);
++	return 0;
++}
++
++early_param("stram_pool", atari_stram_setup);
++
+ /*
+  * This init function is called very early by atari/config.c
+  * It initializes some internal variables needed for stram_alloc()
+@@ -156,6 +190,11 @@ void __init atari_stram_reserve_pages(void *start_mem)
+ 	if (!kernel_in_stram)
+ 		reserve_bootmem(0, PAGE_SIZE, BOOTMEM_DEFAULT);
+ 
++	stram_pool       = (unsigned long) alloc_bootmem_low(pool_size);
++	stram_pool_start = stram_pool;
++	stram_pool_end   = stram_pool + pool_size - 1;
++	DPRINTK("atari_stram pool: size=%d bytes, start=%08lx, end=%08lx\n",
++		pool_size, stram_pool, stram_pool_end);
+ }
+ 
+ void atari_stram_mem_init_hook (void)
+@@ -163,6 +202,38 @@ void atari_stram_mem_init_hook (void)
+ 	mem_init_done = 1;
+ }
+ 
++/* find a region (by size) in the free list */
++static void *find_free_stram(long size)
++{
++	BLOCK *p, *q, *r;
++	unsigned long item;
++
++	q = NULL;
++	r = stram_free_list;
++	for (p = stram_free_list; p; p = p->next) {
++		if (p->size >= size) {
++			q = p;
++			break;
++		}
++		r = p;
++	}
++
++	/* remove from free list */
++	if (q) {
++		item = (unsigned long) q->start;
++		r->next = q->next;
++		return (void *) item;
++	}
++	/* nothing found on free list? take from pool */
++	if ((stram_pool_end - stram_pool) > size) {
++		item = stram_pool;
++		stram_pool += size;
++		return (void *) item;
++	}
++
++	return NULL;
++}
++
+ 
+ /*
+  * This is main public interface: somehow allocate a ST-RAM block
+@@ -184,16 +255,34 @@ void *atari_stram_alloc(long size, const char *owner)
+ 	BLOCK *block;
+ 	int flags;
+ 
+-	DPRINTK("atari_stram_alloc(size=%08lx,owner=%s)\n", size, owner);
++	DPRINTK("atari_stram_alloc(size=%08lx,owner=%s) ... ", size, owner);
+ 
+ 	if (!mem_init_done)
++		/*
++		 * This will trigger a section mismatch warning which is
++		 * actually harmless:
++		 * once mem_init has run (before free_initdata), we will not
++		 * call this code path anymore
++		 */
+ 		return alloc_bootmem_low(size);
+ 	else {
+-		/* After mem_init(): can only resort to __get_dma_pages() */
+-		addr = (void *)__get_dma_pages(GFP_KERNEL, get_order(size));
+-		flags = BLOCK_GFP;
+-		DPRINTK( "atari_stram_alloc: after mem_init, "
+-				 "get_pages=%p\n", addr );
++		/*
++		 * After mem_init(): can only resort to allocating from
++		 * reserved pool ...
++		 */
++		addr = find_free_stram(size);
++		if (addr) {
++			flags = BLOCK_POOL;
++			DPRINTK("after mem_init, allocating from pool, "
++				"find_free_stram=%p\n", addr);
++		} else {
++			/* or resort to __get_dma_pages() !! */
++			addr = (void *)__get_dma_pages(GFP_KERNEL,
++						       get_order(size));
++			flags = BLOCK_GFP;
++			DPRINTK("after mem_init, allocating dma pages, "
++				"get_dma_pages=%p\n", addr);
++		}
+ 	}
+ 
+ 	if (addr) {
+@@ -226,12 +315,18 @@ void atari_stram_free( void *addr )
+ 	DPRINTK( "atari_stram_free: found block (%p): size=%08lx, owner=%s, "
+ 			 "flags=%02x\n", block, block->size, block->owner, block->flags );
+ 
+-	if (!(block->flags & BLOCK_GFP))
++	if (!(block->flags & BLOCK_GFP || block->flags & BLOCK_POOL))
+ 		goto fail;
+ 
+ 	DPRINTK("atari_stram_free: is kmalloced, order_size=%d\n",
+ 		get_order(block->size));
+-	free_pages((unsigned long)addr, get_order(block->size));
++
++	/*
++	 * pages allocated from stram pool cannot be freed - only pages
++	 * allocated by get_free_pages can
++	 */
++	if ((block->flags & BLOCK_GFP))
++		free_pages((unsigned long)addr, get_order(block->size));
+ 	remove_region( block );
+ 	return;
+ 
+@@ -339,9 +434,11 @@ static int stram_proc_show(struct seq_file *m, void *v)
+ 			   virt_to_phys(p->start+p->size-1),
+ 			   p->owner);
+ 		if (p->flags & BLOCK_GFP)
+-			PRINT_PROC( "page-alloced)\n" );
++			PRINT_PROC("page-alloced)\n");
++		else if (p->flags & BLOCK_POOL)
++			PRINT_PROC("pool-alloced)\n");
+ 		else
+-			PRINT_PROC( "??)\n" );
++			PRINT_PROC("?)\n");
+ 	}
+ 
+ 	return 0;
+-- 
+1.7.4.4
+
