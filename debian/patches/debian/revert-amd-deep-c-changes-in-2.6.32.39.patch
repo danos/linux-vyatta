@@ -1,0 +1,205 @@
+commit 90d228c89f774fc3cca59fd65c544a5f731dfa9b
+Author: dann frazier <dannf@debian.org>
+Date:   Wed Apr 27 11:15:28 2011 -0600
+
+    Revert "x86, cpu: AMD errata checking framework"
+    
+    This reverts commit bba4804ec6458830565c24107f3f71f24b46e467.
+
+commit 9f2d46f3aac146887dca8703a04743cae841774b
+Author: dann frazier <dannf@debian.org>
+Date:   Wed Apr 27 11:15:21 2011 -0600
+
+    Revert "x86, cpu: Clean up AMD erratum 400 workaround"
+    
+    This reverts commit 7a3b25c05575f86bf1ba3a397d301752dd981c49.
+
+commit 9e2029fa00ae21547574a288e67cf1392ff17a4b
+Author: dann frazier <dannf@debian.org>
+Date:   Wed Apr 27 11:15:06 2011 -0600
+
+    Revert "x86, AMD: Set ARAT feature on AMD processors"
+    
+    This reverts commit d4274252d17368745a550db596607e7233cdc4d0.
+    
+    Conflicts:
+    
+    	arch/x86/kernel/cpu/amd.c
+
+commit 6e8987561d2666805f5de4a3e8aedd7883f0722b
+Author: dann frazier <dannf@debian.org>
+Date:   Wed Apr 27 11:09:27 2011 -0600
+
+    Revert "x86, cpu: Fix regression in AMD errata checking code"
+    
+    This reverts commit 6f396d4afd30c6940be971bee29e2f62e5bdc437.
+diff --git a/arch/x86/include/asm/processor.h b/arch/x86/include/asm/processor.h
+index da35a70..78bb4d7 100644
+--- a/arch/x86/include/asm/processor.h
++++ b/arch/x86/include/asm/processor.h
+@@ -1029,23 +1029,4 @@ unsigned long calc_aperfmperf_ratio(struct aperfmperf *old,
+ 	return ratio;
+ }
+ 
+-/*
+- * AMD errata checking
+- */
+-#ifdef CONFIG_CPU_SUP_AMD
+-extern const int amd_erratum_400[];
+-extern bool cpu_has_amd_erratum(const int *);
+-
+-#define AMD_LEGACY_ERRATUM(...)		{ -1, __VA_ARGS__, 0 }
+-#define AMD_OSVW_ERRATUM(osvw_id, ...)	{ osvw_id, __VA_ARGS__, 0 }
+-#define AMD_MODEL_RANGE(f, m_start, s_start, m_end, s_end) \
+-	((f << 24) | (m_start << 16) | (s_start << 12) | (m_end << 4) | (s_end))
+-#define AMD_MODEL_RANGE_FAMILY(range)	(((range) >> 24) & 0xff)
+-#define AMD_MODEL_RANGE_START(range)	(((range) >> 12) & 0xfff)
+-#define AMD_MODEL_RANGE_END(range)	((range) & 0xfff)
+-
+-#else
+-#define cpu_has_amd_erratum(x)	(false)
+-#endif /* CONFIG_CPU_SUP_AMD */
+-
+ #endif /* _ASM_X86_PROCESSOR_H */
+diff --git a/arch/x86/kernel/cpu/amd.c b/arch/x86/kernel/cpu/amd.c
+index f893f73..9a154f7 100644
+--- a/arch/x86/kernel/cpu/amd.c
++++ b/arch/x86/kernel/cpu/amd.c
+@@ -566,11 +566,6 @@ static void __cpuinit init_amd(struct cpuinfo_x86 *c)
+ 		}
+ 	}
+ #endif
+-
+-	/* As a rule processors have APIC timer running in deep C states */
+-	if (c->x86 >= 0xf && !cpu_has_amd_erratum(amd_erratum_400))
+-		set_cpu_cap(c, X86_FEATURE_ARAT);
+-
+ 	/*
+ 	 * Disable GART TLB Walk Errors on Fam10h. We do this here
+ 	 * because this is always needed when GART is enabled, even in a
+@@ -633,68 +628,3 @@ static const struct cpu_dev __cpuinitconst amd_cpu_dev = {
+ };
+ 
+ cpu_dev_register(amd_cpu_dev);
+-
+-/*
+- * AMD errata checking
+- *
+- * Errata are defined as arrays of ints using the AMD_LEGACY_ERRATUM() or
+- * AMD_OSVW_ERRATUM() macros. The latter is intended for newer errata that
+- * have an OSVW id assigned, which it takes as first argument. Both take a
+- * variable number of family-specific model-stepping ranges created by
+- * AMD_MODEL_RANGE(). Each erratum also has to be declared as extern const
+- * int[] in arch/x86/include/asm/processor.h.
+- *
+- * Example:
+- *
+- * const int amd_erratum_319[] =
+- *	AMD_LEGACY_ERRATUM(AMD_MODEL_RANGE(0x10, 0x2, 0x1, 0x4, 0x2),
+- *			   AMD_MODEL_RANGE(0x10, 0x8, 0x0, 0x8, 0x0),
+- *			   AMD_MODEL_RANGE(0x10, 0x9, 0x0, 0x9, 0x0));
+- */
+-
+-const int amd_erratum_400[] =
+-	AMD_OSVW_ERRATUM(1, AMD_MODEL_RANGE(0xf, 0x41, 0x2, 0xff, 0xf),
+-			    AMD_MODEL_RANGE(0x10, 0x2, 0x1, 0xff, 0xf));
+-
+-
+-bool cpu_has_amd_erratum(const int *erratum)
+-{
+-	struct cpuinfo_x86 *cpu = &current_cpu_data;
+-	int osvw_id = *erratum++;
+-	u32 range;
+-	u32 ms;
+-
+-	/*
+-	 * If called early enough that current_cpu_data hasn't been initialized
+-	 * yet, fall back to boot_cpu_data.
+-	 */
+-	if (cpu->x86 == 0)
+-		cpu = &boot_cpu_data;
+-
+-	if (cpu->x86_vendor != X86_VENDOR_AMD)
+-		return false;
+-
+-	if (osvw_id >= 0 && osvw_id < 65536 &&
+-	    cpu_has(cpu, X86_FEATURE_OSVW)) {
+-		u64 osvw_len;
+-
+-		rdmsrl(MSR_AMD64_OSVW_ID_LENGTH, osvw_len);
+-		if (osvw_id < osvw_len) {
+-			u64 osvw_bits;
+-
+-			rdmsrl(MSR_AMD64_OSVW_STATUS + (osvw_id >> 6),
+-			    osvw_bits);
+-			return osvw_bits & (1ULL << (osvw_id & 0x3f));
+-		}
+-	}
+-
+-	/* OSVW unavailable or ID unknown, match family-model-stepping range */
+-	ms = (cpu->x86_model << 4) | cpu->x86_mask;
+-	while ((range = *erratum++))
+-		if ((cpu->x86 == AMD_MODEL_RANGE_FAMILY(range)) &&
+-		    (ms >= AMD_MODEL_RANGE_START(range)) &&
+-		    (ms <= AMD_MODEL_RANGE_END(range)))
+-			return true;
+-
+-	return false;
+-}
+diff --git a/arch/x86/kernel/process.c b/arch/x86/kernel/process.c
+index fc6c84d..5fd5b07 100644
+--- a/arch/x86/kernel/process.c
++++ b/arch/x86/kernel/process.c
+@@ -438,6 +438,42 @@ static int __cpuinit mwait_usable(const struct cpuinfo_x86 *c)
+ 	return (edx & MWAIT_EDX_C1);
+ }
+ 
++/*
++ * Check for AMD CPUs, where APIC timer interrupt does not wake up CPU from C1e.
++ * For more information see
++ * - Erratum #400 for NPT family 0xf and family 0x10 CPUs
++ * - Erratum #365 for family 0x11 (not affected because C1e not in use)
++ */
++static int __cpuinit check_c1e_idle(const struct cpuinfo_x86 *c)
++{
++	u64 val;
++	if (c->x86_vendor != X86_VENDOR_AMD)
++		goto no_c1e_idle;
++
++	/* Family 0x0f models < rev F do not have C1E */
++	if (c->x86 == 0x0F && c->x86_model >= 0x40)
++		return 1;
++
++	if (c->x86 == 0x10) {
++		/*
++		 * check OSVW bit for CPUs that are not affected
++		 * by erratum #400
++		 */
++		if (cpu_has(c, X86_FEATURE_OSVW)) {
++			rdmsrl(MSR_AMD64_OSVW_ID_LENGTH, val);
++			if (val >= 2) {
++				rdmsrl(MSR_AMD64_OSVW_STATUS, val);
++				if (!(val & BIT(1)))
++					goto no_c1e_idle;
++			}
++		}
++		return 1;
++	}
++
++no_c1e_idle:
++	return 0;
++}
++
+ static cpumask_var_t c1e_mask;
+ static int c1e_detected;
+ 
+@@ -515,8 +551,7 @@ void __cpuinit select_idle_routine(const struct cpuinfo_x86 *c)
+ 		 */
+ 		printk(KERN_INFO "using mwait in idle threads.\n");
+ 		pm_idle = mwait_idle;
+-	} else if (cpu_has_amd_erratum(amd_erratum_400)) {
+-		/* E400: APIC timer interrupt does not wake up CPU from C1e */
++	} else if (check_c1e_idle(c)) {
+ 		printk(KERN_INFO "using C1E aware idle routine\n");
+ 		pm_idle = c1e_idle;
+ 	} else
