@@ -4,7 +4,7 @@ Date:   Thu Dec 2 14:31:18 2010 -0800
 
     vmalloc: eagerly clear ptes on vunmap
     
-    [ Backport from 64141da587241301ce8638cc945f8b67853156ec, xen flavour parts ]
+    [ Backport from 64141da587241301ce8638cc945f8b67853156ec, generic flavour parts ]
     
     On stock 2.6.37-rc4, running:
     
@@ -55,52 +55,73 @@ Date:   Thu Dec 2 14:31:18 2010 -0800
     Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
     Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
 
-diff --git a/arch/x86/xen/mmu.c b/arch/x86/xen/mmu.c
-index fa36ab8..204e3ba 100644
---- a/arch/x86/xen/mmu.c
-+++ b/arch/x86/xen/mmu.c
-@@ -2430,8 +2430,6 @@ void __init xen_init_mmu_ops(void)
- 	x86_init.paging.pagetable_setup_start = xen_pagetable_setup_start;
- 	x86_init.paging.pagetable_setup_done = xen_pagetable_setup_done;
- 	pv_mmu_ops = xen_mmu_ops;
--
--	vmap_lazy_unmap = false;
- }
- 
- /* Protected by xen_reservation_lock. */
-diff --git a/include/linux/vmalloc.h b/include/linux/vmalloc.h
-index 1a2ba21..3c123c3 100644
---- a/include/linux/vmalloc.h
-+++ b/include/linux/vmalloc.h
-@@ -7,8 +7,6 @@
- 
- struct vm_area_struct;		/* vma defining user mapping in mm_types.h */
- 
--extern bool vmap_lazy_unmap;
--
- /* bits in flags of vmalloc's vm_struct below */
- #define VM_IOREMAP	0x00000001	/* ioremap() and friends */
- #define VM_ALLOC	0x00000002	/* vmalloc() */
 diff --git a/mm/vmalloc.c b/mm/vmalloc.c
 index 4f701c2..80cbd7b 100644
 --- a/mm/vmalloc.c
 +++ b/mm/vmalloc.c
-@@ -31,8 +31,6 @@
- #include <asm/tlbflush.h>
- #include <asm/shmparam.h>
+@@ -566,7 +561,6 @@ static void __purge_vmap_area_lazy(unsigned long *start, unsigned long *end,
+ 			if (va->va_end > *end)
+ 				*end = va->va_end;
+ 			nr += (va->va_end - va->va_start) >> PAGE_SHIFT;
+-			unmap_vmap_area(va);
+ 			list_add_tail(&va->purge_list, &valist);
+ 			va->flags |= VM_LAZY_FREEING;
+ 			va->flags &= ~VM_LAZY_FREE;
+@@ -612,10 +606,11 @@ static void purge_vmap_area_lazy(void)
+ }
  
--bool vmap_lazy_unmap __read_mostly = true;
--
- /*** Page table manipulation functions ***/
- 
- static void vunmap_pte_range(pmd_t *pmd, unsigned long addr, unsigned long end)
-@@ -503,9 +501,6 @@ static unsigned long lazy_max_pages(void)
+ /*
+- * Free and unmap a vmap area, caller ensuring flush_cache_vunmap had been
+- * called for the correct range previously.
++ * Free a vmap area, caller ensuring that the area has been unmapped
++ * and flush_cache_vunmap had been called for the correct range
++ * previously.
+  */
+-static void free_unmap_vmap_area_noflush(struct vmap_area *va)
++static void free_vmap_area_noflush(struct vmap_area *va)
  {
- 	unsigned int log;
+ 	va->flags |= VM_LAZY_FREE;
+ 	atomic_add((va->va_end - va->va_start) >> PAGE_SHIFT, &vmap_lazy_nr);
+@@ -624,6 +619,16 @@ static void free_unmap_vmap_area_noflush(struct vmap_area *va)
+ }
  
--	if (!vmap_lazy_unmap)
--		return 0;
--
- 	log = fls(num_online_cpus());
+ /*
++ * Free and unmap a vmap area, caller ensuring flush_cache_vunmap had been
++ * called for the correct range previously.
++ */
++static void free_unmap_vmap_area_noflush(struct vmap_area *va)
++{
++	unmap_vmap_area(va);
++	free_vmap_area_noflush(va);
++}
++
++/*
+  * Free and unmap a vmap area
+  */
+ static void free_unmap_vmap_area(struct vmap_area *va)
+@@ -799,7 +804,7 @@ static void free_vmap_block(struct vmap_block *vb)
+ 	spin_unlock(&vmap_block_tree_lock);
+ 	BUG_ON(tmp != vb);
  
- 	return log * (32UL * 1024 * 1024 / PAGE_SIZE);
+-	free_unmap_vmap_area_noflush(vb->va);
++	free_vmap_area_noflush(vb->va);
+ 	call_rcu(&vb->rcu_head, rcu_free_vb);
+ }
+ 
+@@ -936,6 +941,8 @@ static void vb_free(const void *addr, unsigned long size)
+ 	rcu_read_unlock();
+ 	BUG_ON(!vb);
+ 
++	vunmap_page_range((unsigned long)addr, (unsigned long)addr + size);
++
+ 	spin_lock(&vb->lock);
+ 	BUG_ON(bitmap_allocate_region(vb->dirty_map, offset >> PAGE_SHIFT, order));
+ 
+@@ -988,7 +995,6 @@ void vm_unmap_aliases(void)
+ 
+ 				s = vb->va->va_start + (i << PAGE_SHIFT);
+ 				e = vb->va->va_start + (j << PAGE_SHIFT);
+-				vunmap_page_range(s, e);
+ 				flush = 1;
+ 
+ 				if (s < start)
