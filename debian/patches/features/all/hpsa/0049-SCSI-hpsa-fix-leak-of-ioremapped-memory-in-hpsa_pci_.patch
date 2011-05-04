@@ -1,0 +1,54 @@
+From: Stephen M. Cameron <scameron@beardog.cce.hp.com>
+Date: Thu, 27 May 2010 15:13:22 -0500
+Subject: [PATCH 49/79] [SCSI] hpsa: fix leak of ioremapped memory in
+ hpsa_pci_init error path.
+
+commit 204892e9717790cd17689aaebf2790a477492734 upstream.
+
+Signed-off-by: Stephen M. Cameron <scameron@beardog.cce.hp.com>
+Signed-off-by: James Bottomley <James.Bottomley@suse.de>
+---
+ drivers/scsi/hpsa.c |   13 ++++++++++++-
+ 1 files changed, 12 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/scsi/hpsa.c b/drivers/scsi/hpsa.c
+index cb0cc09..4983f34 100644
+--- a/drivers/scsi/hpsa.c
++++ b/drivers/scsi/hpsa.c
+@@ -3379,7 +3379,10 @@ static int __devinit hpsa_pci_init(struct ctlr_info *h)
+ 	if (err)
+ 		goto err_out_free_res;
+ 	h->vaddr = remap_pci_mem(h->paddr, 0x250);
+-
++	if (!h->vaddr) {
++		err = -ENOMEM;
++		goto err_out_free_res;
++	}
+ 	err = hpsa_wait_for_board_ready(h);
+ 	if (err)
+ 		goto err_out_free_res;
+@@ -3466,6 +3469,12 @@ static int __devinit hpsa_pci_init(struct ctlr_info *h)
+ 	return 0;
+ 
+ err_out_free_res:
++	if (h->transtable)
++		iounmap(h->transtable);
++	if (h->cfgtable)
++		iounmap(h->cfgtable);
++	if (h->vaddr)
++		iounmap(h->vaddr);
+ 	/*
+ 	 * Deliberately omit pci_disable_device(): it does something nasty to
+ 	 * Smart Array controllers that pci_enable_device does not undo
+@@ -3684,6 +3693,8 @@ static void __devexit hpsa_remove_one(struct pci_dev *pdev)
+ 	hpsa_unregister_scsi(h);	/* unhook from SCSI subsystem */
+ 	hpsa_shutdown(pdev);
+ 	iounmap(h->vaddr);
++	iounmap(h->transtable);
++	iounmap(h->cfgtable);
+ 	hpsa_free_sg_chain_blocks(h);
+ 	pci_free_consistent(h->pdev,
+ 		h->nr_cmds * sizeof(struct CommandList),
+-- 
+1.7.4.4
+

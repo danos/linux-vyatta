@@ -1,0 +1,119 @@
+From: jack wang <jack_wang@usish.com>
+Date: Mon, 7 Dec 2009 17:23:08 +0800
+Subject: [PATCH 12/25] [SCSI] pm8001: enable read HBA SAS address from VPD
+
+commit 7c8356d969e203a8f2f740a9a80d4944eb8cf1d1 upstream.
+
+Signed-off-by: Jack Wang <jack_wang@usish.com>
+Signed-off-by: James Bottomley <James.Bottomley@suse.de>
+---
+ drivers/scsi/pm8001/pm8001_ctl.h  |   10 ----------
+ drivers/scsi/pm8001/pm8001_init.c |   12 ++++++++----
+ drivers/scsi/pm8001/pm8001_sas.h  |   24 ++++++++++++++++++------
+ 3 files changed, 26 insertions(+), 20 deletions(-)
+
+diff --git a/drivers/scsi/pm8001/pm8001_ctl.h b/drivers/scsi/pm8001/pm8001_ctl.h
+index 22644de..63ad4aa 100644
+--- a/drivers/scsi/pm8001/pm8001_ctl.h
++++ b/drivers/scsi/pm8001/pm8001_ctl.h
+@@ -45,16 +45,6 @@
+ #define HEADER_LEN			28
+ #define SIZE_OFFSET			16
+ 
+-struct pm8001_ioctl_payload {
+-	u32	signature;
+-	u16	major_function;
+-	u16	minor_function;
+-	u16	length;
+-	u16	status;
+-	u16	offset;
+-	u16	id;
+-	u8	func_specific[1];
+-};
+ 
+ #define FLASH_OK                        0x000000
+ #define FAIL_OPEN_BIOS_FILE             0x000100
+diff --git a/drivers/scsi/pm8001/pm8001_init.c b/drivers/scsi/pm8001/pm8001_init.c
+index fb6379a..c2f1032 100644
+--- a/drivers/scsi/pm8001/pm8001_init.c
++++ b/drivers/scsi/pm8001/pm8001_init.c
+@@ -516,19 +516,23 @@ static void pm8001_init_sas_add(struct pm8001_hba_info *pm8001_ha)
+ 	u8 i;
+ #ifdef PM8001_READ_VPD
+ 	DECLARE_COMPLETION_ONSTACK(completion);
++	struct pm8001_ioctl_payload payload;
+ 	pm8001_ha->nvmd_completion = &completion;
+-	PM8001_CHIP_DISP->get_nvmd_req(pm8001_ha, 0, 0);
++	payload.minor_function = 0;
++	payload.length = 128;
++	payload.func_specific = kzalloc(128, GFP_KERNEL);
++	PM8001_CHIP_DISP->get_nvmd_req(pm8001_ha, &payload);
+ 	wait_for_completion(&completion);
+ 	for (i = 0; i < pm8001_ha->chip->n_phy; i++) {
+ 		memcpy(&pm8001_ha->phy[i].dev_sas_addr, pm8001_ha->sas_addr,
+ 			SAS_ADDR_SIZE);
+ 		PM8001_INIT_DBG(pm8001_ha,
+-			pm8001_printk("phy %d sas_addr = %x \n", i,
+-			(u64)pm8001_ha->phy[i].dev_sas_addr));
++			pm8001_printk("phy %d sas_addr = %016llx \n", i,
++			pm8001_ha->phy[i].dev_sas_addr));
+ 	}
+ #else
+ 	for (i = 0; i < pm8001_ha->chip->n_phy; i++) {
+-		pm8001_ha->phy[i].dev_sas_addr = 0x500e004010000004ULL;
++		pm8001_ha->phy[i].dev_sas_addr = 0x50010c600047f9d0ULL;
+ 		pm8001_ha->phy[i].dev_sas_addr =
+ 			cpu_to_be64((u64)
+ 				(*(u64 *)&pm8001_ha->phy[i].dev_sas_addr));
+diff --git a/drivers/scsi/pm8001/pm8001_sas.h b/drivers/scsi/pm8001/pm8001_sas.h
+index c44a115..599601e 100644
+--- a/drivers/scsi/pm8001/pm8001_sas.h
++++ b/drivers/scsi/pm8001/pm8001_sas.h
+@@ -100,6 +100,7 @@ do {						\
+ 
+ #define PM8001_USE_TASKLET
+ #define PM8001_USE_MSIX
++#define PM8001_READ_VPD
+ 
+ 
+ #define DEV_IS_EXPANDER(type)	((type == EDGE_DEV) || (type == FANOUT_DEV))
+@@ -111,7 +112,22 @@ extern const struct pm8001_dispatch pm8001_8001_dispatch;
+ struct pm8001_hba_info;
+ struct pm8001_ccb_info;
+ struct pm8001_device;
+-struct pm8001_tmf_task;
++/* define task management IU */
++struct pm8001_tmf_task {
++	u8	tmf;
++	u32	tag_of_task_to_be_managed;
++};
++struct pm8001_ioctl_payload {
++	u32	signature;
++	u16	major_function;
++	u16	minor_function;
++	u16	length;
++	u16	status;
++	u16	offset;
++	u16	id;
++	u8	*func_specific;
++};
++
+ struct pm8001_dispatch {
+ 	char *name;
+ 	int (*chip_init)(struct pm8001_hba_info *pm8001_ha);
+@@ -390,11 +406,7 @@ struct pm8001_fw_image_header {
+ 	__be32 startup_entry;
+ } __attribute__((packed, aligned(4)));
+ 
+-/* define task management IU */
+-struct pm8001_tmf_task {
+-	u8	tmf;
+-	u32	tag_of_task_to_be_managed;
+-};
++
+ /**
+  * FW Flash Update status values
+  */
+-- 
+1.7.4.4
+

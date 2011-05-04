@@ -1,0 +1,72 @@
+From: Rasesh Mody <rmody@brocade.com>
+Date: Thu, 23 Dec 2010 21:45:04 +0000
+Subject: [PATCH 16/23] bna: Enable pure priority tagged packet reception and
+ rxf uninit cleanup fix
+
+commit 886f7fedb0cee56acca7620d89186669273d3d56 upstream.
+
+Change Details:
+	- Enable reception of pure priority tagged packets by default by
+	turning on VLAN Id = 0
+	- Clear the promiscuous mode, all multicast mode flags when
+	bna_rxf_uninit is called
+
+Signed-off-by: Debashis Dutt <ddutt@brocade.com>
+Signed-off-by: Rasesh Mody <rmody@brocade.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/bna/bna_txrx.c |   25 +++++++++++++++++++++++++
+ 1 files changed, 25 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/net/bna/bna_txrx.c b/drivers/net/bna/bna_txrx.c
+index fb6cf1f..5076618 100644
+--- a/drivers/net/bna/bna_txrx.c
++++ b/drivers/net/bna/bna_txrx.c
+@@ -1441,12 +1441,16 @@ bna_rxf_init(struct bna_rxf *rxf,
+ 	memset(rxf->vlan_filter_table, 0,
+ 			(sizeof(u32) * ((BFI_MAX_VLAN + 1) / 32)));
+ 
++	/* Set up VLAN 0 for pure priority tagged packets */
++	rxf->vlan_filter_table[0] |= 1;
++
+ 	bfa_fsm_set_state(rxf, bna_rxf_sm_stopped);
+ }
+ 
+ static void
+ bna_rxf_uninit(struct bna_rxf *rxf)
+ {
++	struct bna *bna = rxf->rx->bna;
+ 	struct bna_mac *mac;
+ 
+ 	bna_rit_mod_seg_put(&rxf->rx->bna->rit_mod, rxf->rit_segment);
+@@ -1473,6 +1477,27 @@ bna_rxf_uninit(struct bna_rxf *rxf)
+ 		bna_mcam_mod_mac_put(&rxf->rx->bna->mcam_mod, mac);
+ 	}
+ 
++	/* Turn off pending promisc mode */
++	if (is_promisc_enable(rxf->rxmode_pending,
++				rxf->rxmode_pending_bitmask)) {
++		/* system promisc state should be pending */
++		BUG_ON(!(bna->rxf_promisc_id == rxf->rxf_id));
++		promisc_inactive(rxf->rxmode_pending,
++				rxf->rxmode_pending_bitmask);
++		 bna->rxf_promisc_id = BFI_MAX_RXF;
++	}
++	/* Promisc mode should not be active */
++	BUG_ON(rxf->rxmode_active & BNA_RXMODE_PROMISC);
++
++	/* Turn off pending all-multi mode */
++	if (is_allmulti_enable(rxf->rxmode_pending,
++				rxf->rxmode_pending_bitmask)) {
++		allmulti_inactive(rxf->rxmode_pending,
++				rxf->rxmode_pending_bitmask);
++	}
++	/* Allmulti mode should not be active */
++	BUG_ON(rxf->rxmode_active & BNA_RXMODE_ALLMULTI);
++
+ 	rxf->rx = NULL;
+ }
+ 
+-- 
+1.7.4.4
+

@@ -1,0 +1,103 @@
+From: Stephen M. Cameron <scameron@beardog.cce.hp.com>
+Date: Wed, 16 Jun 2010 13:51:50 -0500
+Subject: [PATCH 72/79] [SCSI] hpsa: separate intx and msi/msix interrupt
+ handlers
+
+commit 10f66018088fd0c9fe81b1e328e3264c7b10caa5 upstream.
+
+There are things which need to be done in the intx
+interrupt handler which do not need to be done in
+the msi/msix interrupt handler, like checking that
+the interrupt is actually for us, and checking that the
+interrupt pending bit on the hardware is set (which we
+weren't previously doing at all, which means old controllers
+wouldn't work), so it makes sense to separate these into
+two functions.
+
+Signed-off-by: Stephen M. Cameron <scameron@beardog.cce.hp.com>
+Signed-off-by: James Bottomley <James.Bottomley@suse.de>
+---
+ drivers/scsi/hpsa.c |   39 ++++++++++++++++++++++++++++++++-------
+ 1 files changed, 32 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/scsi/hpsa.c b/drivers/scsi/hpsa.c
+index d903cc6..f8b614b 100644
+--- a/drivers/scsi/hpsa.c
++++ b/drivers/scsi/hpsa.c
+@@ -126,7 +126,8 @@ static struct board_type products[] = {
+ 
+ static int number_of_controllers;
+ 
+-static irqreturn_t do_hpsa_intr(int irq, void *dev_id);
++static irqreturn_t do_hpsa_intr_intx(int irq, void *dev_id);
++static irqreturn_t do_hpsa_intr_msi(int irq, void *dev_id);
+ static int hpsa_ioctl(struct scsi_device *dev, int cmd, void *arg);
+ static void start_io(struct ctlr_info *h);
+ 
+@@ -2858,9 +2859,8 @@ static inline bool interrupt_pending(struct ctlr_info *h)
+ 
+ static inline long interrupt_not_for_us(struct ctlr_info *h)
+ {
+-	return !(h->msi_vector || h->msix_vector) &&
+-		((h->access.intr_pending(h) == 0) ||
+-		(h->interrupts_enabled == 0));
++	return (h->access.intr_pending(h) == 0) ||
++		(h->interrupts_enabled == 0);
+ }
+ 
+ static inline int bad_tag(struct ctlr_info *h, u32 tag_index,
+@@ -2934,7 +2934,7 @@ static inline u32 process_nonindexed_cmd(struct ctlr_info *h,
+ 	return next_command(h);
+ }
+ 
+-static irqreturn_t do_hpsa_intr(int irq, void *dev_id)
++static irqreturn_t do_hpsa_intr_intx(int irq, void *dev_id)
+ {
+ 	struct ctlr_info *h = dev_id;
+ 	unsigned long flags;
+@@ -2943,6 +2943,26 @@ static irqreturn_t do_hpsa_intr(int irq, void *dev_id)
+ 	if (interrupt_not_for_us(h))
+ 		return IRQ_NONE;
+ 	spin_lock_irqsave(&h->lock, flags);
++	while (interrupt_pending(h)) {
++		raw_tag = get_next_completion(h);
++		while (raw_tag != FIFO_EMPTY) {
++			if (hpsa_tag_contains_index(raw_tag))
++				raw_tag = process_indexed_cmd(h, raw_tag);
++			else
++				raw_tag = process_nonindexed_cmd(h, raw_tag);
++		}
++	}
++	spin_unlock_irqrestore(&h->lock, flags);
++	return IRQ_HANDLED;
++}
++
++static irqreturn_t do_hpsa_intr_msi(int irq, void *dev_id)
++{
++	struct ctlr_info *h = dev_id;
++	unsigned long flags;
++	u32 raw_tag;
++
++	spin_lock_irqsave(&h->lock, flags);
+ 	raw_tag = get_next_completion(h);
+ 	while (raw_tag != FIFO_EMPTY) {
+ 		if (hpsa_tag_contains_index(raw_tag))
+@@ -3754,8 +3774,13 @@ static int __devinit hpsa_init_one(struct pci_dev *pdev,
+ 
+ 	/* make sure the board interrupts are off */
+ 	h->access.set_intr_mask(h, HPSA_INTR_OFF);
+-	rc = request_irq(h->intr[PERF_MODE_INT], do_hpsa_intr,
+-			IRQF_DISABLED, h->devname, h);
++
++	if (h->msix_vector || h->msi_vector)
++		rc = request_irq(h->intr[PERF_MODE_INT], do_hpsa_intr_msi,
++				IRQF_DISABLED, h->devname, h);
++	else
++		rc = request_irq(h->intr[PERF_MODE_INT], do_hpsa_intr_intx,
++				IRQF_DISABLED, h->devname, h);
+ 	if (rc) {
+ 		dev_err(&pdev->dev, "unable to get irq %d for %s\n",
+ 		       h->intr[PERF_MODE_INT], h->devname);
+-- 
+1.7.4.4
+

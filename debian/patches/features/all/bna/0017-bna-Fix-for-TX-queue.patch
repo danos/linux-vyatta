@@ -1,0 +1,103 @@
+From: Rasesh Mody <rmody@brocade.com>
+Date: Thu, 23 Dec 2010 21:45:05 +0000
+Subject: [PATCH 17/23] bna: Fix for TX queue
+
+commit f7c0fa4cd5dcf58dd95b216d2c33444a3b4a44e0 upstream.
+
+Change Details:
+	- Call netif_wake_queue() if we have freed up sufficient elements
+	at the end of completion processing
+	- Add netif_queue_stopped counter back to bnad_drv_stats {}
+	- Get netif_queue_stopped value from stack
+	- Remove BUG_ON() on value returned by pci_unmap_addr()
+
+Signed-off-by: Debashis Dutt <ddutt@brocade.com>
+Signed-off-by: Rasesh Mody <rmody@brocade.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+[bwh: Adjust context for different version of stats fix]
+---
+ drivers/net/bna/bnad.c         |   20 ++++++++++++++++----
+ drivers/net/bna/bnad.h         |    7 +++++--
+ drivers/net/bna/bnad_ethtool.c |    4 ++++
+ 3 files changed, 25 insertions(+), 6 deletions(-)
+
+--- a/drivers/net/bna/bnad.c
++++ b/drivers/net/bna/bnad.c
+@@ -109,7 +109,7 @@ static void
+ bnad_free_all_txbufs(struct bnad *bnad,
+ 		 struct bna_tcb *tcb)
+ {
+-	u16 		unmap_cons;
++	u32 		unmap_cons;
+ 	struct bnad_unmap_q *unmap_q = tcb->unmap_q;
+ 	struct bnad_skb_unmap *unmap_array;
+ 	struct sk_buff 		*skb = NULL;
+@@ -244,7 +244,7 @@ bnad_tx_free_tasklet(unsigned long bnad_ptr)
+ {
+ 	struct bnad *bnad = (struct bnad *)bnad_ptr;
+ 	struct bna_tcb *tcb;
+-	u32 		acked;
++	u32 		acked = 0;
+ 	int			i, j;
+ 
+ 	for (i = 0; i < bnad->num_tx; i++) {
+@@ -263,6 +263,20 @@ bnad_tx_free_tasklet(unsigned long bnad_ptr)
+ 				smp_mb__before_clear_bit();
+ 				clear_bit(BNAD_TXQ_FREE_SENT, &tcb->flags);
+ 			}
++			if (unlikely(!test_bit(BNAD_TXQ_TX_STARTED,
++						&tcb->flags)))
++				continue;
++			if (netif_queue_stopped(bnad->netdev)) {
++				if (acked && netif_carrier_ok(bnad->netdev) &&
++					BNA_QE_FREE_CNT(tcb, tcb->q_depth) >=
++						BNAD_NETIF_WAKE_THRESHOLD) {
++					netif_wake_queue(bnad->netdev);
++					/* TODO */
++					/* Counters for individual TxQs? */
++					BNAD_UPDATE_CTR(bnad,
++						netif_queue_wakeup);
++				}
++			}
+ 		}
+ 	}
+ }
+@@ -334,8 +348,6 @@ bnad_free_all_rxbufs(struct bnad *bnad, struct bna_rcb *rcb)
+ 		skb = unmap_q->unmap_array[unmap_cons].skb;
+ 		if (!skb)
+ 			continue;
+-		BUG_ON(!(pci_unmap_addr(
+-			&unmap_q->unmap_array[unmap_cons], dma_addr)));
+ 		unmap_q->unmap_array[unmap_cons].skb = NULL;
+ 		pci_unmap_single(bnad->pcidev, pci_unmap_addr(&unmap_q->
+ 					unmap_array[unmap_cons],
+--- a/drivers/net/bna/bnad.h
++++ b/drivers/net/bna/bnad.h
+@@ -126,6 +126,7 @@ struct bnad_completion {
+ struct bnad_drv_stats {
+ 	u64 		netif_queue_stop;
+ 	u64		netif_queue_wakeup;
++	u64		netif_queue_stopped;
+ 	u64		tso4;
+ 	u64		tso6;
+ 	u64		tso_err;
+--- a/drivers/net/bna/bnad_ethtool.c
++++ b/drivers/net/bna/bnad_ethtool.c
+@@ -68,6 +68,7 @@ static char *bnad_net_stats_strings[BNAD_ETHTOOL_STATS_NUM] = {
+ 
+ 	"netif_queue_stop",
+ 	"netif_queue_wakeup",
++	"netif_queue_stopped",
+ 	"tso4",
+ 	"tso6",
+ 	"tso_err",
+@@ -1183,6 +1184,9 @@ bnad_get_ethtool_stats(struct net_device *netdev, struct ethtool_stats *stats,
+ 	     i++)
+ 		buf[bi++] = net_stats[i];
+ 
++	/* Get netif_queue_stopped from stack */
++	bnad->stats.drv_stats.netif_queue_stopped = netif_queue_stopped(netdev);
++
+ 	/* Fill driver stats into ethtool buffers */
+ 	stats64 = (u64 *)&bnad->stats.drv_stats;
+ 	for (i = 0; i < sizeof(struct bnad_drv_stats) / sizeof(u64); i++)
