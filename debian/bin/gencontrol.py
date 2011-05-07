@@ -46,6 +46,7 @@ class Gencontrol(Base):
                 vars['abiname'] = '-%s' % self.config['abi', arch]['abiname']
             except KeyError:
                 vars['abiname'] = self.abiname
+            makeflags['ABINAME'] = vars['abiname']
 
         headers_arch = self.templates["control.headers.arch"]
         packages_headers_arch = self.process_packages(headers_arch, vars)
