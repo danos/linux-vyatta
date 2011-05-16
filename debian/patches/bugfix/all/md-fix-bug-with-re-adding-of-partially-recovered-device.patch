@@ -1,0 +1,60 @@
+commit 69b74dfe7cc2022a2f2e0cf920f0c24e72c0d387
+Author: NeilBrown <neilb@suse.de>
+Date:   Thu Dec 9 16:36:28 2010 +1100
+
+    md: fix bug with re-adding of partially recovered device.
+    
+    commit 1a855a0606653d2d82506281e2c686bacb4b2f45 upstream.
+    
+    With v0.90 metadata, a hot-spare does not become a full member of the
+    array until recovery is complete.  So if we re-add such a device to
+    the array, we know that all of it is as up-to-date as the event count
+    would suggest, and so it a bitmap-based recovery is possible.
+    
+    However with v1.x metadata, the hot-spare immediately becomes a full
+    member of the array, but it record how much of the device has been
+    recovered.  If the array is stopped and re-assembled recovery starts
+    from this point.
+    
+    When such a device is hot-added to an array we currently lose the 'how
+    much is recovered' information and incorrectly included it as a full
+    in-sync member (after bitmap-based fixup).
+    This is wrong and unsafe and could corrupt data.
+    
+    So be more careful about setting saved_raid_disk - which is what
+    guides the re-adding of devices back into an array.
+    The new code matches the code in slot_store which does a similar
+    thing, which is encouraging.
+    
+    This is suitable for any -stable kernel.
+    
+    Reported-by: "Dailey, Nate" <Nate.Dailey@stratus.com>
+    Signed-off-by: NeilBrown <neilb@suse.de>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+    Signed-off-by: Willy Tarreau <w@1wt.eu>
+    [dannf: adjusted to Debian's 2.6.26]
+
+diff -urpN linux-source-2.6.26.orig/drivers/md/md.c linux-source-2.6.26/drivers/md/md.c
+--- linux-source-2.6.26.orig/drivers/md/md.c	2011-01-24 22:55:29.000000000 -0700
++++ linux-source-2.6.26/drivers/md/md.c	2011-05-15 17:41:11.319677736 -0600
+@@ -4143,7 +4143,7 @@ static int add_new_disk(mddev_t * mddev,
+ 				PTR_ERR(rdev));
+ 			return PTR_ERR(rdev);
+ 		}
+-		/* set save_raid_disk if appropriate */
++		/* set saved_raid_disk if appropriate */
+ 		if (!mddev->persistent) {
+ 			if (info->state & (1<<MD_DISK_SYNC)  &&
+ 			    info->raid_disk < mddev->raid_disks)
+@@ -4153,7 +4153,10 @@ static int add_new_disk(mddev_t * mddev,
+ 		} else
+ 			super_types[mddev->major_version].
+ 				validate_super(mddev, rdev);
+-		rdev->saved_raid_disk = rdev->raid_disk;
++		if (test_bit(In_sync, &rdev->flags))
++			rdev->saved_raid_disk = rdev->raid_disk;
++		else
++			rdev->saved_raid_disk = -1;
+ 
+ 		clear_bit(In_sync, &rdev->flags); /* just to be sure */
+ 		if (info->state & (1<<MD_DISK_WRITEMOSTLY))
