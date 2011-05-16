@@ -1,0 +1,30 @@
+commit 3f51182e8c7a3dc5415f4b31811f1fa1ab4d27e9
+Author: James Bottomley <James.Bottomley@suse.de>
+Date:   Thu Jan 20 17:26:44 2011 -0600
+
+    libsas: fix runaway error handler problem
+    
+    commit 9ee91f7fb550a4c82f82d9818e42493484c754af upstream.
+    
+    libsas makes use of scsi_schedule_eh() but forgets to clear the
+    host_eh_scheduled flag in its error handling routine.  Because of this,
+    the error handler thread never gets to sleep; it's constantly awake and
+    trying to run the error routine leading to console spew and inability to
+    run anything else (at least on a UP system).  The fix is to clear the
+    flag as we splice the work queue.
+    
+    Signed-off-by: James Bottomley <James.Bottomley@suse.de>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+
+diff --git a/drivers/scsi/libsas/sas_scsi_host.c b/drivers/scsi/libsas/sas_scsi_host.c
+index a8e3ef3..c8508ca 100644
+--- a/drivers/scsi/libsas/sas_scsi_host.c
++++ b/drivers/scsi/libsas/sas_scsi_host.c
+@@ -648,6 +648,7 @@ void sas_scsi_recover_host(struct Scsi_Host *shost)
+ 
+ 	spin_lock_irqsave(shost->host_lock, flags);
+ 	list_splice_init(&shost->eh_cmd_q, &eh_work_q);
++	shost->host_eh_scheduled = 0;
+ 	spin_unlock_irqrestore(shost->host_lock, flags);
+ 
+ 	SAS_DPRINTK("Enter %s\n", __func__);
