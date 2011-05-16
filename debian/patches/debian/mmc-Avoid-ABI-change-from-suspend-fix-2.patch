@@ -1,0 +1,148 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Tue, 28 Sep 2010 02:52:32 +0100
+Subject: [PATCH 2/2] mmc: Avoid ABI change from suspend fix
+
+Move rescan_disable flag into the existing bitfield.
+
+Move pm_notify in front of the public struct mmc_host.
+---
+ drivers/mmc/core/core.c  |    4 ++--
+ drivers/mmc/core/host.c  |   18 +++++++++++-------
+ include/linux/mmc/host.h |   12 ++++++++++--
+ 3 files changed, 23 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/mmc/core/core.c b/drivers/mmc/core/core.c
+index 46f6157..e5e62be 100644
+--- a/drivers/mmc/core/core.c
++++ b/drivers/mmc/core/core.c
+@@ -1319,8 +1319,8 @@ EXPORT_SYMBOL(mmc_resume_host);
+ int mmc_pm_notify(struct notifier_block *notify_block,
+ 					unsigned long mode, void *unused)
+ {
+-	struct mmc_host *host = container_of(
+-		notify_block, struct mmc_host, pm_notify);
++	struct mmc_host *host = &container_of(
++		notify_block, struct mmc_host_plus, pm_notify)->host;
+ 	unsigned long flags;
+ 
+ 
+diff --git a/drivers/mmc/core/host.c b/drivers/mmc/core/host.c
+index b88fc3d..f60f735 100644
+--- a/drivers/mmc/core/host.c
++++ b/drivers/mmc/core/host.c
+@@ -16,7 +16,9 @@
+ #include <linux/idr.h>
+ #include <linux/pagemap.h>
+ #include <linux/leds.h>
++#ifndef __GENKSYMS__
+ #include <linux/suspend.h>
++#endif
+ 
+ #include <linux/mmc/host.h>
+ 
+@@ -28,7 +30,7 @@
+ static void mmc_host_classdev_release(struct device *dev)
+ {
+ 	struct mmc_host *host = cls_dev_to_mmc_host(dev);
+-	kfree(host);
++	kfree(container_of(host, struct mmc_host_plus, host));
+ }
+ 
+ static struct class mmc_host_class = {
+@@ -60,13 +62,15 @@ struct mmc_host *mmc_alloc_host(int extra, struct device *dev)
+ {
+ 	int err;
+ 	struct mmc_host *host;
++	struct mmc_host_plus *host_plus;
+ 
+ 	if (!idr_pre_get(&mmc_host_idr, GFP_KERNEL))
+ 		return NULL;
+ 
+-	host = kzalloc(sizeof(struct mmc_host) + extra, GFP_KERNEL);
+-	if (!host)
++	host_plus = kzalloc(sizeof(struct mmc_host_plus) + extra, GFP_KERNEL);
++	if (!host_plus)
+ 		return NULL;
++	host = &host_plus->host;
+ 
+ 	spin_lock(&mmc_host_lock);
+ 	err = idr_get_new(&mmc_host_idr, host, &host->index);
+@@ -85,7 +89,7 @@ struct mmc_host *mmc_alloc_host(int extra, struct device *dev)
+ 	INIT_DELAYED_WORK(&host->detect, mmc_rescan);
+ 	INIT_DELAYED_WORK_DEFERRABLE(&host->disable, mmc_host_deeper_disable);
+ #ifdef CONFIG_PM
+-	host->pm_notify.notifier_call = mmc_pm_notify;
++	host_plus->pm_notify.notifier_call = mmc_pm_notify;
+ #endif
+ 
+ 	/*
+@@ -102,7 +106,7 @@ struct mmc_host *mmc_alloc_host(int extra, struct device *dev)
+ 	return host;
+ 
+ free:
+-	kfree(host);
++	kfree(host_plus);
+ 	return NULL;
+ }
+ 
+@@ -134,7 +138,7 @@ int mmc_add_host(struct mmc_host *host)
+ #endif
+ 
+ 	mmc_start_host(host);
+-	register_pm_notifier(&host->pm_notify);
++	register_pm_notifier(&container_of(host, struct mmc_host_plus, host)->pm_notify);
+ 
+ 	return 0;
+ }
+@@ -151,7 +155,7 @@ EXPORT_SYMBOL(mmc_add_host);
+  */
+ void mmc_remove_host(struct mmc_host *host)
+ {
+-	unregister_pm_notifier(&host->pm_notify);
++	unregister_pm_notifier(&container_of(host, struct mmc_host_plus, host)->pm_notify);
+ 	mmc_stop_host(host);
+ 
+ #ifdef CONFIG_DEBUG_FS
+diff --git a/include/linux/mmc/host.h b/include/linux/mmc/host.h
+index 475ca8a..4f11a2f 100644
+--- a/include/linux/mmc/host.h
++++ b/include/linux/mmc/host.h
+@@ -120,7 +120,6 @@ struct mmc_host {
+ 	unsigned int		f_min;
+ 	unsigned int		f_max;
+ 	u32			ocr_avail;
+-	struct notifier_block	pm_notify;
+ 
+ #define MMC_VDD_165_195		0x00000080	/* VDD voltage 1.65 - 1.95 */
+ #define MMC_VDD_20_21		0x00000100	/* VDD voltage 2.0 ~ 2.1 */
+@@ -175,10 +174,12 @@ struct mmc_host {
+ #ifdef CONFIG_MMC_DEBUG
+ 	unsigned int		removed:1;	/* host is being removed */
+ #endif
++#ifndef __GENKSYMS__
++	unsigned int		rescan_disable:1; /* disable card detection */
++#endif
+ 
+ 	/* Only used with MMC_CAP_DISABLE */
+ 	int			enabled;	/* host is enabled */
+-	int			rescan_disable;	/* disable card detection */
+ 	int			nesting_cnt;	/* "enable" nesting count */
+ 	int			en_dis_recurs;	/* detect recursion */
+ 	unsigned int		disable_delay;	/* disable delay in msecs */
+@@ -208,6 +209,13 @@ struct mmc_host {
+ 	unsigned long		private[0] ____cacheline_aligned;
+ };
+ 
++#ifndef __GENKSYMS__
++struct mmc_host_plus {
++	struct notifier_block	pm_notify;
++	struct mmc_host		host;
++};
++#endif
++
+ extern struct mmc_host *mmc_alloc_host(int extra, struct device *);
+ extern int mmc_add_host(struct mmc_host *);
+ extern void mmc_remove_host(struct mmc_host *);
+-- 
+1.7.1
+
