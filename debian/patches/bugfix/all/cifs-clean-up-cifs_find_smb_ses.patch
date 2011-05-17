@@ -1,0 +1,84 @@
+commit 4ff67b720c02c36e54d55b88c2931879b7db1cd2
+Author: Jeff Layton <jlayton@redhat.com>
+Date:   Tue Jul 6 20:43:02 2010 -0400
+
+    cifs: clean up cifs_find_smb_ses (try #2)
+    
+    This patch replaces the earlier patch by the same name. The only
+    difference is that MAX_PASSWORD_SIZE has been increased to attempt to
+    match the limits that windows enforces.
+    
+    Do a better job of matching sessions by authtype. Matching by username
+    for a Kerberos session is incorrect, and anonymous sessions need special
+    handling.
+    
+    Also, in the case where we do match by username, we also need to match
+    by password. That ensures that someone else doesn't "borrow" an existing
+    session without needing to know the password.
+    
+    Finally, passwords can be longer than 16 bytes. Bump MAX_PASSWORD_SIZE
+    to 512 to match the size that the userspace mount helper allows.
+    
+    Signed-off-by: Jeff Layton <jlayton@redhat.com>
+    Signed-off-by: Steve French <sfrench@us.ibm.com>
+    [dannf: backported to Debian's 2.6.32]
+
+diff -urpN linux-source-2.6.32.orig/fs/cifs/cifsglob.h linux-source-2.6.32/fs/cifs/cifsglob.h
+--- linux-source-2.6.32.orig/fs/cifs/cifsglob.h	2011-05-03 09:28:59.000000000 -0600
++++ linux-source-2.6.32/fs/cifs/cifsglob.h	2011-05-17 00:55:12.683573674 -0600
+@@ -33,7 +33,7 @@
+ #define MAX_SHARE_SIZE  64	/* used to be 20, this should still be enough */
+ #define MAX_USERNAME_SIZE 32	/* 32 is to allow for 15 char names + null
+ 				   termination then *2 for unicode versions */
+-#define MAX_PASSWORD_SIZE 16
++#define MAX_PASSWORD_SIZE 512  /* max for windows seems to be 256 wide chars */
+ 
+ #define CIFS_MIN_RCV_POOL 4
+ 
+diff -urpN linux-source-2.6.32.orig/fs/cifs/connect.c linux-source-2.6.32/fs/cifs/connect.c
+--- linux-source-2.6.32.orig/fs/cifs/connect.c	2011-05-03 09:29:09.000000000 -0600
++++ linux-source-2.6.32/fs/cifs/connect.c	2011-05-17 00:57:32.409046666 -0600
+@@ -1587,17 +1587,27 @@ out_err:
+ }
+ 
+ static struct cifsSesInfo *
+-cifs_find_smb_ses(struct TCP_Server_Info *server, char *username)
++cifs_find_smb_ses(struct TCP_Server_Info *server, struct smb_vol *vol)
+ {
+-	struct list_head *tmp;
+ 	struct cifsSesInfo *ses;
+ 
+ 	write_lock(&cifs_tcp_ses_lock);
+-	list_for_each(tmp, &server->smb_ses_list) {
+-		ses = list_entry(tmp, struct cifsSesInfo, smb_ses_list);
+-		if (strncmp(ses->userName, username, MAX_USERNAME_SIZE))
+-			continue;
+-
++	list_for_each_entry(ses, &server->smb_ses_list, smb_ses_list) {
++		switch (server->secType) {
++		case Kerberos:
++			if (vol->linux_uid != ses->linux_uid)
++				continue;
++			break;
++		default:
++			/* anything else takes username/password */
++			if (strncmp(ses->userName, vol->username,
++				    MAX_USERNAME_SIZE))
++				continue;
++			if (strlen(vol->username) != 0 &&
++			    strncmp(ses->password, vol->password,
++				    MAX_PASSWORD_SIZE))
++				continue;
++		}
+ 		++ses->ses_count;
+ 		write_unlock(&cifs_tcp_ses_lock);
+ 		return ses;
+@@ -2356,7 +2366,7 @@ try_mount_again:
+ 		goto out;
+ 	}
+ 
+-	pSesInfo = cifs_find_smb_ses(srvTcp, volume_info->username);
++	pSesInfo = cifs_find_smb_ses(srvTcp, volume_info);
+ 	if (pSesInfo) {
+ 		cFYI(1, ("Existing smb sess found (status=%d)",
+ 			pSesInfo->status));
