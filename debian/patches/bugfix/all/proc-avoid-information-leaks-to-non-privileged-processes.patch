@@ -1,0 +1,94 @@
+commit f83ce3e6b02d5e48b3a43b001390e2b58820389d
+Author: Jake Edge <jake@lwn.net>
+Date:   Mon May 4 12:51:14 2009 -0600
+
+    proc: avoid information leaks to non-privileged processes
+    
+    By using the same test as is used for /proc/pid/maps and /proc/pid/smaps,
+    only allow processes that can ptrace() a given process to see information
+    that might be used to bypass address space layout randomization (ASLR).
+    These include eip, esp, wchan, and start_stack in /proc/pid/stat as well
+    as the non-symbolic output from /proc/pid/wchan.
+    
+    ASLR can be bypassed by sampling eip as shown by the proof-of-concept
+    code at http://code.google.com/p/fuzzyaslr/ As part of a presentation
+    (http://www.cr0.org/paper/to-jt-linux-alsr-leak.pdf) esp and wchan were
+    also noted as possibly usable information leaks as well.  The
+    start_stack address also leaks potentially useful information.
+    
+    Cc: Stable Team <stable@kernel.org>
+    Signed-off-by: Jake Edge <jake@lwn.net>
+    Acked-by: Arjan van de Ven <arjan@linux.intel.com>
+    Acked-by: "Eric W. Biederman" <ebiederm@xmission.com>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+    [dannf: backported to Debian's 2.6.26]
+
+diff -urpN linux-source-2.6.26.orig/fs/proc/array.c linux-source-2.6.26/fs/proc/array.c
+--- linux-source-2.6.26.orig/fs/proc/array.c	2011-01-24 22:55:23.000000000 -0700
++++ linux-source-2.6.26/fs/proc/array.c	2011-05-29 12:39:14.441111404 -0600
+@@ -80,6 +80,7 @@
+ #include <linux/delayacct.h>
+ #include <linux/seq_file.h>
+ #include <linux/pid_namespace.h>
++#include <linux/ptrace.h>
+ 
+ #include <asm/pgtable.h>
+ #include <asm/processor.h>
+@@ -342,6 +343,7 @@ static int do_task_stat(struct seq_file
+ 	char state;
+ 	pid_t ppid = 0, pgid = -1, sid = -1;
+ 	int num_threads = 0;
++	int permitted;
+ 	struct mm_struct *mm;
+ 	unsigned long long start_time;
+ 	unsigned long cmin_flt = 0, cmaj_flt = 0;
+@@ -354,11 +356,14 @@ static int do_task_stat(struct seq_file
+ 
+ 	state = *get_task_state(task);
+ 	vsize = eip = esp = 0;
++	permitted = ptrace_may_attach(task);
+ 	mm = get_task_mm(task);
+ 	if (mm) {
+ 		vsize = task_vsize(mm);
+-		eip = KSTK_EIP(task);
+-		esp = KSTK_ESP(task);
++		if (permitted) {
++			eip = KSTK_EIP(task);
++			esp = KSTK_ESP(task);
++		}
+ 	}
+ 
+ 	get_task_comm(tcomm, task);
+@@ -414,7 +419,7 @@ static int do_task_stat(struct seq_file
+ 		unlock_task_sighand(task, &flags);
+ 	}
+ 
+-	if (!whole || num_threads < 2)
++	if (permitted && (!whole || num_threads < 2))
+ 		wchan = get_wchan(task);
+ 	if (!whole) {
+ 		min_flt = task->min_flt;
+@@ -466,7 +471,7 @@ static int do_task_stat(struct seq_file
+ 		rsslim,
+ 		mm ? mm->start_code : 0,
+ 		mm ? mm->end_code : 0,
+-		mm ? mm->start_stack : 0,
++		(permitted && mm) ? mm->start_stack : 0,
+ 		esp,
+ 		eip,
+ 		/* The signal information here is obsolete.
+diff -urpN linux-source-2.6.26.orig/fs/proc/base.c linux-source-2.6.26/fs/proc/base.c
+--- linux-source-2.6.26.orig/fs/proc/base.c	2011-01-24 22:55:33.000000000 -0700
++++ linux-source-2.6.26/fs/proc/base.c	2011-05-29 12:38:52.196846232 -0600
+@@ -329,7 +329,10 @@ static int proc_pid_wchan(struct task_st
+ 	wchan = get_wchan(task);
+ 
+ 	if (lookup_symbol_name(wchan, symname) < 0)
+-		return sprintf(buffer, "%lu", wchan);
++		if (!ptrace_may_attach(task))
++			return 0;
++		else
++			return sprintf(buffer, "%lu", wchan);
+ 	else
+ 		return sprintf(buffer, "%s", symname);
+ }
