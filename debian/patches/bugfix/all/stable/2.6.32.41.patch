@@ -1,0 +1,524 @@
+diff --git a/Makefile b/Makefile
+index b31b10c..46e401f 100644
+diff --git a/arch/x86/include/asm/apicdef.h b/arch/x86/include/asm/apicdef.h
+index 3b62da9..54536ea 100644
+--- a/arch/x86/include/asm/apicdef.h
++++ b/arch/x86/include/asm/apicdef.h
+@@ -72,6 +72,7 @@
+ #define		APIC_DEST_LOGICAL	0x00800
+ #define		APIC_DEST_PHYSICAL	0x00000
+ #define		APIC_DM_FIXED		0x00000
++#define		APIC_DM_FIXED_MASK	0x00700
+ #define		APIC_DM_LOWEST		0x00100
+ #define		APIC_DM_SMI		0x00200
+ #define		APIC_DM_REMRD		0x00300
+diff --git a/arch/x86/kernel/cpu/amd.c b/arch/x86/kernel/cpu/amd.c
+index 8f9c307..396c693 100644
+--- a/arch/x86/kernel/cpu/amd.c
++++ b/arch/x86/kernel/cpu/amd.c
+@@ -568,7 +568,7 @@ static void __cpuinit init_amd(struct cpuinfo_x86 *c)
+ #endif
+ 
+ 	/* As a rule processors have APIC timer running in deep C states */
+-	if (c->x86 >= 0xf && !cpu_has_amd_erratum(amd_erratum_400))
++	if (c->x86 > 0xf && !cpu_has_amd_erratum(amd_erratum_400))
+ 		set_cpu_cap(c, X86_FEATURE_ARAT);
+ 
+ 	/*
+@@ -653,7 +653,7 @@ cpu_dev_register(amd_cpu_dev);
+  */
+ 
+ const int amd_erratum_400[] =
+-	AMD_OSVW_ERRATUM(1, AMD_MODEL_RANGE(0x0f, 0x4, 0x2, 0xff, 0xf),
++	AMD_OSVW_ERRATUM(1, AMD_MODEL_RANGE(0xf, 0x41, 0x2, 0xff, 0xf),
+ 			    AMD_MODEL_RANGE(0x10, 0x2, 0x1, 0xff, 0xf));
+ 
+ 
+diff --git a/arch/x86/kernel/cpu/mcheck/mce_amd.c b/arch/x86/kernel/cpu/mcheck/mce_amd.c
+index 8387792..ef3cd31 100644
+--- a/arch/x86/kernel/cpu/mcheck/mce_amd.c
++++ b/arch/x86/kernel/cpu/mcheck/mce_amd.c
+@@ -468,6 +468,7 @@ recurse:
+ out_free:
+ 	if (b) {
+ 		kobject_put(&b->kobj);
++		list_del(&b->miscj);
+ 		kfree(b);
+ 	}
+ 	return err;
+diff --git a/arch/x86/kernel/cpu/mcheck/therm_throt.c b/arch/x86/kernel/cpu/mcheck/therm_throt.c
+index 687638e..cf678c9 100644
+--- a/arch/x86/kernel/cpu/mcheck/therm_throt.c
++++ b/arch/x86/kernel/cpu/mcheck/therm_throt.c
+@@ -286,18 +286,20 @@ void intel_init_thermal(struct cpuinfo_x86 *c)
+ 	 */
+ 	rdmsr(MSR_IA32_MISC_ENABLE, l, h);
+ 
++	h = lvtthmr_init;
+ 	/*
+ 	 * The initial value of thermal LVT entries on all APs always reads
+ 	 * 0x10000 because APs are woken up by BSP issuing INIT-SIPI-SIPI
+ 	 * sequence to them and LVT registers are reset to 0s except for
+ 	 * the mask bits which are set to 1s when APs receive INIT IPI.
+-	 * Always restore the value that BIOS has programmed on AP based on
+-	 * BSP's info we saved since BIOS is always setting the same value
+-	 * for all threads/cores
++	 * If BIOS takes over the thermal interrupt and sets its interrupt
++	 * delivery mode to SMI (not fixed), it restores the value that the
++	 * BIOS has programmed on AP based on BSP's info we saved since BIOS
++	 * is always setting the same value for all threads/cores.
+ 	 */
+-	apic_write(APIC_LVTTHMR, lvtthmr_init);
++	if ((h & APIC_DM_FIXED_MASK) != APIC_DM_FIXED)
++		apic_write(APIC_LVTTHMR, lvtthmr_init);
+ 
+-	h = lvtthmr_init;
+ 
+ 	if ((l & MSR_IA32_MISC_ENABLE_TM1) && (h & APIC_DM_SMI)) {
+ 		printk(KERN_DEBUG
+diff --git a/drivers/net/Makefile b/drivers/net/Makefile
+index 246323d..6a793ae 100644
+--- a/drivers/net/Makefile
++++ b/drivers/net/Makefile
+@@ -138,7 +138,7 @@ obj-$(CONFIG_NE3210) += ne3210.o 8390.o
+ obj-$(CONFIG_SB1250_MAC) += sb1250-mac.o
+ obj-$(CONFIG_B44) += b44.o
+ obj-$(CONFIG_FORCEDETH) += forcedeth.o
+-obj-$(CONFIG_NE_H8300) += ne-h8300.o 8390.o
++obj-$(CONFIG_NE_H8300) += ne-h8300.o
+ obj-$(CONFIG_AX88796) += ax88796.o
+ obj-$(CONFIG_BCM63XX_ENET) += bcm63xx_enet.o
+ 
+@@ -208,7 +208,7 @@ obj-$(CONFIG_SC92031) += sc92031.o
+ obj-$(CONFIG_LP486E) += lp486e.o
+ 
+ obj-$(CONFIG_ETH16I) += eth16i.o
+-obj-$(CONFIG_ZORRO8390) += zorro8390.o 8390.o
++obj-$(CONFIG_ZORRO8390) += zorro8390.o
+ obj-$(CONFIG_HPLANCE) += hplance.o 7990.o
+ obj-$(CONFIG_MVME147_NET) += mvme147.o 7990.o
+ obj-$(CONFIG_EQUALIZER) += eql.o
+@@ -220,7 +220,7 @@ obj-$(CONFIG_SGI_IOC3_ETH) += ioc3-eth.o
+ obj-$(CONFIG_DECLANCE) += declance.o
+ obj-$(CONFIG_ATARILANCE) += atarilance.o
+ obj-$(CONFIG_A2065) += a2065.o
+-obj-$(CONFIG_HYDRA) += hydra.o 8390.o
++obj-$(CONFIG_HYDRA) += hydra.o
+ obj-$(CONFIG_ARIADNE) += ariadne.o
+ obj-$(CONFIG_CS89x0) += cs89x0.o
+ obj-$(CONFIG_MACSONIC) += macsonic.o
+diff --git a/drivers/net/ehea/ehea_ethtool.c b/drivers/net/ehea/ehea_ethtool.c
+index d768852..b636e17 100644
+--- a/drivers/net/ehea/ehea_ethtool.c
++++ b/drivers/net/ehea/ehea_ethtool.c
+@@ -53,15 +53,20 @@ static int ehea_get_settings(struct net_device *dev, struct ethtool_cmd *cmd)
+ 		cmd->duplex = -1;
+ 	}
+ 
+-	cmd->supported = (SUPPORTED_10000baseT_Full | SUPPORTED_1000baseT_Full
+-		       | SUPPORTED_100baseT_Full |  SUPPORTED_100baseT_Half
+-		       | SUPPORTED_10baseT_Full | SUPPORTED_10baseT_Half
+-		       | SUPPORTED_Autoneg | SUPPORTED_FIBRE);
+-
+-	cmd->advertising = (ADVERTISED_10000baseT_Full | ADVERTISED_Autoneg
+-			 | ADVERTISED_FIBRE);
++	if (cmd->speed == SPEED_10000) {
++		cmd->supported = (SUPPORTED_10000baseT_Full | SUPPORTED_FIBRE);
++		cmd->advertising = (ADVERTISED_10000baseT_Full | ADVERTISED_FIBRE);
++		cmd->port = PORT_FIBRE;
++	} else {
++		cmd->supported = (SUPPORTED_1000baseT_Full | SUPPORTED_100baseT_Full
++			       | SUPPORTED_100baseT_Half | SUPPORTED_10baseT_Full
++			       | SUPPORTED_10baseT_Half | SUPPORTED_Autoneg
++			       | SUPPORTED_TP);
++		cmd->advertising = (ADVERTISED_1000baseT_Full | ADVERTISED_Autoneg
++				 | ADVERTISED_TP);
++		cmd->port = PORT_TP;
++	}
+ 
+-	cmd->port = PORT_FIBRE;
+ 	cmd->autoneg = port->autoneg == 1 ? AUTONEG_ENABLE : AUTONEG_DISABLE;
+ 
+ 	return 0;
+diff --git a/drivers/net/hydra.c b/drivers/net/hydra.c
+index d496b6f..be1e2ef 100644
+--- a/drivers/net/hydra.c
++++ b/drivers/net/hydra.c
+@@ -98,15 +98,15 @@ static const struct net_device_ops hydra_netdev_ops = {
+ 	.ndo_open		= hydra_open,
+ 	.ndo_stop		= hydra_close,
+ 
+-	.ndo_start_xmit		= ei_start_xmit,
+-	.ndo_tx_timeout		= ei_tx_timeout,
+-	.ndo_get_stats		= ei_get_stats,
+-	.ndo_set_multicast_list = ei_set_multicast_list,
++	.ndo_start_xmit		= __ei_start_xmit,
++	.ndo_tx_timeout		= __ei_tx_timeout,
++	.ndo_get_stats		= __ei_get_stats,
++	.ndo_set_multicast_list = __ei_set_multicast_list,
+ 	.ndo_validate_addr	= eth_validate_addr,
+-	.ndo_set_mac_address 	= eth_mac_addr,
++	.ndo_set_mac_address	= eth_mac_addr,
+ 	.ndo_change_mtu		= eth_change_mtu,
+ #ifdef CONFIG_NET_POLL_CONTROLLER
+-	.ndo_poll_controller	= ei_poll,
++	.ndo_poll_controller	= __ei_poll,
+ #endif
+ };
+ 
+@@ -125,7 +125,7 @@ static int __devinit hydra_init(struct zorro_dev *z)
+ 	0x10, 0x12, 0x14, 0x16, 0x18, 0x1a, 0x1c, 0x1e,
+     };
+ 
+-    dev = alloc_ei_netdev();
++    dev = ____alloc_ei_netdev(0);
+     if (!dev)
+ 	return -ENOMEM;
+ 
+diff --git a/drivers/net/ne-h8300.c b/drivers/net/ne-h8300.c
+index 7bd6662..31da04f 100644
+--- a/drivers/net/ne-h8300.c
++++ b/drivers/net/ne-h8300.c
+@@ -167,7 +167,7 @@ static void cleanup_card(struct net_device *dev)
+ #ifndef MODULE
+ struct net_device * __init ne_probe(int unit)
+ {
+-	struct net_device *dev = alloc_ei_netdev();
++	struct net_device *dev = ____alloc_ei_netdev(0);
+ 	int err;
+ 
+ 	if (!dev)
+@@ -197,15 +197,15 @@ static const struct net_device_ops ne_netdev_ops = {
+ 	.ndo_open		= ne_open,
+ 	.ndo_stop		= ne_close,
+ 
+-	.ndo_start_xmit		= ei_start_xmit,
+-	.ndo_tx_timeout		= ei_tx_timeout,
+-	.ndo_get_stats		= ei_get_stats,
+-	.ndo_set_multicast_list = ei_set_multicast_list,
++	.ndo_start_xmit		= __ei_start_xmit,
++	.ndo_tx_timeout		= __ei_tx_timeout,
++	.ndo_get_stats		= __ei_get_stats,
++	.ndo_set_multicast_list = __ei_set_multicast_list,
+ 	.ndo_validate_addr	= eth_validate_addr,
+-	.ndo_set_mac_address 	= eth_mac_addr,
++	.ndo_set_mac_address	= eth_mac_addr,
+ 	.ndo_change_mtu		= eth_change_mtu,
+ #ifdef CONFIG_NET_POLL_CONTROLLER
+-	.ndo_poll_controller	= ei_poll,
++	.ndo_poll_controller	= __ei_poll,
+ #endif
+ };
+ 
+@@ -638,7 +638,7 @@ int init_module(void)
+ 	int err;
+ 
+ 	for (this_dev = 0; this_dev < MAX_NE_CARDS; this_dev++) {
+-		struct net_device *dev = alloc_ei_netdev();
++		struct net_device *dev = ____alloc_ei_netdev(0);
+ 		if (!dev)
+ 			break;
+ 		if (io[this_dev]) {
+diff --git a/drivers/net/netxen/netxen_nic.h b/drivers/net/netxen/netxen_nic.h
+index 71975ba..e52af5b 100644
+--- a/drivers/net/netxen/netxen_nic.h
++++ b/drivers/net/netxen/netxen_nic.h
+@@ -490,7 +490,6 @@ struct status_desc {
+ #define NX_P2_MN_ROMIMAGE_NAME		"nxromimg.bin"
+ #define NX_P3_CT_ROMIMAGE_NAME		"nx3fwct.bin"
+ #define NX_P3_MN_ROMIMAGE_NAME		"nx3fwmn.bin"
+-#define NX_UNIFIED_ROMIMAGE_NAME	"phanfw.bin"
+ #define NX_FLASH_ROMIMAGE_NAME		"flash"
+ 
+ extern char netxen_nic_driver_name[];
+diff --git a/drivers/net/netxen/netxen_nic_init.c b/drivers/net/netxen/netxen_nic_init.c
+index 562a488..7167c91 100644
+--- a/drivers/net/netxen/netxen_nic_init.c
++++ b/drivers/net/netxen/netxen_nic_init.c
+@@ -676,7 +676,6 @@ static char *fw_name[] = {
+ 	NX_P2_MN_ROMIMAGE_NAME,
+ 	NX_P3_CT_ROMIMAGE_NAME,
+ 	NX_P3_MN_ROMIMAGE_NAME,
+-	NX_UNIFIED_ROMIMAGE_NAME,
+ 	NX_FLASH_ROMIMAGE_NAME,
+ };
+ 
+diff --git a/drivers/net/netxen/netxen_nic_main.c b/drivers/net/netxen/netxen_nic_main.c
+index 9890a7e..166fc23 100644
+--- a/drivers/net/netxen/netxen_nic_main.c
++++ b/drivers/net/netxen/netxen_nic_main.c
+@@ -41,7 +41,6 @@ MODULE_VERSION(NETXEN_NIC_LINUX_VERSIONID);
+ MODULE_FIRMWARE(NX_P2_MN_ROMIMAGE_NAME);
+ MODULE_FIRMWARE(NX_P3_CT_ROMIMAGE_NAME);
+ MODULE_FIRMWARE(NX_P3_MN_ROMIMAGE_NAME);
+-MODULE_FIRMWARE(NX_UNIFIED_ROMIMAGE_NAME);
+ 
+ char netxen_nic_driver_name[] = "netxen_nic";
+ static char netxen_nic_driver_string[] = "NetXen Network Driver version "
+diff --git a/drivers/net/slip.c b/drivers/net/slip.c
+index fe3cebb..9a3088f 100644
+--- a/drivers/net/slip.c
++++ b/drivers/net/slip.c
+@@ -850,7 +850,9 @@ static int slip_open(struct tty_struct *tty)
+ 	/* Done.  We have linked the TTY line to a channel. */
+ 	rtnl_unlock();
+ 	tty->receive_room = 65536;	/* We don't flow control */
+-	return sl->dev->base_addr;
++
++	/* TTY layer expects 0 on success */
++	return 0;
+ 
+ err_free_bufs:
+ 	sl_free_bufs(sl);
+diff --git a/drivers/net/vmxnet3/vmxnet3_ethtool.c b/drivers/net/vmxnet3/vmxnet3_ethtool.c
+index c2c15e4..379d72b 100644
+--- a/drivers/net/vmxnet3/vmxnet3_ethtool.c
++++ b/drivers/net/vmxnet3/vmxnet3_ethtool.c
+@@ -288,6 +288,9 @@ vmxnet3_set_flags(struct net_device *netdev, u32 data) {
+ 		/* toggle the LRO feature*/
+ 		netdev->features ^= NETIF_F_LRO;
+ 
++		/* Update private LRO flag */
++		adapter->lro = lro_requested;
++
+ 		/* update harware LRO capability accordingly */
+ 		if (lro_requested)
+ 			adapter->shared->devRead.misc.uptFeatures &= UPT1_F_LRO;
+diff --git a/drivers/net/wireless/libertas/cmd.c b/drivers/net/wireless/libertas/cmd.c
+index 0a324dc..b1c41f7 100644
+--- a/drivers/net/wireless/libertas/cmd.c
++++ b/drivers/net/wireless/libertas/cmd.c
+@@ -1758,8 +1758,8 @@ int lbs_execute_next_command(struct lbs_private *priv)
+ 				    cpu_to_le16(CMD_SUBCMD_EXIT_PS)) {
+ 					lbs_deb_host(
+ 					       "EXEC_NEXT_CMD: ignore ENTER_PS cmd\n");
+-					list_del(&cmdnode->list);
+ 					spin_lock_irqsave(&priv->driver_lock, flags);
++					list_del(&cmdnode->list);
+ 					lbs_complete_command(priv, cmdnode, 0);
+ 					spin_unlock_irqrestore(&priv->driver_lock, flags);
+ 
+@@ -1771,8 +1771,8 @@ int lbs_execute_next_command(struct lbs_private *priv)
+ 				    (priv->psstate == PS_STATE_PRE_SLEEP)) {
+ 					lbs_deb_host(
+ 					       "EXEC_NEXT_CMD: ignore EXIT_PS cmd in sleep\n");
+-					list_del(&cmdnode->list);
+ 					spin_lock_irqsave(&priv->driver_lock, flags);
++					list_del(&cmdnode->list);
+ 					lbs_complete_command(priv, cmdnode, 0);
+ 					spin_unlock_irqrestore(&priv->driver_lock, flags);
+ 					priv->needtowakeup = 1;
+@@ -1785,7 +1785,9 @@ int lbs_execute_next_command(struct lbs_private *priv)
+ 				       "EXEC_NEXT_CMD: sending EXIT_PS\n");
+ 			}
+ 		}
++		spin_lock_irqsave(&priv->driver_lock, flags);
+ 		list_del(&cmdnode->list);
++		spin_unlock_irqrestore(&priv->driver_lock, flags);
+ 		lbs_deb_host("EXEC_NEXT_CMD: sending command 0x%04x\n",
+ 			    le16_to_cpu(cmd->command));
+ 		lbs_submit_command(priv, cmdnode);
+diff --git a/drivers/net/zorro8390.c b/drivers/net/zorro8390.c
+index 81c753a..25e720c 100644
+--- a/drivers/net/zorro8390.c
++++ b/drivers/net/zorro8390.c
+@@ -125,7 +125,7 @@ static int __devinit zorro8390_init_one(struct zorro_dev *z,
+ 
+     board = z->resource.start;
+     ioaddr = board+cards[i].offset;
+-    dev = alloc_ei_netdev();
++    dev = ____alloc_ei_netdev(0);
+     if (!dev)
+ 	return -ENOMEM;
+     if (!request_mem_region(ioaddr, NE_IO_EXTENT*2, DRV_NAME)) {
+@@ -145,15 +145,15 @@ static int __devinit zorro8390_init_one(struct zorro_dev *z,
+ static const struct net_device_ops zorro8390_netdev_ops = {
+ 	.ndo_open		= zorro8390_open,
+ 	.ndo_stop		= zorro8390_close,
+-	.ndo_start_xmit		= ei_start_xmit,
+-	.ndo_tx_timeout		= ei_tx_timeout,
+-	.ndo_get_stats		= ei_get_stats,
+-	.ndo_set_multicast_list = ei_set_multicast_list,
++	.ndo_start_xmit		= __ei_start_xmit,
++	.ndo_tx_timeout		= __ei_tx_timeout,
++	.ndo_get_stats		= __ei_get_stats,
++	.ndo_set_multicast_list = __ei_set_multicast_list,
+ 	.ndo_validate_addr	= eth_validate_addr,
+ 	.ndo_set_mac_address 	= eth_mac_addr,
+ 	.ndo_change_mtu		= eth_change_mtu,
+ #ifdef CONFIG_NET_POLL_CONTROLLER
+-	.ndo_poll_controller	= ei_poll,
++	.ndo_poll_controller	= __ei_poll,
+ #endif
+ };
+ 
+diff --git a/drivers/scsi/megaraid/megaraid_sas.c b/drivers/scsi/megaraid/megaraid_sas.c
+index 202fa0f..4709052 100644
+--- a/drivers/scsi/megaraid/megaraid_sas.c
++++ b/drivers/scsi/megaraid/megaraid_sas.c
+@@ -3072,6 +3072,9 @@ megasas_mgmt_fw_ioctl(struct megasas_instance *instance,
+ 	 * For each user buffer, create a mirror buffer and copy in
+ 	 */
+ 	for (i = 0; i < ioc->sge_count; i++) {
++		if (!ioc->sgl[i].iov_len)
++			continue;
++
+ 		kbuff_arr[i] = dma_alloc_coherent(&instance->pdev->dev,
+ 						    ioc->sgl[i].iov_len,
+ 						    &buf_handle, GFP_KERNEL);
+diff --git a/fs/cifs/connect.c b/fs/cifs/connect.c
+index 7df5937..6234417 100644
+--- a/fs/cifs/connect.c
++++ b/fs/cifs/connect.c
+@@ -799,8 +799,7 @@ static int
+ cifs_parse_mount_options(char *options, const char *devname,
+ 			 struct smb_vol *vol)
+ {
+-	char *value;
+-	char *data;
++	char *value, *data, *end;
+ 	unsigned int  temp_len, i, j;
+ 	char separator[2];
+ 	short int override_uid = -1;
+@@ -843,6 +842,7 @@ cifs_parse_mount_options(char *options, const char *devname,
+ 	if (!options)
+ 		return 1;
+ 
++	end = options + strlen(options);
+ 	if (strncmp(options, "sep=", 4) == 0) {
+ 		if (options[4] != 0) {
+ 			separator[0] = options[4];
+@@ -907,6 +907,7 @@ cifs_parse_mount_options(char *options, const char *devname,
+ 			the only illegal character in a password is null */
+ 
+ 			if ((value[temp_len] == 0) &&
++			    (value + temp_len < end) &&
+ 			    (value[temp_len+1] == separator[0])) {
+ 				/* reinsert comma */
+ 				value[temp_len] = separator[0];
+@@ -2230,6 +2231,11 @@ is_path_accessible(int xid, struct cifsTconInfo *tcon,
+ 			      0 /* not legacy */, cifs_sb->local_nls,
+ 			      cifs_sb->mnt_cifs_flags &
+ 				CIFS_MOUNT_MAP_SPECIAL_CHR);
++
++	if (rc == -EOPNOTSUPP || rc == -EINVAL)
++		rc = SMBQueryInformation(xid, tcon, full_path, pfile_info,
++				cifs_sb->local_nls, cifs_sb->mnt_cifs_flags &
++				  CIFS_MOUNT_MAP_SPECIAL_CHR);
+ 	kfree(pfile_info);
+ 	return rc;
+ }
+diff --git a/fs/cifs/sess.c b/fs/cifs/sess.c
+index 6d6ff4f..20ae71b 100644
+--- a/fs/cifs/sess.c
++++ b/fs/cifs/sess.c
+@@ -906,7 +906,9 @@ ssetup_ntlmssp_authenticate:
+ 	}
+ 
+ 	/* BB check if Unicode and decode strings */
+-	if (smb_buf->Flags2 & SMBFLG2_UNICODE) {
++	if (bytes_remaining == 0) {
++		/* no string area to decode, do nothing */
++	} else if (smb_buf->Flags2 & SMBFLG2_UNICODE) {
+ 		/* unicode string area must be word-aligned */
+ 		if (((unsigned long) bcc_ptr - (unsigned long) smb_buf) % 2) {
+ 			++bcc_ptr;
+diff --git a/fs/partitions/efi.c b/fs/partitions/efi.c
+index 49cfd5f..2aac776 100644
+--- a/fs/partitions/efi.c
++++ b/fs/partitions/efi.c
+@@ -349,6 +349,12 @@ is_gpt_valid(struct block_device *bdev, u64 lba,
+ 		goto fail;
+ 	}
+ 
++	/* Check that sizeof_partition_entry has the correct value */
++	if (le32_to_cpu((*gpt)->sizeof_partition_entry) != sizeof(gpt_entry)) {
++		pr_debug("GUID Partitition Entry Size check failed.\n");
++		goto fail;
++	}
++
+ 	if (!(*ptes = alloc_read_gpt_entries(bdev, *gpt)))
+ 		goto fail;
+ 
+diff --git a/kernel/time/clocksource.c b/kernel/time/clocksource.c
+index f8b0f96..bf4fe98 100644
+--- a/kernel/time/clocksource.c
++++ b/kernel/time/clocksource.c
+@@ -561,8 +561,8 @@ int clocksource_register(struct clocksource *cs)
+ 
+ 	mutex_lock(&clocksource_mutex);
+ 	clocksource_enqueue(cs);
+-	clocksource_select();
+ 	clocksource_enqueue_watchdog(cs);
++	clocksource_select();
+ 	mutex_unlock(&clocksource_mutex);
+ 	return 0;
+ }
+diff --git a/kernel/time/tick-broadcast.c b/kernel/time/tick-broadcast.c
+index 49446b1..8917fd3 100644
+--- a/kernel/time/tick-broadcast.c
++++ b/kernel/time/tick-broadcast.c
+@@ -523,10 +523,11 @@ static void tick_broadcast_init_next_event(struct cpumask *mask,
+  */
+ void tick_broadcast_setup_oneshot(struct clock_event_device *bc)
+ {
++	int cpu = smp_processor_id();
++
+ 	/* Set it up only once ! */
+ 	if (bc->event_handler != tick_handle_oneshot_broadcast) {
+ 		int was_periodic = bc->mode == CLOCK_EVT_MODE_PERIODIC;
+-		int cpu = smp_processor_id();
+ 
+ 		bc->event_handler = tick_handle_oneshot_broadcast;
+ 		clockevents_set_mode(bc, CLOCK_EVT_MODE_ONESHOT);
+@@ -552,6 +553,15 @@ void tick_broadcast_setup_oneshot(struct clock_event_device *bc)
+ 			tick_broadcast_set_event(tick_next_period, 1);
+ 		} else
+ 			bc->next_event.tv64 = KTIME_MAX;
++	} else {
++		/*
++		 * The first cpu which switches to oneshot mode sets
++		 * the bit for all other cpus which are in the general
++		 * (periodic) broadcast mask. So the bit is set and
++		 * would prevent the first broadcast enter after this
++		 * to program the bc device.
++		 */
++		tick_broadcast_clear_oneshot(cpu);
+ 	}
+ }
+ 
+diff --git a/kernel/time/timekeeping.c b/kernel/time/timekeeping.c
+index 26e2f37..f5e362f 100644
+--- a/kernel/time/timekeeping.c
++++ b/kernel/time/timekeeping.c
+@@ -168,8 +168,15 @@ int __read_mostly timekeeping_suspended;
+ static struct timespec xtime_cache __attribute__ ((aligned (16)));
+ void update_xtime_cache(u64 nsec)
+ {
+-	xtime_cache = xtime;
+-	timespec_add_ns(&xtime_cache, nsec);
++	/*
++	 * Use temporary variable so get_seconds() cannot catch
++	 * an intermediate xtime_cache.tv_sec value.
++	 * The ACCESS_ONCE() keeps the compiler from optimizing
++	 * out the intermediate value.
++	 */
++	struct timespec ts = xtime;
++	timespec_add_ns(&ts, nsec);
++	ACCESS_ONCE(xtime_cache) = ts;
+ }
+ 
+ /* must hold xtime_lock */
+diff --git a/net/dccp/options.c b/net/dccp/options.c
+index 1b08cae..b4a853e 100644
+--- a/net/dccp/options.c
++++ b/net/dccp/options.c
+@@ -131,6 +131,8 @@ int dccp_parse_options(struct sock *sk, struct dccp_request_sock *dreq,
+ 		case DCCPO_CHANGE_L ... DCCPO_CONFIRM_R:
+ 			if (pkt_type == DCCP_PKT_DATA)      /* RFC 4340, 6 */
+ 				break;
++			if (len == 0)
++				goto out_invalid_option;
+ 			rc = dccp_feat_parse_options(sk, dreq, mandatory, opt,
+ 						    *value, value + 1, len - 1);
+ 			if (rc)
