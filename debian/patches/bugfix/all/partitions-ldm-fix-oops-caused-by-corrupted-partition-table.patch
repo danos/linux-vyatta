@@ -1,0 +1,63 @@
+commit c340b1d640001c8c9ecff74f68fd90422ae2448a
+Author: Timo Warns <Warns@pre-sense.de>
+Date:   Thu Apr 14 15:21:56 2011 -0700
+
+    fs/partitions/ldm.c: fix oops caused by corrupted partition table
+    
+    The kernel automatically evaluates partition tables of storage devices.
+    The code for evaluating LDM partitions (in fs/partitions/ldm.c) contains
+    a bug that causes a kernel oops on certain corrupted LDM partitions.
+    A kernel subsystem seems to crash, because, after the oops, the kernel no
+    longer recognizes newly connected storage devices.
+    
+    The patch validates the value of vblk_size.
+    
+    [akpm@linux-foundation.org: coding-style fixes]
+    Signed-off-by: Timo Warns <warns@pre-sense.de>
+    Cc: Eugene Teo <eugeneteo@kernel.sg>
+    Cc: Harvey Harrison <harvey.harrison@gmail.com>
+    Cc: Richard Russon <rich@flatcap.org>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+    [dannf: backported to Debian's 2.6.26]
+
+diff -urpN linux-source-2.6.26.orig/fs/partitions/ldm.c linux-source-2.6.26/fs/partitions/ldm.c
+--- linux-source-2.6.26.orig/fs/partitions/ldm.c	2008-07-13 15:51:29.000000000 -0600
++++ linux-source-2.6.26/fs/partitions/ldm.c	2011-06-05 21:23:22.003023825 -0600
+@@ -1294,6 +1294,11 @@ static bool ldm_frag_add (const u8 *data
+ 
+ 	BUG_ON (!data || !frags);
+ 
++	if (size < 2 * VBLK_SIZE_HEAD) {
++		ldm_error("Value of size is to small.");
++		return false;
++	}
++
+ 	group = BE32 (data + 0x08);
+ 	rec   = BE16 (data + 0x0C);
+ 	num   = BE16 (data + 0x0E);
+@@ -1301,6 +1306,10 @@ static bool ldm_frag_add (const u8 *data
+ 		ldm_error ("A VBLK claims to have %d parts.", num);
+ 		return false;
+ 	}
++	if (rec >= num) {
++		ldm_error("REC value (%d) exceeds NUM value (%d)", rec, num);
++		return false;
++	}
+ 
+ 	list_for_each (item, frags) {
+ 		f = list_entry (item, struct frag, list);
+@@ -1329,10 +1338,9 @@ found:
+ 
+ 	f->map |= (1 << rec);
+ 
+-	if (num > 0) {
+-		data += VBLK_SIZE_HEAD;
+-		size -= VBLK_SIZE_HEAD;
+-	}
++	data += VBLK_SIZE_HEAD;
++	size -= VBLK_SIZE_HEAD;
++
+ 	memcpy (f->data+rec*(size-VBLK_SIZE_HEAD)+VBLK_SIZE_HEAD, data, size);
+ 
+ 	return true;
