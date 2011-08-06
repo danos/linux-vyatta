@@ -1,0 +1,73 @@
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Fri, 17 Jun 2011 10:04:22 -0500
+Subject: [PATCH 06/10] drm/i915: Maintain LRU order of inactive objects upon access by CPU (v2)
+
+commit f8fd3ab5b8bf8f99ea13ebbecabd5c8e42c82948 upstream.
+
+BugLink: http://bugs.launchpad.net/bugs/599017
+
+In order to reduce the penalty of fallbacks under memory pressure and to
+avoid a potential immediate ping-pong of evicting a mmaped buffer, we
+move the object to the tail of the inactive list when a page is freshly
+faulted or the object is moved into the CPU domain.
+
+We choose not to protect the CPU objects from casual eviction,
+preferring to keep the GPU active for as long as possible.
+
+v2: Daniel Vetter found a bug where I forgot that pinned objects are
+kept off the inactive list.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Signed-off-by: Eric Anholt <eric@anholt.net>
+(backported from commit 7d1c4804ae98cdee572d7d10d8a5deaa2e686285 upstream)
+
+Signed-off-by: Seth Forshee <seth.forshee@canonical.com>
+Signed-off-by: Stefan Bader <stefan.bader@canonical.com>
+---
+ drivers/gpu/drm/i915/i915_gem.c |   16 ++++++++++++++++
+ 1 files changed, 16 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index 2e4ff69..b3c7bd1 100644
+--- a/drivers/gpu/drm/i915/i915_gem.c
++++ b/drivers/gpu/drm/i915/i915_gem.c
+@@ -55,6 +55,14 @@ static int i915_gem_phys_pwrite(struct drm_device *dev, struct drm_gem_object *o
+ static LIST_HEAD(shrink_list);
+ static DEFINE_SPINLOCK(shrink_list_lock);
+ 
++static inline bool
++i915_gem_object_is_inactive(struct drm_i915_gem_object *obj_priv)
++{
++	return obj_priv->gtt_space &&
++		!obj_priv->active &&
++		obj_priv->pin_count == 0;
++}
++
+ int i915_gem_do_init(struct drm_device *dev, unsigned long start,
+ 		     unsigned long end)
+ {
+@@ -1068,6 +1076,11 @@ i915_gem_set_domain_ioctl(struct drm_device *dev, void *data,
+ 		ret = i915_gem_object_set_to_cpu_domain(obj, write_domain != 0);
+ 	}
+ 
++	
++	/* Maintain LRU order of "inactive" objects */
++	if (ret == 0 && i915_gem_object_is_inactive(obj_priv))
++		list_move_tail(&obj_priv->list, &dev_priv->mm.inactive_list);
++
+ 	drm_gem_object_unreference(obj);
+ 	mutex_unlock(&dev->struct_mutex);
+ 	return ret;
+@@ -1203,6 +1216,9 @@ int i915_gem_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+ 			goto unlock;
+ 	}
+ 
++	if (i915_gem_object_is_inactive(obj_priv))
++		list_move_tail(&obj_priv->list, &dev_priv->mm.inactive_list);
++
+ 	pfn = ((dev->agp->base + obj_priv->gtt_offset) >> PAGE_SHIFT) +
+ 		page_offset;
+ 
+-- 
+1.7.2.5
+
