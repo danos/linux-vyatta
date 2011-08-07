@@ -1,0 +1,1092 @@
+diff --git a/arch/um/kernel/dyn.lds.S b/arch/um/kernel/dyn.lds.S
+index 7fcad58..3d6b43f 100644
+--- a/arch/um/kernel/dyn.lds.S
++++ b/arch/um/kernel/dyn.lds.S
+@@ -50,8 +50,18 @@ SECTIONS
+   .rela.got       : { *(.rela.got) }
+   .rel.bss        : { *(.rel.bss .rel.bss.* .rel.gnu.linkonce.b.*) }
+   .rela.bss       : { *(.rela.bss .rela.bss.* .rela.gnu.linkonce.b.*) }
+-  .rel.plt        : { *(.rel.plt) }
+-  .rela.plt       : { *(.rela.plt) }
++  .rel.plt : {
++	*(.rel.plt)
++	PROVIDE_HIDDEN(__rel_iplt_start = .);
++	*(.rel.iplt)
++	PROVIDE_HIDDEN(__rel_iplt_end = .);
++  }
++  .rela.plt : {
++	*(.rela.plt)
++	PROVIDE_HIDDEN(__rela_iplt_start = .);
++	*(.rela.iplt)
++	PROVIDE_HIDDEN(__rela_iplt_end = .);
++  }
+   .init           : {
+     KEEP (*(.init))
+   } =0x90909090
+diff --git a/arch/um/kernel/uml.lds.S b/arch/um/kernel/uml.lds.S
+index 664f942..79a077a 100644
+--- a/arch/um/kernel/uml.lds.S
++++ b/arch/um/kernel/uml.lds.S
+@@ -43,6 +43,23 @@ SECTIONS
+ 	__syscall_stub_end = .;
+   }
+ 
++  /*
++   * These are needed even in a static link, even if they wind up being empty.
++   * Newer glibc needs these __rel{,a}_iplt_{start,end} symbols.
++   */
++  .rel.plt : {
++	*(.rel.plt)
++	PROVIDE_HIDDEN(__rel_iplt_start = .);
++	*(.rel.iplt)
++	PROVIDE_HIDDEN(__rel_iplt_end = .);
++  }
++  .rela.plt : {
++	*(.rela.plt)
++	PROVIDE_HIDDEN(__rela_iplt_start = .);
++	*(.rela.iplt)
++	PROVIDE_HIDDEN(__rela_iplt_end = .);
++  }
++
+   #include "asm/common.lds.S"
+ 
+   init.data : { INIT_DATA }
+diff --git a/arch/um/os-Linux/mem.c b/arch/um/os-Linux/mem.c
+index 93a11d7..e696144 100644
+--- a/arch/um/os-Linux/mem.c
++++ b/arch/um/os-Linux/mem.c
+@@ -10,6 +10,7 @@
+ #include <errno.h>
+ #include <fcntl.h>
+ #include <string.h>
++#include <sys/stat.h>
+ #include <sys/mman.h>
+ #include <sys/param.h>
+ #include "init.h"
+diff --git a/arch/x86/xen/mmu.c b/arch/x86/xen/mmu.c
+index 356a799..3f90a2c 100644
+--- a/arch/x86/xen/mmu.c
++++ b/arch/x86/xen/mmu.c
+@@ -1658,6 +1658,11 @@ static __init void xen_map_identity_early(pmd_t *pmd, unsigned long max_pfn)
+ 		for (pteidx = 0; pteidx < PTRS_PER_PTE; pteidx++, pfn++) {
+ 			pte_t pte;
+ 
++#ifdef CONFIG_X86_32
++			if (pfn > max_pfn_mapped)
++				max_pfn_mapped = pfn;
++#endif
++
+ 			if (!pte_none(pte_page[pteidx]))
+ 				continue;
+ 
+@@ -1770,7 +1775,9 @@ __init pgd_t *xen_setup_kernel_pagetable(pgd_t *pgd,
+ {
+ 	pmd_t *kernel_pmd;
+ 
+-	max_pfn_mapped = PFN_DOWN(__pa(xen_start_info->mfn_list));
++	max_pfn_mapped = PFN_DOWN(__pa(xen_start_info->pt_base) +
++				  xen_start_info->nr_pt_frames * PAGE_SIZE +
++				  512*1024);
+ 
+ 	kernel_pmd = m2v(pgd[KERNEL_PGD_BOUNDARY].pgd);
+ 	memcpy(level2_kernel_pgt, kernel_pmd, sizeof(pmd_t) * PTRS_PER_PMD);
+diff --git a/block/cfq-iosched.c b/block/cfq-iosched.c
+index aa1e953..847c947 100644
+--- a/block/cfq-iosched.c
++++ b/block/cfq-iosched.c
+@@ -1540,8 +1540,14 @@ static void __cfq_exit_single_io_context(struct cfq_data *cfqd,
+ 	cic->dead_key = (unsigned long) cic->key;
+ 	cic->key = NULL;
+ 
+-	if (ioc->ioc_data == cic)
++	rcu_read_lock();
++	if (rcu_dereference(ioc->ioc_data) == cic) {
++		rcu_read_unlock();
++		spin_lock(&ioc->lock);
+ 		rcu_assign_pointer(ioc->ioc_data, NULL);
++		spin_unlock(&ioc->lock);
++	} else
++		rcu_read_unlock();
+ 
+ 	if (cic->cfqq[BLK_RW_ASYNC]) {
+ 		cfq_exit_cfqq(cfqd, cic->cfqq[BLK_RW_ASYNC]);
+diff --git a/drivers/char/tty_ldisc.c b/drivers/char/tty_ldisc.c
+index cf0bfc6..d814a3d 100644
+--- a/drivers/char/tty_ldisc.c
++++ b/drivers/char/tty_ldisc.c
+@@ -539,7 +539,7 @@ static int tty_ldisc_halt(struct tty_struct *tty)
+ static int tty_ldisc_wait_idle(struct tty_struct *tty)
+ {
+ 	int ret;
+-	ret = wait_event_interruptible_timeout(tty_ldisc_idle,
++	ret = wait_event_timeout(tty_ldisc_idle,
+ 			atomic_read(&tty->ldisc->users) == 1, 5 * HZ);
+ 	if (ret < 0)
+ 		return ret;
+@@ -735,6 +735,8 @@ static int tty_ldisc_reinit(struct tty_struct *tty, int ldisc)
+ 	if (IS_ERR(ld))
+ 		return -1;
+ 
++	WARN_ON_ONCE(tty_ldisc_wait_idle(tty));
++
+ 	tty_ldisc_close(tty, tty->ldisc);
+ 	tty_ldisc_put(tty->ldisc);
+ 	tty->ldisc = NULL;
+diff --git a/drivers/i2c/busses/i2c-taos-evm.c b/drivers/i2c/busses/i2c-taos-evm.c
+index dd39c1e..26c352a 100644
+--- a/drivers/i2c/busses/i2c-taos-evm.c
++++ b/drivers/i2c/busses/i2c-taos-evm.c
+@@ -234,7 +234,7 @@ static int taos_connect(struct serio *serio, struct serio_driver *drv)
+ 
+ 	if (taos->state != TAOS_STATE_IDLE) {
+ 		err = -ENODEV;
+-		dev_dbg(&serio->dev, "TAOS EVM reset failed (state=%d, "
++		dev_err(&serio->dev, "TAOS EVM reset failed (state=%d, "
+ 			"pos=%d)\n", taos->state, taos->pos);
+ 		goto exit_close;
+ 	}
+@@ -255,7 +255,7 @@ static int taos_connect(struct serio *serio, struct serio_driver *drv)
+ 					 msecs_to_jiffies(250));
+ 	if (taos->state != TAOS_STATE_IDLE) {
+ 		err = -ENODEV;
+-		dev_err(&adapter->dev, "Echo off failed "
++		dev_err(&serio->dev, "TAOS EVM echo off failed "
+ 			"(state=%d)\n", taos->state);
+ 		goto exit_close;
+ 	}
+@@ -263,7 +263,7 @@ static int taos_connect(struct serio *serio, struct serio_driver *drv)
+ 	err = i2c_add_adapter(adapter);
+ 	if (err)
+ 		goto exit_close;
+-	dev_dbg(&serio->dev, "Connected to TAOS EVM\n");
++	dev_info(&serio->dev, "Connected to TAOS EVM\n");
+ 
+ 	taos->client = taos_instantiate_device(adapter);
+ 	return 0;
+@@ -288,7 +288,7 @@ static void taos_disconnect(struct serio *serio)
+ 	serio_set_drvdata(serio, NULL);
+ 	kfree(taos);
+ 
+-	dev_dbg(&serio->dev, "Disconnected from TAOS EVM\n");
++	dev_info(&serio->dev, "Disconnected from TAOS EVM\n");
+ }
+ 
+ static struct serio_device_id taos_serio_ids[] = {
+diff --git a/drivers/md/md.c b/drivers/md/md.c
+index 7c5129f..c199c70 100644
+--- a/drivers/md/md.c
++++ b/drivers/md/md.c
+@@ -6623,6 +6623,7 @@ static int remove_and_add_spares(mddev_t *mddev)
+ 		list_for_each_entry(rdev, &mddev->disks, same_set) {
+ 			if (rdev->raid_disk >= 0 &&
+ 			    !test_bit(In_sync, &rdev->flags) &&
++			    !test_bit(Faulty, &rdev->flags) &&
+ 			    !test_bit(Blocked, &rdev->flags))
+ 				spares++;
+ 			if (rdev->raid_disk < 0
+diff --git a/drivers/media/video/uvc/uvc_queue.c b/drivers/media/video/uvc/uvc_queue.c
+index f854698..348cb71 100644
+--- a/drivers/media/video/uvc/uvc_queue.c
++++ b/drivers/media/video/uvc/uvc_queue.c
+@@ -165,6 +165,8 @@ int uvc_free_buffers(struct uvc_video_queue *queue)
+ 	}
+ 
+ 	if (queue->count) {
++		uvc_queue_cancel(queue, 0);
++		INIT_LIST_HEAD(&queue->mainqueue);
+ 		vfree(queue->mem);
+ 		queue->count = 0;
+ 	}
+diff --git a/drivers/net/hamradio/6pack.c b/drivers/net/hamradio/6pack.c
+index fb58830..0e5b54b 100644
+--- a/drivers/net/hamradio/6pack.c
++++ b/drivers/net/hamradio/6pack.c
+@@ -690,10 +690,10 @@ static void sixpack_close(struct tty_struct *tty)
+ {
+ 	struct sixpack *sp;
+ 
+-	write_lock(&disc_data_lock);
++	write_lock_bh(&disc_data_lock);
+ 	sp = tty->disc_data;
+ 	tty->disc_data = NULL;
+-	write_unlock(&disc_data_lock);
++	write_unlock_bh(&disc_data_lock);
+ 	if (!sp)
+ 		return;
+ 
+diff --git a/drivers/net/hamradio/mkiss.c b/drivers/net/hamradio/mkiss.c
+index db4b7f1..6cfc2b4 100644
+--- a/drivers/net/hamradio/mkiss.c
++++ b/drivers/net/hamradio/mkiss.c
+@@ -811,10 +811,10 @@ static void mkiss_close(struct tty_struct *tty)
+ {
+ 	struct mkiss *ax;
+ 
+-	write_lock(&disc_data_lock);
++	write_lock_bh(&disc_data_lock);
+ 	ax = tty->disc_data;
+ 	tty->disc_data = NULL;
+-	write_unlock(&disc_data_lock);
++	write_unlock_bh(&disc_data_lock);
+ 
+ 	if (!ax)
+ 		return;
+diff --git a/drivers/net/wireless/ath/ath5k/eeprom.c b/drivers/net/wireless/ath/ath5k/eeprom.c
+index 9a96550..caed62b 100644
+--- a/drivers/net/wireless/ath/ath5k/eeprom.c
++++ b/drivers/net/wireless/ath/ath5k/eeprom.c
+@@ -1588,14 +1588,12 @@ ath5k_eeprom_free_pcal_info(struct ath5k_hw *ah, int mode)
+ 		if (!chinfo[pier].pd_curves)
+ 			continue;
+ 
+-		for (pdg = 0; pdg < ee->ee_pd_gains[mode]; pdg++) {
++		for (pdg = 0; pdg < AR5K_EEPROM_N_PD_CURVES; pdg++) {
+ 			struct ath5k_pdgain_info *pd =
+ 					&chinfo[pier].pd_curves[pdg];
+ 
+-			if (pd != NULL) {
+-				kfree(pd->pd_step);
+-				kfree(pd->pd_pwr);
+-			}
++			kfree(pd->pd_step);
++			kfree(pd->pd_pwr);
+ 		}
+ 
+ 		kfree(chinfo[pier].pd_curves);
+diff --git a/drivers/usb/core/driver.c b/drivers/usb/core/driver.c
+index d784a8b..3ac64a5 100644
+--- a/drivers/usb/core/driver.c
++++ b/drivers/usb/core/driver.c
+@@ -1187,13 +1187,22 @@ static int usb_suspend_both(struct usb_device *udev, pm_message_t msg)
+ 		for (; i < udev->actconfig->desc.bNumInterfaces; i++) {
+ 			intf = udev->actconfig->interface[i];
+ 			status = usb_suspend_interface(udev, intf, msg);
++
++			/* Ignore errors during system sleep transitions */
++			if (!(msg.event & PM_EVENT_AUTO))
++				status = 0;
+ 			if (status != 0)
+ 				break;
+ 		}
+ 	}
+-	if (status == 0)
++	if (status == 0) {
+ 		status = usb_suspend_device(udev, msg);
+ 
++		/* Again, ignore errors during system sleep transitions */
++		if (!(msg.event & PM_EVENT_AUTO))
++			status = 0;
++	}
++
+ 	/* If the suspend failed, resume interfaces that did get suspended */
+ 	if (status != 0) {
+ 		pm_message_t msg2;
+diff --git a/drivers/usb/core/hub.c b/drivers/usb/core/hub.c
+index 03eed28..2b428fc 100644
+--- a/drivers/usb/core/hub.c
++++ b/drivers/usb/core/hub.c
+@@ -2188,6 +2188,10 @@ int usb_port_suspend(struct usb_device *udev, pm_message_t msg)
+ 				USB_DEVICE_REMOTE_WAKEUP, 0,
+ 				NULL, 0,
+ 				USB_CTRL_SET_TIMEOUT);
++
++		/* System sleep transitions should never fail */
++		if (!(msg.event & PM_EVENT_AUTO))
++			status = 0;
+ 	} else {
+ 		/* device has up to 10 msec to fully suspend */
+ 		dev_dbg(&udev->dev, "usb %ssuspend\n",
+@@ -2427,16 +2431,15 @@ static int hub_suspend(struct usb_interface *intf, pm_message_t msg)
+ 	struct usb_device	*hdev = hub->hdev;
+ 	unsigned		port1;
+ 
+-	/* fail if children aren't already suspended */
++	/* Warn if children aren't already suspended */
+ 	for (port1 = 1; port1 <= hdev->maxchild; port1++) {
+ 		struct usb_device	*udev;
+ 
+ 		udev = hdev->children [port1-1];
+ 		if (udev && udev->can_submit) {
+-			if (!(msg.event & PM_EVENT_AUTO))
+-				dev_dbg(&intf->dev, "port %d nyet suspended\n",
+-						port1);
+-			return -EBUSY;
++			dev_warn(&intf->dev, "port %d nyet suspended\n", port1);
++			if (msg.event & PM_EVENT_AUTO)
++				return -EBUSY;
+ 		}
+ 	}
+ 
+diff --git a/drivers/usb/host/xhci-hcd.c b/drivers/usb/host/xhci-hcd.c
+index a24a92f..56661a2 100644
+--- a/drivers/usb/host/xhci-hcd.c
++++ b/drivers/usb/host/xhci-hcd.c
+@@ -979,6 +979,7 @@ int xhci_add_endpoint(struct usb_hcd *hcd, struct usb_device *udev,
+ 	u32 added_ctxs;
+ 	unsigned int last_ctx;
+ 	u32 new_add_flags, new_drop_flags, new_slot_info;
++	struct xhci_virt_device *virt_dev;
+ 	int ret = 0;
+ 
+ 	ret = xhci_check_args(hcd, udev, ep, 1, __func__);
+@@ -1007,11 +1008,25 @@ int xhci_add_endpoint(struct usb_hcd *hcd, struct usb_device *udev,
+ 		return -EINVAL;
+ 	}
+ 
+-	in_ctx = xhci->devs[udev->slot_id]->in_ctx;
+-	out_ctx = xhci->devs[udev->slot_id]->out_ctx;
++	virt_dev = xhci->devs[udev->slot_id];
++	in_ctx = virt_dev->in_ctx;
++	out_ctx = virt_dev->out_ctx;
+ 	ctrl_ctx = xhci_get_input_control_ctx(xhci, in_ctx);
+ 	ep_index = xhci_get_endpoint_index(&ep->desc);
+ 	ep_ctx = xhci_get_ep_ctx(xhci, out_ctx, ep_index);
++
++	/* If this endpoint is already in use, and the upper layers are trying
++	 * to add it again without dropping it, reject the addition.
++	 */
++	if (virt_dev->eps[ep_index].ring &&
++			!(le32_to_cpu(ctrl_ctx->drop_flags) &
++				xhci_get_endpoint_flag(&ep->desc))) {
++		xhci_warn(xhci, "Trying to add endpoint 0x%x "
++				"without dropping it.\n",
++				(unsigned int) ep->desc.bEndpointAddress);
++		return -EINVAL;
++	}
++
+ 	/* If the HCD has already noted the endpoint is enabled,
+ 	 * ignore this request.
+ 	 */
+@@ -1026,8 +1041,7 @@ int xhci_add_endpoint(struct usb_hcd *hcd, struct usb_device *udev,
+ 	 * process context, not interrupt context (or so documenation
+ 	 * for usb_set_interface() and usb_set_configuration() claim).
+ 	 */
+-	if (xhci_endpoint_init(xhci, xhci->devs[udev->slot_id],
+-				udev, ep, GFP_KERNEL) < 0) {
++	if (xhci_endpoint_init(xhci, virt_dev, udev, ep, GFP_NOIO) < 0) {
+ 		dev_dbg(&udev->dev, "%s - could not initialize ep %#x\n",
+ 				__func__, ep->desc.bEndpointAddress);
+ 		return -ENOMEM;
+diff --git a/drivers/watchdog/mtx-1_wdt.c b/drivers/watchdog/mtx-1_wdt.c
+index 08e8a6a..e797a2c 100644
+--- a/drivers/watchdog/mtx-1_wdt.c
++++ b/drivers/watchdog/mtx-1_wdt.c
+@@ -211,6 +211,12 @@ static int __devinit mtx1_wdt_probe(struct platform_device *pdev)
+ 	int ret;
+ 
+ 	mtx1_wdt_device.gpio = pdev->resource[0].start;
++	ret = gpio_request_one(mtx1_wdt_device.gpio,
++				GPIOF_OUT_INIT_HIGH, "mtx1-wdt");
++	if (ret < 0) {
++		dev_err(&pdev->dev, "failed to request gpio");
++		return ret;
++	}
+ 
+ 	spin_lock_init(&mtx1_wdt_device.lock);
+ 	init_completion(&mtx1_wdt_device.stop);
+@@ -236,6 +242,8 @@ static int __devexit mtx1_wdt_remove(struct platform_device *pdev)
+ 		mtx1_wdt_device.queue = 0;
+ 		wait_for_completion(&mtx1_wdt_device.stop);
+ 	}
++
++	gpio_free(mtx1_wdt_device.gpio);
+ 	misc_deregister(&mtx1_wdt_misc);
+ 	return 0;
+ }
+diff --git a/fs/inode.c b/fs/inode.c
+index 4d8e3be..8bbe005 100644
+--- a/fs/inode.c
++++ b/fs/inode.c
+@@ -256,6 +256,20 @@ void destroy_inode(struct inode *inode)
+ 		kmem_cache_free(inode_cachep, (inode));
+ }
+ 
++void address_space_init_once(struct address_space *mapping)
++{
++	memset(mapping, 0, sizeof(*mapping));
++	INIT_RADIX_TREE(&mapping->page_tree, GFP_ATOMIC);
++	spin_lock_init(&mapping->tree_lock);
++	spin_lock_init(&mapping->i_mmap_lock);
++	INIT_LIST_HEAD(&mapping->private_list);
++	spin_lock_init(&mapping->private_lock);
++	INIT_RAW_PRIO_TREE_ROOT(&mapping->i_mmap);
++	INIT_LIST_HEAD(&mapping->i_mmap_nonlinear);
++	mutex_init(&mapping->unmap_mutex);
++}
++EXPORT_SYMBOL(address_space_init_once);
++
+ /*
+  * These are initializations that only need to be done
+  * once, because the fields are idempotent across use
+@@ -267,13 +281,7 @@ void inode_init_once(struct inode *inode)
+ 	INIT_HLIST_NODE(&inode->i_hash);
+ 	INIT_LIST_HEAD(&inode->i_dentry);
+ 	INIT_LIST_HEAD(&inode->i_devices);
+-	INIT_RADIX_TREE(&inode->i_data.page_tree, GFP_ATOMIC);
+-	spin_lock_init(&inode->i_data.tree_lock);
+-	spin_lock_init(&inode->i_data.i_mmap_lock);
+-	INIT_LIST_HEAD(&inode->i_data.private_list);
+-	spin_lock_init(&inode->i_data.private_lock);
+-	INIT_RAW_PRIO_TREE_ROOT(&inode->i_data.i_mmap);
+-	INIT_LIST_HEAD(&inode->i_data.i_mmap_nonlinear);
++	address_space_init_once(&inode->i_data);
+ 	i_size_ordered_init(inode);
+ #ifdef CONFIG_INOTIFY
+ 	INIT_LIST_HEAD(&inode->inotify_watches);
+diff --git a/fs/nilfs2/btnode.c b/fs/nilfs2/btnode.c
+index 84c2538..8dff317 100644
+--- a/fs/nilfs2/btnode.c
++++ b/fs/nilfs2/btnode.c
+@@ -34,19 +34,6 @@
+ #include "btnode.h"
+ 
+ 
+-void nilfs_btnode_cache_init_once(struct address_space *btnc)
+-{
+-	memset(btnc, 0, sizeof(*btnc));
+-	INIT_RADIX_TREE(&btnc->page_tree, GFP_ATOMIC);
+-	spin_lock_init(&btnc->tree_lock);
+-	INIT_LIST_HEAD(&btnc->private_list);
+-	spin_lock_init(&btnc->private_lock);
+-
+-	spin_lock_init(&btnc->i_mmap_lock);
+-	INIT_RAW_PRIO_TREE_ROOT(&btnc->i_mmap);
+-	INIT_LIST_HEAD(&btnc->i_mmap_nonlinear);
+-}
+-
+ static const struct address_space_operations def_btnode_aops = {
+ 	.sync_page		= block_sync_page,
+ };
+diff --git a/fs/nilfs2/btnode.h b/fs/nilfs2/btnode.h
+index 3e22751..067913e 100644
+--- a/fs/nilfs2/btnode.h
++++ b/fs/nilfs2/btnode.h
+@@ -37,7 +37,6 @@ struct nilfs_btnode_chkey_ctxt {
+ 	struct buffer_head *newbh;
+ };
+ 
+-void nilfs_btnode_cache_init_once(struct address_space *);
+ void nilfs_btnode_cache_init(struct address_space *, struct backing_dev_info *);
+ void nilfs_btnode_cache_clear(struct address_space *);
+ int nilfs_btnode_submit_block(struct address_space *, __u64, sector_t,
+diff --git a/fs/nilfs2/super.c b/fs/nilfs2/super.c
+index 63e7b10..93c11af3 100644
+--- a/fs/nilfs2/super.c
++++ b/fs/nilfs2/super.c
+@@ -166,7 +166,7 @@ static void init_once(void *obj)
+ #ifdef CONFIG_NILFS_XATTR
+ 	init_rwsem(&ii->xattr_sem);
+ #endif
+-	nilfs_btnode_cache_init_once(&ii->i_btnode_cache);
++	address_space_init_once(&ii->i_btnode_cache);
+ 	ii->i_bmap = (struct nilfs_bmap *)&ii->i_bmap_union;
+ 	inode_init_once(&ii->vfs_inode);
+ }
+diff --git a/include/asm-generic/bug.h b/include/asm-generic/bug.h
+index 4b67559..d48ddf0 100644
+--- a/include/asm-generic/bug.h
++++ b/include/asm-generic/bug.h
+@@ -50,6 +50,22 @@ struct bug_entry {
+ #define BUG_ON(condition) do { if (unlikely(condition)) BUG(); } while(0)
+ #endif
+ 
++#define __WARN_RATELIMIT(condition, state, format...)		\
++({								\
++	int rtn = 0;						\
++	if (unlikely(__ratelimit(state)))			\
++		rtn = WARN(condition, format);			\
++	rtn;							\
++})
++
++#define WARN_RATELIMIT(condition, format...)			\
++({								\
++	static DEFINE_RATELIMIT_STATE(_rs,			\
++				      DEFAULT_RATELIMIT_INTERVAL,	\
++				      DEFAULT_RATELIMIT_BURST);	\
++	__WARN_RATELIMIT(condition, &_rs, format);		\
++})
++
+ /*
+  * WARN(), WARN_ON(), WARN_ON_ONCE, and so on can be used to report
+  * significant issues that need prompt attention if they should ever
+diff --git a/include/linux/clocksource.h b/include/linux/clocksource.h
+index f73bc1b..ca5c0c4 100644
+--- a/include/linux/clocksource.h
++++ b/include/linux/clocksource.h
+@@ -190,6 +190,7 @@ struct clocksource {
+ #ifdef CONFIG_CLOCKSOURCE_WATCHDOG
+ 	/* Watchdog related data, used by the framework */
+ 	struct list_head wd_list;
++	cycle_t cs_last;
+ 	cycle_t wd_last;
+ #endif
+ };
+diff --git a/include/linux/fs.h b/include/linux/fs.h
+index 1ff0962..1b9a47a 100644
+--- a/include/linux/fs.h
++++ b/include/linux/fs.h
+@@ -635,6 +635,7 @@ struct address_space {
+ 	spinlock_t		private_lock;	/* for use by the address_space */
+ 	struct list_head	private_list;	/* ditto */
+ 	struct address_space	*assoc_mapping;	/* ditto */
++	struct mutex		unmap_mutex;    /* to protect unmapping */
+ } __attribute__((aligned(sizeof(long))));
+ 	/*
+ 	 * On most architectures that alignment is already the case; but
+@@ -2158,6 +2159,7 @@ extern loff_t vfs_llseek(struct file *file, loff_t offset, int origin);
+ 
+ extern int inode_init_always(struct super_block *, struct inode *);
+ extern void inode_init_once(struct inode *);
++extern void address_space_init_once(struct address_space *mapping);
+ extern void inode_add_to_lists(struct super_block *, struct inode *);
+ extern void iput(struct inode *);
+ extern struct inode * igrab(struct inode *);
+diff --git a/include/linux/if_packet.h b/include/linux/if_packet.h
+index dea7d6b..8851a01 100644
+--- a/include/linux/if_packet.h
++++ b/include/linux/if_packet.h
+@@ -63,6 +63,7 @@ struct tpacket_auxdata
+ 	__u16		tp_mac;
+ 	__u16		tp_net;
+ 	__u16		tp_vlan_tci;
++	__u16		tp_padding;
+ };
+ 
+ /* Rx ring - header status */
+@@ -103,6 +104,7 @@ struct tpacket2_hdr
+ 	__u32		tp_sec;
+ 	__u32		tp_nsec;
+ 	__u16		tp_vlan_tci;
++	__u16		tp_padding;
+ };
+ 
+ #define TPACKET2_HDRLEN		(TPACKET_ALIGN(sizeof(struct tpacket2_hdr)) + sizeof(struct sockaddr_ll))
+diff --git a/include/net/netlink.h b/include/net/netlink.h
+index a63b219..c344646 100644
+--- a/include/net/netlink.h
++++ b/include/net/netlink.h
+@@ -384,7 +384,7 @@ static inline int nlmsg_parse(const struct nlmsghdr *nlh, int hdrlen,
+  *
+  * Returns the first attribute which matches the specified type.
+  */
+-static inline struct nlattr *nlmsg_find_attr(struct nlmsghdr *nlh,
++static inline struct nlattr *nlmsg_find_attr(const struct nlmsghdr *nlh,
+ 					     int hdrlen, int attrtype)
+ {
+ 	return nla_find(nlmsg_attrdata(nlh, hdrlen),
+diff --git a/kernel/power/snapshot.c b/kernel/power/snapshot.c
+index a8520b0..356f487 100644
+--- a/kernel/power/snapshot.c
++++ b/kernel/power/snapshot.c
+@@ -1120,9 +1120,19 @@ static unsigned long preallocate_image_pages(unsigned long nr_pages, gfp_t mask)
+ 	return nr_alloc;
+ }
+ 
+-static unsigned long preallocate_image_memory(unsigned long nr_pages)
++static unsigned long preallocate_image_memory(unsigned long nr_pages,
++					      unsigned long avail_normal)
+ {
+-	return preallocate_image_pages(nr_pages, GFP_IMAGE);
++	unsigned long alloc;
++
++	if (avail_normal <= alloc_normal)
++		return 0;
++
++	alloc = avail_normal - alloc_normal;
++	if (nr_pages < alloc)
++		alloc = nr_pages;
++
++	return preallocate_image_pages(alloc, GFP_IMAGE);
+ }
+ 
+ #ifdef CONFIG_HIGHMEM
+@@ -1168,15 +1178,26 @@ static inline unsigned long preallocate_highmem_fraction(unsigned long nr_pages,
+  */
+ static void free_unnecessary_pages(void)
+ {
+-	unsigned long save_highmem, to_free_normal, to_free_highmem;
++	unsigned long save, to_free_normal, to_free_highmem;
+ 
+-	to_free_normal = alloc_normal - count_data_pages();
+-	save_highmem = count_highmem_pages();
+-	if (alloc_highmem > save_highmem) {
+-		to_free_highmem = alloc_highmem - save_highmem;
++	save = count_data_pages();
++	if (alloc_normal >= save) {
++		to_free_normal = alloc_normal - save;
++		save = 0;
++	} else {
++		to_free_normal = 0;
++		save -= alloc_normal;
++	}
++	save += count_highmem_pages();
++	if (alloc_highmem >= save) {
++		to_free_highmem = alloc_highmem - save;
+ 	} else {
+ 		to_free_highmem = 0;
+-		to_free_normal -= save_highmem - alloc_highmem;
++		save -= alloc_highmem;
++		if (to_free_normal > save)
++			to_free_normal -= save;
++		else
++			to_free_normal = 0;
+ 	}
+ 
+ 	memory_bm_position_reset(&copy_bm);
+@@ -1257,7 +1278,7 @@ int hibernate_preallocate_memory(void)
+ {
+ 	struct zone *zone;
+ 	unsigned long saveable, size, max_size, count, highmem, pages = 0;
+-	unsigned long alloc, save_highmem, pages_highmem;
++	unsigned long alloc, save_highmem, pages_highmem, avail_normal;
+ 	struct timeval start, stop;
+ 	int error;
+ 
+@@ -1294,6 +1315,7 @@ int hibernate_preallocate_memory(void)
+ 		else
+ 			count += zone_page_state(zone, NR_FREE_PAGES);
+ 	}
++	avail_normal = count;
+ 	count += highmem;
+ 	count -= totalreserve_pages;
+ 
+@@ -1308,12 +1330,21 @@ int hibernate_preallocate_memory(void)
+ 	 */
+ 	if (size >= saveable) {
+ 		pages = preallocate_image_highmem(save_highmem);
+-		pages += preallocate_image_memory(saveable - pages);
++		pages += preallocate_image_memory(saveable - pages, avail_normal);
+ 		goto out;
+ 	}
+ 
+ 	/* Estimate the minimum size of the image. */
+ 	pages = minimum_image_size(saveable);
++	/*
++	 * To avoid excessive pressure on the normal zone, leave room in it to
++	 * accommodate an image of the minimum size (unless it's already too
++	 * small, in which case don't preallocate pages from it at all).
++	 */
++	if (avail_normal > pages)
++		avail_normal -= pages;
++	else
++		avail_normal = 0;
+ 	if (size < pages)
+ 		size = min_t(unsigned long, pages, max_size);
+ 
+@@ -1334,16 +1365,34 @@ int hibernate_preallocate_memory(void)
+ 	 */
+ 	pages_highmem = preallocate_image_highmem(highmem / 2);
+ 	alloc = (count - max_size) - pages_highmem;
+-	pages = preallocate_image_memory(alloc);
+-	if (pages < alloc)
+-		goto err_out;
+-	size = max_size - size;
+-	alloc = size;
+-	size = preallocate_highmem_fraction(size, highmem, count);
+-	pages_highmem += size;
+-	alloc -= size;
+-	pages += preallocate_image_memory(alloc);
+-	pages += pages_highmem;
++	pages = preallocate_image_memory(alloc, avail_normal);
++	if (pages < alloc) {
++		/* We have exhausted non-highmem pages, try highmem. */
++		alloc -= pages;
++		pages += pages_highmem;
++		pages_highmem = preallocate_image_highmem(alloc);
++		if (pages_highmem < alloc)
++			goto err_out;
++		pages += pages_highmem;
++		/*
++		 * size is the desired number of saveable pages to leave in
++		 * memory, so try to preallocate (all memory - size) pages.
++		 */
++		alloc = (count - pages) - size;
++		pages += preallocate_image_highmem(alloc);
++	} else {
++		/*
++		 * There are approximately max_size saveable pages at this point
++		 * and we want to reduce this number down to size.
++		 */
++		alloc = max_size - size;
++		size = preallocate_highmem_fraction(alloc, highmem, count);
++		pages_highmem += size;
++		alloc -= size;
++		size = preallocate_image_memory(alloc, avail_normal);
++		pages_highmem += preallocate_image_highmem(alloc - size);
++		pages += pages_highmem + size;
++	}
+ 
+ 	/*
+ 	 * We only need as many page frames for the image as there are saveable
+diff --git a/kernel/power/user.c b/kernel/power/user.c
+index b135356..b15c3d7 100644
+--- a/kernel/power/user.c
++++ b/kernel/power/user.c
+@@ -113,8 +113,10 @@ static int snapshot_open(struct inode *inode, struct file *filp)
+ 		if (error)
+ 			pm_notifier_call_chain(PM_POST_RESTORE);
+ 	}
+-	if (error)
++	if (error) {
++		free_basic_memory_bitmaps();
+ 		atomic_inc(&snapshot_device_available);
++	}
+ 	data->frozen = 0;
+ 	data->ready = 0;
+ 	data->platform_support = 0;
+diff --git a/kernel/taskstats.c b/kernel/taskstats.c
+index ea8384d..b080920 100644
+--- a/kernel/taskstats.c
++++ b/kernel/taskstats.c
+@@ -293,16 +293,18 @@ ret:
+ static int add_del_listener(pid_t pid, const struct cpumask *mask, int isadd)
+ {
+ 	struct listener_list *listeners;
+-	struct listener *s, *tmp;
++	struct listener *s, *tmp, *s2;
+ 	unsigned int cpu;
+ 
+ 	if (!cpumask_subset(mask, cpu_possible_mask))
+ 		return -EINVAL;
+ 
++	s = NULL;
+ 	if (isadd == REGISTER) {
+ 		for_each_cpu(cpu, mask) {
+-			s = kmalloc_node(sizeof(struct listener), GFP_KERNEL,
+-					 cpu_to_node(cpu));
++			if (!s)
++				s = kmalloc_node(sizeof(struct listener),
++						 GFP_KERNEL, cpu_to_node(cpu));
+ 			if (!s)
+ 				goto cleanup;
+ 			s->pid = pid;
+@@ -311,9 +313,16 @@ static int add_del_listener(pid_t pid, const struct cpumask *mask, int isadd)
+ 
+ 			listeners = &per_cpu(listener_array, cpu);
+ 			down_write(&listeners->sem);
++			list_for_each_entry_safe(s2, tmp, &listeners->list, list) {
++				if (s2->pid == pid)
++					goto next_cpu;
++			}
+ 			list_add(&s->list, &listeners->list);
++			s = NULL;
++next_cpu:
+ 			up_write(&listeners->sem);
+ 		}
++		kfree(s);
+ 		return 0;
+ 	}
+ 
+diff --git a/kernel/time/clocksource.c b/kernel/time/clocksource.c
+index bf4fe98..a02e070 100644
+--- a/kernel/time/clocksource.c
++++ b/kernel/time/clocksource.c
+@@ -131,7 +131,6 @@ static struct clocksource *watchdog;
+ static struct timer_list watchdog_timer;
+ static DECLARE_WORK(watchdog_work, clocksource_watchdog_work);
+ static DEFINE_SPINLOCK(watchdog_lock);
+-static cycle_t watchdog_last;
+ static int watchdog_running;
+ 
+ static int clocksource_watchdog_kthread(void *data);
+@@ -200,11 +199,6 @@ static void clocksource_watchdog(unsigned long data)
+ 	if (!watchdog_running)
+ 		goto out;
+ 
+-	wdnow = watchdog->read(watchdog);
+-	wd_nsec = clocksource_cyc2ns((wdnow - watchdog_last) & watchdog->mask,
+-				     watchdog->mult, watchdog->shift);
+-	watchdog_last = wdnow;
+-
+ 	list_for_each_entry(cs, &watchdog_list, wd_list) {
+ 
+ 		/* Clocksource already marked unstable? */
+@@ -214,19 +208,28 @@ static void clocksource_watchdog(unsigned long data)
+ 			continue;
+ 		}
+ 
++		local_irq_disable();
+ 		csnow = cs->read(cs);
++		wdnow = watchdog->read(watchdog);
++		local_irq_enable();
+ 
+ 		/* Clocksource initialized ? */
+ 		if (!(cs->flags & CLOCK_SOURCE_WATCHDOG)) {
+ 			cs->flags |= CLOCK_SOURCE_WATCHDOG;
+-			cs->wd_last = csnow;
++			cs->wd_last = wdnow;
++			cs->cs_last = csnow;
+ 			continue;
+ 		}
+ 
+-		/* Check the deviation from the watchdog clocksource. */
+-		cs_nsec = clocksource_cyc2ns((csnow - cs->wd_last) &
++		wd_nsec = clocksource_cyc2ns((wdnow - cs->wd_last) & watchdog->mask,
++					     watchdog->mult, watchdog->shift);
++
++		cs_nsec = clocksource_cyc2ns((csnow - cs->cs_last) &
+ 					     cs->mask, cs->mult, cs->shift);
+-		cs->wd_last = csnow;
++		cs->cs_last = csnow;
++		cs->wd_last = wdnow;
++
++		/* Check the deviation from the watchdog clocksource. */
+ 		if (abs(cs_nsec - wd_nsec) > WATCHDOG_THRESHOLD) {
+ 			clocksource_unstable(cs, cs_nsec - wd_nsec);
+ 			continue;
+@@ -264,7 +267,6 @@ static inline void clocksource_start_watchdog(void)
+ 		return;
+ 	init_timer(&watchdog_timer);
+ 	watchdog_timer.function = clocksource_watchdog;
+-	watchdog_last = watchdog->read(watchdog);
+ 	watchdog_timer.expires = jiffies + WATCHDOG_INTERVAL;
+ 	add_timer_on(&watchdog_timer, cpumask_first(cpu_online_mask));
+ 	watchdog_running = 1;
+diff --git a/lib/debugobjects.c b/lib/debugobjects.c
+index eae56fd..2b413db 100644
+--- a/lib/debugobjects.c
++++ b/lib/debugobjects.c
+@@ -196,7 +196,7 @@ static void free_object(struct debug_obj *obj)
+ 	 * initialized:
+ 	 */
+ 	if (obj_pool_free > ODEBUG_POOL_SIZE && obj_cache)
+-		sched = !work_pending(&debug_obj_work);
++		sched = keventd_up() && !work_pending(&debug_obj_work);
+ 	hlist_add_head(&obj->node, &obj_pool);
+ 	obj_pool_free++;
+ 	obj_pool_used--;
+diff --git a/mm/hugetlb.c b/mm/hugetlb.c
+index 0cf9863..5e1e508 100644
+--- a/mm/hugetlb.c
++++ b/mm/hugetlb.c
+@@ -1074,6 +1074,14 @@ static void __init gather_bootmem_prealloc(void)
+ 		WARN_ON(page_count(page) != 1);
+ 		prep_compound_huge_page(page, h->order);
+ 		prep_new_huge_page(h, page, page_to_nid(page));
++		/*
++		 * If we had gigantic hugepages allocated at boot time, we need
++		 * to restore the 'stolen' pages to totalram_pages in order to
++		 * fix confusing memory reports from free(1) and another
++		 * side-effects, like CommitLimit going negative.
++		 */
++		if (h->order > (MAX_ORDER - 1))
++			totalram_pages += 1 << h->order;
+ 	}
+ }
+ 
+diff --git a/mm/ksm.c b/mm/ksm.c
+index e9501f8..318ab79 100644
+--- a/mm/ksm.c
++++ b/mm/ksm.c
+@@ -1215,6 +1215,12 @@ static struct rmap_item *scan_get_next_rmap_item(struct page **page)
+ 		slot = list_entry(slot->mm_list.next, struct mm_slot, mm_list);
+ 		ksm_scan.mm_slot = slot;
+ 		spin_unlock(&ksm_mmlist_lock);
++		/*
++		 * Although we tested list_empty() above, a racing __ksm_exit
++		 * of the last mm on the list may have removed it since then.
++		 */
++		if (slot == &ksm_mm_head)
++			return NULL;
+ next_mm:
+ 		ksm_scan.address = 0;
+ 		ksm_scan.rmap_item = list_entry(&slot->rmap_list,
+diff --git a/mm/memory.c b/mm/memory.c
+index 53c1da0..6c836d3 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -2454,6 +2454,7 @@ void unmap_mapping_range(struct address_space *mapping,
+ 		details.last_index = ULONG_MAX;
+ 	details.i_mmap_lock = &mapping->i_mmap_lock;
+ 
++	mutex_lock(&mapping->unmap_mutex);
+ 	spin_lock(&mapping->i_mmap_lock);
+ 
+ 	/* Protect against endless unmapping loops */
+@@ -2470,6 +2471,7 @@ void unmap_mapping_range(struct address_space *mapping,
+ 	if (unlikely(!list_empty(&mapping->i_mmap_nonlinear)))
+ 		unmap_mapping_range_list(&mapping->i_mmap_nonlinear, &details);
+ 	spin_unlock(&mapping->i_mmap_lock);
++	mutex_unlock(&mapping->unmap_mutex);
+ }
+ EXPORT_SYMBOL(unmap_mapping_range);
+ 
+diff --git a/mm/migrate.c b/mm/migrate.c
+index 0e39f94..aaca868 100644
+--- a/mm/migrate.c
++++ b/mm/migrate.c
+@@ -314,7 +314,7 @@ static int migrate_page_move_mapping(struct address_space *mapping,
+ 	 */
+ 	__dec_zone_page_state(page, NR_FILE_PAGES);
+ 	__inc_zone_page_state(newpage, NR_FILE_PAGES);
+-	if (PageSwapBacked(page)) {
++	if (!PageSwapCache(page) && PageSwapBacked(page)) {
+ 		__dec_zone_page_state(page, NR_SHMEM);
+ 		__inc_zone_page_state(newpage, NR_SHMEM);
+ 	}
+diff --git a/net/core/filter.c b/net/core/filter.c
+index 0127397..d162169 100644
+--- a/net/core/filter.c
++++ b/net/core/filter.c
+@@ -291,7 +291,9 @@ load_b:
+ 			mem[f_k] = X;
+ 			continue;
+ 		default:
+-			WARN_ON(1);
++			WARN_RATELIMIT(1, "Unknown code:%u jt:%u tf:%u k:%u\n",
++				       fentry->code, fentry->jt,
++				       fentry->jf, fentry->k);
+ 			return 0;
+ 		}
+ 
+diff --git a/net/ipv4/af_inet.c b/net/ipv4/af_inet.c
+index 57737b8..a289878 100644
+--- a/net/ipv4/af_inet.c
++++ b/net/ipv4/af_inet.c
+@@ -460,6 +460,9 @@ int inet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
+ 	if (addr_len < sizeof(struct sockaddr_in))
+ 		goto out;
+ 
++	if (addr->sin_family != AF_INET)
++		goto out;
++
+ 	chk_addr_ret = inet_addr_type(sock_net(sk), addr->sin_addr.s_addr);
+ 
+ 	/* Not specified by any standard per-se, however it breaks too
+diff --git a/net/ipv4/inet_diag.c b/net/ipv4/inet_diag.c
+index 6fe360f..dba56d2 100644
+--- a/net/ipv4/inet_diag.c
++++ b/net/ipv4/inet_diag.c
+@@ -436,7 +436,7 @@ static int valid_cc(const void *bc, int len, int cc)
+ 			return 0;
+ 		if (cc == len)
+ 			return 1;
+-		if (op->yes < 4)
++		if (op->yes < 4 || op->yes & 3)
+ 			return 0;
+ 		len -= op->yes;
+ 		bc  += op->yes;
+@@ -446,11 +446,11 @@ static int valid_cc(const void *bc, int len, int cc)
+ 
+ static int inet_diag_bc_audit(const void *bytecode, int bytecode_len)
+ {
+-	const unsigned char *bc = bytecode;
++	const void *bc = bytecode;
+ 	int  len = bytecode_len;
+ 
+ 	while (len > 0) {
+-		struct inet_diag_bc_op *op = (struct inet_diag_bc_op *)bc;
++		const struct inet_diag_bc_op *op = bc;
+ 
+ //printk("BC: %d %d %d {%d} / %d\n", op->code, op->yes, op->no, op[1].no, len);
+ 		switch (op->code) {
+@@ -461,22 +461,20 @@ static int inet_diag_bc_audit(const void *bytecode, int bytecode_len)
+ 		case INET_DIAG_BC_S_LE:
+ 		case INET_DIAG_BC_D_GE:
+ 		case INET_DIAG_BC_D_LE:
+-			if (op->yes < 4 || op->yes > len + 4)
+-				return -EINVAL;
+ 		case INET_DIAG_BC_JMP:
+-			if (op->no < 4 || op->no > len + 4)
++			if (op->no < 4 || op->no > len + 4 || op->no & 3)
+ 				return -EINVAL;
+ 			if (op->no < len &&
+ 			    !valid_cc(bytecode, bytecode_len, len - op->no))
+ 				return -EINVAL;
+ 			break;
+ 		case INET_DIAG_BC_NOP:
+-			if (op->yes < 4 || op->yes > len + 4)
+-				return -EINVAL;
+ 			break;
+ 		default:
+ 			return -EINVAL;
+ 		}
++		if (op->yes < 4 || op->yes > len + 4 || op->yes & 3)
++			return -EINVAL;
+ 		bc  += op->yes;
+ 		len -= op->yes;
+ 	}
+diff --git a/net/ipv4/udp.c b/net/ipv4/udp.c
+index 31db78c..0ac8833 100644
+--- a/net/ipv4/udp.c
++++ b/net/ipv4/udp.c
+@@ -1011,6 +1011,9 @@ csum_copy_err:
+ 
+ 	if (noblock)
+ 		return -EAGAIN;
++
++	/* starting over for a new packet */
++	msg->msg_flags &= ~MSG_TRUNC;
+ 	goto try_again;
+ }
+ 
+diff --git a/net/ipv6/udp.c b/net/ipv6/udp.c
+index cf538ed..ca520d4 100644
+--- a/net/ipv6/udp.c
++++ b/net/ipv6/udp.c
+@@ -304,8 +304,11 @@ csum_copy_err:
+ 	}
+ 	release_sock(sk);
+ 
+-	if (flags & MSG_DONTWAIT)
++	if (noblock)
+ 		return -EAGAIN;
++
++	/* starting over for a new packet */
++	msg->msg_flags &= ~MSG_TRUNC;
+ 	goto try_again;
+ }
+ 
+diff --git a/net/packet/af_packet.c b/net/packet/af_packet.c
+index 9d9b78e..35cfa79 100644
+--- a/net/packet/af_packet.c
++++ b/net/packet/af_packet.c
+@@ -767,6 +767,7 @@ static int tpacket_rcv(struct sk_buff *skb, struct net_device *dev,
+ 		h.h2->tp_sec = ts.tv_sec;
+ 		h.h2->tp_nsec = ts.tv_nsec;
+ 		h.h2->tp_vlan_tci = skb->vlan_tci;
++		h.h2->tp_padding = 0;
+ 		hdrlen = sizeof(*h.h2);
+ 		break;
+ 	default:
+@@ -1499,6 +1500,7 @@ static int packet_recvmsg(struct kiocb *iocb, struct socket *sock,
+ 		aux.tp_net = skb_network_offset(skb);
+ 		aux.tp_vlan_tci = skb->vlan_tci;
+ 
++		aux.tp_padding = 0;
+ 		put_cmsg(msg, SOL_PACKET, PACKET_AUXDATA, sizeof(aux), &aux);
+ 	}
+ 
+diff --git a/net/sunrpc/auth_gss/auth_gss.c b/net/sunrpc/auth_gss/auth_gss.c
+index 4c32700..8f4fe73 100644
+--- a/net/sunrpc/auth_gss/auth_gss.c
++++ b/net/sunrpc/auth_gss/auth_gss.c
+@@ -548,13 +548,13 @@ retry:
+ 	}
+ 	inode = &gss_msg->inode->vfs_inode;
+ 	for (;;) {
+-		prepare_to_wait(&gss_msg->waitqueue, &wait, TASK_INTERRUPTIBLE);
++		prepare_to_wait(&gss_msg->waitqueue, &wait, TASK_KILLABLE);
+ 		spin_lock(&inode->i_lock);
+ 		if (gss_msg->ctx != NULL || gss_msg->msg.errno < 0) {
+ 			break;
+ 		}
+ 		spin_unlock(&inode->i_lock);
+-		if (signalled()) {
++		if (fatal_signal_pending(current)) {
+ 			err = -ERESTARTSYS;
+ 			goto out_intr;
+ 		}
+diff --git a/net/sunrpc/clnt.c b/net/sunrpc/clnt.c
+index 38829e2..d838bea 100644
+--- a/net/sunrpc/clnt.c
++++ b/net/sunrpc/clnt.c
+@@ -938,7 +938,7 @@ call_allocate(struct rpc_task *task)
+ 
+ 	dprintk("RPC: %5u rpc_buffer allocation failed\n", task->tk_pid);
+ 
+-	if (RPC_IS_ASYNC(task) || !signalled()) {
++	if (RPC_IS_ASYNC(task) || !fatal_signal_pending(current)) {
+ 		task->tk_action = call_allocate;
+ 		rpc_delay(task, HZ>>4);
+ 		return;
