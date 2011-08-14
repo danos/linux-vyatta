@@ -1,0 +1,55 @@
+From: Matt Carlson <mcarlson@broadcom.com>
+Date: Fri, 12 Feb 2010 14:47:12 +0000
+Subject: [PATCH 076/207] tg3: Fix AC131 loopback test errors for 5785
+
+commit 1061b7c56482310bbb8197045d51e2986afabfce upstream.
+
+The AC131 does not enable the forced transmit clock settings
+immediately.  The workaround is to read the register again to get the
+setting to take effect.
+
+Signed-off-by: Matt Carlson <mcarlson@broadcom.com>
+Reviewed-by: Michael Chan <mchan@broadcom.com>
+Reviewed-by: Benjamin Li <benli@broadcom.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/tg3.c |    8 ++++++--
+ drivers/net/tg3.h |    3 +++
+ 2 files changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/tg3.c b/drivers/net/tg3.c
+index ae90711..76925b6 100644
+--- a/drivers/net/tg3.c
++++ b/drivers/net/tg3.c
+@@ -10823,8 +10823,12 @@ static int tg3_run_loopback(struct tg3 *tp, int loopback_mode)
+ 
+ 		mac_mode = tp->mac_mode & ~MAC_MODE_PORT_MODE_MASK;
+ 		if (tp->tg3_flags3 & TG3_FLG3_PHY_IS_FET) {
+-			if (GET_ASIC_REV(tp->pci_chip_rev_id) == ASIC_REV_5906)
+-				tg3_writephy(tp, MII_TG3_FET_PTEST, 0x1800);
++			tg3_writephy(tp, MII_TG3_FET_PTEST,
++				     MII_TG3_FET_PTEST_FRC_TX_LINK |
++				     MII_TG3_FET_PTEST_FRC_TX_LOCK);
++			/* The write needs to be flushed for the AC131 */
++			if (GET_ASIC_REV(tp->pci_chip_rev_id) == ASIC_REV_5785)
++				tg3_readphy(tp, MII_TG3_FET_PTEST, &val);
+ 			mac_mode |= MAC_MODE_PORT_MODE_MII;
+ 		} else
+ 			mac_mode |= MAC_MODE_PORT_MODE_GMII;
+diff --git a/drivers/net/tg3.h b/drivers/net/tg3.h
+index a8fb53a..b4fd596 100644
+--- a/drivers/net/tg3.h
++++ b/drivers/net/tg3.h
+@@ -2112,6 +2112,9 @@
+ 
+ /* Fast Ethernet Tranceiver definitions */
+ #define MII_TG3_FET_PTEST		0x17
++#define  MII_TG3_FET_PTEST_FRC_TX_LINK	0x1000
++#define  MII_TG3_FET_PTEST_FRC_TX_LOCK	0x0800
++
+ #define MII_TG3_FET_TEST		0x1f
+ #define  MII_TG3_FET_SHADOW_EN		0x0080
+ 
+-- 
+1.7.5.4
+

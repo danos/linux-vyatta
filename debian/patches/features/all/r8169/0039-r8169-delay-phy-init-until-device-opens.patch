@@ -1,0 +1,71 @@
+From: =?UTF-8?q?fran=C3=A7ois=20romieu?= <romieu@fr.zoreil.com>
+Date: Sat, 8 Jan 2011 02:17:26 +0000
+Subject: [PATCH 39/47] r8169: delay phy init until device opens.
+
+commit eee3a96c6368f47df8df5bd4ed1843600652b337 upstream.
+
+It workarounds the 60s firmware load failure timeout for the
+non-modular case.
+
+Signed-off-by: Francois Romieu <romieu@fr.zoreil.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/r8169.c |   21 +++++++++++----------
+ 1 files changed, 11 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/net/r8169.c b/drivers/net/r8169.c
+index 6ab2fbe..99dbe74 100644
+--- a/drivers/net/r8169.c
++++ b/drivers/net/r8169.c
+@@ -3075,15 +3075,6 @@ rtl8169_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
+ 		rtl8168_driver_start(tp);
+ 	}
+ 
+-	rtl8169_init_phy(dev, tp);
+-
+-	/*
+-	 * Pretend we are using VLANs; This bypasses a nasty bug where
+-	 * Interrupts stop flowing on high load on 8110SCd controllers.
+-	 */
+-	if (tp->mac_version == RTL_GIGA_MAC_VER_05)
+-		RTL_W16(CPlusCmd, RTL_R16(CPlusCmd) | RxVlan);
+-
+ 	device_set_wakeup_enable(&pdev->dev, tp->features & RTL_FEATURE_WOL);
+ 
+ 	if (pci_dev_run_wake(pdev)) {
+@@ -3141,6 +3132,7 @@ static void __devexit rtl8169_remove_one(struct pci_dev *pdev)
+ static int rtl8169_open(struct net_device *dev)
+ {
+ 	struct rtl8169_private *tp = netdev_priv(dev);
++	void __iomem *ioaddr = tp->mmio_addr;
+ 	struct pci_dev *pdev = tp->pci_dev;
+ 	int retval = -ENOMEM;
+ 
+@@ -3176,6 +3168,15 @@ static int rtl8169_open(struct net_device *dev)
+ 
+ 	napi_enable(&tp->napi);
+ 
++	rtl8169_init_phy(dev, tp);
++
++	/*
++	 * Pretend we are using VLANs; This bypasses a nasty bug where
++	 * Interrupts stop flowing on high load on 8110SCd controllers.
++	 */
++	if (tp->mac_version == RTL_GIGA_MAC_VER_05)
++		RTL_W16(CPlusCmd, RTL_R16(CPlusCmd) | RxVlan);
++
+ 	rtl_pll_power_up(tp);
+ 
+ 	rtl_hw_start(dev);
+@@ -3185,7 +3186,7 @@ static int rtl8169_open(struct net_device *dev)
+ 	tp->saved_wolopts = 0;
+ 	pm_runtime_put_noidle(&pdev->dev);
+ 
+-	rtl8169_check_link_status(dev, tp, tp->mmio_addr);
++	rtl8169_check_link_status(dev, tp, ioaddr);
+ out:
+ 	return retval;
+ 
+-- 
+1.7.5.4
+

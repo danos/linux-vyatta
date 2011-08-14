@@ -1,0 +1,112 @@
+From: Jesse Brandeburg <jesse.brandeburg@intel.com>
+Date: Tue, 4 May 2010 22:26:03 +0000
+Subject: [PATCH 081/166] e1000/e1000e: implement a simple interrupt
+ moderation
+
+commit eab2abf5826b78b126826cc70e564c44816396da upstream.
+
+Back before e1000-7.3.20, the e1000 driver had a simple algorithm that
+managed interrupt moderation.  The driver was updated in 7.3.20 to
+have the new "adaptive" interrupt moderation but we have customer
+requests to redeploy the old way as an option.  This patch adds the
+old functionality back.  The new functionality can be enabled via
+module parameter or at runtime via ethtool.
+Module parameter: (InterruptThrottleRate=4) to use this new
+moderation method.
+Ethtool method: ethtool -C ethX rx-usecs 4
+
+Signed-off-by: Jesse Brandeburg <jesse.brandeburg@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+[bwh: Restricted to drivers/net/e1000e]
+---
+ drivers/net/e1000e/ethtool.c |    8 +++++---
+ drivers/net/e1000e/netdev.c  |   18 +++++++++++++++++-
+ drivers/net/e1000e/param.c   |    5 +++++
+ 3 files changed, 27 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/net/e1000e/ethtool.c b/drivers/net/e1000e/ethtool.c
+index b72c1c0..6ff376c 100644
+--- a/drivers/net/e1000e/ethtool.c
++++ b/drivers/net/e1000e/ethtool.c
+@@ -1890,7 +1890,7 @@ static int e1000_get_coalesce(struct net_device *netdev,
+ {
+ 	struct e1000_adapter *adapter = netdev_priv(netdev);
+ 
+-	if (adapter->itr_setting <= 3)
++	if (adapter->itr_setting <= 4)
+ 		ec->rx_coalesce_usecs = adapter->itr_setting;
+ 	else
+ 		ec->rx_coalesce_usecs = 1000000 / adapter->itr_setting;
+@@ -1905,12 +1905,14 @@ static int e1000_set_coalesce(struct net_device *netdev,
+ 	struct e1000_hw *hw = &adapter->hw;
+ 
+ 	if ((ec->rx_coalesce_usecs > E1000_MAX_ITR_USECS) ||
+-	    ((ec->rx_coalesce_usecs > 3) &&
++	    ((ec->rx_coalesce_usecs > 4) &&
+ 	     (ec->rx_coalesce_usecs < E1000_MIN_ITR_USECS)) ||
+ 	    (ec->rx_coalesce_usecs == 2))
+ 		return -EINVAL;
+ 
+-	if (ec->rx_coalesce_usecs <= 3) {
++	if (ec->rx_coalesce_usecs == 4) {
++		adapter->itr = adapter->itr_setting = 4;
++	} else if (ec->rx_coalesce_usecs <= 3) {
+ 		adapter->itr = 20000;
+ 		adapter->itr_setting = ec->rx_coalesce_usecs;
+ 	} else {
+diff --git a/drivers/net/e1000e/netdev.c b/drivers/net/e1000e/netdev.c
+index 0b5ea23..71307b3 100644
+--- a/drivers/net/e1000e/netdev.c
++++ b/drivers/net/e1000e/netdev.c
+@@ -52,7 +52,7 @@
+ 
+ #include "e1000.h"
+ 
+-#define DRV_VERSION "1.0.2-k2"
++#define DRV_VERSION "1.0.2-k4"
+ char e1000e_driver_name[] = "e1000e";
+ const char e1000e_driver_version[] = DRV_VERSION;
+ 
+@@ -4076,6 +4076,22 @@ link_up:
+ 		}
+ 	}
+ 
++	/* Simple mode for Interrupt Throttle Rate (ITR) */
++	if (adapter->itr_setting == 4) {
++		/*
++		 * Symmetric Tx/Rx gets a reduced ITR=2000;
++		 * Total asymmetrical Tx or Rx gets ITR=8000;
++		 * everyone else is between 2000-8000.
++		 */
++		u32 goc = (adapter->gotc + adapter->gorc) / 10000;
++		u32 dif = (adapter->gotc > adapter->gorc ?
++			    adapter->gotc - adapter->gorc :
++			    adapter->gorc - adapter->gotc) / 10000;
++		u32 itr = goc > 0 ? (dif * 6000 / goc + 2000) : 8000;
++
++		ew32(ITR, 1000000000 / (itr * 256));
++	}
++
+ 	/* Cause software interrupt to ensure Rx ring is cleaned */
+ 	if (adapter->msix_entries)
+ 		ew32(ICS, adapter->rx_ring->ims_val);
+diff --git a/drivers/net/e1000e/param.c b/drivers/net/e1000e/param.c
+index f775a48..0f4077c 100644
+--- a/drivers/net/e1000e/param.c
++++ b/drivers/net/e1000e/param.c
+@@ -351,6 +351,11 @@ void __devinit e1000e_check_options(struct e1000_adapter *adapter)
+ 				adapter->itr_setting = adapter->itr;
+ 				adapter->itr = 20000;
+ 				break;
++			case 4:
++				e_info("%s set to simplified (2000-8000 ints) "
++				       "mode\n", opt.name);
++				adapter->itr_setting = 4;
++				break;
+ 			default:
+ 				/*
+ 				 * Save the setting, because the dynamic bits
+-- 
+1.7.5.4
+

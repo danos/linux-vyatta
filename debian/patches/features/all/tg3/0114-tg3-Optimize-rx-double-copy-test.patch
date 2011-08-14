@@ -1,0 +1,120 @@
+From: Matt Carlson <mcarlson@broadcom.com>
+Date: Mon, 12 Apr 2010 06:58:27 +0000
+Subject: [PATCH 114/207] tg3: Optimize rx double copy test
+
+commit d2757fc4076118e13180e91f02c3c52659be3d9d upstream.
+
+On a PCIX bus, the 5701 has a bug which requires the driver to double
+copy all rx packets.  The rx code uses the rx_offset device member as a
+flag to determine if this workaround should take effect.  The following
+patch will modify the rx_offset member such that this test will become
+less clear.
+
+The patch starts by integrating the workaround check into the packet
+length check.  It rounds out the implementation by relaxing the
+workaround restrictions if the platform has efficient unaligned
+accesses.
+
+Signed-off-by: Matt Carlson <mcarlson@broadcom.com>
+Reviewed-by: Michael Chan <mchan@broadcom.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/tg3.c |   32 +++++++++++++++++++++++++-------
+ drivers/net/tg3.h |    5 ++---
+ 2 files changed, 27 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/net/tg3.c b/drivers/net/tg3.c
+index 40b2dd9..15d0164 100644
+--- a/drivers/net/tg3.c
++++ b/drivers/net/tg3.c
+@@ -144,6 +144,24 @@
+ 
+ #define TG3_RSS_MIN_NUM_MSIX_VECS	2
+ 
++/* Due to a hardware bug, the 5701 can only DMA to memory addresses
++ * that are at least dword aligned when used in PCIX mode.  The driver
++ * works around this bug by double copying the packet.  This workaround
++ * is built into the normal double copy length check for efficiency.
++ *
++ * However, the double copy is only necessary on those architectures
++ * where unaligned memory accesses are inefficient.  For those architectures
++ * where unaligned memory accesses incur little penalty, we can reintegrate
++ * the 5701 in the normal rx path.  Doing so saves a device structure
++ * dereference by hardcoding the double copy threshold in place.
++ */
++#define TG3_RX_COPY_THRESHOLD		256
++#if NET_IP_ALIGN == 0 || defined(CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS)
++	#define TG3_RX_COPY_THRESH(tp)	TG3_RX_COPY_THRESHOLD
++#else
++	#define TG3_RX_COPY_THRESH(tp)	((tp)->rx_copy_thresh)
++#endif
++
+ /* minimum number of free TX descriptors required to wake up TX process */
+ #define TG3_TX_WAKEUP_THRESH(tnapi)		((tnapi)->tx_pending / 4)
+ 
+@@ -4639,12 +4657,7 @@ static int tg3_rx(struct tg3_napi *tnapi, int budget)
+ 		len = ((desc->idx_len & RXD_LEN_MASK) >> RXD_LEN_SHIFT) -
+ 		      ETH_FCS_LEN;
+ 
+-		if (len > RX_COPY_THRESHOLD &&
+-		    tp->rx_offset == NET_IP_ALIGN) {
+-		    /* rx_offset will likely not equal NET_IP_ALIGN
+-		     * if this is a 5701 card running in PCI-X mode
+-		     * [see tg3_get_invariants()]
+-		     */
++		if (len > TG3_RX_COPY_THRESH(tp)) {
+ 			int skb_size;
+ 
+ 			skb_size = tg3_alloc_rx_skb(tp, tpr, opaque_key,
+@@ -13470,9 +13483,14 @@ static int __devinit tg3_get_invariants(struct tg3 *tp)
+ 		tp->tg3_flags &= ~TG3_FLAG_POLL_SERDES;
+ 
+ 	tp->rx_offset = NET_IP_ALIGN;
++	tp->rx_copy_thresh = TG3_RX_COPY_THRESHOLD;
+ 	if (GET_ASIC_REV(tp->pci_chip_rev_id) == ASIC_REV_5701 &&
+-	    (tp->tg3_flags & TG3_FLAG_PCIX_MODE) != 0)
++	    (tp->tg3_flags & TG3_FLAG_PCIX_MODE) != 0) {
+ 		tp->rx_offset = 0;
++#ifndef CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS
++		tp->rx_copy_thresh = ~0;
++#endif
++	}
+ 
+ 	tp->rx_std_max_post = TG3_RX_RING_SIZE;
+ 
+diff --git a/drivers/net/tg3.h b/drivers/net/tg3.h
+index 9e7fe0e..43dd1d2 100644
+--- a/drivers/net/tg3.h
++++ b/drivers/net/tg3.h
+@@ -23,8 +23,6 @@
+ #define TG3_BDINFO_NIC_ADDR		0xcUL /* 32-bit */
+ #define TG3_BDINFO_SIZE			0x10UL
+ 
+-#define RX_COPY_THRESHOLD		256
+-
+ #define TG3_RX_INTERNAL_RING_SZ_5906	32
+ 
+ #define RX_STD_MAX_SIZE			1536
+@@ -2754,9 +2752,11 @@ struct tg3 {
+ 	struct tg3_napi			napi[TG3_IRQ_MAX_VECS];
+ 	void				(*write32_rx_mbox) (struct tg3 *, u32,
+ 							    u32);
++	u32				rx_copy_thresh;
+ 	u32				rx_pending;
+ 	u32				rx_jumbo_pending;
+ 	u32				rx_std_max_post;
++	u32				rx_offset;
+ 	u32				rx_pkt_map_sz;
+ #if TG3_VLAN_TAG_USED
+ 	struct vlan_group		*vlgrp;
+@@ -2776,7 +2776,6 @@ struct tg3 {
+ 	unsigned long			last_event_jiffies;
+ 	};
+ 
+-	u32				rx_offset;
+ 	u32				tg3_flags;
+ #define TG3_FLAG_TAGGED_STATUS		0x00000001
+ #define TG3_FLAG_TXD_MBOX_HWBUG		0x00000002
+-- 
+1.7.5.4
+

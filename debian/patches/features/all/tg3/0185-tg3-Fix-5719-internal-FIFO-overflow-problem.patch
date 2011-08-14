@@ -1,0 +1,102 @@
+From: Matt Carlson <mcarlson@broadcom.com>
+Date: Wed, 24 Nov 2010 08:31:48 +0000
+Subject: [PATCH 185/207] tg3: Fix 5719 internal FIFO overflow problem
+
+commit cf79003d598b1f82a4caa0564107283b4f560e14 upstream.
+
+Under load, there an internal FIFO can overflow on the 5719.  The fix is
+to scale back the PCIe maximum read request size based on the current
+link speed and width.
+
+Signed-off-by: Matt Carlson <mcarlson@broadcom.com>
+Reviewed-by: Michael Chan <mchan@broadcom.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/tg3.c |   44 +++++++++++++++++++++++++++++++++++++++++---
+ drivers/net/tg3.h |    1 +
+ 2 files changed, 42 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/net/tg3.c b/drivers/net/tg3.c
+index 1cc35cb..bf63883 100644
+--- a/drivers/net/tg3.c
++++ b/drivers/net/tg3.c
+@@ -6985,7 +6985,7 @@ static void tg3_restore_pci_state(struct tg3 *tp)
+ 
+ 	if (GET_ASIC_REV(tp->pci_chip_rev_id) != ASIC_REV_5785) {
+ 		if (tp->tg3_flags2 & TG3_FLG2_PCI_EXPRESS)
+-			pcie_set_readrq(tp->pdev, 4096);
++			pcie_set_readrq(tp->pdev, tp->pcie_readrq);
+ 		else {
+ 			pci_write_config_byte(tp->pdev, PCI_CACHE_LINE_SIZE,
+ 					      tp->pci_cacheline_sz);
+@@ -7179,7 +7179,7 @@ static int tg3_chip_reset(struct tg3 *tp)
+ 				      tp->pcie_cap + PCI_EXP_DEVCTL,
+ 				      val16);
+ 
+-		pcie_set_readrq(tp->pdev, 4096);
++		pcie_set_readrq(tp->pdev, tp->pcie_readrq);
+ 
+ 		/* Clear error status */
+ 		pci_write_config_word(tp->pdev,
+@@ -13369,7 +13369,45 @@ static int __devinit tg3_get_invariants(struct tg3 *tp)
+ 
+ 		tp->tg3_flags2 |= TG3_FLG2_PCI_EXPRESS;
+ 
+-		pcie_set_readrq(tp->pdev, 4096);
++		tp->pcie_readrq = 4096;
++		if (GET_ASIC_REV(tp->pci_chip_rev_id) == ASIC_REV_5719) {
++			u16 word;
++
++			pci_read_config_word(tp->pdev,
++					     tp->pcie_cap + PCI_EXP_LNKSTA,
++					     &word);
++			switch (word & PCI_EXP_LNKSTA_CLS) {
++			case PCI_EXP_LNKSTA_CLS_2_5GB:
++				word &= PCI_EXP_LNKSTA_NLW;
++				word >>= PCI_EXP_LNKSTA_NLW_SHIFT;
++				switch (word) {
++				case 2:
++					tp->pcie_readrq = 2048;
++					break;
++				case 4:
++					tp->pcie_readrq = 1024;
++					break;
++				}
++				break;
++
++			case PCI_EXP_LNKSTA_CLS_5_0GB:
++				word &= PCI_EXP_LNKSTA_NLW;
++				word >>= PCI_EXP_LNKSTA_NLW_SHIFT;
++				switch (word) {
++				case 1:
++					tp->pcie_readrq = 2048;
++					break;
++				case 2:
++					tp->pcie_readrq = 1024;
++					break;
++				case 4:
++					tp->pcie_readrq = 512;
++					break;
++				}
++			}
++		}
++
++		pcie_set_readrq(tp->pdev, tp->pcie_readrq);
+ 
+ 		pci_read_config_word(tp->pdev,
+ 				     tp->pcie_cap + PCI_EXP_LNKCTL,
+diff --git a/drivers/net/tg3.h b/drivers/net/tg3.h
+index fe8acde..acb5630 100644
+--- a/drivers/net/tg3.h
++++ b/drivers/net/tg3.h
+@@ -2948,6 +2948,7 @@ struct tg3 {
+ 	int				pcix_cap;
+ 	int				pcie_cap;
+ 	};
++	int				pcie_readrq;
+ 
+ 	struct mii_bus			*mdio_bus;
+ 	int				mdio_irq[PHY_MAX_ADDR];
+-- 
+1.7.5.4
+

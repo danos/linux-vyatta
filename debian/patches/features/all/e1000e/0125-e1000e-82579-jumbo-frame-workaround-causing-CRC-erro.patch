@@ -1,0 +1,131 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Wed, 22 Sep 2010 17:16:40 +0000
+Subject: [PATCH 125/166] e1000e: 82579 jumbo frame workaround causing CRC
+ errors
+
+commit a1ce647378c0262fe72757f989e961b2de6460a5 upstream.
+
+The subject workaround was causing CRC errors due to writing the wrong
+register with updates of the RCTL register.  It was also found that the
+workaround function which modifies the RCTL register was being called in
+the middle of a read-modify-write operation of the RCTL register, so the
+function call has been moved appropriately.  Lastly, jumbo frames must not
+be allowed when CRC stripping is disabled by a module parameter because the
+workaround requires the CRC be stripped.
+
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Tested-by: Jeff Pieper <jeffrey.e.pieper@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/e1000e/ich8lan.c |   12 +-----------
+ drivers/net/e1000e/netdev.c  |   29 +++++++++++++++++++----------
+ 2 files changed, 20 insertions(+), 21 deletions(-)
+
+diff --git a/drivers/net/e1000e/ich8lan.c b/drivers/net/e1000e/ich8lan.c
+index 89b1e1a..bb346ae 100644
+--- a/drivers/net/e1000e/ich8lan.c
++++ b/drivers/net/e1000e/ich8lan.c
+@@ -1475,10 +1475,6 @@ s32 e1000_lv_jumbo_workaround_ich8lan(struct e1000_hw *hw, bool enable)
+ 			goto out;
+ 
+ 		/* Enable jumbo frame workaround in the PHY */
+-		e1e_rphy(hw, PHY_REG(769, 20), &data);
+-		ret_val = e1e_wphy(hw, PHY_REG(769, 20), data & ~(1 << 14));
+-		if (ret_val)
+-			goto out;
+ 		e1e_rphy(hw, PHY_REG(769, 23), &data);
+ 		data &= ~(0x7F << 5);
+ 		data |= (0x37 << 5);
+@@ -1487,7 +1483,6 @@ s32 e1000_lv_jumbo_workaround_ich8lan(struct e1000_hw *hw, bool enable)
+ 			goto out;
+ 		e1e_rphy(hw, PHY_REG(769, 16), &data);
+ 		data &= ~(1 << 13);
+-		data |= (1 << 12);
+ 		ret_val = e1e_wphy(hw, PHY_REG(769, 16), data);
+ 		if (ret_val)
+ 			goto out;
+@@ -1512,7 +1507,7 @@ s32 e1000_lv_jumbo_workaround_ich8lan(struct e1000_hw *hw, bool enable)
+ 
+ 		mac_reg = er32(RCTL);
+ 		mac_reg &= ~E1000_RCTL_SECRC;
+-		ew32(FFLT_DBG, mac_reg);
++		ew32(RCTL, mac_reg);
+ 
+ 		ret_val = e1000e_read_kmrn_reg(hw,
+ 						E1000_KMRNCTRLSTA_CTRL_OFFSET,
+@@ -1538,17 +1533,12 @@ s32 e1000_lv_jumbo_workaround_ich8lan(struct e1000_hw *hw, bool enable)
+ 			goto out;
+ 
+ 		/* Write PHY register values back to h/w defaults */
+-		e1e_rphy(hw, PHY_REG(769, 20), &data);
+-		ret_val = e1e_wphy(hw, PHY_REG(769, 20), data & ~(1 << 14));
+-		if (ret_val)
+-			goto out;
+ 		e1e_rphy(hw, PHY_REG(769, 23), &data);
+ 		data &= ~(0x7F << 5);
+ 		ret_val = e1e_wphy(hw, PHY_REG(769, 23), data);
+ 		if (ret_val)
+ 			goto out;
+ 		e1e_rphy(hw, PHY_REG(769, 16), &data);
+-		data &= ~(1 << 12);
+ 		data |= (1 << 13);
+ 		ret_val = e1e_wphy(hw, PHY_REG(769, 16), data);
+ 		if (ret_val)
+diff --git a/drivers/net/e1000e/netdev.c b/drivers/net/e1000e/netdev.c
+index fa55fcc..a6136c7 100644
+--- a/drivers/net/e1000e/netdev.c
++++ b/drivers/net/e1000e/netdev.c
+@@ -2704,6 +2704,16 @@ static void e1000_setup_rctl(struct e1000_adapter *adapter)
+ 	u32 psrctl = 0;
+ 	u32 pages = 0;
+ 
++	/* Workaround Si errata on 82579 - configure jumbo frame flow */
++	if (hw->mac.type == e1000_pch2lan) {
++		s32 ret_val;
++
++		if (adapter->netdev->mtu > ETH_DATA_LEN)
++			ret_val = e1000_lv_jumbo_workaround_ich8lan(hw, true);
++		else
++			ret_val = e1000_lv_jumbo_workaround_ich8lan(hw, false);
++	}
++
+ 	/* Program MC offset vector base */
+ 	rctl = er32(RCTL);
+ 	rctl &= ~(3 << E1000_RCTL_MO_SHIFT);
+@@ -2744,16 +2754,6 @@ static void e1000_setup_rctl(struct e1000_adapter *adapter)
+ 		e1e_wphy(hw, 22, phy_data);
+ 	}
+ 
+-	/* Workaround Si errata on 82579 - configure jumbo frame flow */
+-	if (hw->mac.type == e1000_pch2lan) {
+-		s32 ret_val;
+-
+-		if (rctl & E1000_RCTL_LPE)
+-			ret_val = e1000_lv_jumbo_workaround_ich8lan(hw, true);
+-		else
+-			ret_val = e1000_lv_jumbo_workaround_ich8lan(hw, false);
+-	}
+-
+ 	/* Setup buffer sizes */
+ 	rctl &= ~E1000_RCTL_SZ_4096;
+ 	rctl |= E1000_RCTL_BSEX;
+@@ -4814,6 +4814,15 @@ static int e1000_change_mtu(struct net_device *netdev, int new_mtu)
+ 		return -EINVAL;
+ 	}
+ 
++	/* Jumbo frame workaround on 82579 requires CRC be stripped */
++	if ((adapter->hw.mac.type == e1000_pch2lan) &&
++	    !(adapter->flags2 & FLAG2_CRC_STRIPPING) &&
++	    (new_mtu > ETH_DATA_LEN)) {
++		e_err("Jumbo Frames not supported on 82579 when CRC "
++		      "stripping is disabled.\n");
++		return -EINVAL;
++	}
++
+ 	/* 82573 Errata 17 */
+ 	if (((adapter->hw.mac.type == e1000_82573) ||
+ 	     (adapter->hw.mac.type == e1000_82574)) &&
+-- 
+1.7.5.4
+

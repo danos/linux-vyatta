@@ -1,0 +1,255 @@
+From: Matt Carlson <mcarlson@broadcom.com>
+Date: Thu, 14 Oct 2010 10:37:41 +0000
+Subject: [PATCH 176/207] tg3: Add EEE support
+
+commit 52b02d04c801fff51ca49ad033210846d1713253 upstream.
+
+This patch adds Energy Efficient Ethernet (EEE) support for the 5718
+device ID and the 57765 B0 asic revision.
+
+Signed-off-by: Matt Carlson <mcarlson@broadcom.com>
+Reviewed-by: Michael Chan <mchan@broadcom.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/tg3.c |  114 +++++++++++++++++++++++++++++++++++++++++++++++++++++
+ drivers/net/tg3.h |   33 +++++++++++++++-
+ 2 files changed, 146 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/net/tg3.c b/drivers/net/tg3.c
+index f21f5e9..03602f7 100644
+--- a/drivers/net/tg3.c
++++ b/drivers/net/tg3.c
+@@ -1584,6 +1584,17 @@ static void tg3_phy_fini(struct tg3 *tp)
+ 	}
+ }
+ 
++static int tg3_phydsp_read(struct tg3 *tp, u32 reg, u32 *val)
++{
++	int err;
++
++	err = tg3_writephy(tp, MII_TG3_DSP_ADDRESS, reg);
++	if (!err)
++		err = tg3_readphy(tp, MII_TG3_DSP_RW_PORT, val);
++
++	return err;
++}
++
+ static int tg3_phydsp_write(struct tg3 *tp, u32 reg, u32 val)
+ {
+ 	int err;
+@@ -1747,6 +1758,42 @@ static void tg3_phy_apply_otp(struct tg3 *tp)
+ 	tg3_writephy(tp, MII_TG3_AUX_CTRL, phy);
+ }
+ 
++static void tg3_phy_eee_adjust(struct tg3 *tp, u32 current_link_up)
++{
++	u32 val;
++
++	if (!(tp->phy_flags & TG3_PHYFLG_EEE_CAP))
++		return;
++
++	tp->setlpicnt = 0;
++
++	if (tp->link_config.autoneg == AUTONEG_ENABLE &&
++	    current_link_up == 1 &&
++	    (tp->link_config.active_speed == SPEED_1000 ||
++	     (tp->link_config.active_speed == SPEED_100 &&
++	      tp->link_config.active_duplex == DUPLEX_FULL))) {
++		u32 eeectl;
++
++		if (tp->link_config.active_speed == SPEED_1000)
++			eeectl = TG3_CPMU_EEE_CTRL_EXIT_16_5_US;
++		else
++			eeectl = TG3_CPMU_EEE_CTRL_EXIT_36_US;
++
++		tw32(TG3_CPMU_EEE_CTRL, eeectl);
++
++		tg3_phy_cl45_read(tp, 0x7, TG3_CL45_D7_EEERES_STAT, &val);
++
++		if (val == TG3_CL45_D7_EEERES_STAT_LP_1000T ||
++		    val == TG3_CL45_D7_EEERES_STAT_LP_100TX)
++			tp->setlpicnt = 2;
++	}
++
++	if (!tp->setlpicnt) {
++		val = tr32(TG3_CPMU_EEE_MODE);
++		tw32(TG3_CPMU_EEE_MODE, val & ~TG3_CPMU_EEEMD_LPI_ENABLE);
++	}
++}
++
+ static int tg3_wait_macro_done(struct tg3 *tp)
+ {
+ 	int limit = 100;
+@@ -2921,6 +2968,44 @@ static void tg3_phy_copper_begin(struct tg3 *tp)
+ 		tg3_writephy(tp, MII_TG3_CTRL, new_adv);
+ 	}
+ 
++	if (tp->phy_flags & TG3_PHYFLG_EEE_CAP) {
++		u32 val = 0;
++
++		tw32(TG3_CPMU_EEE_MODE,
++		     tr32(TG3_CPMU_EEE_MODE) & ~TG3_CPMU_EEEMD_LPI_ENABLE);
++
++		/* Enable SM_DSP clock and tx 6dB coding. */
++		val = MII_TG3_AUXCTL_SHDWSEL_AUXCTL |
++		      MII_TG3_AUXCTL_ACTL_SMDSP_ENA |
++		      MII_TG3_AUXCTL_ACTL_TX_6DB;
++		tg3_writephy(tp, MII_TG3_AUX_CTRL, val);
++
++		if ((GET_ASIC_REV(tp->pci_chip_rev_id) == ASIC_REV_5717 ||
++		     GET_ASIC_REV(tp->pci_chip_rev_id) == ASIC_REV_57765) &&
++		    !tg3_phydsp_read(tp, MII_TG3_DSP_CH34TP2, &val))
++			tg3_phydsp_write(tp, MII_TG3_DSP_CH34TP2,
++					 val | MII_TG3_DSP_CH34TP2_HIBW01);
++
++		if (tp->link_config.autoneg == AUTONEG_ENABLE) {
++			/* Advertise 100-BaseTX EEE ability */
++			if (tp->link_config.advertising &
++			    (ADVERTISED_100baseT_Half |
++			     ADVERTISED_100baseT_Full))
++				val |= TG3_CL45_D7_EEEADV_CAP_100TX;
++			/* Advertise 1000-BaseT EEE ability */
++			if (tp->link_config.advertising &
++			    (ADVERTISED_1000baseT_Half |
++			     ADVERTISED_1000baseT_Full))
++				val |= TG3_CL45_D7_EEEADV_CAP_1000T;
++		}
++		tg3_phy_cl45_write(tp, 0x7, TG3_CL45_D7_EEEADV_CAP, val);
++
++		/* Turn off SM_DSP clock. */
++		val = MII_TG3_AUXCTL_SHDWSEL_AUXCTL |
++		      MII_TG3_AUXCTL_ACTL_TX_6DB;
++		tg3_writephy(tp, MII_TG3_AUX_CTRL, val);
++	}
++
+ 	if (tp->link_config.autoneg == AUTONEG_DISABLE &&
+ 	    tp->link_config.speed != SPEED_INVALID) {
+ 		u32 bmcr, orig_bmcr;
+@@ -3282,6 +3367,8 @@ relink:
+ 	tw32_f(MAC_MODE, tp->mac_mode);
+ 	udelay(40);
+ 
++	tg3_phy_eee_adjust(tp, current_link_up);
++
+ 	if (tp->tg3_flags & TG3_FLAG_USE_LINKCHG_REG) {
+ 		/* Polled via timer. */
+ 		tw32_f(MAC_EVENT, 0);
+@@ -7790,6 +7877,22 @@ static int tg3_reset_hw(struct tg3 *tp, int reset_phy)
+ 		tw32(TG3_CPMU_LSPD_10MB_CLK, val);
+ 	}
+ 
++	/* Enable MAC control of LPI */
++	if (tp->phy_flags & TG3_PHYFLG_EEE_CAP) {
++		tw32_f(TG3_CPMU_EEE_LNKIDL_CTRL,
++		       TG3_CPMU_EEE_LNKIDL_PCIE_NL0 |
++		       TG3_CPMU_EEE_LNKIDL_UART_IDL);
++
++		tw32_f(TG3_CPMU_EEE_CTRL,
++		       TG3_CPMU_EEE_CTRL_EXIT_20_1_US);
++
++		tw32_f(TG3_CPMU_EEE_MODE,
++		       TG3_CPMU_EEEMD_ERLY_L1_XIT_DET |
++		       TG3_CPMU_EEEMD_LPI_IN_TX |
++		       TG3_CPMU_EEEMD_LPI_IN_RX |
++		       TG3_CPMU_EEEMD_EEE_ENABLE);
++	}
++
+ 	/* This works around an issue with Athlon chipsets on
+ 	 * B3 tigon3 silicon.  This bit has no effect on any
+ 	 * other revision.  But do not set this on PCI Express
+@@ -8598,6 +8701,12 @@ static void tg3_timer(unsigned long __opaque)
+ 		if (tp->tg3_flags2 & TG3_FLG2_5705_PLUS)
+ 			tg3_periodic_fetch_stats(tp);
+ 
++		if (tp->setlpicnt && !--tp->setlpicnt) {
++			u32 val = tr32(TG3_CPMU_EEE_MODE);
++			tw32(TG3_CPMU_EEE_MODE,
++			     val | TG3_CPMU_EEEMD_LPI_ENABLE);
++		}
++
+ 		if (tp->tg3_flags & TG3_FLAG_USE_LINKCHG_REG) {
+ 			u32 mac_stat;
+ 			int phy_event;
+@@ -12437,6 +12546,11 @@ static int __devinit tg3_phy_probe(struct tg3 *tp)
+ 		}
+ 	}
+ 
++	if (tp->pdev->device == TG3PCI_DEVICE_TIGON3_5718 ||
++	    (GET_ASIC_REV(tp->pci_chip_rev_id) == ASIC_REV_57765 &&
++	     tp->pci_chip_rev_id != CHIPREV_ID_57765_A0))
++		tp->phy_flags |= TG3_PHYFLG_EEE_CAP;
++
+ 	if (!(tp->phy_flags & TG3_PHYFLG_ANY_SERDES) &&
+ 	    !(tp->tg3_flags3 & TG3_FLG3_ENABLE_APE) &&
+ 	    !(tp->tg3_flags & TG3_FLAG_ENABLE_ASF)) {
+diff --git a/drivers/net/tg3.h b/drivers/net/tg3.h
+index 6dea2c0..0d50349 100644
+--- a/drivers/net/tg3.h
++++ b/drivers/net/tg3.h
+@@ -1091,7 +1091,26 @@
+ #define  CPMU_MUTEX_GNT_DRIVER		 0x00001000
+ #define TG3_CPMU_PHY_STRAP		0x00003664
+ #define TG3_CPMU_PHY_STRAP_IS_SERDES	 0x00000020
+-/* 0x3664 --> 0x3800 unused */
++/* 0x3664 --> 0x36b0 unused */
++
++#define TG3_CPMU_EEE_MODE		0x000036b0
++#define TG3_CPMU_EEEMD_ERLY_L1_XIT_DET	 0x00000008
++#define TG3_CPMU_EEEMD_LPI_ENABLE	 0x00000080
++#define TG3_CPMU_EEEMD_LPI_IN_TX	 0x00000100
++#define TG3_CPMU_EEEMD_LPI_IN_RX	 0x00000200
++#define TG3_CPMU_EEEMD_EEE_ENABLE	 0x00100000
++/* 0x36b4 --> 0x36b8 unused */
++
++#define TG3_CPMU_EEE_LNKIDL_CTRL	0x000036bc
++#define  TG3_CPMU_EEE_LNKIDL_PCIE_NL0	 0x01000000
++#define  TG3_CPMU_EEE_LNKIDL_UART_IDL	 0x00000004
++/* 0x36c0 --> 0x36d0 unused */
++
++#define TG3_CPMU_EEE_CTRL		0x000036d0
++#define TG3_CPMU_EEE_CTRL_EXIT_16_5_US	 0x0000019d
++#define TG3_CPMU_EEE_CTRL_EXIT_36_US	 0x00000384
++#define TG3_CPMU_EEE_CTRL_EXIT_20_1_US	 0x000001f8
++/* 0x36d4 --> 0x3800 unused */
+ 
+ /* Mbuf cluster free registers */
+ #define MBFREE_MODE			0x00003800
+@@ -2082,6 +2101,8 @@
+ #define MII_TG3_DSP_TAP1		0x0001
+ #define  MII_TG3_DSP_TAP1_AGCTGT_DFLT	0x0007
+ #define MII_TG3_DSP_AADJ1CH0		0x001f
++#define MII_TG3_DSP_CH34TP2		0x4022
++#define MII_TG3_DSP_CH34TP2_HIBW01	0x0010
+ #define MII_TG3_DSP_AADJ1CH3		0x601f
+ #define  MII_TG3_DSP_AADJ1CH3_ADCCKADJ	0x0002
+ #define MII_TG3_DSP_EXP1_INT_STAT	0x0f01
+@@ -2148,6 +2169,14 @@
+ #define MII_TG3_TEST1_TRIM_EN		0x0010
+ #define MII_TG3_TEST1_CRC_EN		0x8000
+ 
++/* Clause 45 expansion registers */
++#define TG3_CL45_D7_EEEADV_CAP		0x003c
++#define TG3_CL45_D7_EEEADV_CAP_100TX	0x0002
++#define TG3_CL45_D7_EEEADV_CAP_1000T	0x0004
++#define TG3_CL45_D7_EEERES_STAT		0x803e
++#define TG3_CL45_D7_EEERES_STAT_LP_100TX	0x0002
++#define TG3_CL45_D7_EEERES_STAT_LP_1000T	0x0004
++
+ 
+ /* Fast Ethernet Tranceiver definitions */
+ #define MII_TG3_FET_PTEST		0x17
+@@ -2992,9 +3021,11 @@ struct tg3 {
+ #define TG3_PHYFLG_BER_BUG		0x00008000
+ #define TG3_PHYFLG_SERDES_PREEMPHASIS	0x00010000
+ #define TG3_PHYFLG_PARALLEL_DETECT	0x00020000
++#define TG3_PHYFLG_EEE_CAP		0x00040000
+ 
+ 	u32				led_ctrl;
+ 	u32				phy_otp;
++	u32				setlpicnt;
+ 
+ #define TG3_BPN_SIZE			24
+ 	char				board_part_number[TG3_BPN_SIZE];
+-- 
+1.7.5.4
+

@@ -1,0 +1,103 @@
+From: Matt Carlson <mcarlson@broadcom.com>
+Date: Mon, 2 Aug 2010 11:26:03 +0000
+Subject: [PATCH 148/207] tg3: Improve small packet performance
+
+commit f65aac166fe10b96e64c233980a3522fc50fbecf upstream.
+
+smp_mb() inside tg3_tx_avail() is used twice in the normal
+tg3_start_xmit() path (see illustration below).  The full memory
+barrier is only necessary during race conditions with tx completion.
+We can speed up the tx path by replacing smp_mb() in tg3_tx_avail()
+with a compiler barrier.  The compiler barrier is to force the
+compiler to fetch the tx_prod and tx_cons from memory.
+
+In the race condition between tg3_start_xmit() and tg3_tx(),
+we have the following situation:
+
+tg3_start_xmit()                       tg3_tx()
+    if (!tg3_tx_avail())
+        BUG();
+
+    ...
+
+    if (!tg3_tx_avail())
+        netif_tx_stop_queue();         update_tx_index();
+        smp_mb();                      smp_mb();
+        if (tg3_tx_avail())            if (netif_tx_queue_stopped() &&
+            netif_tx_wake_queue();         tg3_tx_avail())
+
+With smp_mb() removed from tg3_tx_avail(), we need to add smp_mb() to
+tg3_start_xmit() as shown above to properly order netif_tx_stop_queue()
+and tg3_tx_avail() to check the ring index.  If it is not strictly
+ordered, the tx queue can be stopped forever.
+
+This improves performance by about 3% with 2 ports running
+bi-directional 64-byte packets.
+
+Reviewed-by: Benjamin Li <benli@broadcom.com>
+Signed-off-by: Michael Chan <mchan@broadcom.com>
+Signed-off-by: Matt Carlson <mcarlson@broadcom.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/tg3.c |   24 +++++++++++++++++++++++-
+ 1 files changed, 23 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/net/tg3.c b/drivers/net/tg3.c
+index 43d0ab2..69a2575 100644
+--- a/drivers/net/tg3.c
++++ b/drivers/net/tg3.c
+@@ -4386,7 +4386,8 @@ static void tg3_tx_recover(struct tg3 *tp)
+ 
+ static inline u32 tg3_tx_avail(struct tg3_napi *tnapi)
+ {
+-	smp_mb();
++	/* Tell compiler to fetch tx indices from memory. */
++	barrier();
+ 	return tnapi->tx_pending -
+ 	       ((tnapi->tx_prod - tnapi->tx_cons) & (TG3_TX_RING_SIZE - 1));
+ }
+@@ -5670,6 +5671,13 @@ static netdev_tx_t tg3_start_xmit(struct sk_buff *skb,
+ 	tnapi->tx_prod = entry;
+ 	if (unlikely(tg3_tx_avail(tnapi) <= (MAX_SKB_FRAGS + 1))) {
+ 		netif_tx_stop_queue(txq);
++
++		/* netif_tx_stop_queue() must be done before checking
++		 * checking tx index in tg3_tx_avail() below, because in
++		 * tg3_tx(), we update tx index before checking for
++		 * netif_tx_queue_stopped().
++		 */
++		smp_mb();
+ 		if (tg3_tx_avail(tnapi) > TG3_TX_WAKEUP_THRESH(tnapi))
+ 			netif_tx_wake_queue(txq);
+ 	}
+@@ -5715,6 +5723,13 @@ static int tg3_tso_bug(struct tg3 *tp, struct sk_buff *skb)
+ 	/* Estimate the number of fragments in the worst case */
+ 	if (unlikely(tg3_tx_avail(&tp->napi[0]) <= frag_cnt_est)) {
+ 		netif_stop_queue(tp->dev);
++
++		/* netif_tx_stop_queue() must be done before checking
++		 * checking tx index in tg3_tx_avail() below, because in
++		 * tg3_tx(), we update tx index before checking for
++		 * netif_tx_queue_stopped().
++		 */
++		smp_mb();
+ 		if (tg3_tx_avail(&tp->napi[0]) <= frag_cnt_est)
+ 			return NETDEV_TX_BUSY;
+ 
+@@ -5950,6 +5965,13 @@ static netdev_tx_t tg3_start_xmit_dma_bug(struct sk_buff *skb,
+ 	tnapi->tx_prod = entry;
+ 	if (unlikely(tg3_tx_avail(tnapi) <= (MAX_SKB_FRAGS + 1))) {
+ 		netif_tx_stop_queue(txq);
++
++		/* netif_tx_stop_queue() must be done before checking
++		 * checking tx index in tg3_tx_avail() below, because in
++		 * tg3_tx(), we update tx index before checking for
++		 * netif_tx_queue_stopped().
++		 */
++		smp_mb();
+ 		if (tg3_tx_avail(tnapi) > TG3_TX_WAKEUP_THRESH(tnapi))
+ 			netif_tx_wake_queue(txq);
+ 	}
+-- 
+1.7.5.4
+

@@ -1,0 +1,67 @@
+From: Matt Carlson <mcarlson@broadcom.com>
+Date: Mon, 2 Nov 2009 14:25:31 +0000
+Subject: [PATCH 007/207] tg3: Add more PCI DMA map error checking
+
+commit a21771dd189b340328c573da9e005068e8a74c53 upstream.
+
+This patch adds code to check the status of pci_map_single() before
+allowing rx buffers to be used.  It also converts the pci_map_single()
+call in tg3_run_loopback() to use skb_dma_map() instead.
+
+Signed-off-by: Matt Carlson <mcarlson@broadcom.com>
+Signed-off-by: Michael Chan <mchan@broadcom.com>
+Signed-off-by: Benjamin Li <benli@broadcom.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/tg3.c |   14 +++++++++++---
+ 1 files changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/net/tg3.c b/drivers/net/tg3.c
+index 6119149..31b6602 100644
+--- a/drivers/net/tg3.c
++++ b/drivers/net/tg3.c
+@@ -4426,6 +4426,10 @@ static int tg3_alloc_rx_skb(struct tg3_napi *tnapi, u32 opaque_key,
+ 
+ 	mapping = pci_map_single(tp->pdev, skb->data, skb_size,
+ 				 PCI_DMA_FROMDEVICE);
++	if (pci_dma_mapping_error(tp->pdev, mapping)) {
++		dev_kfree_skb(skb);
++		return -EIO;
++	}
+ 
+ 	map->skb = skb;
+ 	pci_unmap_addr_set(map, mapping, mapping);
+@@ -10370,7 +10374,10 @@ static int tg3_run_loopback(struct tg3 *tp, int loopback_mode)
+ 	for (i = 14; i < tx_len; i++)
+ 		tx_data[i] = (u8) (i & 0xff);
+ 
+-	map = pci_map_single(tp->pdev, skb->data, tx_len, PCI_DMA_TODEVICE);
++	if (skb_dma_map(&tp->pdev->dev, skb, DMA_TO_DEVICE)) {
++		dev_kfree_skb(skb);
++		return -EIO;
++	}
+ 
+ 	tw32_f(HOSTCC_MODE, tp->coalesce_mode | HOSTCC_MODE_ENABLE |
+ 	       rnapi->coal_now);
+@@ -10381,7 +10388,8 @@ static int tg3_run_loopback(struct tg3 *tp, int loopback_mode)
+ 
+ 	num_pkts = 0;
+ 
+-	tg3_set_txd(tnapi, tnapi->tx_prod, map, tx_len, 0, 1);
++	tg3_set_txd(tnapi, tnapi->tx_prod,
++		    skb_shinfo(skb)->dma_head, tx_len, 0, 1);
+ 
+ 	tnapi->tx_prod++;
+ 	num_pkts++;
+@@ -10405,7 +10413,7 @@ static int tg3_run_loopback(struct tg3 *tp, int loopback_mode)
+ 			break;
+ 	}
+ 
+-	pci_unmap_single(tp->pdev, map, tx_len, PCI_DMA_TODEVICE);
++	skb_dma_unmap(&tp->pdev->dev, skb, DMA_TO_DEVICE);
+ 	dev_kfree_skb(skb);
+ 
+ 	if (tx_idx != tnapi->tx_prod)
+-- 
+1.7.5.4
+

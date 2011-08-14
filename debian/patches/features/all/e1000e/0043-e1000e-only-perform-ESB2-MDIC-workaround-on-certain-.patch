@@ -1,0 +1,187 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Tue, 8 Dec 2009 07:28:20 +0000
+Subject: [PATCH 043/166] e1000e: only perform ESB2 MDIC workaround on certain
+ configurations
+
+commit 3421eecdee750bafc78b12ac25b3e980195265eb upstream.
+
+A workaround added for all ESB2 devices (adds a delay for all MDIC accesses
+which resolves an issue with the MDIC ready bit being set prematurely) is
+applicable only to devices in which the MAC-PHY interconnect is not
+operating in a certain mode with in-band MDIO.  Check the control register
+for the operating mode and enable the workaround accordingly.
+
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/e1000e/es2lan.c |   97 ++++++++++++++++++++++++++++---------------
+ drivers/net/e1000e/hw.h     |    5 ++
+ 2 files changed, 69 insertions(+), 33 deletions(-)
+
+diff --git a/drivers/net/e1000e/es2lan.c b/drivers/net/e1000e/es2lan.c
+index d2a1047..3028f23 100644
+--- a/drivers/net/e1000e/es2lan.c
++++ b/drivers/net/e1000e/es2lan.c
+@@ -46,6 +46,9 @@
+ #define E1000_KMRNCTRLSTA_HD_CTRL_1000_DEFAULT	 0x0000
+ #define E1000_KMRNCTRLSTA_OPMODE_E_IDLE		 0x2000
+ 
++#define E1000_KMRNCTRLSTA_OPMODE_MASK		 0x000C
++#define E1000_KMRNCTRLSTA_OPMODE_INBAND_MDIO	 0x0004
++
+ #define E1000_TCTL_EXT_GCEX_MASK 0x000FFC00 /* Gigabit Carry Extend Padding */
+ #define DEFAULT_TCTL_EXT_GCEX_80003ES2LAN	 0x00010000
+ 
+@@ -462,28 +465,36 @@ static s32 e1000_read_phy_reg_gg82563_80003es2lan(struct e1000_hw *hw,
+ 		return ret_val;
+ 	}
+ 
+-	/*
+-	 * The "ready" bit in the MDIC register may be incorrectly set
+-	 * before the device has completed the "Page Select" MDI
+-	 * transaction.  So we wait 200us after each MDI command...
+-	 */
+-	udelay(200);
++	if (hw->dev_spec.e80003es2lan.mdic_wa_enable == true) {
++		/*
++		 * The "ready" bit in the MDIC register may be incorrectly set
++		 * before the device has completed the "Page Select" MDI
++		 * transaction.  So we wait 200us after each MDI command...
++		 */
++		udelay(200);
+ 
+-	/* ...and verify the command was successful. */
+-	ret_val = e1000e_read_phy_reg_mdic(hw, page_select, &temp);
++		/* ...and verify the command was successful. */
++		ret_val = e1000e_read_phy_reg_mdic(hw, page_select, &temp);
+ 
+-	if (((u16)offset >> GG82563_PAGE_SHIFT) != temp) {
+-		ret_val = -E1000_ERR_PHY;
+-		e1000_release_phy_80003es2lan(hw);
+-		return ret_val;
+-	}
++		if (((u16)offset >> GG82563_PAGE_SHIFT) != temp) {
++			ret_val = -E1000_ERR_PHY;
++			e1000_release_phy_80003es2lan(hw);
++			return ret_val;
++		}
+ 
+-	udelay(200);
++		udelay(200);
+ 
+-	ret_val = e1000e_read_phy_reg_mdic(hw, MAX_PHY_REG_ADDRESS & offset,
+-					   data);
++		ret_val = e1000e_read_phy_reg_mdic(hw,
++		                                  MAX_PHY_REG_ADDRESS & offset,
++		                                  data);
++
++		udelay(200);
++	} else {
++		ret_val = e1000e_read_phy_reg_mdic(hw,
++		                                  MAX_PHY_REG_ADDRESS & offset,
++		                                  data);
++	}
+ 
+-	udelay(200);
+ 	e1000_release_phy_80003es2lan(hw);
+ 
+ 	return ret_val;
+@@ -526,28 +537,35 @@ static s32 e1000_write_phy_reg_gg82563_80003es2lan(struct e1000_hw *hw,
+ 		return ret_val;
+ 	}
+ 
++	if (hw->dev_spec.e80003es2lan.mdic_wa_enable == true) {
++		/*
++		 * The "ready" bit in the MDIC register may be incorrectly set
++		 * before the device has completed the "Page Select" MDI
++		 * transaction.  So we wait 200us after each MDI command...
++		 */
++		udelay(200);
+ 
+-	/*
+-	 * The "ready" bit in the MDIC register may be incorrectly set
+-	 * before the device has completed the "Page Select" MDI
+-	 * transaction.  So we wait 200us after each MDI command...
+-	 */
+-	udelay(200);
++		/* ...and verify the command was successful. */
++		ret_val = e1000e_read_phy_reg_mdic(hw, page_select, &temp);
+ 
+-	/* ...and verify the command was successful. */
+-	ret_val = e1000e_read_phy_reg_mdic(hw, page_select, &temp);
++		if (((u16)offset >> GG82563_PAGE_SHIFT) != temp) {
++			e1000_release_phy_80003es2lan(hw);
++			return -E1000_ERR_PHY;
++		}
+ 
+-	if (((u16)offset >> GG82563_PAGE_SHIFT) != temp) {
+-		e1000_release_phy_80003es2lan(hw);
+-		return -E1000_ERR_PHY;
+-	}
++		udelay(200);
+ 
+-	udelay(200);
++		ret_val = e1000e_write_phy_reg_mdic(hw,
++		                                  MAX_PHY_REG_ADDRESS & offset,
++		                                  data);
+ 
+-	ret_val = e1000e_write_phy_reg_mdic(hw, MAX_PHY_REG_ADDRESS & offset,
+-					    data);
++		udelay(200);
++	} else {
++		ret_val = e1000e_write_phy_reg_mdic(hw,
++		                                  MAX_PHY_REG_ADDRESS & offset,
++		                                  data);
++	}
+ 
+-	udelay(200);
+ 	e1000_release_phy_80003es2lan(hw);
+ 
+ 	return ret_val;
+@@ -866,6 +884,19 @@ static s32 e1000_init_hw_80003es2lan(struct e1000_hw *hw)
+ 	reg_data &= ~0x00100000;
+ 	E1000_WRITE_REG_ARRAY(hw, E1000_FFLT, 0x0001, reg_data);
+ 
++	/* default to true to enable the MDIC W/A */
++	hw->dev_spec.e80003es2lan.mdic_wa_enable = true;
++
++	ret_val = e1000_read_kmrn_reg_80003es2lan(hw,
++	                              E1000_KMRNCTRLSTA_OFFSET >>
++	                              E1000_KMRNCTRLSTA_OFFSET_SHIFT,
++	                              &i);
++	if (!ret_val) {
++		if ((i & E1000_KMRNCTRLSTA_OPMODE_MASK) ==
++		     E1000_KMRNCTRLSTA_OPMODE_INBAND_MDIO)
++			hw->dev_spec.e80003es2lan.mdic_wa_enable = false;
++	}
++
+ 	/*
+ 	 * Clear all of the statistics registers (clear on read).  It is
+ 	 * important that we do this after we have tried to establish link
+diff --git a/drivers/net/e1000e/hw.h b/drivers/net/e1000e/hw.h
+index 8462dbd..f78c537 100644
+--- a/drivers/net/e1000e/hw.h
++++ b/drivers/net/e1000e/hw.h
+@@ -900,6 +900,10 @@ struct e1000_dev_spec_82571 {
+ 	u32 smb_counter;
+ };
+ 
++struct e1000_dev_spec_80003es2lan {
++	bool  mdic_wa_enable;
++};
++
+ struct e1000_shadow_ram {
+ 	u16  value;
+ 	bool modified;
+@@ -928,6 +932,7 @@ struct e1000_hw {
+ 
+ 	union {
+ 		struct e1000_dev_spec_82571	e82571;
++		struct e1000_dev_spec_80003es2lan e80003es2lan;
+ 		struct e1000_dev_spec_ich8lan	ich8lan;
+ 	} dev_spec;
+ };
+-- 
+1.7.5.4
+

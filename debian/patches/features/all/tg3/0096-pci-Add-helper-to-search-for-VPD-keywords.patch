@@ -1,0 +1,141 @@
+From: Matt Carlson <mcarlson@broadcom.com>
+Date: Fri, 26 Feb 2010 14:04:43 +0000
+Subject: [PATCH 096/207] pci: Add helper to search for VPD keywords
+
+commit 4067a8541d397e9d6b443dd2ce0ecb78bfd991db upstream.
+
+This patch adds the pci_vpd_find_info_keyword() helper function to
+find information field keywords within read-only and read-write large
+resource data type sections.
+
+Signed-off-by: Matt Carlson <mcarlson@broadcom.com>
+Signed-off-by: Michael Chan <mchan@broadcom.com>
+Acked-by: Jesse Barnes <jbarnes@virtuousgeek.org>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+[bwh: Adjust context; drop inapplicable changes to bnx2]
+---
+ drivers/net/tg3.c   |   32 +++++++++++++-------------------
+ drivers/pci/vpd.c   |   18 ++++++++++++++++++
+ include/linux/pci.h |   17 +++++++++++++++++
+ 3 files changed, 48 insertions(+), 19 deletions(-)
+
+diff --git a/drivers/net/tg3.c b/drivers/net/tg3.c
+index 2448bcf..2223379 100644
+--- a/drivers/net/tg3.c
++++ b/drivers/net/tg3.c
+@@ -12587,39 +12587,33 @@ static void __devinit tg3_read_partno(struct tg3 *tp)
+ 
+ 	/* Now parse and find the part number. */
+ 	for (i = 0; i < TG3_NVM_VPD_LEN - 2; ) {
+-		unsigned int block_end;
++		unsigned int block_end, rosize;
+ 
+ 		i = pci_vpd_find_tag(vpd_data, i, TG3_NVM_VPD_LEN,
+ 				     PCI_VPD_LRDT_RO_DATA);
+ 		if (i < 0)
+ 			break;
+ 
+-		block_end = i + PCI_VPD_LRDT_TAG_SIZE +
+-			    pci_vpd_lrdt_size(&vpd_data[i]);
+-
++		rosize = pci_vpd_lrdt_size(&vpd_data[i]);
++		block_end = i + PCI_VPD_LRDT_TAG_SIZE + rosize;
+ 		i += PCI_VPD_LRDT_TAG_SIZE;
+ 
+ 		if (block_end > TG3_NVM_VPD_LEN)
+ 			goto out_not_found;
+ 
+-		while (i < (block_end - 2)) {
+-			if (vpd_data[i + 0] == 'P' &&
+-			    vpd_data[i + 1] == 'N') {
+-				int partno_len = pci_vpd_info_field_size(&vpd_data[i]);
++		i = pci_vpd_find_info_keyword(vpd_data, i, rosize,
++					      PCI_VPD_RO_KEYWORD_PARTNO);
++		if (i > 0) {
++			u8 len = pci_vpd_info_field_size(&vpd_data[i]);
+ 
+-				i += PCI_VPD_INFO_FLD_HDR_SIZE;
+-				if (partno_len > TG3_BPN_SIZE ||
+-				    (partno_len + i) > TG3_NVM_VPD_LEN)
+-					goto out_not_found;
++			i += PCI_VPD_INFO_FLD_HDR_SIZE;
++			if (len > TG3_BPN_SIZE ||
++			    (len + i) > TG3_NVM_VPD_LEN)
++				break;
+ 
+-				memcpy(tp->board_part_number,
+-				       &vpd_data[i], partno_len);
++			memcpy(tp->board_part_number, &vpd_data[i], len);
+ 
+-				/* Success. */
+-				return;
+-			}
+-			i += PCI_VPD_INFO_FLD_HDR_SIZE +
+-			     pci_vpd_info_field_size(&vpd_data[i]);
++			return;
+ 		}
+ 
+ 		/* Part number not found. */
+diff --git a/drivers/pci/vpd.c b/drivers/pci/vpd.c
+index 6bc55457..a5a5ca1 100644
+--- a/drivers/pci/vpd.c
++++ b/drivers/pci/vpd.c
+@@ -41,3 +41,21 @@ int pci_vpd_find_tag(const u8 *buf, unsigned int off, unsigned int len, u8 rdt)
+ 	return -ENOENT;
+ }
+ EXPORT_SYMBOL_GPL(pci_vpd_find_tag);
++
++int pci_vpd_find_info_keyword(const u8 *buf, unsigned int off,
++			      unsigned int len, const char *kw)
++{
++	int i;
++
++	for (i = off; i + PCI_VPD_INFO_FLD_HDR_SIZE <= off + len;) {
++		if (buf[i + 0] == kw[0] &&
++		    buf[i + 1] == kw[1])
++			return i;
++
++		i += PCI_VPD_INFO_FLD_HDR_SIZE +
++		     pci_vpd_info_field_size(&buf[i]);
++	}
++
++	return -ENOENT;
++}
++EXPORT_SYMBOL_GPL(pci_vpd_find_info_keyword);
+diff --git a/include/linux/pci.h b/include/linux/pci.h
+index 9dba6a4..9a18b5f 100644
+--- a/include/linux/pci.h
++++ b/include/linux/pci.h
+@@ -1325,6 +1325,10 @@ extern void pci_hp_remove_module_link(struct pci_slot *pci_slot);
+ 
+ #define PCI_VPD_INFO_FLD_HDR_SIZE	3
+ 
++#define PCI_VPD_RO_KEYWORD_PARTNO	"PN"
++#define PCI_VPD_RO_KEYWORD_MFR_ID	"MN"
++#define PCI_VPD_RO_KEYWORD_VENDOR0	"V0"
++
+ /**
+  * pci_vpd_lrdt_size - Extracts the Large Resource Data Type length
+  * @lrdt: Pointer to the beginning of the Large Resource Data Type tag
+@@ -1370,5 +1374,18 @@ static inline u8 pci_vpd_info_field_size(const u8 *info_field)
+  */
+ int pci_vpd_find_tag(const u8 *buf, unsigned int off, unsigned int len, u8 rdt);
+ 
++/**
++ * pci_vpd_find_info_keyword - Locates an information field keyword in the VPD
++ * @buf: Pointer to buffered vpd data
++ * @off: The offset into the buffer at which to begin the search
++ * @len: The length of the buffer area, relative to off, in which to search
++ * @kw: The keyword to search for
++ *
++ * Returns the index where the information field keyword was found or
++ * -ENOENT otherwise.
++ */
++int pci_vpd_find_info_keyword(const u8 *buf, unsigned int off,
++			      unsigned int len, const char *kw);
++
+ #endif /* __KERNEL__ */
+ #endif /* LINUX_PCI_H */
+-- 
+1.7.5.4
+

@@ -1,0 +1,47 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Fri, 20 Nov 2009 23:23:34 +0000
+Subject: [PATCH 010/166] e1000e: link reporting problems
+
+commit 7ea9655f8a4ccefcd8fdea7eb4fc5dab98e1a7ba upstream.
+
+Copper links with WoL or management enabled (any condition which prevents
+the phy from being powered down when the interface is taken down) were
+always reporting link-up when the interface had been taken down. This
+is because when the interface is taken down (ifconfig ethx down),
+interrupts are disabled. With no interrupts, there is no LSC interrupt,
+which is normally required to set "get_link_status", which instructs the
+driver to query the device for link state. The fix is to force
+get_link_status to true if the interface is not up.
+
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/e1000e/ethtool.c |   11 +++++++++++
+ 1 files changed, 11 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/net/e1000e/ethtool.c b/drivers/net/e1000e/ethtool.c
+index 3d73f20..67e06fd 100644
+--- a/drivers/net/e1000e/ethtool.c
++++ b/drivers/net/e1000e/ethtool.c
+@@ -190,6 +190,17 @@ static int e1000_get_settings(struct net_device *netdev,
+ static u32 e1000_get_link(struct net_device *netdev)
+ {
+ 	struct e1000_adapter *adapter = netdev_priv(netdev);
++	struct e1000_mac_info *mac = &adapter->hw.mac;
++
++	/*
++	 * If the link is not reported up to netdev, interrupts are disabled,
++	 * and so the physical link state may have changed since we last
++	 * looked. Set get_link_status to make sure that the true link
++	 * state is interrogated, rather than pulling a cached and possibly
++	 * stale link state from the driver.
++	 */
++	if (!netif_carrier_ok(netdev))
++		mac->get_link_status = 1;
+ 
+ 	return e1000_has_link(adapter);
+ }
+-- 
+1.7.5.4
+

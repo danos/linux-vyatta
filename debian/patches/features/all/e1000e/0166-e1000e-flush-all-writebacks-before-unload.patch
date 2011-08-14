@@ -1,0 +1,84 @@
+From: Jesse Brandeburg <jesse.brandeburg@intel.com>
+Date: Wed, 2 Feb 2011 10:19:50 +0000
+Subject: [PATCH 166/166] e1000e: flush all writebacks before unload
+
+commit 713b3c9e4c1a6da6b45da6474ed554ed0a48de69 upstream.
+
+The driver was not flushing all writebacks before unloading, possibly
+causing memory to be written by the hardware after the driver had
+reinitialized the rings.
+
+This adds missing functionality to flush any pending writebacks and is
+called in all spots where descriptors should be completed before the driver
+begins processing.
+
+Signed-off-by: Jesse Brandeburg <jesse.brandeburg@intel.com>
+Reviewed-by: Bruce Allan <bruce.w.allan@intel.com>
+Tested-by: Jeff Pieper <jeffrey.e.pieper@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/e1000e/netdev.c |   31 +++++++++++++++++++++----------
+ 1 files changed, 21 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/net/e1000e/netdev.c b/drivers/net/e1000e/netdev.c
+index de8de8d..dcdc472 100644
+--- a/drivers/net/e1000e/netdev.c
++++ b/drivers/net/e1000e/netdev.c
+@@ -3355,6 +3355,21 @@ int e1000e_up(struct e1000_adapter *adapter)
+ 	return 0;
+ }
+ 
++static void e1000e_flush_descriptors(struct e1000_adapter *adapter)
++{
++	struct e1000_hw *hw = &adapter->hw;
++
++	if (!(adapter->flags2 & FLAG2_DMA_BURST))
++		return;
++
++	/* flush pending descriptor writebacks to memory */
++	ew32(TIDV, adapter->tx_int_delay | E1000_TIDV_FPD);
++	ew32(RDTR, adapter->rx_int_delay | E1000_RDTR_FPD);
++
++	/* execute the writes immediately */
++	e1e_flush();
++}
++
+ void e1000e_down(struct e1000_adapter *adapter)
+ {
+ 	struct net_device *netdev = adapter->netdev;
+@@ -3394,6 +3409,9 @@ void e1000e_down(struct e1000_adapter *adapter)
+ 
+ 	if (!pci_channel_offline(adapter->pdev))
+ 		e1000e_reset(adapter);
++
++	e1000e_flush_descriptors(adapter);
++
+ 	e1000_clean_tx_ring(adapter);
+ 	e1000_clean_rx_ring(adapter);
+ 
+@@ -4359,19 +4377,12 @@ link_up:
+ 	else
+ 		ew32(ICS, E1000_ICS_RXDMT0);
+ 
++	/* flush pending descriptors to memory before detecting Tx hang */
++	e1000e_flush_descriptors(adapter);
++
+ 	/* Force detection of hung controller every watchdog period */
+ 	adapter->detect_tx_hung = 1;
+ 
+-	/* flush partial descriptors to memory before detecting Tx hang */
+-	if (adapter->flags2 & FLAG2_DMA_BURST) {
+-		ew32(TIDV, adapter->tx_int_delay | E1000_TIDV_FPD);
+-		ew32(RDTR, adapter->rx_int_delay | E1000_RDTR_FPD);
+-		/*
+-		 * no need to flush the writes because the timeout code does
+-		 * an er32 first thing
+-		 */
+-	}
+-
+ 	/*
+ 	 * With 82571 controllers, LAA may be overwritten due to controller
+ 	 * reset from the other port. Set the appropriate LAA in RAR[0]
+-- 
+1.7.5.4
+

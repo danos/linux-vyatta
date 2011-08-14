@@ -1,0 +1,86 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Mon, 10 May 2010 14:59:31 +0000
+Subject: [PATCH 084/166] e1000e: bad state after running ethtool diagnostics
+ with AMT enabled
+
+commit 11b08be830078c1cc4af484d0f85c3a010319c97 upstream.
+
+When running ethtool online diagnostics with no open interface, there is a
+short period of time where the driver relinquishes control of the adapter
+during which time AMT (manageability firmware) can put the adapter into an
+unknown state resulting in such things as link test failure, hardware hang,
+reporting an incorrect link speed, etc.  Resetting the adapter during an
+open() resolves this by putting the adapter into a quiescent state.
+
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/e1000e/ethtool.c |    9 +++++++++
+ drivers/net/e1000e/netdev.c  |   16 +++++++++-------
+ 2 files changed, 18 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/net/e1000e/ethtool.c b/drivers/net/e1000e/ethtool.c
+index 6ff376c..2c52121 100644
+--- a/drivers/net/e1000e/ethtool.c
++++ b/drivers/net/e1000e/ethtool.c
+@@ -1737,6 +1737,12 @@ static void e1000_diag_test(struct net_device *netdev,
+ 		if (if_running)
+ 			dev_open(netdev);
+ 	} else {
++		if (!if_running && (adapter->flags & FLAG_HAS_AMT)) {
++			clear_bit(__E1000_TESTING, &adapter->state);
++			dev_open(netdev);
++			set_bit(__E1000_TESTING, &adapter->state);
++		}
++
+ 		e_info("online testing starting\n");
+ 		/* Online tests */
+ 		if (e1000_link_test(adapter, &data[4]))
+@@ -1748,6 +1754,9 @@ static void e1000_diag_test(struct net_device *netdev,
+ 		data[2] = 0;
+ 		data[3] = 0;
+ 
++		if (!if_running && (adapter->flags & FLAG_HAS_AMT))
++			dev_close(netdev);
++
+ 		clear_bit(__E1000_TESTING, &adapter->state);
+ 	}
+ 	msleep_interruptible(4 * 1000);
+diff --git a/drivers/net/e1000e/netdev.c b/drivers/net/e1000e/netdev.c
+index 71307b3..2404022 100644
+--- a/drivers/net/e1000e/netdev.c
++++ b/drivers/net/e1000e/netdev.c
+@@ -3450,6 +3450,15 @@ static int e1000_open(struct net_device *netdev)
+ 	if (err)
+ 		goto err_setup_rx;
+ 
++	/*
++	 * If AMT is enabled, let the firmware know that the network
++	 * interface is now open and reset the part to a known state.
++	 */
++	if (adapter->flags & FLAG_HAS_AMT) {
++		e1000_get_hw_control(adapter);
++		e1000e_reset(adapter);
++	}
++
+ 	e1000e_power_up_phy(adapter);
+ 
+ 	adapter->mng_vlan_id = E1000_MNG_VLAN_NONE;
+@@ -3458,13 +3467,6 @@ static int e1000_open(struct net_device *netdev)
+ 		e1000_update_mng_vlan(adapter);
+ 
+ 	/*
+-	 * If AMT is enabled, let the firmware know that the network
+-	 * interface is now open
+-	 */
+-	if (adapter->flags & FLAG_HAS_AMT)
+-		e1000_get_hw_control(adapter);
+-
+-	/*
+ 	 * before we allocate an interrupt, we must be ready to handle it.
+ 	 * Setting DEBUG_SHIRQ in the kernel makes it fire an interrupt
+ 	 * as soon as we call pci_request_irq, so we have to setup our
+-- 
+1.7.5.4
+

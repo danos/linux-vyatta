@@ -1,0 +1,82 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Wed, 5 May 2010 22:00:06 +0000
+Subject: [PATCH 082/166] e1000e: reset MAC-PHY interconnect on 82577/82578
+ during Sx->S0
+
+commit 6dfaa76994e5d49a82afb415bbe1362e901b2b95 upstream.
+
+During Sx->S0 transitions, the interconnect between the MAC and PHY on
+82577/82578 can remain in SMBus mode instead of transitioning to the
+PCIe-like mode required during normal operation.  Toggling the LANPHYPC
+Value bit essentially resets the interconnect forcing it to the correct
+mode.
+
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/e1000e/defines.h |    2 ++
+ drivers/net/e1000e/ich8lan.c |   20 ++++++++++++++++++++
+ 2 files changed, 22 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/net/e1000e/defines.h b/drivers/net/e1000e/defines.h
+index e301e26..7f760aa 100644
+--- a/drivers/net/e1000e/defines.h
++++ b/drivers/net/e1000e/defines.h
+@@ -214,6 +214,8 @@
+ #define E1000_CTRL_SPD_1000 0x00000200  /* Force 1Gb */
+ #define E1000_CTRL_FRCSPD   0x00000800  /* Force Speed */
+ #define E1000_CTRL_FRCDPX   0x00001000  /* Force Duplex */
++#define E1000_CTRL_LANPHYPC_OVERRIDE 0x00010000 /* SW control of LANPHYPC */
++#define E1000_CTRL_LANPHYPC_VALUE    0x00020000 /* SW value of LANPHYPC */
+ #define E1000_CTRL_SWDPIN0  0x00040000  /* SWDPIN 0 value */
+ #define E1000_CTRL_SWDPIN1  0x00080000  /* SWDPIN 1 value */
+ #define E1000_CTRL_SWDPIO0  0x00400000  /* SWDPIN 0 Input or output */
+diff --git a/drivers/net/e1000e/ich8lan.c b/drivers/net/e1000e/ich8lan.c
+index d619cf5..b8c4dce 100644
+--- a/drivers/net/e1000e/ich8lan.c
++++ b/drivers/net/e1000e/ich8lan.c
+@@ -83,6 +83,8 @@
+ 
+ 
+ #define E1000_ICH_FWSM_RSPCIPHY	0x00000040 /* Reset PHY on PCI Reset */
++/* FW established a valid mode */
++#define E1000_ICH_FWSM_FW_VALID		0x00008000
+ 
+ #define E1000_ICH_MNG_IAMT_MODE		0x2
+ 
+@@ -259,6 +261,7 @@ static inline void __ew32flash(struct e1000_hw *hw, unsigned long reg, u32 val)
+ static s32 e1000_init_phy_params_pchlan(struct e1000_hw *hw)
+ {
+ 	struct e1000_phy_info *phy = &hw->phy;
++	u32 ctrl;
+ 	s32 ret_val = 0;
+ 
+ 	phy->addr                     = 1;
+@@ -274,6 +277,23 @@ static s32 e1000_init_phy_params_pchlan(struct e1000_hw *hw)
+ 	phy->ops.power_down           = e1000_power_down_phy_copper_ich8lan;
+ 	phy->autoneg_mask             = AUTONEG_ADVERTISE_SPEED_DEFAULT;
+ 
++	if (!(er32(FWSM) & E1000_ICH_FWSM_FW_VALID)) {
++		/*
++		 * The MAC-PHY interconnect may still be in SMBus mode
++		 * after Sx->S0.  Toggle the LANPHYPC Value bit to force
++		 * the interconnect to PCIe mode, but only if there is no
++		 * firmware present otherwise firmware will have done it.
++		 */
++		ctrl = er32(CTRL);
++		ctrl |=  E1000_CTRL_LANPHYPC_OVERRIDE;
++		ctrl &= ~E1000_CTRL_LANPHYPC_VALUE;
++		ew32(CTRL, ctrl);
++		udelay(10);
++		ctrl &= ~E1000_CTRL_LANPHYPC_OVERRIDE;
++		ew32(CTRL, ctrl);
++		msleep(50);
++	}
++
+ 	/*
+ 	 * Reset the PHY before any acccess to it.  Doing so, ensures that
+ 	 * the PHY is in a known good state before we read/write PHY registers.
+-- 
+1.7.5.4
+

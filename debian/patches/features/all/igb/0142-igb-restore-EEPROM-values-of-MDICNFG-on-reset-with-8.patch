@@ -1,0 +1,98 @@
+From: Nick Nunley <nicholas.d.nunley@intel.com>
+Date: Mon, 26 Jul 2010 13:15:29 +0000
+Subject: [PATCH 142/165] igb: restore EEPROM values of MDICNFG on reset with
+ 82580
+
+commit 08451e2587dc8d8c34cbbb8edc88a6e4fa8946e6 upstream.
+
+On a reset the MDICNFG.Destination and MDICNFG.COM_MDIO
+register fields are not restored to the EEPROM default.
+This patch modifies the reset code to read the EEPROM
+and restore the default values.
+
+Signed-off-by: Nicholas Nunley <nicholas.d.nunley@intel.com>
+Tested-by: Jeff Pieper <jeffrey.e.pieper@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/igb/e1000_82575.c   |   41 +++++++++++++++++++++++++++++++++++++++
+ drivers/net/igb/e1000_defines.h |    4 +++
+ 2 files changed, 45 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/net/igb/e1000_82575.c b/drivers/net/igb/e1000_82575.c
+index 2971438..cc58227 100644
+--- a/drivers/net/igb/e1000_82575.c
++++ b/drivers/net/igb/e1000_82575.c
+@@ -1549,6 +1549,43 @@ out:
+ }
+ 
+ /**
++ *  igb_reset_mdicnfg_82580 - Reset MDICNFG destination and com_mdio bits
++ *  @hw: pointer to the HW structure
++ *
++ *  This resets the the MDICNFG.Destination and MDICNFG.Com_MDIO bits based on
++ *  the values found in the EEPROM.  This addresses an issue in which these
++ *  bits are not restored from EEPROM after reset.
++ **/
++static s32 igb_reset_mdicnfg_82580(struct e1000_hw *hw)
++{
++	s32 ret_val = 0;
++	u32 mdicnfg;
++	u16 nvm_data;
++
++	if (hw->mac.type != e1000_82580)
++		goto out;
++	if (!igb_sgmii_active_82575(hw))
++		goto out;
++
++	ret_val = hw->nvm.ops.read(hw, NVM_INIT_CONTROL3_PORT_A +
++				   NVM_82580_LAN_FUNC_OFFSET(hw->bus.func), 1,
++				   &nvm_data);
++	if (ret_val) {
++		hw_dbg("NVM Read Error\n");
++		goto out;
++	}
++
++	mdicnfg = rd32(E1000_MDICNFG);
++	if (nvm_data & NVM_WORD24_EXT_MDIO)
++		mdicnfg |= E1000_MDICNFG_EXT_MDIO;
++	if (nvm_data & NVM_WORD24_COM_MDIO)
++		mdicnfg |= E1000_MDICNFG_COM_MDIO;
++	wr32(E1000_MDICNFG, mdicnfg);
++out:
++	return ret_val;
++}
++
++/**
+  *  igb_reset_hw_82580 - Reset hardware
+  *  @hw: pointer to the HW structure
+  *
+@@ -1623,6 +1660,10 @@ static s32 igb_reset_hw_82580(struct e1000_hw *hw)
+ 	wr32(E1000_IMC, 0xffffffff);
+ 	icr = rd32(E1000_ICR);
+ 
++	ret_val = igb_reset_mdicnfg_82580(hw);
++	if (ret_val)
++		hw_dbg("Could not reset MDICNFG based on EEPROM\n");
++
+ 	/* Install any alternate MAC address into RAR0 */
+ 	ret_val = igb_check_alt_mac_addr(hw);
+ 
+diff --git a/drivers/net/igb/e1000_defines.h b/drivers/net/igb/e1000_defines.h
+index 1d4767f..bbd2ec3 100644
+--- a/drivers/net/igb/e1000_defines.h
++++ b/drivers/net/igb/e1000_defines.h
+@@ -570,6 +570,10 @@
+ 
+ #define NVM_82580_LAN_FUNC_OFFSET(a) (a ? (0x40 + (0x40 * a)) : 0)
+ 
++/* Mask bits for fields in Word 0x24 of the NVM */
++#define NVM_WORD24_COM_MDIO         0x0008 /* MDIO interface shared */
++#define NVM_WORD24_EXT_MDIO         0x0004 /* MDIO accesses routed external */
++
+ /* Mask bits for fields in Word 0x0f of the NVM */
+ #define NVM_WORD0F_PAUSE_MASK       0x3000
+ #define NVM_WORD0F_ASM_DIR          0x2000
+-- 
+1.7.5.4
+

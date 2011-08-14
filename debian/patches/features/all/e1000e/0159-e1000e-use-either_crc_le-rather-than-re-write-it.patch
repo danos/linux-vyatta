@@ -1,0 +1,70 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Thu, 6 Jan 2011 14:29:51 +0000
+Subject: [PATCH 159/166] e1000e: use either_crc_le() rather than re-write it
+
+commit fe46f58fa61f025564a3c1e80b789885cb4b0f30 upstream.
+
+For the 82579 jumbo frame workaround, there is no need to re-write the CRC
+calculation functionality already found in the kernel's ether_crc_le().
+
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Tested-by: Jeff Pieper <jeffrey.e.pieper@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/e1000e/e1000.h   |    1 +
+ drivers/net/e1000e/ich8lan.c |   19 +------------------
+ 2 files changed, 2 insertions(+), 18 deletions(-)
+
+diff --git a/drivers/net/e1000e/e1000.h b/drivers/net/e1000e/e1000.h
+index 2c913b8..4b3802a 100644
+--- a/drivers/net/e1000e/e1000.h
++++ b/drivers/net/e1000e/e1000.h
+@@ -38,6 +38,7 @@
+ #include <linux/netdevice.h>
+ #include <linux/pci.h>
+ #include <linux/pci-aspm.h>
++#include <linux/crc32.h>
+ 
+ #include "hw.h"
+ 
+diff --git a/drivers/net/e1000e/ich8lan.c b/drivers/net/e1000e/ich8lan.c
+index 5759545..5bb65b7 100644
+--- a/drivers/net/e1000e/ich8lan.c
++++ b/drivers/net/e1000e/ich8lan.c
+@@ -1395,22 +1395,6 @@ void e1000_copy_rx_addrs_to_phy_ich8lan(struct e1000_hw *hw)
+ 	}
+ }
+ 
+-static u32 e1000_calc_rx_da_crc(u8 mac[])
+-{
+-	u32 poly = 0xEDB88320;	/* Polynomial for 802.3 CRC calculation */
+-	u32 i, j, mask, crc;
+-
+-	crc = 0xffffffff;
+-	for (i = 0; i < 6; i++) {
+-		crc = crc ^ mac[i];
+-		for (j = 8; j > 0; j--) {
+-			mask = (crc & 1) * (-1);
+-			crc = (crc >> 1) ^ (poly & mask);
+-		}
+-	}
+-	return ~crc;
+-}
+-
+ /**
+  *  e1000_lv_jumbo_workaround_ich8lan - required for jumbo frame operation
+  *  with 82579 PHY
+@@ -1453,8 +1437,7 @@ s32 e1000_lv_jumbo_workaround_ich8lan(struct e1000_hw *hw, bool enable)
+ 			mac_addr[4] = (addr_high & 0xFF);
+ 			mac_addr[5] = ((addr_high >> 8) & 0xFF);
+ 
+-			ew32(PCH_RAICC(i),
+-					e1000_calc_rx_da_crc(mac_addr));
++			ew32(PCH_RAICC(i), ~ether_crc_le(ETH_ALEN, mac_addr));
+ 		}
+ 
+ 		/* Write Rx addresses to the PHY */
+-- 
+1.7.5.4
+

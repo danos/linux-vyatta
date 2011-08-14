@@ -1,0 +1,65 @@
+From: Matt Carlson <mcarlson@broadcom.com>
+Date: Tue, 25 Jan 2011 15:58:52 +0000
+Subject: [PATCH 203/207] tg3: Fix loopback tests
+
+commit 49692ca1e686970bac5726c3fd925427bb3ae89d upstream.
+
+The half-duplex bit in the MAC MODE register will be set during the
+loopback test if the external link is in half-duplex mode.  This will
+cause the loopback test to fail on newer devices.  This patch turns the
+half-duplex bit off for the test.
+
+Also, newer devices fail the internal phy loopback test because the phy
+link takes a little while to come up.  This patch adds code to wait for
+the link before proceeding with the test.
+
+Signed-off-by: Matt Carlson <mcarlson@broadcom.com>
+Reviewed-by: Michael Chan <mchan@broadcom.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/tg3.c |   15 ++++++++++++---
+ 1 files changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/net/tg3.c b/drivers/net/tg3.c
+index f176cce..3faff5d 100644
+--- a/drivers/net/tg3.c
++++ b/drivers/net/tg3.c
+@@ -10880,8 +10880,9 @@ static int tg3_run_loopback(struct tg3 *tp, int loopback_mode)
+ 		if (GET_ASIC_REV(tp->pci_chip_rev_id) == ASIC_REV_5780)
+ 			return 0;
+ 
+-		mac_mode = (tp->mac_mode & ~MAC_MODE_PORT_MODE_MASK) |
+-			   MAC_MODE_PORT_INT_LPBACK;
++		mac_mode = tp->mac_mode &
++			   ~(MAC_MODE_PORT_MODE_MASK | MAC_MODE_HALF_DUPLEX);
++		mac_mode |= MAC_MODE_PORT_INT_LPBACK;
+ 		if (!(tp->tg3_flags2 & TG3_FLG2_5705_PLUS))
+ 			mac_mode |= MAC_MODE_LINK_POLARITY;
+ 		if (tp->phy_flags & TG3_PHYFLG_10_100_ONLY)
+@@ -10903,7 +10904,8 @@ static int tg3_run_loopback(struct tg3 *tp, int loopback_mode)
+ 		tg3_writephy(tp, MII_BMCR, val);
+ 		udelay(40);
+ 
+-		mac_mode = tp->mac_mode & ~MAC_MODE_PORT_MODE_MASK;
++		mac_mode = tp->mac_mode &
++			   ~(MAC_MODE_PORT_MODE_MASK | MAC_MODE_HALF_DUPLEX);
+ 		if (tp->phy_flags & TG3_PHYFLG_IS_FET) {
+ 			tg3_writephy(tp, MII_TG3_FET_PTEST,
+ 				     MII_TG3_FET_PTEST_FRC_TX_LINK |
+@@ -10931,6 +10933,13 @@ static int tg3_run_loopback(struct tg3 *tp, int loopback_mode)
+ 				     MII_TG3_EXT_CTRL_LNK3_LED_MODE);
+ 		}
+ 		tw32(MAC_MODE, mac_mode);
++
++		/* Wait for link */
++		for (i = 0; i < 100; i++) {
++			if (tr32(MAC_TX_STATUS) & TX_STATUS_LINK_UP)
++				break;
++			mdelay(1);
++		}
+ 	} else {
+ 		return -EINVAL;
+ 	}
+-- 
+1.7.5.4
+

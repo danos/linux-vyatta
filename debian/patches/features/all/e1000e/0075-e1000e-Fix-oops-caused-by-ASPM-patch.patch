@@ -1,0 +1,57 @@
+From: Anton Blanchard <anton@samba.org>
+Date: Wed, 28 Apr 2010 21:46:06 +0000
+Subject: [PATCH 075/166] e1000e: Fix oops caused by ASPM patch.
+
+commit 0c75ba22541ccea88e89782373991109a7ec2a54 upstream.
+
+Commit 6f461f6c7c961f0b1b73c0f27becf472a0ac606b
+("e1000e: enable/disable ASPM L0s and L1 and ERT according to hardware errata")
+oopses on one of my ppc64 boxes with a NULL pointer (0x4a):
+
+Unable to handle kernel paging request for data at address 0x0000004a
+Faulting instruction address: 0xc0000000004d2f1c
+cpu 0xe: Vector: 300 (Data Access) at [c000000bec1833a0]
+    pc: c0000000004d2f1c: .e1000e_disable_aspm+0xe0/0x150
+    lr: c0000000004d2f0c: .e1000e_disable_aspm+0xd0/0x150
+   dar: 4a
+
+[c000000bec1836d0] c00000000069b9d8 .e1000_probe+0x84/0xe8c
+[c000000bec1837b0] c000000000386d90 .local_pci_probe+0x4c/0x68
+[c000000bec183840] c0000000003872ac .pci_device_probe+0xfc/0x148
+[c000000bec183900] c000000000409e8c .driver_probe_device+0xe4/0x1d0
+[c000000bec1839a0] c00000000040a024 .__driver_attach+0xac/0xf4
+[c000000bec183a40] c000000000409124 .bus_for_each_dev+0x9c/0x10c
+[c000000bec183b00] c000000000409c1c .driver_attach+0x40/0x60
+[c000000bec183b90] c0000000004085dc .bus_add_driver+0x150/0x328
+[c000000bec183c40] c00000000040a58c .driver_register+0x100/0x1c4
+[c000000bec183cf0] c00000000038764c .__pci_register_driver+0x78/0x128
+
+Seems like pdev->bus->self == NULL. I haven't touched pci in a long time
+so I'm trying to remember what this means (no pcie bridge perhaps?)
+
+The patch below fixes the oops for me.
+
+Signed-off-by: Anton Blanchard <anton@samba.org>
+Reviewed-by: Bruce Allan <bruce.w.allan@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/e1000e/netdev.c |    3 +++
+ 1 files changed, 3 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/net/e1000e/netdev.c b/drivers/net/e1000e/netdev.c
+index e485a7d..5722fa6 100644
+--- a/drivers/net/e1000e/netdev.c
++++ b/drivers/net/e1000e/netdev.c
+@@ -5026,6 +5026,9 @@ static void __e1000e_disable_aspm(struct pci_dev *pdev, u16 state)
+ 	reg16 &= ~state;
+ 	pci_write_config_word(pdev, pos + PCI_EXP_LNKCTL, reg16);
+ 
++	if (!pdev->bus->self)
++		return;
++
+ 	pos = pci_pcie_cap(pdev->bus->self);
+ 	pci_read_config_word(pdev->bus->self, pos + PCI_EXP_LNKCTL, &reg16);
+ 	reg16 &= ~state;
+-- 
+1.7.5.4
+

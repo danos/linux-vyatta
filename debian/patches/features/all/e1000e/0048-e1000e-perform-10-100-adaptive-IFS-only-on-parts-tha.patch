@@ -1,0 +1,124 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Thu, 7 Jan 2010 16:31:35 +0000
+Subject: [PATCH 048/166] e1000e: perform 10/100 adaptive IFS only on parts
+ that support it
+
+commit f464ba87fe7f346e270239354eb0d38f7a3b3e6b upstream.
+
+Adaptive IFS which involves writing to the Adaptive IFS Throttle register
+was being done for all devices supported by the driver even though it is
+not supported (i.e. the register doesn't even exist) on some devices.  The
+feature is supported on 8257x/82583 and ICH/PCH based devices, but not
+on ESB2.
+
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/e1000e/82571.c   |    2 ++
+ drivers/net/e1000e/es2lan.c  |    2 ++
+ drivers/net/e1000e/hw.h      |    1 +
+ drivers/net/e1000e/ich8lan.c |    2 ++
+ drivers/net/e1000e/lib.c     |   14 ++++++++++++++
+ 5 files changed, 21 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/net/e1000e/82571.c b/drivers/net/e1000e/82571.c
+index b979464..02d67d0 100644
+--- a/drivers/net/e1000e/82571.c
++++ b/drivers/net/e1000e/82571.c
+@@ -237,6 +237,8 @@ static s32 e1000_init_mac_params_82571(struct e1000_adapter *adapter)
+ 	/* Set if manageability features are enabled. */
+ 	mac->arc_subsystem_valid = (er32(FWSM) & E1000_FWSM_MODE_MASK)
+ 	                ? true : false;
++	/* Adaptive IFS supported */
++	mac->adaptive_ifs = true;
+ 
+ 	/* check for link */
+ 	switch (hw->phy.media_type) {
+diff --git a/drivers/net/e1000e/es2lan.c b/drivers/net/e1000e/es2lan.c
+index 3028f23..e2aa3b7 100644
+--- a/drivers/net/e1000e/es2lan.c
++++ b/drivers/net/e1000e/es2lan.c
+@@ -224,6 +224,8 @@ static s32 e1000_init_mac_params_80003es2lan(struct e1000_adapter *adapter)
+ 	/* Set if manageability features are enabled. */
+ 	mac->arc_subsystem_valid = (er32(FWSM) & E1000_FWSM_MODE_MASK)
+                         ? true : false;
++	/* Adaptive IFS not supported */
++	mac->adaptive_ifs = false;
+ 
+ 	/* check for link */
+ 	switch (hw->phy.media_type) {
+diff --git a/drivers/net/e1000e/hw.h b/drivers/net/e1000e/hw.h
+index f78c537..606c4da 100644
+--- a/drivers/net/e1000e/hw.h
++++ b/drivers/net/e1000e/hw.h
+@@ -818,6 +818,7 @@ struct e1000_mac_info {
+ 
+ 	u8  forced_speed_duplex;
+ 
++	bool adaptive_ifs;
+ 	bool arc_subsystem_valid;
+ 	bool autoneg;
+ 	bool autoneg_failed;
+diff --git a/drivers/net/e1000e/ich8lan.c b/drivers/net/e1000e/ich8lan.c
+index 642925e..1124f5a 100644
+--- a/drivers/net/e1000e/ich8lan.c
++++ b/drivers/net/e1000e/ich8lan.c
+@@ -465,6 +465,8 @@ static s32 e1000_init_mac_params_ich8lan(struct e1000_adapter *adapter)
+ 		mac->rar_entry_count--;
+ 	/* Set if manageability features are enabled. */
+ 	mac->arc_subsystem_valid = true;
++	/* Adaptive IFS supported */
++	mac->adaptive_ifs = true;
+ 
+ 	/* LED operations */
+ 	switch (mac->type) {
+diff --git a/drivers/net/e1000e/lib.c b/drivers/net/e1000e/lib.c
+index a86c175..56b59e4 100644
+--- a/drivers/net/e1000e/lib.c
++++ b/drivers/net/e1000e/lib.c
+@@ -1609,6 +1609,11 @@ void e1000e_reset_adaptive(struct e1000_hw *hw)
+ {
+ 	struct e1000_mac_info *mac = &hw->mac;
+ 
++	if (!mac->adaptive_ifs) {
++		e_dbg("Not in Adaptive IFS mode!\n");
++		goto out;
++	}
++
+ 	mac->current_ifs_val = 0;
+ 	mac->ifs_min_val = IFS_MIN;
+ 	mac->ifs_max_val = IFS_MAX;
+@@ -1617,6 +1622,8 @@ void e1000e_reset_adaptive(struct e1000_hw *hw)
+ 
+ 	mac->in_ifs_mode = false;
+ 	ew32(AIT, 0);
++out:
++	return;
+ }
+ 
+ /**
+@@ -1630,6 +1637,11 @@ void e1000e_update_adaptive(struct e1000_hw *hw)
+ {
+ 	struct e1000_mac_info *mac = &hw->mac;
+ 
++	if (!mac->adaptive_ifs) {
++		e_dbg("Not in Adaptive IFS mode!\n");
++		goto out;
++	}
++
+ 	if ((mac->collision_delta * mac->ifs_ratio) > mac->tx_packet_delta) {
+ 		if (mac->tx_packet_delta > MIN_NUM_XMITS) {
+ 			mac->in_ifs_mode = true;
+@@ -1650,6 +1662,8 @@ void e1000e_update_adaptive(struct e1000_hw *hw)
+ 			ew32(AIT, 0);
+ 		}
+ 	}
++out:
++	return;
+ }
+ 
+ /**
+-- 
+1.7.5.4
+
