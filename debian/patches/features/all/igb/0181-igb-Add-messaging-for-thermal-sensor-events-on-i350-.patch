@@ -1,0 +1,123 @@
+From: Carolyn Wyborny <carolyn.wyborny@intel.com>
+Date: Sat, 12 Mar 2011 08:59:47 +0000
+Subject: [PATCH 181/200] igb: Add messaging for thermal sensor events on i350
+ devices
+
+commit 7ef5ed1ce96c3f9a95b7327279f94b0700c689ef upstream.
+
+This feature adds messaging to the link status change to notify
+the user if the device returned from a downshift or power off
+event due to the Thermal Sensor feature in i350 parts. Feature
+is only available on internal copper ports.
+
+Signed-off-by: Carolyn Wyborny <carolyn.wyborny@intel.com>
+Tested-by: Aaron Brown <aaron.f.brown@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/igb/e1000_defines.h |    5 +++++
+ drivers/net/igb/e1000_regs.h    |    3 +++
+ drivers/net/igb/igb_main.c      |   37 ++++++++++++++++++++++++++++++++++++-
+ 3 files changed, 44 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/net/igb/e1000_defines.h b/drivers/net/igb/e1000_defines.h
+index e9f80c9..1935b85 100644
+--- a/drivers/net/igb/e1000_defines.h
++++ b/drivers/net/igb/e1000_defines.h
+@@ -51,6 +51,7 @@
+ #define E1000_CTRL_EXT_LINK_MODE_PCIE_SERDES  0x00C00000
+ #define E1000_CTRL_EXT_LINK_MODE_1000BASE_KX  0x00400000
+ #define E1000_CTRL_EXT_LINK_MODE_SGMII   0x00800000
++#define E1000_CTRL_EXT_LINK_MODE_GMII   0x00000000
+ #define E1000_CTRL_EXT_EIAME          0x01000000
+ #define E1000_CTRL_EXT_IRCA           0x00000001
+ /* Interrupt delay cancellation */
+@@ -788,6 +789,10 @@
+ #define E1000_MDIC_ERROR     0x40000000
+ #define E1000_MDIC_DEST      0x80000000
+ 
++/* Thermal Sensor */
++#define E1000_THSTAT_PWR_DOWN       0x00000001 /* Power Down Event */
++#define E1000_THSTAT_LINK_THROTTLE  0x00000002 /* Link Speed Throttle Event */
++
+ /* Energy Efficient Ethernet */
+ #define E1000_IPCNFG_EEE_1G_AN       0x00000008  /* EEE Enable 1G AN */
+ #define E1000_IPCNFG_EEE_100M_AN     0x00000004  /* EEE Enable 100M AN */
+diff --git a/drivers/net/igb/e1000_regs.h b/drivers/net/igb/e1000_regs.h
+index 58591bf..212ec96 100644
+--- a/drivers/net/igb/e1000_regs.h
++++ b/drivers/net/igb/e1000_regs.h
+@@ -337,6 +337,9 @@
+ #define E1000_IPCNFG  0x0E38  /* Internal PHY Configuration */
+ #define E1000_EEER    0x0E30  /* Energy Efficient Ethernet */
+ 
++/* Thermal Sensor Register */
++#define E1000_THSTAT    0x08110 /* Thermal Sensor Status */
++
+ /* OS2BMC Registers */
+ #define E1000_B2OSPC    0x08FE0 /* BMC2OS packets sent by BMC */
+ #define E1000_B2OGPRC   0x04158 /* BMC2OS packets received by host */
+diff --git a/drivers/net/igb/igb_main.c b/drivers/net/igb/igb_main.c
+index b642966..67f1ec2 100644
+--- a/drivers/net/igb/igb_main.c
++++ b/drivers/net/igb/igb_main.c
+@@ -3526,7 +3526,7 @@ static void igb_watchdog_task(struct work_struct *work)
+                                                    watchdog_task);
+ 	struct e1000_hw *hw = &adapter->hw;
+ 	struct net_device *netdev = adapter->netdev;
+-	u32 link;
++	u32 link, ctrl_ext, thstat;
+ 	int i;
+ 
+ 	link = igb_has_link(adapter);
+@@ -3550,6 +3550,25 @@ static void igb_watchdog_task(struct work_struct *work)
+ 			       ((ctrl & E1000_CTRL_RFCE) ?  "RX" :
+ 			       ((ctrl & E1000_CTRL_TFCE) ?  "TX" : "None")));
+ 
++			/* check for thermal sensor event on i350,
++			 * copper only */
++			if (hw->mac.type == e1000_i350) {
++				thstat = rd32(E1000_THSTAT);
++				ctrl_ext = rd32(E1000_CTRL_EXT);
++				if ((hw->phy.media_type ==
++				     e1000_media_type_copper) && !(ctrl_ext &
++				     E1000_CTRL_EXT_LINK_MODE_SGMII)) {
++					if (thstat &
++					    E1000_THSTAT_LINK_THROTTLE) {
++						printk(KERN_INFO "igb: %s The "
++						       "network adapter link "
++						       "speed was downshifted "
++						       "because it "
++						       "overheated.\n",
++						       netdev->name);
++					}
++				}
++			}
+ 			/* adjust timeout factor according to speed/duplex */
+ 			adapter->tx_timeout_factor = 1;
+ 			switch (adapter->link_speed) {
+@@ -3574,6 +3593,22 @@ static void igb_watchdog_task(struct work_struct *work)
+ 		if (netif_carrier_ok(netdev)) {
+ 			adapter->link_speed = 0;
+ 			adapter->link_duplex = 0;
++			/* check for thermal sensor event on i350
++			 * copper only*/
++			if (hw->mac.type == e1000_i350) {
++				thstat = rd32(E1000_THSTAT);
++				ctrl_ext = rd32(E1000_CTRL_EXT);
++				if ((hw->phy.media_type ==
++				     e1000_media_type_copper) && !(ctrl_ext &
++				     E1000_CTRL_EXT_LINK_MODE_SGMII)) {
++					if (thstat & E1000_THSTAT_PWR_DOWN) {
++						printk(KERN_ERR "igb: %s The "
++						"network adapter was stopped "
++						"because it overheated.\n",
++						netdev->name);
++					}
++				}
++			}
+ 			/* Links status message must follow this format */
+ 			printk(KERN_INFO "igb: %s NIC Link is Down\n",
+ 			       netdev->name);
+-- 
+1.7.5.4
+
