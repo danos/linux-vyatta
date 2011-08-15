@@ -1,0 +1,126 @@
+From: Francois Romieu <romieu@fr.zoreil.com>
+Date: Tue, 26 Apr 2011 18:58:59 +0200
+Subject: [PATCH 65/71] r8169: provide some firmware information via ethtool.
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+commit 31bd204f97e3796c5cfcfc582a93a10e45b99946 upstream.
+
+There is no real firmware version yet but the manpage of ethtool
+is rather terse about the driver information.
+
+Former output:
+$ ethtool -i eth1
+driver: r8169
+version: 2.3LK-NAPI
+firmware-version:
+bus-info: 0000:01:00.0
+$ ethtool -i eth0
+driver: r8169
+version: 2.3LK-NAPI
+firmware-version:
+bus-info: 0000:03:00.0
+
+Current output:
+$ ethtool -i eth1
+driver: r8169
+version: 2.3LK-NAPI
+firmware-version: N/A
+bus-info: 0000:01:00.0
+
+$ ethtool -i eth0
+driver: r8169
+version: 2.3LK-NAPI
+firmware-version: rtl_nic/rtl8168d-1.fw
+bus-info: 0000:03:00.0
+
+Signed-off-by: Francois Romieu <romieu@fr.zoreil.com>
+Fixed-by Ciprian Docan <docan@eden.rutgers.edu>
+Cc: Realtek linux nic maintainers <nic_swsd@realtek.com>
+Cc: Fejes József <fejes@joco.name>
+Cc: Borislav Petkov <borislav.petkov@amd.com>
+---
+ drivers/net/r8169.c |   45 +++++++++++++++++++++++++--------------------
+ 1 files changed, 25 insertions(+), 20 deletions(-)
+
+diff --git a/drivers/net/r8169.c b/drivers/net/r8169.c
+index f915100..f8037db 100644
+--- a/drivers/net/r8169.c
++++ b/drivers/net/r8169.c
+@@ -1191,6 +1191,19 @@ static int rtl8169_set_wol(struct net_device *dev, struct ethtool_wolinfo *wol)
+ 	return 0;
+ }
+ 
++static const char *rtl_lookup_firmware_name(struct rtl8169_private *tp)
++{
++	int i;
++
++	for (i = 0; i < ARRAY_SIZE(rtl_firmware_infos); i++) {
++		const struct rtl_firmware_info *info = rtl_firmware_infos + i;
++
++		if (info->mac_version == tp->mac_version)
++			return info->fw_name;
++	}
++	return NULL;
++}
++
+ static void rtl8169_get_drvinfo(struct net_device *dev,
+ 				struct ethtool_drvinfo *info)
+ {
+@@ -1199,6 +1212,8 @@ static void rtl8169_get_drvinfo(struct net_device *dev,
+ 	strcpy(info->driver, MODULENAME);
+ 	strcpy(info->version, RTL8169_VERSION);
+ 	strcpy(info->bus_info, pci_name(tp->pci_dev));
++	strncpy(info->fw_version, IS_ERR_OR_NULL(tp->fw) ? "N/A" :
++		rtl_lookup_firmware_name(tp), sizeof(info->fw_version) - 1);
+ }
+ 
+ static int rtl8169_get_regs_len(struct net_device *dev)
+@@ -3541,33 +3556,23 @@ static void __devexit rtl8169_remove_one(struct pci_dev *pdev)
+ 
+ static void rtl_request_firmware(struct rtl8169_private *tp)
+ {
+-	int i;
+-
+ 	/* Return early if the firmware is already loaded / cached. */
+-	if (!IS_ERR(tp->fw))
+-		goto out;
+-
+-	for (i = 0; i < ARRAY_SIZE(rtl_firmware_infos); i++) {
+-		const struct rtl_firmware_info *info = rtl_firmware_infos + i;
++	if (IS_ERR(tp->fw)) {
++		const char *name;
+ 
+-		if (info->mac_version == tp->mac_version) {
+-			const char *name = info->fw_name;
++		name = rtl_lookup_firmware_name(tp);
++		if (name) {
+ 			int rc;
+ 
+ 			rc = request_firmware(&tp->fw, name, &tp->pci_dev->dev);
+-			if (rc < 0) {
+-				netif_warn(tp, ifup, tp->dev, "unable to load "
+-					"firmware patch %s (%d)\n", name, rc);
+-				goto out_disable_request_firmware;
+-			}
+-			goto out;
++			if (rc >= 0)
++				return;
++
++			netif_warn(tp, ifup, tp->dev, "unable to load "
++				"firmware patch %s (%d)\n", name, rc);
+ 		}
++		tp->fw = NULL;
+ 	}
+-
+-out_disable_request_firmware:
+-	tp->fw = NULL;
+-out:
+-	return;
+ }
+ 
+ static int rtl8169_open(struct net_device *dev)
+-- 
+1.7.5.4
+

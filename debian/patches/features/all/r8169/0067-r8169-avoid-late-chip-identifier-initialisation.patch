@@ -1,0 +1,67 @@
+From: Francois Romieu <romieu@fr.zoreil.com>
+Date: Sun, 8 May 2011 17:47:36 +0200
+Subject: [PATCH 67/71] r8169: avoid late chip identifier initialisation.
+
+commit 5d320a205de277774962782a4b1923e4f8cdf781 upstream.
+
+Unknown 8168 chips did not have any PLL power method set as they
+did not inherit a default family soon enough. Fix it.
+
+Signed-off-by: Francois Romieu <romieu@fr.zoreil.com>
+Cc: Realtek linux nic maintainers <nic_swsd@realtek.com>
+[bwh: Adjust context for omitted VLAN changes]
+---
+ drivers/net/r8169.c |   18 +++++++++---------
+ 1 files changed, 9 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/net/r8169.c b/drivers/net/r8169.c
+index e34f3cc..6a19ace 100644
+--- a/drivers/net/r8169.c
++++ b/drivers/net/r8169.c
+@@ -1663,8 +1663,9 @@ static const struct ethtool_ops rtl8169_ethtool_ops = {
+ };
+ 
+ static void rtl8169_get_mac_version(struct rtl8169_private *tp,
+-				    void __iomem *ioaddr)
++				    struct net_device *dev, u8 default_version)
+ {
++	void __iomem *ioaddr = tp->mmio_addr;
+ 	/*
+ 	 * The driver currently handles the 8168Bf and the 8168Be identically
+ 	 * but they can be identified more specifically through the test below
+@@ -1751,6 +1752,12 @@ static void rtl8169_get_mac_version(struct rtl8169_private *tp,
+ 	while ((reg & p->mask) != p->val)
+ 		p++;
+ 	tp->mac_version = p->mac_version;
++
++	if (tp->mac_version == RTL_GIGA_MAC_NONE) {
++		netif_notice(tp, probe, dev,
++			     "unknown MAC, using family default\n");
++		tp->mac_version = default_version;
++	}
+ }
+ 
+ static void rtl8169_print_mac_version(struct rtl8169_private *tp)
+@@ -3411,18 +3418,11 @@ rtl8169_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
+ 	pci_set_master(pdev);
+ 
+ 	/* Identify chip attached to board */
+-	rtl8169_get_mac_version(tp, ioaddr);
++	rtl8169_get_mac_version(tp, dev, cfg->default_ver);
+ 
+ 	rtl_init_mdio_ops(tp);
+ 	rtl_init_pll_power_ops(tp);
+ 
+-	/* Use appropriate default if unknown */
+-	if (tp->mac_version == RTL_GIGA_MAC_NONE) {
+-		netif_notice(tp, probe, dev,
+-			     "unknown MAC, using family default\n");
+-		tp->mac_version = cfg->default_ver;
+-	}
+-
+ 	rtl8169_print_mac_version(tp);
+ 
+ 	chipset = tp->mac_version;
+-- 
+1.7.5.4
+
