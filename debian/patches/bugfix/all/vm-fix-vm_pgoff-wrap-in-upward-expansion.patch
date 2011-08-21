@@ -1,0 +1,40 @@
+commit 42c36f63ac1366ab0ecc2d5717821362c259f517
+Author: Hugh Dickins <hughd@google.com>
+Date:   Mon May 9 17:44:42 2011 -0700
+
+    vm: fix vm_pgoff wrap in upward expansion
+    
+    Commit a626ca6a6564 ("vm: fix vm_pgoff wrap in stack expansion") fixed
+    the case of an expanding mapping causing vm_pgoff wrapping when you had
+    downward stack expansion.  But there was another case where IA64 and
+    PA-RISC expand mappings: upward expansion.
+    
+    This fixes that case too.
+    
+    Signed-off-by: Hugh Dickins <hughd@google.com>
+    Cc: stable@kernel.org
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+    [dannf: backported to Debian's 2.6.32]
+
+diff --git a/mm/mmap.c b/mm/mmap.c
+index 537b365..515e3cb 100644
+--- a/mm/mmap.c
++++ b/mm/mmap.c
+@@ -1636,9 +1636,14 @@ int expand_upwards(struct vm_area_struct *vma, unsigned long address)
+ 		size = address - vma->vm_start;
+ 		grow = (address - vma->vm_end) >> PAGE_SHIFT;
+ 
+-		error = acct_stack_growth(vma, size, grow);
+-		if (!error)
+-			vma->vm_end = address;
++		error = -ENOMEM;
++		if (vma->vm_pgoff + (size >> PAGE_SHIFT) >= vma->vm_pgoff) {
++			error = acct_stack_growth(vma, size, grow);
++			if (!error) {
++				vma->vm_end = address;
++				perf_event_mmap(vma);
++			}
++		}
+ 	}
+ 	anon_vma_unlock(vma);
+ 	return error;

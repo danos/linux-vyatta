@@ -1,0 +1,43 @@
+commit a626ca6a656450e9f4df91d0dda238fff23285f4
+Author: Linus Torvalds <torvalds@linux-foundation.org>
+Date:   Wed Apr 13 08:07:28 2011 -0700
+
+    vm: fix vm_pgoff wrap in stack expansion
+    
+    Commit 982134ba6261 ("mm: avoid wrapping vm_pgoff in mremap()") fixed
+    the case of a expanding mapping causing vm_pgoff wrapping when you used
+    mremap.  But there was another case where we expand mappings hiding in
+    plain sight: the automatic stack expansion.
+    
+    This fixes that case too.
+    
+    This one also found by Robert Święcki, using his nasty system call
+    fuzzer tool.  Good job.
+    
+    Reported-and-tested-by: Robert Święcki <robert@swiecki.net>
+    Cc: stable@kernel.org
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+    [dannf: backported to Debian's 2.6.32]
+
+diff --git a/mm/mmap.c b/mm/mmap.c
+index 292afec..537b365 100644
+--- a/mm/mmap.c
++++ b/mm/mmap.c
+@@ -1680,10 +1680,13 @@ static int expand_downwards(struct vm_area_struct *vma,
+ 		size = vma->vm_end - address;
+ 		grow = (vma->vm_start - address) >> PAGE_SHIFT;
+ 
+-		error = acct_stack_growth(vma, size, grow);
+-		if (!error) {
+-			vma->vm_start = address;
+-			vma->vm_pgoff -= grow;
++		error = -ENOMEM;
++		if (grow <= vma->vm_pgoff) {
++			error = acct_stack_growth(vma, size, grow);
++			if (!error) {
++				vma->vm_start = address;
++				vma->vm_pgoff -= grow;
++			}
+ 		}
+ 	}
+ 	anon_vma_unlock(vma);
