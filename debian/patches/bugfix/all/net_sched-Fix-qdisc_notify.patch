@@ -1,0 +1,52 @@
+commit 53b0f08042f04813cd1a7473dacd3edfacb28eb3
+Author: Eric Dumazet <eric.dumazet@gmail.com>
+Date:   Sat May 22 20:37:44 2010 +0000
+
+    net_sched: Fix qdisc_notify()
+    
+    Ben Pfaff reported a kernel oops and provided a test program to
+    reproduce it.
+    
+    https://kerneltrap.org/mailarchive/linux-netdev/2010/5/21/6277805
+    
+    tc_fill_qdisc() should not be called for builtin qdisc, or it
+    dereference a NULL pointer to get device ifindex.
+    
+    Fix is to always use tc_qdisc_dump_ignore() before calling
+    tc_fill_qdisc().
+    
+    Reported-by: Ben Pfaff <blp@nicira.com>
+    Signed-off-by: Eric Dumazet <eric.dumazet@gmail.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+    [dannf: backported to Debian's 2.6.26]
+
+diff --git a/net/sched/sch_api.c b/net/sched/sch_api.c
+index 2761cf4..93cbd8e 100644
+--- a/net/sched/sch_api.c
++++ b/net/sched/sch_api.c
+@@ -867,6 +867,11 @@ nla_put_failure:
+ 	return -1;
+ }
+ 
++static bool tc_qdisc_dump_ignore(struct Qdisc *q)
++{
++	return (q->flags & TCQ_F_BUILTIN) ? true : false;
++}
++
+ static int qdisc_notify(struct sk_buff *oskb, struct nlmsghdr *n,
+ 			u32 clid, struct Qdisc *old, struct Qdisc *new)
+ {
+@@ -877,11 +882,11 @@ static int qdisc_notify(struct sk_buff *oskb, struct nlmsghdr *n,
+ 	if (!skb)
+ 		return -ENOBUFS;
+ 
+-	if (old && old->handle) {
++	if (old && !tc_qdisc_dump_ignore(old)) {
+ 		if (tc_fill_qdisc(skb, old, clid, pid, n->nlmsg_seq, 0, RTM_DELQDISC) < 0)
+ 			goto err_out;
+ 	}
+-	if (new) {
++	if (new && !tc_qdisc_dump_ignore(new)) {
+ 		if (tc_fill_qdisc(skb, new, clid, pid, n->nlmsg_seq, old ? NLM_F_REPLACE : 0, RTM_NEWQDISC) < 0)
+ 			goto err_out;
+ 	}
