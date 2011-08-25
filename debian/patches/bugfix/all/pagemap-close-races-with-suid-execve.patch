@@ -1,0 +1,58 @@
+commit ca6b0bf0e086513b9ee5efc0aa5770ecb57778af
+Author: Al Viro <viro@zeniv.linux.org.uk>
+Date:   Tue Feb 15 22:04:37 2011 -0500
+
+    pagemap: close races with suid execve
+    
+    just use mm_for_maps()
+    
+    Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+    [dannf: backported to Debian's 2.6.32]
+
+diff --git a/fs/proc/base.c b/fs/proc/base.c
+index ae485ab..aca5390 100644
+--- a/fs/proc/base.c
++++ b/fs/proc/base.c
+@@ -2552,7 +2552,7 @@ static const struct pid_entry tgid_base_stuff[] = {
+ #ifdef CONFIG_PROC_PAGE_MONITOR
+ 	REG("clear_refs", S_IWUSR, proc_clear_refs_operations),
+ 	REG("smaps",      S_IRUGO, proc_smaps_operations),
+-	REG("pagemap",    S_IRUSR, proc_pagemap_operations),
++	REG("pagemap",    S_IRUGO, proc_pagemap_operations),
+ #endif
+ #ifdef CONFIG_SECURITY
+ 	DIR("attr",       S_IRUGO|S_IXUGO, proc_attr_dir_inode_operations, proc_attr_dir_operations),
+@@ -2890,7 +2890,7 @@ static const struct pid_entry tid_base_stuff[] = {
+ #ifdef CONFIG_PROC_PAGE_MONITOR
+ 	REG("clear_refs", S_IWUSR, proc_clear_refs_operations),
+ 	REG("smaps",     S_IRUGO, proc_smaps_operations),
+-	REG("pagemap",    S_IRUSR, proc_pagemap_operations),
++	REG("pagemap",    S_IRUGO, proc_pagemap_operations),
+ #endif
+ #ifdef CONFIG_SECURITY
+ 	DIR("attr",      S_IRUGO|S_IXUGO, proc_attr_dir_inode_operations, proc_attr_dir_operations),
+diff --git a/fs/proc/task_mmu.c b/fs/proc/task_mmu.c
+index 3b7b82a..6e7b065 100644
+--- a/fs/proc/task_mmu.c
++++ b/fs/proc/task_mmu.c
+@@ -682,7 +682,8 @@ static ssize_t pagemap_read(struct file *file, char __user *buf,
+ 		goto out;
+ 
+ 	ret = -EACCES;
+-	if (!ptrace_may_access(task, PTRACE_MODE_READ))
++	mm = mm_for_maps(task);
++	if (!mm)
+ 		goto out_task;
+ 
+ 	ret = -EINVAL;
+@@ -695,10 +696,6 @@ static ssize_t pagemap_read(struct file *file, char __user *buf,
+ 	if (!count)
+ 		goto out_task;
+ 
+-	mm = get_task_mm(task);
+-	if (!mm)
+-		goto out_task;
+-
+ 
+ 	uaddr = (unsigned long)buf & PAGE_MASK;
+ 	uend = (unsigned long)(buf + count);
