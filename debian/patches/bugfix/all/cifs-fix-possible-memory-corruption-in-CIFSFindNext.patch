@@ -1,0 +1,41 @@
+From: Jeff Layton <jlayton@redhat.com>
+Date: Tue, 23 Aug 2011 11:21:28 +0000 (-0400)
+Subject: cifs: fix possible memory corruption in CIFSFindNext
+X-Git-Url: https://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Fsfrench%2Fcifs-2.6.git;a=commitdiff_plain;h=c32dfffaf59f73bbcf4472141b851a4dc5db2bf0
+
+cifs: fix possible memory corruption in CIFSFindNext
+
+The name_len variable in CIFSFindNext is a signed int that gets set to
+the resume_name_len in the cifs_search_info. The resume_name_len however
+is unsigned and for some infolevels is populated directly from a 32 bit
+value sent by the server.
+
+If the server sends a very large value for this, then that value could
+look negative when converted to a signed int. That would make that
+value pass the PATH_MAX check later in CIFSFindNext. The name_len would
+then be used as a length value for a memcpy. It would then be treated
+as unsigned again, and the memcpy scribbles over a ton of memory.
+
+Fix this by making the name_len an unsigned value in CIFSFindNext.
+
+Cc: <stable@kernel.org>
+Reported-by: Darren Lavender <dcl@hppine99.gbr.hp.com>
+Signed-off-by: Jeff Layton <jlayton@redhat.com>
+Signed-off-by: Steve French <sfrench@us.ibm.com>
+[dannf: backported to Debian's 2.6.32]
+---
+
+diff --git a/fs/cifs/cifssmb.c b/fs/cifs/cifssmb.c
+index 04b755a..665b128 100644
+--- a/fs/cifs/cifssmb.c
++++ b/fs/cifs/cifssmb.c
+@@ -3596,7 +3596,8 @@ int CIFSFindNext(const int xid, struct cifsTconInfo *tcon,
+ 	T2_FNEXT_RSP_PARMS *parms;
+ 	char *response_data;
+ 	int rc = 0;
+-	int bytes_returned, name_len;
++	int bytes_returned;
++	unsigned int name_len;
+ 	__u16 params, byte_count;
+ 
+ 	cFYI(1, ("In FindNext"));
