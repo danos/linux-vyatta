@@ -1,0 +1,533 @@
+diff --git a/Makefile b/Makefile
+index 5ba9830..9f479bf 100644
+diff --git a/arch/x86/kernel/apic/x2apic_uv_x.c b/arch/x86/kernel/apic/x2apic_uv_x.c
+index c7ee9c9..95b0712 100644
+--- a/arch/x86/kernel/apic/x2apic_uv_x.c
++++ b/arch/x86/kernel/apic/x2apic_uv_x.c
+@@ -117,7 +117,6 @@ static int __cpuinit uv_wakeup_secondary(int phys_apicid, unsigned long start_ri
+ 	    ((start_rip << UVH_IPI_INT_VECTOR_SHFT) >> 12) |
+ 	    APIC_DM_INIT;
+ 	uv_write_global_mmr64(pnode, UVH_IPI_INT, val);
+-	mdelay(10);
+ 
+ 	val = (1UL << UVH_IPI_INT_SEND_SHFT) |
+ 	    (phys_apicid << UVH_IPI_INT_APIC_ID_SHFT) |
+diff --git a/arch/x86/vdso/vdso32/sysenter.S b/arch/x86/vdso/vdso32/sysenter.S
+index e2800af..e354bce 100644
+--- a/arch/x86/vdso/vdso32/sysenter.S
++++ b/arch/x86/vdso/vdso32/sysenter.S
+@@ -43,7 +43,7 @@ __kernel_vsyscall:
+ 	.space 7,0x90
+ 
+ 	/* 14: System call restart point is here! (SYSENTER_RETURN-2) */
+-	jmp .Lenter_kernel
++	int $0x80
+ 	/* 16: System call normal return point is here! */
+ VDSO32_SYSENTER_RETURN:	/* Symbol used by sysenter.c via vdso32-syms.h */
+ 	pop %ebp
+diff --git a/drivers/gpu/drm/ttm/ttm_bo.c b/drivers/gpu/drm/ttm/ttm_bo.c
+index 87c0625..0ed436e 100644
+diff --git a/drivers/hwmon/ibmaem.c b/drivers/hwmon/ibmaem.c
+index 405d3fb..a818105 100644
+--- a/drivers/hwmon/ibmaem.c
++++ b/drivers/hwmon/ibmaem.c
+@@ -429,13 +429,15 @@ static int aem_read_sensor(struct aem_data *data, u8 elt, u8 reg,
+ 	aem_send_message(ipmi);
+ 
+ 	res = wait_for_completion_timeout(&ipmi->read_complete, IPMI_TIMEOUT);
+-	if (!res)
+-		return -ETIMEDOUT;
++	if (!res) {
++		res = -ETIMEDOUT;
++		goto out;
++	}
+ 
+ 	if (ipmi->rx_result || ipmi->rx_msg_len != rs_size ||
+ 	    memcmp(&rs_resp->id, &system_x_id, sizeof(system_x_id))) {
+-		kfree(rs_resp);
+-		return -ENOENT;
++		res = -ENOENT;
++		goto out;
+ 	}
+ 
+ 	switch (size) {
+@@ -460,8 +462,11 @@ static int aem_read_sensor(struct aem_data *data, u8 elt, u8 reg,
+ 		break;
+ 	}
+ 	}
++	res = 0;
+ 
+-	return 0;
++out:
++	kfree(rs_resp);
++	return res;
+ }
+ 
+ /* Update AEM energy registers */
+diff --git a/drivers/net/igb/e1000_82575.c b/drivers/net/igb/e1000_82575.c
+index 33352ff..d617f2d 100644
+diff --git a/drivers/usb/class/usbtmc.c b/drivers/usb/class/usbtmc.c
+index d9461c9..ae1ffbc 100644
+--- a/drivers/usb/class/usbtmc.c
++++ b/drivers/usb/class/usbtmc.c
+@@ -267,7 +267,7 @@ usbtmc_abort_bulk_in_status:
+ 				dev_err(dev, "usb_bulk_msg returned %d\n", rv);
+ 				goto exit;
+ 			}
+-		} while ((actual = max_size) &&
++		} while ((actual == max_size) &&
+ 			 (n < USBTMC_MAX_READS_TO_CLEAR_BULK_IN));
+ 
+ 	if (actual == max_size) {
+diff --git a/drivers/usb/host/pci-quirks.c b/drivers/usb/host/pci-quirks.c
+index bcf7a88..eae8b18 100644
+--- a/drivers/usb/host/pci-quirks.c
++++ b/drivers/usb/host/pci-quirks.c
+@@ -444,7 +444,7 @@ static void __devinit quirk_usb_handoff_xhci(struct pci_dev *pdev)
+ 
+ 	/* If the BIOS owns the HC, signal that the OS wants it, and wait */
+ 	if (val & XHCI_HC_BIOS_OWNED) {
+-		writel(val & XHCI_HC_OS_OWNED, base + ext_cap_offset);
++		writel(val | XHCI_HC_OS_OWNED, base + ext_cap_offset);
+ 
+ 		/* Wait for 5 seconds with 10 microsecond polling interval */
+ 		timeout = handshake(base + ext_cap_offset, XHCI_HC_BIOS_OWNED,
+diff --git a/drivers/usb/serial/qcserial.c b/drivers/usb/serial/qcserial.c
+index 8ab4ab2..d469673 100644
+--- a/drivers/usb/serial/qcserial.c
++++ b/drivers/usb/serial/qcserial.c
+@@ -43,6 +43,7 @@ static struct usb_device_id id_table[] = {
+ 	{USB_DEVICE(0x05c6, 0x9203)},	/* Generic Gobi Modem device */
+ 	{USB_DEVICE(0x05c6, 0x9222)},	/* Generic Gobi Modem device */
+ 	{USB_DEVICE(0x05c6, 0x9008)},	/* Generic Gobi QDL device */
++	{USB_DEVICE(0x05c6, 0x9009)},	/* Generic Gobi Modem device */
+ 	{USB_DEVICE(0x05c6, 0x9201)},	/* Generic Gobi QDL device */
+ 	{USB_DEVICE(0x05c6, 0x9221)},	/* Generic Gobi QDL device */
+ 	{USB_DEVICE(0x05c6, 0x9231)},	/* Generic Gobi QDL device */
+diff --git a/drivers/usb/storage/unusual_devs.h b/drivers/usb/storage/unusual_devs.h
+index 6ca33f2..4453f12 100644
+--- a/drivers/usb/storage/unusual_devs.h
++++ b/drivers/usb/storage/unusual_devs.h
+@@ -1977,6 +1977,16 @@ UNUSUAL_DEV(  0x4146, 0xba01, 0x0100, 0x0100,
+ 		"Micro Mini 1GB",
+ 		US_SC_DEVICE, US_PR_DEVICE, NULL, US_FL_NOT_LOCKABLE ),
+ 
++/*
++ * Nick Bowler <nbowler@elliptictech.com>
++ * SCSI stack spams (otherwise harmless) error messages.
++ */
++UNUSUAL_DEV(  0xc251, 0x4003, 0x0100, 0x0100,
++		"Keil Software, Inc.",
++		"V2M MotherBoard",
++		US_SC_DEVICE, US_PR_DEVICE, NULL,
++		US_FL_NOT_LOCKABLE),
++
+ /* Reported by Andrew Simmons <andrew.simmons@gmail.com> */
+ UNUSUAL_DEV(  0xed06, 0x4500, 0x0001, 0x0001,
+ 		"DataStor",
+diff --git a/fs/befs/linuxvfs.c b/fs/befs/linuxvfs.c
+index 34ddda8..9158c07 100644
+--- a/fs/befs/linuxvfs.c
++++ b/fs/befs/linuxvfs.c
+@@ -469,17 +469,22 @@ befs_follow_link(struct dentry *dentry, struct nameidata *nd)
+ 		befs_data_stream *data = &befs_ino->i_data.ds;
+ 		befs_off_t len = data->size;
+ 
+-		befs_debug(sb, "Follow long symlink");
+-
+-		link = kmalloc(len, GFP_NOFS);
+-		if (!link) {
+-			link = ERR_PTR(-ENOMEM);
+-		} else if (befs_read_lsymlink(sb, data, link, len) != len) {
+-			kfree(link);
+-			befs_error(sb, "Failed to read entire long symlink");
++		if (len == 0) {
++			befs_error(sb, "Long symlink with illegal length");
+ 			link = ERR_PTR(-EIO);
+ 		} else {
+-			link[len - 1] = '\0';
++			befs_debug(sb, "Follow long symlink");
++
++			link = kmalloc(len, GFP_NOFS);
++			if (!link) {
++				link = ERR_PTR(-ENOMEM);
++			} else if (befs_read_lsymlink(sb, data, link, len) != len) {
++				kfree(link);
++				befs_error(sb, "Failed to read entire long symlink");
++				link = ERR_PTR(-EIO);
++			} else {
++				link[len - 1] = '\0';
++			}
+ 		}
+ 	} else {
+ 		link = befs_ino->i_data.symlink;
+diff --git a/fs/fuse/dev.c b/fs/fuse/dev.c
+index 650546f..1facb39 100644
+--- a/fs/fuse/dev.c
++++ b/fs/fuse/dev.c
+@@ -899,6 +899,10 @@ static int fuse_notify_inval_entry(struct fuse_conn *fc, unsigned int size,
+ 	if (outarg.namelen > FUSE_NAME_MAX)
+ 		goto err;
+ 
++	err = -EINVAL;
++	if (size != sizeof(outarg) + outarg.namelen + 1)
++		goto err;
++
+ 	name.name = buf;
+ 	name.len = outarg.namelen;
+ 	err = fuse_copy_one(cs, buf, outarg.namelen + 1);
+diff --git a/fs/partitions/efi.c b/fs/partitions/efi.c
+index 2aac776..6ab70f4 100644
+--- a/fs/partitions/efi.c
++++ b/fs/partitions/efi.c
+@@ -311,6 +311,15 @@ is_gpt_valid(struct block_device *bdev, u64 lba,
+ 		goto fail;
+ 	}
+ 
++	/* Check the GUID Partition Table header size */
++	if (le32_to_cpu((*gpt)->header_size) >
++			bdev_logical_block_size(bdev)) {
++		pr_debug("GUID Partition Table Header size is wrong: %u > %u\n",
++			le32_to_cpu((*gpt)->header_size),
++			bdev_logical_block_size(bdev));
++		goto fail;
++	}
++
+ 	/* Check the GUID Partition Table CRC */
+ 	origcrc = le32_to_cpu((*gpt)->header_crc32);
+ 	(*gpt)->header_crc32 = 0;
+diff --git a/kernel/futex.c b/kernel/futex.c
+index 09dbee2..fb98c9f 100644
+--- a/kernel/futex.c
++++ b/kernel/futex.c
+@@ -203,6 +203,8 @@ static void drop_futex_key_refs(union futex_key *key)
+  * @uaddr:	virtual address of the futex
+  * @fshared:	0 for a PROCESS_PRIVATE futex, 1 for PROCESS_SHARED
+  * @key:	address where result is stored.
++ * @rw:		mapping needs to be read/write (values: VERIFY_READ,
++ *              VERIFY_WRITE)
+  *
+  * Returns a negative error code or 0
+  * The key words are stored in *key on success.
+@@ -214,12 +216,12 @@ static void drop_futex_key_refs(union futex_key *key)
+  * lock_page() might sleep, the caller should not hold a spinlock.
+  */
+ static int
+-get_futex_key(u32 __user *uaddr, int fshared, union futex_key *key)
++get_futex_key(u32 __user *uaddr, int fshared, union futex_key *key, int rw)
+ {
+ 	unsigned long address = (unsigned long)uaddr;
+ 	struct mm_struct *mm = current->mm;
+ 	struct page *page;
+-	int err;
++	int err, ro = 0;
+ 
+ 	/*
+ 	 * The futex address must be "naturally" aligned.
+@@ -247,14 +249,31 @@ get_futex_key(u32 __user *uaddr, int fshared, union futex_key *key)
+ 
+ again:
+ 	err = get_user_pages_fast(address, 1, 1, &page);
++	/*
++	 * If write access is not required (eg. FUTEX_WAIT), try
++	 * and get read-only access.
++	 */
++	if (err == -EFAULT && rw == VERIFY_READ) {
++		err = get_user_pages_fast(address, 1, 0, &page);
++		ro = 1;
++	}
+ 	if (err < 0)
+ 		return err;
++	else
++		err = 0;
+ 
+ 	page = compound_head(page);
+ 	lock_page(page);
+ 	if (!page->mapping) {
+ 		unlock_page(page);
+ 		put_page(page);
++		/*
++		* ZERO_PAGE pages don't have a mapping. Avoid a busy loop
++		* trying to find one. RW mapping would have COW'd (and thus
++		* have a mapping) so this page is RO and won't ever change.
++		*/
++		if ((page == ZERO_PAGE(address)))
++			return -EFAULT;
+ 		goto again;
+ 	}
+ 
+@@ -266,6 +285,15 @@ again:
+ 	 * the object not the particular process.
+ 	 */
+ 	if (PageAnon(page)) {
++		/*
++		 * A RO anonymous page will never change and thus doesn't make
++		 * sense for futex operations.
++		 */
++		if (ro) {
++			err = -EFAULT;
++			goto out;
++		}
++
+ 		key->both.offset |= FUT_OFF_MMSHARED; /* ref taken on mm */
+ 		key->private.mm = mm;
+ 		key->private.address = address;
+@@ -277,9 +305,10 @@ again:
+ 
+ 	get_futex_key_refs(key);
+ 
++out:
+ 	unlock_page(page);
+ 	put_page(page);
+-	return 0;
++	return err;
+ }
+ 
+ static inline
+@@ -880,7 +909,7 @@ static int futex_wake(u32 __user *uaddr, int fshared, int nr_wake, u32 bitset)
+ 	if (!bitset)
+ 		return -EINVAL;
+ 
+-	ret = get_futex_key(uaddr, fshared, &key);
++	ret = get_futex_key(uaddr, fshared, &key, VERIFY_READ);
+ 	if (unlikely(ret != 0))
+ 		goto out;
+ 
+@@ -926,10 +955,10 @@ futex_wake_op(u32 __user *uaddr1, int fshared, u32 __user *uaddr2,
+ 	int ret, op_ret;
+ 
+ retry:
+-	ret = get_futex_key(uaddr1, fshared, &key1);
++	ret = get_futex_key(uaddr1, fshared, &key1, VERIFY_READ);
+ 	if (unlikely(ret != 0))
+ 		goto out;
+-	ret = get_futex_key(uaddr2, fshared, &key2);
++	ret = get_futex_key(uaddr2, fshared, &key2, VERIFY_WRITE);
+ 	if (unlikely(ret != 0))
+ 		goto out_put_key1;
+ 
+@@ -1188,10 +1217,11 @@ retry:
+ 		pi_state = NULL;
+ 	}
+ 
+-	ret = get_futex_key(uaddr1, fshared, &key1);
++	ret = get_futex_key(uaddr1, fshared, &key1, VERIFY_READ);
+ 	if (unlikely(ret != 0))
+ 		goto out;
+-	ret = get_futex_key(uaddr2, fshared, &key2);
++	ret = get_futex_key(uaddr2, fshared, &key2,
++			    requeue_pi ? VERIFY_WRITE : VERIFY_READ);
+ 	if (unlikely(ret != 0))
+ 		goto out_put_key1;
+ 
+@@ -1746,7 +1776,7 @@ static int futex_wait_setup(u32 __user *uaddr, u32 val, int fshared,
+ 	 */
+ retry:
+ 	q->key = FUTEX_KEY_INIT;
+-	ret = get_futex_key(uaddr, fshared, &q->key);
++	ret = get_futex_key(uaddr, fshared, &q->key, VERIFY_READ);
+ 	if (unlikely(ret != 0))
+ 		return ret;
+ 
+@@ -1912,7 +1942,7 @@ static int futex_lock_pi(u32 __user *uaddr, int fshared,
+ 	q.requeue_pi_key = NULL;
+ retry:
+ 	q.key = FUTEX_KEY_INIT;
+-	ret = get_futex_key(uaddr, fshared, &q.key);
++	ret = get_futex_key(uaddr, fshared, &q.key, VERIFY_WRITE);
+ 	if (unlikely(ret != 0))
+ 		goto out;
+ 
+@@ -2031,7 +2061,7 @@ retry:
+ 	if ((uval & FUTEX_TID_MASK) != task_pid_vnr(current))
+ 		return -EPERM;
+ 
+-	ret = get_futex_key(uaddr, fshared, &key);
++	ret = get_futex_key(uaddr, fshared, &key, VERIFY_WRITE);
+ 	if (unlikely(ret != 0))
+ 		goto out;
+ 
+@@ -2223,7 +2253,7 @@ static int futex_wait_requeue_pi(u32 __user *uaddr, int fshared,
+ 	rt_waiter.task = NULL;
+ 
+ 	key2 = FUTEX_KEY_INIT;
+-	ret = get_futex_key(uaddr2, fshared, &key2);
++	ret = get_futex_key(uaddr2, fshared, &key2, VERIFY_WRITE);
+ 	if (unlikely(ret != 0))
+ 		goto out;
+ 
+diff --git a/mm/vmalloc.c b/mm/vmalloc.c
+index 680dcbb..7221e9e 100644
+--- a/mm/vmalloc.c
++++ b/mm/vmalloc.c
+@@ -671,9 +671,10 @@ static void free_unmap_vmap_area_addr(unsigned long addr)
+ #define VMAP_BBMAP_BITS_MIN	(VMAP_MAX_ALLOC*2)
+ #define VMAP_MIN(x, y)		((x) < (y) ? (x) : (y)) /* can't use min() */
+ #define VMAP_MAX(x, y)		((x) > (y) ? (x) : (y)) /* can't use max() */
+-#define VMAP_BBMAP_BITS		VMAP_MIN(VMAP_BBMAP_BITS_MAX,		\
+-					VMAP_MAX(VMAP_BBMAP_BITS_MIN,	\
+-						VMALLOC_PAGES / NR_CPUS / 16))
++#define VMAP_BBMAP_BITS		\
++		VMAP_MIN(VMAP_BBMAP_BITS_MAX,	\
++		VMAP_MAX(VMAP_BBMAP_BITS_MIN,	\
++			VMALLOC_PAGES / roundup_pow_of_two(NR_CPUS) / 16))
+ 
+ #define VMAP_BLOCK_SIZE		(VMAP_BBMAP_BITS * PAGE_SIZE)
+ 
+diff --git a/net/atm/br2684.c b/net/atm/br2684.c
+index c9230c3..be1c1d2 100644
+--- a/net/atm/br2684.c
++++ b/net/atm/br2684.c
+@@ -208,8 +208,6 @@ static int br2684_xmit_vcc(struct sk_buff *skb, struct net_device *dev,
+ 		if (brdev->payload == p_bridged) {
+ 			skb_push(skb, 2);
+ 			memset(skb->data, 0, 2);
+-		} else { /* p_routed */
+-			skb_pull(skb, ETH_HLEN);
+ 		}
+ 	}
+ 	skb_debug(skb);
+diff --git a/sound/pci/ac97/ac97_patch.c b/sound/pci/ac97/ac97_patch.c
+index e7efcef..eeb2e23 100644
+--- a/sound/pci/ac97/ac97_patch.c
++++ b/sound/pci/ac97/ac97_patch.c
+@@ -1915,6 +1915,7 @@ static unsigned int ad1981_jacks_whitelist[] = {
+ 	0x103c0944, /* HP nc6220 */
+ 	0x103c0934, /* HP nc8220 */
+ 	0x103c006d, /* HP nx9105 */
++	0x103c300d, /* HP Compaq dc5100 SFF(PT003AW) */
+ 	0x17340088, /* FSC Scenic-W */
+ 	0 /* end */
+ };
+diff --git a/sound/usb/caiaq/audio.c b/sound/usb/caiaq/audio.c
+index 007b4bf..e89017a 100644
+--- a/sound/usb/caiaq/audio.c
++++ b/sound/usb/caiaq/audio.c
+@@ -138,8 +138,12 @@ static void stream_stop(struct snd_usb_caiaqdev *dev)
+ 
+ 	for (i = 0; i < N_URBS; i++) {
+ 		usb_kill_urb(dev->data_urbs_in[i]);
+-		usb_kill_urb(dev->data_urbs_out[i]);
++
++		if (test_bit(i, &dev->outurb_active_mask))
++			usb_kill_urb(dev->data_urbs_out[i]);
+ 	}
++
++	dev->outurb_active_mask = 0;
+ }
+ 
+ static int snd_usb_caiaq_substream_open(struct snd_pcm_substream *substream)
+@@ -466,8 +470,9 @@ static void read_completed(struct urb *urb)
+ {
+ 	struct snd_usb_caiaq_cb_info *info = urb->context;
+ 	struct snd_usb_caiaqdev *dev;
+-	struct urb *out;
+-	int frame, len, send_it = 0, outframe = 0;
++	struct urb *out = NULL;
++	int i, frame, len, send_it = 0, outframe = 0;
++	size_t offset = 0;
+ 
+ 	if (urb->status || !info)
+ 		return;
+@@ -477,7 +482,17 @@ static void read_completed(struct urb *urb)
+ 	if (!dev->streaming)
+ 		return;
+ 
+-	out = dev->data_urbs_out[info->index];
++	/* find an unused output urb that is unused */
++	for (i = 0; i < N_URBS; i++)
++		if (test_and_set_bit(i, &dev->outurb_active_mask) == 0) {
++			out = dev->data_urbs_out[i];
++			break;
++		}
++
++	if (!out) {
++		log("Unable to find an output urb to use\n");
++		goto requeue;
++	}
+ 
+ 	/* read the recently received packet and send back one which has
+ 	 * the same layout */
+@@ -488,7 +503,8 @@ static void read_completed(struct urb *urb)
+ 		len = urb->iso_frame_desc[outframe].actual_length;
+ 		out->iso_frame_desc[outframe].length = len;
+ 		out->iso_frame_desc[outframe].actual_length = 0;
+-		out->iso_frame_desc[outframe].offset = BYTES_PER_FRAME * frame;
++		out->iso_frame_desc[outframe].offset = offset;
++		offset += len;
+ 
+ 		if (len > 0) {
+ 			spin_lock(&dev->spinlock);
+@@ -504,11 +520,15 @@ static void read_completed(struct urb *urb)
+ 	}
+ 
+ 	if (send_it) {
+-		out->number_of_packets = FRAMES_PER_URB;
++		out->number_of_packets = outframe;
+ 		out->transfer_flags = URB_ISO_ASAP;
+ 		usb_submit_urb(out, GFP_ATOMIC);
++	} else {
++		struct snd_usb_caiaq_cb_info *oinfo = out->context;
++		clear_bit(oinfo->index, &dev->outurb_active_mask);
+ 	}
+ 
++requeue:
+ 	/* re-submit inbound urb */
+ 	for (frame = 0; frame < FRAMES_PER_URB; frame++) {
+ 		urb->iso_frame_desc[frame].offset = BYTES_PER_FRAME * frame;
+@@ -530,6 +550,8 @@ static void write_completed(struct urb *urb)
+ 		dev->output_running = 1;
+ 		wake_up(&dev->prepare_wait_queue);
+ 	}
++
++	clear_bit(info->index, &dev->outurb_active_mask);
+ }
+ 
+ static struct urb **alloc_urbs(struct snd_usb_caiaqdev *dev, int dir, int *ret)
+@@ -680,6 +702,9 @@ int snd_usb_caiaq_audio_init(struct snd_usb_caiaqdev *dev)
+ 	if (!dev->data_cb_info)
+ 		return -ENOMEM;
+ 
++	dev->outurb_active_mask = 0;
++	BUILD_BUG_ON(N_URBS > (sizeof(dev->outurb_active_mask) * 8));
++
+ 	for (i = 0; i < N_URBS; i++) {
+ 		dev->data_cb_info[i].dev = dev;
+ 		dev->data_cb_info[i].index = i;
+diff --git a/sound/usb/caiaq/device.h b/sound/usb/caiaq/device.h
+index 44e3edf..94c0c36 100644
+--- a/sound/usb/caiaq/device.h
++++ b/sound/usb/caiaq/device.h
+@@ -92,6 +92,7 @@ struct snd_usb_caiaqdev {
+ 	int input_panic, output_panic, warned;
+ 	char *audio_in_buf, *audio_out_buf;
+ 	unsigned int samplerates, bpp;
++	unsigned long outurb_active_mask;
+ 
+ 	struct snd_pcm_substream *sub_playback[MAX_STREAMS];
+ 	struct snd_pcm_substream *sub_capture[MAX_STREAMS];
+diff --git a/tools/perf/util/config.c b/tools/perf/util/config.c
+index 8784649..1720d01 100644
+--- a/tools/perf/util/config.c
++++ b/tools/perf/util/config.c
+@@ -416,7 +416,6 @@ int perf_config_global(void)
+ int perf_config(config_fn_t fn, void *data)
+ {
+ 	int ret = 0, found = 0;
+-	char *repo_config = NULL;
+ 	const char *home = NULL;
+ 
+ 	/* Setting $PERF_CONFIG makes perf read _only_ the given config file. */
+@@ -438,12 +437,6 @@ int perf_config(config_fn_t fn, void *data)
+ 		free(user_config);
+ 	}
+ 
+-	repo_config = perf_pathdup("config");
+-	if (!access(repo_config, R_OK)) {
+-		ret += perf_config_from_file(fn, repo_config, data);
+-		found += 1;
+-	}
+-	free(repo_config);
+ 	if (found == 0)
+ 		return -1;
+ 	return ret;
