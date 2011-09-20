@@ -1,0 +1,89 @@
+On Wed, Aug 17, 2011 at 06:39:11PM +0200, Moritz Mühlenhoff wrote:
+> On Wed, Aug 17, 2011 at 10:05:30AM -0600, dann frazier wrote:
+> > On Wed, Aug 17, 2011 at 10:33:21AM +0200, Moritz Muehlenhoff wrote:
+> > > Hi Dann,
+> > > I've whipped up a patch for CVE-2009-4067. (The driver was removed
+> > > upstream, so there's no upstream fix). Could you have a second look,
+> > > please?
+> > 
+> > Sure - where can I find it?
+> 
+> I forgot the attachment :-)
+> 
+> Cheers,
+>         Moritz 
+
+> diff -aur linux-2.6-2.6.26.orig/drivers/usb/misc/auerswald.c linux-2.6-2.6.26/drivers/usb/misc/auerswald.c
+> --- linux-2.6-2.6.26.orig/drivers/usb/misc/auerswald.c	2008-07-13 23:51:29.000000000 +0200
+> +++ linux-2.6-2.6.26/drivers/usb/misc/auerswald.c	2011-08-17 10:30:13.958449758 +0200
+> @@ -1946,7 +1946,7 @@
+>  	/* Try to get a suitable textual description of the device */
+>  	/* Device name:*/
+>  	ret = usb_string( cp->usbdev, AUSI_DEVICE, cp->dev_desc, AUSI_DLEN-1);
+> -	if (ret >= 0) {
+> +	if (ret >= 0 && ret < AUSI_DLEN) {
+>  		u += ret;
+>  		/* Append Serial Number */
+>  		memcpy(&cp->dev_desc[u], ",Ser# ", 6);
+> Nur in linux-2.6-2.6.26/drivers/usb/misc/: auerswald.c~.
+
+I think that is sufficient to resolve the specific vulnerability that
+the MWR PDF describes. However, if the user can control AUSI_DEVICE,
+shouldn't we also assume they can control AUSI_SERIALNR, and just
+overflow things a little further down?
+
+Also, there's a couple places where they seem to blindly memcpy a
+hardcoded number of bytes to the end of the string without checking
+to see if this crosses the AUSI_DLEN boundary.
+
+Perhaps I'm overly paranoid, but what do you think of this?
+
+--- linux-source-2.6.26/drivers/usb/misc/auerswald.c.orig	2011-08-21 14:04:46.634626234 -0600
++++ linux-source-2.6.26/drivers/usb/misc/auerswald.c	2011-08-21 14:04:47.826643896 -0600
+@@ -1946,23 +1946,28 @@ static int auerswald_probe (struct usb_i
+ 	/* Try to get a suitable textual description of the device */
+ 	/* Device name:*/
+ 	ret = usb_string( cp->usbdev, AUSI_DEVICE, cp->dev_desc, AUSI_DLEN-1);
+-	if (ret >= 0) {
+-		u += ret;
+-		/* Append Serial Number */
+-		memcpy(&cp->dev_desc[u], ",Ser# ", 6);
+-		u += 6;
+-		ret = usb_string( cp->usbdev, AUSI_SERIALNR, &cp->dev_desc[u], AUSI_DLEN-u-1);
+-		if (ret >= 0) {
+-			u += ret;
+-			/* Append subscriber number */
+-			memcpy(&cp->dev_desc[u], ", ", 2);
+-			u += 2;
+-			ret = usb_string( cp->usbdev, AUSI_MSN, &cp->dev_desc[u], AUSI_DLEN-u-1);
+-			if (ret >= 0) {
+-				u += ret;
+-			}
+-		}
+-	}
++	if (ret < 0 || ret >= AUSI_DLEN)
++		goto desc_done;
++	u += ret;
++	if (u >= AUSI_DLEN - 6)
++		goto desc_done;
++	/* Append Serial Number */
++	memcpy(&cp->dev_desc[u], ",Ser# ", 6);
++	u += 6;
++	ret = usb_string( cp->usbdev, AUSI_SERIALNR, &cp->dev_desc[u], AUSI_DLEN-u-1);
++	if (ret < 0 || u + ret >= AUSI_DLEN)
++		goto desc_done;
++	u += ret;
++	if (u >= AUSI_DLEN - 2)
++		goto desc_done;
++	/* Append subscriber number */
++	memcpy(&cp->dev_desc[u], ", ", 2);
++	u += 2;
++	ret = usb_string( cp->usbdev, AUSI_MSN, &cp->dev_desc[u], AUSI_DLEN-u-1);
++	if (ret < 0 || u + ret >= AUSI_DLEN)
++		goto desc_done;
++	u += ret;
++desc_done:
+ 	cp->dev_desc[u] = '\0';
+ 	info("device is a %s", cp->dev_desc);
+ 
+

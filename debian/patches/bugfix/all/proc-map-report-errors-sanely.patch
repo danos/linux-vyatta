@@ -1,0 +1,80 @@
+commit ec6fd8a4355cda81cd9f06bebc048e83eb514ac7
+Author: Al Viro <viro@zeniv.linux.org.uk>
+Date:   Tue Feb 15 22:22:54 2011 -0500
+
+    report errors in /proc/*/*map* sanely
+    
+    Signed-off-by: Al Viro <viro@zeniv.linux.org.uk>
+    [dannf: backported to Debian's 2.6.26]
+
+commit c4511551969b481182ce9114dd552d68e1c5dfe7
+Author: dann frazier <dannf@debian.org>
+Date:   Wed Aug 31 22:09:22 2011 -0600
+
+    bugfix/all/proc-map-report-errors-sanely.patch
+
+diff --git a/fs/proc/base.c b/fs/proc/base.c
+index 47afca0..01421c4 100644
+--- a/fs/proc/base.c
++++ b/fs/proc/base.c
+@@ -254,7 +254,7 @@ struct mm_struct *mm_for_maps(struct task_struct *task)
+ 		if (!ptrace_may_attach(task) ||
+ 		    mm != task->mm) {
+ 			mmput(mm);
+-			mm = NULL;
++			mm = ERR_PTR(-EACCES);
+ 		}
+ 	}
+ 	return mm;
+diff --git a/fs/proc/task_mmu.c b/fs/proc/task_mmu.c
+index 56c00dc..e2dd752 100644
+--- a/fs/proc/task_mmu.c
++++ b/fs/proc/task_mmu.c
+@@ -114,11 +114,11 @@ static void *m_start(struct seq_file *m, loff_t *pos)
+ 
+ 	priv->task = get_pid_task(priv->pid, PIDTYPE_PID);
+ 	if (!priv->task)
+-		return NULL;
++		return ERR_PTR(-ESRCH);
+ 
+ 	mm = mm_for_maps(priv->task);
+-	if (!mm)
+-		return NULL;
++	if (!mm || IS_ERR(mm))
++		return mm;
+ 	down_read(&mm->mmap_sem);
+ 
+ 	tail_vma = get_gate_vma(priv->task);
+@@ -662,9 +662,9 @@ static ssize_t pagemap_read(struct file *file, char __user *buf,
+ 	if (!task)
+ 		goto out;
+ 
+-	ret = -EACCES;
+ 	mm = mm_for_maps(task);
+-	if (!mm)
++	ret = PTR_ERR(mm);
++	if (!mm || IS_ERR(mm))
+ 		goto out_task;
+ 
+ 	ret = -EINVAL;
+diff --git a/fs/proc/task_nommu.c b/fs/proc/task_nommu.c
+index 5b4a574..8ed6452 100644
+--- a/fs/proc/task_nommu.c
++++ b/fs/proc/task_nommu.c
+@@ -129,13 +129,13 @@ static void *m_start(struct seq_file *m, loff_t *pos)
+ 	/* pin the task and mm whilst we play with them */
+ 	priv->task = get_pid_task(priv->pid, PIDTYPE_PID);
+ 	if (!priv->task)
+-		return NULL;
++		return ERR_PTR(-ESRCH);
+ 
+ 	mm = mm_for_maps(priv->task);
+-	if (!mm) {
++	if (!mm || IS_ERR(mm)) {
+ 		put_task_struct(priv->task);
+ 		priv->task = NULL;
+-		return NULL;
++		return mm;
+ 	}
+ 	down_read(&mm->mmap_sem);
+ 

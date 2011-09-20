@@ -1,0 +1,71 @@
+commit 0b760113a3a155269a3fba93a409c640031dd68f
+Author: Trond Myklebust <Trond.Myklebust@netapp.com>
+Date:   Tue May 31 15:15:34 2011 -0400
+
+    NLM: Don't hang forever on NLM unlock requests
+    
+    If the NLM daemon is killed on the NFS server, we can currently end up
+    hanging forever on an 'unlock' request, instead of aborting. Basically,
+    if the rpcbind request fails, or the server keeps returning garbage, we
+    really want to quit instead of retrying.
+    
+    Tested-by: Vasily Averin <vvs@sw.ru>
+    Signed-off-by: Trond Myklebust <Trond.Myklebust@netapp.com>
+    Cc: stable@kernel.org
+
+diff -urpN linux-source-2.6.32.orig/fs/lockd/clntproc.c linux-source-2.6.32/fs/lockd/clntproc.c
+--- linux-source-2.6.32.orig/fs/lockd/clntproc.c	2009-12-02 20:51:21.000000000 -0700
++++ linux-source-2.6.32/fs/lockd/clntproc.c	2011-08-03 23:36:15.028741583 -0600
+@@ -709,7 +709,13 @@ static void nlmclnt_unlock_callback(stru
+ 
+ 	if (task->tk_status < 0) {
+ 		dprintk("lockd: unlock failed (err = %d)\n", -task->tk_status);
+-		goto retry_rebind;
++		switch (task->tk_status) {
++		case -EACCES:
++		case -EIO:
++			goto die;
++		default:
++			goto retry_rebind;
++		}
+ 	}
+ 	if (status == NLM_LCK_DENIED_GRACE_PERIOD) {
+ 		rpc_delay(task, NLMCLNT_GRACE_WAIT);
+diff -urpN linux-source-2.6.32.orig/include/linux/sunrpc/sched.h linux-source-2.6.32/include/linux/sunrpc/sched.h
+--- linux-source-2.6.32.orig/include/linux/sunrpc/sched.h	2009-12-02 20:51:21.000000000 -0700
++++ linux-source-2.6.32/include/linux/sunrpc/sched.h	2011-08-03 23:43:26.040758731 -0600
+@@ -84,8 +84,8 @@ struct rpc_task {
+ 	long			tk_rtt;		/* round-trip time (jiffies) */
+ 
+ 	pid_t			tk_owner;	/* Process id for batching tasks */
+-	unsigned char		tk_priority : 2;/* Task priority */
+-
++	unsigned char		tk_priority : 2,/* Task priority */
++				tk_rebind_retry : 2;
+ #ifdef RPC_DEBUG
+ 	unsigned short		tk_pid;		/* debugging aid */
+ #endif
+diff -urpN linux-source-2.6.32.orig/net/sunrpc/clnt.c linux-source-2.6.32/net/sunrpc/clnt.c
+--- linux-source-2.6.32.orig/net/sunrpc/clnt.c	2009-12-02 20:51:21.000000000 -0700
++++ linux-source-2.6.32/net/sunrpc/clnt.c	2011-08-03 23:36:15.036741657 -0600
+@@ -1052,6 +1052,9 @@ call_bind_status(struct rpc_task *task)
+ 			status = -EOPNOTSUPP;
+ 			break;
+ 		}
++		if (task->tk_rebind_retry == 0)
++			break;
++		task->tk_rebind_retry--;
+ 		rpc_delay(task, 3*HZ);
+ 		goto retry_timeout;
+ 	case -ETIMEDOUT:
+diff -urpN linux-source-2.6.32.orig/net/sunrpc/sched.c linux-source-2.6.32/net/sunrpc/sched.c
+--- linux-source-2.6.32.orig/net/sunrpc/sched.c	2011-06-11 13:10:38.000000000 -0600
++++ linux-source-2.6.32/net/sunrpc/sched.c	2011-08-03 23:36:15.044741731 -0600
+@@ -789,6 +789,7 @@ static void rpc_init_task(struct rpc_tas
+ 	/* Initialize retry counters */
+ 	task->tk_garb_retry = 2;
+ 	task->tk_cred_retry = 2;
++	task->tk_rebind_retry = 2;
+ 
+ 	task->tk_priority = task_setup_data->priority - RPC_PRIORITY_LOW;
+ 	task->tk_owner = current->tgid;
