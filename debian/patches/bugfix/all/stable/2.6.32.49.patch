@@ -1,0 +1,2039 @@
+diff --git a/Documentation/Makefile b/Documentation/Makefile
+index 94b9457..043d7da 100644
+--- a/Documentation/Makefile
++++ b/Documentation/Makefile
+@@ -1,3 +1,3 @@
+ obj-m := DocBook/ accounting/ auxdisplay/ connector/ \
+ 	filesystems/configfs/ ia64/ networking/ \
+-	pcmcia/ spi/ video4linux/ vm/ watchdog/src/
++	pcmcia/ spi/ vm/ watchdog/src/
+diff --git a/Documentation/kbuild/makefiles.txt b/Documentation/kbuild/makefiles.txt
+index 71c602d..ab8689b 100644
+--- a/Documentation/kbuild/makefiles.txt
++++ b/Documentation/kbuild/makefiles.txt
+@@ -502,6 +502,18 @@ more details, with real examples.
+ 	gcc >= 3.00. For gcc < 3.00, -malign-functions=4 is used.
+ 	Note: cc-option-align uses KBUILD_CFLAGS for $(CC) options
+ 
++    cc-disable-warning
++	cc-disable-warning checks if gcc supports a given warning and returns
++	the commandline switch to disable it. This special function is needed,
++	because gcc 4.4 and later accept any unknown -Wno-* option and only
++	warn about it if there is another warning in the source file.
++
++	Example:
++		KBUILD_CFLAGS += $(call cc-disable-warning, unused-but-set-variable)
++
++	In the above example, -Wno-unused-but-set-variable will be added to
++	KBUILD_CFLAGS only if gcc really accepts it.
++
+     cc-version
+ 	cc-version returns a numerical version of the $(CC) compiler version.
+ 	The format is <major><minor> where both are two digits. So for example
+diff --git a/Documentation/video4linux/Makefile b/Documentation/video4linux/Makefile
+deleted file mode 100644
+index 1ed0e98..0000000
+--- a/Documentation/video4linux/Makefile
++++ /dev/null
+@@ -1,8 +0,0 @@
+-# kbuild trick to avoid linker error. Can be omitted if a module is built.
+-obj- := dummy.o
+-
+-# List of programs to build
+-hostprogs-y := v4lgrab
+-
+-# Tell kbuild to always build the programs
+-always := $(hostprogs-y)
+diff --git a/Documentation/video4linux/v4lgrab.c b/Documentation/video4linux/v4lgrab.c
+deleted file mode 100644
+index c8ded17..0000000
+--- a/Documentation/video4linux/v4lgrab.c
++++ /dev/null
+@@ -1,201 +0,0 @@
+-/* Simple Video4Linux image grabber. */
+-/*
+- *	Video4Linux Driver Test/Example Framegrabbing Program
+- *
+- *	Compile with:
+- *		gcc -s -Wall -Wstrict-prototypes v4lgrab.c -o v4lgrab
+- *	Use as:
+- *		v4lgrab >image.ppm
+- *
+- *	Copyright (C) 1998-05-03, Phil Blundell <philb@gnu.org>
+- *	Copied from http://www.tazenda.demon.co.uk/phil/vgrabber.c
+- *	with minor modifications (Dave Forrest, drf5n@virginia.edu).
+- *
+- *
+- *	For some cameras you may need to pre-load libv4l to perform
+- *	the necessary decompression, e.g.:
+- *
+- *	export LD_PRELOAD=/usr/lib/libv4l/v4l1compat.so
+- *	./v4lgrab >image.ppm
+- *
+- *	see http://hansdegoede.livejournal.com/3636.html for details.
+- *
+- */
+-
+-#include <unistd.h>
+-#include <sys/types.h>
+-#include <sys/stat.h>
+-#include <fcntl.h>
+-#include <stdio.h>
+-#include <sys/ioctl.h>
+-#include <stdlib.h>
+-
+-#include <linux/types.h>
+-#include <linux/videodev.h>
+-
+-#define VIDEO_DEV "/dev/video0"
+-
+-/* Stole this from tvset.c */
+-
+-#define READ_VIDEO_PIXEL(buf, format, depth, r, g, b)                   \
+-{                                                                       \
+-	switch (format)                                                 \
+-	{                                                               \
+-		case VIDEO_PALETTE_GREY:                                \
+-			switch (depth)                                  \
+-			{                                               \
+-				case 4:                                 \
+-				case 6:                                 \
+-				case 8:                                 \
+-					(r) = (g) = (b) = (*buf++ << 8);\
+-					break;                          \
+-									\
+-				case 16:                                \
+-					(r) = (g) = (b) =               \
+-						*((unsigned short *) buf);      \
+-					buf += 2;                       \
+-					break;                          \
+-			}                                               \
+-			break;                                          \
+-									\
+-									\
+-		case VIDEO_PALETTE_RGB565:                              \
+-		{                                                       \
+-			unsigned short tmp = *(unsigned short *)buf;    \
+-			(r) = tmp&0xF800;                               \
+-			(g) = (tmp<<5)&0xFC00;                          \
+-			(b) = (tmp<<11)&0xF800;                         \
+-			buf += 2;                                       \
+-		}                                                       \
+-		break;                                                  \
+-									\
+-		case VIDEO_PALETTE_RGB555:                              \
+-			(r) = (buf[0]&0xF8)<<8;                         \
+-			(g) = ((buf[0] << 5 | buf[1] >> 3)&0xF8)<<8;    \
+-			(b) = ((buf[1] << 2 ) & 0xF8)<<8;               \
+-			buf += 2;                                       \
+-			break;                                          \
+-									\
+-		case VIDEO_PALETTE_RGB24:                               \
+-			(r) = buf[0] << 8; (g) = buf[1] << 8;           \
+-			(b) = buf[2] << 8;                              \
+-			buf += 3;                                       \
+-			break;                                          \
+-									\
+-		default:                                                \
+-			fprintf(stderr,                                 \
+-				"Format %d not yet supported\n",        \
+-				format);                                \
+-	}                                                               \
+-}
+-
+-static int get_brightness_adj(unsigned char *image, long size, int *brightness) {
+-  long i, tot = 0;
+-  for (i=0;i<size*3;i++)
+-    tot += image[i];
+-  *brightness = (128 - tot/(size*3))/3;
+-  return !((tot/(size*3)) >= 126 && (tot/(size*3)) <= 130);
+-}
+-
+-int main(int argc, char ** argv)
+-{
+-  int fd = open(VIDEO_DEV, O_RDONLY), f;
+-  struct video_capability cap;
+-  struct video_window win;
+-  struct video_picture vpic;
+-
+-  unsigned char *buffer, *src;
+-  int bpp = 24, r = 0, g = 0, b = 0;
+-  unsigned int i, src_depth = 16;
+-
+-  if (fd < 0) {
+-    perror(VIDEO_DEV);
+-    exit(1);
+-  }
+-
+-  if (ioctl(fd, VIDIOCGCAP, &cap) < 0) {
+-    perror("VIDIOGCAP");
+-    fprintf(stderr, "(" VIDEO_DEV " not a video4linux device?)\n");
+-    close(fd);
+-    exit(1);
+-  }
+-
+-  if (ioctl(fd, VIDIOCGWIN, &win) < 0) {
+-    perror("VIDIOCGWIN");
+-    close(fd);
+-    exit(1);
+-  }
+-
+-  if (ioctl(fd, VIDIOCGPICT, &vpic) < 0) {
+-    perror("VIDIOCGPICT");
+-    close(fd);
+-    exit(1);
+-  }
+-
+-  if (cap.type & VID_TYPE_MONOCHROME) {
+-    vpic.depth=8;
+-    vpic.palette=VIDEO_PALETTE_GREY;    /* 8bit grey */
+-    if(ioctl(fd, VIDIOCSPICT, &vpic) < 0) {
+-      vpic.depth=6;
+-      if(ioctl(fd, VIDIOCSPICT, &vpic) < 0) {
+-	vpic.depth=4;
+-	if(ioctl(fd, VIDIOCSPICT, &vpic) < 0) {
+-	  fprintf(stderr, "Unable to find a supported capture format.\n");
+-	  close(fd);
+-	  exit(1);
+-	}
+-      }
+-    }
+-  } else {
+-    vpic.depth=24;
+-    vpic.palette=VIDEO_PALETTE_RGB24;
+-
+-    if(ioctl(fd, VIDIOCSPICT, &vpic) < 0) {
+-      vpic.palette=VIDEO_PALETTE_RGB565;
+-      vpic.depth=16;
+-
+-      if(ioctl(fd, VIDIOCSPICT, &vpic)==-1) {
+-	vpic.palette=VIDEO_PALETTE_RGB555;
+-	vpic.depth=15;
+-
+-	if(ioctl(fd, VIDIOCSPICT, &vpic)==-1) {
+-	  fprintf(stderr, "Unable to find a supported capture format.\n");
+-	  return -1;
+-	}
+-      }
+-    }
+-  }
+-
+-  buffer = malloc(win.width * win.height * bpp);
+-  if (!buffer) {
+-    fprintf(stderr, "Out of memory.\n");
+-    exit(1);
+-  }
+-
+-  do {
+-    int newbright;
+-    read(fd, buffer, win.width * win.height * bpp);
+-    f = get_brightness_adj(buffer, win.width * win.height, &newbright);
+-    if (f) {
+-      vpic.brightness += (newbright << 8);
+-      if(ioctl(fd, VIDIOCSPICT, &vpic)==-1) {
+-	perror("VIDIOSPICT");
+-	break;
+-      }
+-    }
+-  } while (f);
+-
+-  fprintf(stdout, "P6\n%d %d 255\n", win.width, win.height);
+-
+-  src = buffer;
+-
+-  for (i = 0; i < win.width * win.height; i++) {
+-    READ_VIDEO_PIXEL(src, vpic.palette, src_depth, r, g, b);
+-    fputc(r>>8, stdout);
+-    fputc(g>>8, stdout);
+-    fputc(b>>8, stdout);
+-  }
+-
+-  close(fd);
+-  return 0;
+-}
+diff --git a/Makefile b/Makefile
+index 400a175..a19b0e8 100644
+diff --git a/arch/ia64/hp/sim/simserial.c b/arch/ia64/hp/sim/simserial.c
+index 2bef526..204f650 100644
+--- a/arch/ia64/hp/sim/simserial.c
++++ b/arch/ia64/hp/sim/simserial.c
+@@ -395,7 +395,7 @@ static int rs_ioctl(struct tty_struct *tty, struct file * file,
+ {
+ 	if ((cmd != TIOCGSERIAL) && (cmd != TIOCSSERIAL) &&
+ 	    (cmd != TIOCSERCONFIG) && (cmd != TIOCSERGSTRUCT) &&
+-	    (cmd != TIOCMIWAIT) && (cmd != TIOCGICOUNT)) {
++	    (cmd != TIOCMIWAIT)) {
+ 		if (tty->flags & (1 << TTY_IO_ERROR))
+ 		    return -EIO;
+ 	}
+@@ -433,16 +433,6 @@ static int rs_ioctl(struct tty_struct *tty, struct file * file,
+ 		case TIOCMIWAIT:
+ 			printk(KERN_INFO "rs_ioctl: TIOCMIWAIT: called\n");
+ 			return 0;
+-		/*
+-		 * Get counter of input serial line interrupts (DCD,RI,DSR,CTS)
+-		 * Return: write counters to the user passed counter struct
+-		 * NB: both 1->0 and 0->1 transitions are counted except for
+-		 *     RI where only 0->1 is counted.
+-		 */
+-		case TIOCGICOUNT:
+-			printk(KERN_INFO "rs_ioctl: TIOCGICOUNT called\n");
+-			return 0;
+-
+ 		case TIOCSERGWILD:
+ 		case TIOCSERSWILD:
+ 			/* "setserial -W" is called in Debian boot */
+diff --git a/drivers/base/sys.c b/drivers/base/sys.c
+index 0d90390..3f202f7 100644
+--- a/drivers/base/sys.c
++++ b/drivers/base/sys.c
+@@ -471,6 +471,12 @@ int sysdev_resume(void)
+ {
+ 	struct sysdev_class *cls;
+ 
++	/*
++	 * Called from syscore in mainline but called directly here
++	 * since syscore does not exist in this tree.
++	 */
++	irq_pm_syscore_resume();
++
+ 	WARN_ONCE(!irqs_disabled(),
+ 		"Interrupts enabled while resuming system devices\n");
+ 
+diff --git a/drivers/char/amiserial.c b/drivers/char/amiserial.c
+index 6c32fbf..579d479 100644
+--- a/drivers/char/amiserial.c
++++ b/drivers/char/amiserial.c
+@@ -1262,6 +1262,36 @@ static int rs_break(struct tty_struct *tty, int break_state)
+ 	return 0;
+ }
+ 
++/*
++ * Get counter of input serial line interrupts (DCD,RI,DSR,CTS)
++ * Return: write counters to the user passed counter struct
++ * NB: both 1->0 and 0->1 transitions are counted except for
++ *     RI where only 0->1 is counted.
++ */
++static int rs_get_icount(struct tty_struct *tty,
++				struct serial_icounter_struct *icount)
++{
++	struct async_struct *info = tty->driver_data;
++	struct async_icount cnow;
++	unsigned long flags;
++
++	local_irq_save(flags);
++	cnow = info->state->icount;
++	local_irq_restore(flags);
++	icount->cts = cnow.cts;
++	icount->dsr = cnow.dsr;
++	icount->rng = cnow.rng;
++	icount->dcd = cnow.dcd;
++	icount->rx = cnow.rx;
++	icount->tx = cnow.tx;
++	icount->frame = cnow.frame;
++	icount->overrun = cnow.overrun;
++	icount->parity = cnow.parity;
++	icount->brk = cnow.brk;
++	icount->buf_overrun = cnow.buf_overrun;
++
++	return 0;
++}
+ 
+ static int rs_ioctl(struct tty_struct *tty, struct file * file,
+ 		    unsigned int cmd, unsigned long arg)
+@@ -1331,31 +1361,6 @@ static int rs_ioctl(struct tty_struct *tty, struct file * file,
+ 			}
+ 			/* NOTREACHED */
+ 
+-		/* 
+-		 * Get counter of input serial line interrupts (DCD,RI,DSR,CTS)
+-		 * Return: write counters to the user passed counter struct
+-		 * NB: both 1->0 and 0->1 transitions are counted except for
+-		 *     RI where only 0->1 is counted.
+-		 */
+-		case TIOCGICOUNT:
+-			local_irq_save(flags);
+-			cnow = info->state->icount;
+-			local_irq_restore(flags);
+-			icount.cts = cnow.cts;
+-			icount.dsr = cnow.dsr;
+-			icount.rng = cnow.rng;
+-			icount.dcd = cnow.dcd;
+-			icount.rx = cnow.rx;
+-			icount.tx = cnow.tx;
+-			icount.frame = cnow.frame;
+-			icount.overrun = cnow.overrun;
+-			icount.parity = cnow.parity;
+-			icount.brk = cnow.brk;
+-			icount.buf_overrun = cnow.buf_overrun;
+-
+-			if (copy_to_user(argp, &icount, sizeof(icount)))
+-				return -EFAULT;
+-			return 0;
+ 		case TIOCSERGWILD:
+ 		case TIOCSERSWILD:
+ 			/* "setserial -W" is called in Debian boot */
+@@ -1948,6 +1953,7 @@ static const struct tty_operations serial_ops = {
+ 	.wait_until_sent = rs_wait_until_sent,
+ 	.tiocmget = rs_tiocmget,
+ 	.tiocmset = rs_tiocmset,
++	.get_icount = rs_get_icount,
+ 	.proc_fops = &rs_proc_fops,
+ };
+ 
+diff --git a/drivers/char/cyclades.c b/drivers/char/cyclades.c
+index 4254457..a0369dc 100644
+--- a/drivers/char/cyclades.c
++++ b/drivers/char/cyclades.c
+@@ -2798,29 +2798,6 @@ cy_ioctl(struct tty_struct *tty, struct file *file,
+ 		 * NB: both 1->0 and 0->1 transitions are counted except for
+ 		 *     RI where only 0->1 is counted.
+ 		 */
+-	case TIOCGICOUNT: {
+-		struct serial_icounter_struct sic = { };
+-
+-		spin_lock_irqsave(&info->card->card_lock, flags);
+-		cnow = info->icount;
+-		spin_unlock_irqrestore(&info->card->card_lock, flags);
+-
+-		sic.cts = cnow.cts;
+-		sic.dsr = cnow.dsr;
+-		sic.rng = cnow.rng;
+-		sic.dcd = cnow.dcd;
+-		sic.rx = cnow.rx;
+-		sic.tx = cnow.tx;
+-		sic.frame = cnow.frame;
+-		sic.overrun = cnow.overrun;
+-		sic.parity = cnow.parity;
+-		sic.brk = cnow.brk;
+-		sic.buf_overrun = cnow.buf_overrun;
+-
+-		if (copy_to_user(argp, &sic, sizeof(sic)))
+-			ret_val = -EFAULT;
+-		break;
+-	}
+ 	default:
+ 		ret_val = -ENOIOCTLCMD;
+ 	}
+@@ -2832,6 +2809,31 @@ cy_ioctl(struct tty_struct *tty, struct file *file,
+ 	return ret_val;
+ }				/* cy_ioctl */
+ 
++static int cy_get_icount(struct tty_struct *tty,
++				struct serial_icounter_struct *sic)
++{
++	struct cyclades_port *info = tty->driver_data;
++	struct cyclades_icount cnow;	/* Used to snapshot */
++	unsigned long flags;
++
++	spin_lock_irqsave(&info->card->card_lock, flags);
++	cnow = info->icount;
++	spin_unlock_irqrestore(&info->card->card_lock, flags);
++
++	sic->cts = cnow.cts;
++	sic->dsr = cnow.dsr;
++	sic->rng = cnow.rng;
++	sic->dcd = cnow.dcd;
++	sic->rx = cnow.rx;
++	sic->tx = cnow.tx;
++	sic->frame = cnow.frame;
++	sic->overrun = cnow.overrun;
++	sic->parity = cnow.parity;
++	sic->brk = cnow.brk;
++	sic->buf_overrun = cnow.buf_overrun;
++	return 0;
++}
++
+ /*
+  * This routine allows the tty driver to be notified when
+  * device's termios settings have changed.  Note that a
+@@ -4098,6 +4100,7 @@ static const struct tty_operations cy_ops = {
+ 	.wait_until_sent = cy_wait_until_sent,
+ 	.tiocmget = cy_tiocmget,
+ 	.tiocmset = cy_tiocmset,
++	.get_icount = cy_get_icount,
+ 	.proc_fops = &cyclades_proc_fops,
+ };
+ 
+diff --git a/drivers/char/ip2/ip2main.c b/drivers/char/ip2/ip2main.c
+index 517271c..3bec541 100644
+--- a/drivers/char/ip2/ip2main.c
++++ b/drivers/char/ip2/ip2main.c
+@@ -183,6 +183,8 @@ static void ip2_hangup(PTTY);
+ static int  ip2_tiocmget(struct tty_struct *tty, struct file *file);
+ static int  ip2_tiocmset(struct tty_struct *tty, struct file *file,
+ 			 unsigned int set, unsigned int clear);
++static int ip2_get_icount(struct tty_struct *tty,
++		struct serial_icounter_struct *icount);
+ 
+ static void set_irq(int, int);
+ static void ip2_interrupt_bh(struct work_struct *work);
+@@ -448,6 +450,7 @@ static const struct tty_operations ip2_ops = {
+ 	.hangup          = ip2_hangup,
+ 	.tiocmget	 = ip2_tiocmget,
+ 	.tiocmset	 = ip2_tiocmset,
++	.get_icount	 = ip2_get_icount,
+ 	.proc_fops	 = &ip2_proc_fops,
+ };
+ 
+@@ -2112,7 +2115,6 @@ ip2_ioctl ( PTTY tty, struct file *pFile, UINT cmd, ULONG arg )
+ 	i2ChanStrPtr pCh = DevTable[tty->index];
+ 	i2eBordStrPtr pB;
+ 	struct async_icount cprev, cnow;	/* kernel counter temps */
+-	struct serial_icounter_struct __user *p_cuser;
+ 	int rc = 0;
+ 	unsigned long flags;
+ 	void __user *argp = (void __user *)arg;
+@@ -2281,34 +2283,6 @@ ip2_ioctl ( PTTY tty, struct file *pFile, UINT cmd, ULONG arg )
+ 		break;
+ 
+ 	/*
+-	 * Get counter of input serial line interrupts (DCD,RI,DSR,CTS)
+-	 * Return: write counters to the user passed counter struct
+-	 * NB: both 1->0 and 0->1 transitions are counted except for RI where
+-	 * only 0->1 is counted. The controller is quite capable of counting
+-	 * both, but this done to preserve compatibility with the standard
+-	 * serial driver.
+-	 */
+-	case TIOCGICOUNT:
+-		ip2trace (CHANN, ITRC_IOCTL, 11, 1, rc );
+-
+-		write_lock_irqsave(&pB->read_fifo_spinlock, flags);
+-		cnow = pCh->icount;
+-		write_unlock_irqrestore(&pB->read_fifo_spinlock, flags);
+-		p_cuser = argp;
+-		rc = put_user(cnow.cts, &p_cuser->cts);
+-		rc = put_user(cnow.dsr, &p_cuser->dsr);
+-		rc = put_user(cnow.rng, &p_cuser->rng);
+-		rc = put_user(cnow.dcd, &p_cuser->dcd);
+-		rc = put_user(cnow.rx, &p_cuser->rx);
+-		rc = put_user(cnow.tx, &p_cuser->tx);
+-		rc = put_user(cnow.frame, &p_cuser->frame);
+-		rc = put_user(cnow.overrun, &p_cuser->overrun);
+-		rc = put_user(cnow.parity, &p_cuser->parity);
+-		rc = put_user(cnow.brk, &p_cuser->brk);
+-		rc = put_user(cnow.buf_overrun, &p_cuser->buf_overrun);
+-		break;
+-
+-	/*
+ 	 * The rest are not supported by this driver. By returning -ENOIOCTLCMD they
+ 	 * will be passed to the line discipline for it to handle.
+ 	 */
+@@ -2332,6 +2306,46 @@ ip2_ioctl ( PTTY tty, struct file *pFile, UINT cmd, ULONG arg )
+ 	return rc;
+ }
+ 
++static int ip2_get_icount(struct tty_struct *tty,
++		struct serial_icounter_struct *icount)
++{
++	i2ChanStrPtr pCh = DevTable[tty->index];
++	i2eBordStrPtr pB;
++	struct async_icount cnow;	/* kernel counter temp */
++	unsigned long flags;
++
++	if ( pCh == NULL )
++		return -ENODEV;
++
++	pB = pCh->pMyBord;
++
++	/*
++	 * Get counter of input serial line interrupts (DCD,RI,DSR,CTS)
++	 * Return: write counters to the user passed counter struct
++	 * NB: both 1->0 and 0->1 transitions are counted except for RI where
++	 * only 0->1 is counted. The controller is quite capable of counting
++	 * both, but this done to preserve compatibility with the standard
++	 * serial driver.
++	 */
++
++	write_lock_irqsave(&pB->read_fifo_spinlock, flags);
++	cnow = pCh->icount;
++	write_unlock_irqrestore(&pB->read_fifo_spinlock, flags);
++
++	icount->cts = cnow.cts;
++	icount->dsr = cnow.dsr;
++	icount->rng = cnow.rng;
++	icount->dcd = cnow.dcd;
++	icount->rx = cnow.rx;
++	icount->tx = cnow.tx;
++	icount->frame = cnow.frame;
++	icount->overrun = cnow.overrun;
++	icount->parity = cnow.parity;
++	icount->brk = cnow.brk;
++	icount->buf_overrun = cnow.buf_overrun;
++	return 0;
++}
++
+ /******************************************************************************/
+ /* Function:   GetSerialInfo()                                                */
+ /* Parameters: Pointer to channel structure                                   */
+diff --git a/drivers/char/mxser.c b/drivers/char/mxser.c
+index 5e28d39..4b97406 100644
+--- a/drivers/char/mxser.c
++++ b/drivers/char/mxser.c
+@@ -1736,7 +1736,7 @@ static int mxser_ioctl(struct tty_struct *tty, struct file *file,
+ 		return 0;
+ 	}
+ 
+-	if (cmd != TIOCGSERIAL && cmd != TIOCMIWAIT && cmd != TIOCGICOUNT &&
++	if (cmd != TIOCGSERIAL && cmd != TIOCMIWAIT &&
+ 			test_bit(TTY_IO_ERROR, &tty->flags))
+ 		return -EIO;
+ 
+@@ -1766,32 +1766,6 @@ static int mxser_ioctl(struct tty_struct *tty, struct file *file,
+ 
+ 		return wait_event_interruptible(info->port.delta_msr_wait,
+ 				mxser_cflags_changed(info, arg, &cnow));
+-	/*
+-	 * Get counter of input serial line interrupts (DCD,RI,DSR,CTS)
+-	 * Return: write counters to the user passed counter struct
+-	 * NB: both 1->0 and 0->1 transitions are counted except for
+-	 *     RI where only 0->1 is counted.
+-	 */
+-	case TIOCGICOUNT: {
+-		struct serial_icounter_struct icnt = { 0 };
+-		spin_lock_irqsave(&info->slock, flags);
+-		cnow = info->icount;
+-		spin_unlock_irqrestore(&info->slock, flags);
+-
+-		icnt.frame = cnow.frame;
+-		icnt.brk = cnow.brk;
+-		icnt.overrun = cnow.overrun;
+-		icnt.buf_overrun = cnow.buf_overrun;
+-		icnt.parity = cnow.parity;
+-		icnt.rx = cnow.rx;
+-		icnt.tx = cnow.tx;
+-		icnt.cts = cnow.cts;
+-		icnt.dsr = cnow.dsr;
+-		icnt.rng = cnow.rng;
+-		icnt.dcd = cnow.dcd;
+-
+-		return copy_to_user(argp, &icnt, sizeof(icnt)) ? -EFAULT : 0;
+-	}
+ 	case MOXA_HighSpeedOn:
+ 		return put_user(info->baud_base != 115200 ? 1 : 0, (int __user *)argp);
+ 	case MOXA_SDS_RSTICOUNTER:
+@@ -1862,6 +1836,39 @@ static int mxser_ioctl(struct tty_struct *tty, struct file *file,
+ 	return 0;
+ }
+ 
++	/*
++	 * Get counter of input serial line interrupts (DCD,RI,DSR,CTS)
++	 * Return: write counters to the user passed counter struct
++	 * NB: both 1->0 and 0->1 transitions are counted except for
++	 *     RI where only 0->1 is counted.
++	 */
++
++static int mxser_get_icount(struct tty_struct *tty,
++		struct serial_icounter_struct *icount)
++
++{
++	struct mxser_port *info = tty->driver_data;
++	struct async_icount cnow;
++	unsigned long flags;
++
++	spin_lock_irqsave(&info->slock, flags);
++	cnow = info->icount;
++	spin_unlock_irqrestore(&info->slock, flags);
++
++	icount->frame = cnow.frame;
++	icount->brk = cnow.brk;
++	icount->overrun = cnow.overrun;
++	icount->buf_overrun = cnow.buf_overrun;
++	icount->parity = cnow.parity;
++	icount->rx = cnow.rx;
++	icount->tx = cnow.tx;
++	icount->cts = cnow.cts;
++	icount->dsr = cnow.dsr;
++	icount->rng = cnow.rng;
++	icount->dcd = cnow.dcd;
++	return 0;
++}
++
+ static void mxser_stoprx(struct tty_struct *tty)
+ {
+ 	struct mxser_port *info = tty->driver_data;
+@@ -2358,6 +2365,7 @@ static const struct tty_operations mxser_ops = {
+ 	.wait_until_sent = mxser_wait_until_sent,
+ 	.tiocmget = mxser_tiocmget,
+ 	.tiocmset = mxser_tiocmset,
++	.get_icount = mxser_get_icount,
+ };
+ 
+ struct tty_port_operations mxser_port_ops = {
+diff --git a/drivers/char/nozomi.c b/drivers/char/nozomi.c
+index dc52f75..19b3e1d 100644
+--- a/drivers/char/nozomi.c
++++ b/drivers/char/nozomi.c
+@@ -1783,24 +1783,24 @@ static int ntty_cflags_changed(struct port *port, unsigned long flags,
+ 	return ret;
+ }
+ 
+-static int ntty_ioctl_tiocgicount(struct port *port, void __user *argp)
++static int ntty_tiocgicount(struct tty_struct *tty,
++				struct serial_icounter_struct *icount)
+ {
++	struct port *port = tty->driver_data;
+ 	const struct async_icount cnow = port->tty_icount;
+-	struct serial_icounter_struct icount;
+-
+-	icount.cts = cnow.cts;
+-	icount.dsr = cnow.dsr;
+-	icount.rng = cnow.rng;
+-	icount.dcd = cnow.dcd;
+-	icount.rx = cnow.rx;
+-	icount.tx = cnow.tx;
+-	icount.frame = cnow.frame;
+-	icount.overrun = cnow.overrun;
+-	icount.parity = cnow.parity;
+-	icount.brk = cnow.brk;
+-	icount.buf_overrun = cnow.buf_overrun;
+-
+-	return copy_to_user(argp, &icount, sizeof(icount)) ? -EFAULT : 0;
++
++	icount->cts = cnow.cts;
++	icount->dsr = cnow.dsr;
++	icount->rng = cnow.rng;
++	icount->dcd = cnow.dcd;
++	icount->rx = cnow.rx;
++	icount->tx = cnow.tx;
++	icount->frame = cnow.frame;
++	icount->overrun = cnow.overrun;
++	icount->parity = cnow.parity;
++	icount->brk = cnow.brk;
++	icount->buf_overrun = cnow.buf_overrun;
++	return 0;
+ }
+ 
+ static int ntty_ioctl(struct tty_struct *tty, struct file *file,
+@@ -1819,9 +1819,7 @@ static int ntty_ioctl(struct tty_struct *tty, struct file *file,
+ 		rval = wait_event_interruptible(port->tty_wait,
+ 				ntty_cflags_changed(port, arg, &cprev));
+ 		break;
+-	} case TIOCGICOUNT:
+-		rval = ntty_ioctl_tiocgicount(port, argp);
+-		break;
++	}
+ 	default:
+ 		DBG1("ERR: 0x%08X, %d", cmd, cmd);
+ 		break;
+@@ -1895,6 +1893,7 @@ static const struct tty_operations tty_ops = {
+ 	.chars_in_buffer = ntty_chars_in_buffer,
+ 	.tiocmget = ntty_tiocmget,
+ 	.tiocmset = ntty_tiocmset,
++	.get_icount = ntty_tiocgicount,
+ };
+ 
+ /* Module initialization */
+diff --git a/drivers/char/pcmcia/synclink_cs.c b/drivers/char/pcmcia/synclink_cs.c
+index a08c899..74d124b 100644
+--- a/drivers/char/pcmcia/synclink_cs.c
++++ b/drivers/char/pcmcia/synclink_cs.c
+@@ -2252,6 +2252,32 @@ static int mgslpc_break(struct tty_struct *tty, int break_state)
+ 	return 0;
+ }
+ 
++static int mgslpc_get_icount(struct tty_struct *tty,
++				struct serial_icounter_struct *icount)
++{
++	MGSLPC_INFO * info = (MGSLPC_INFO *)tty->driver_data;
++	struct mgsl_icount cnow;	/* kernel counter temps */
++	unsigned long flags;
++
++	spin_lock_irqsave(&info->lock,flags);
++	cnow = info->icount;
++	spin_unlock_irqrestore(&info->lock,flags);
++
++	icount->cts = cnow.cts;
++	icount->dsr = cnow.dsr;
++	icount->rng = cnow.rng;
++	icount->dcd = cnow.dcd;
++	icount->rx = cnow.rx;
++	icount->tx = cnow.tx;
++	icount->frame = cnow.frame;
++	icount->overrun = cnow.overrun;
++	icount->parity = cnow.parity;
++	icount->brk = cnow.brk;
++	icount->buf_overrun = cnow.buf_overrun;
++
++	return 0;
++}
++
+ /* Service an IOCTL request
+  *
+  * Arguments:
+@@ -2267,11 +2293,7 @@ static int mgslpc_ioctl(struct tty_struct *tty, struct file * file,
+ 			unsigned int cmd, unsigned long arg)
+ {
+ 	MGSLPC_INFO * info = (MGSLPC_INFO *)tty->driver_data;
+-	int error;
+-	struct mgsl_icount cnow;	/* kernel counter temps */
+-	struct serial_icounter_struct __user *p_cuser;	/* user space */
+ 	void __user *argp = (void __user *)arg;
+-	unsigned long flags;
+ 
+ 	if (debug_level >= DEBUG_LEVEL_INFO)
+ 		printk("%s(%d):mgslpc_ioctl %s cmd=%08X\n", __FILE__,__LINE__,
+@@ -2281,7 +2303,7 @@ static int mgslpc_ioctl(struct tty_struct *tty, struct file * file,
+ 		return -ENODEV;
+ 
+ 	if ((cmd != TIOCGSERIAL) && (cmd != TIOCSSERIAL) &&
+-	    (cmd != TIOCMIWAIT) && (cmd != TIOCGICOUNT)) {
++	    (cmd != TIOCMIWAIT)) {
+ 		if (tty->flags & (1 << TTY_IO_ERROR))
+ 		    return -EIO;
+ 	}
+@@ -2311,34 +2333,6 @@ static int mgslpc_ioctl(struct tty_struct *tty, struct file * file,
+ 		return wait_events(info, argp);
+ 	case TIOCMIWAIT:
+ 		return modem_input_wait(info,(int)arg);
+-	case TIOCGICOUNT:
+-		spin_lock_irqsave(&info->lock,flags);
+-		cnow = info->icount;
+-		spin_unlock_irqrestore(&info->lock,flags);
+-		p_cuser = argp;
+-		PUT_USER(error,cnow.cts, &p_cuser->cts);
+-		if (error) return error;
+-		PUT_USER(error,cnow.dsr, &p_cuser->dsr);
+-		if (error) return error;
+-		PUT_USER(error,cnow.rng, &p_cuser->rng);
+-		if (error) return error;
+-		PUT_USER(error,cnow.dcd, &p_cuser->dcd);
+-		if (error) return error;
+-		PUT_USER(error,cnow.rx, &p_cuser->rx);
+-		if (error) return error;
+-		PUT_USER(error,cnow.tx, &p_cuser->tx);
+-		if (error) return error;
+-		PUT_USER(error,cnow.frame, &p_cuser->frame);
+-		if (error) return error;
+-		PUT_USER(error,cnow.overrun, &p_cuser->overrun);
+-		if (error) return error;
+-		PUT_USER(error,cnow.parity, &p_cuser->parity);
+-		if (error) return error;
+-		PUT_USER(error,cnow.brk, &p_cuser->brk);
+-		if (error) return error;
+-		PUT_USER(error,cnow.buf_overrun, &p_cuser->buf_overrun);
+-		if (error) return error;
+-		return 0;
+ 	default:
+ 		return -ENOIOCTLCMD;
+ 	}
+diff --git a/drivers/char/synclink.c b/drivers/char/synclink.c
+index 4846b73..b118959 100644
+--- a/drivers/char/synclink.c
++++ b/drivers/char/synclink.c
+@@ -2920,6 +2920,38 @@ static int mgsl_break(struct tty_struct *tty, int break_state)
+ 	
+ }	/* end of mgsl_break() */
+ 
++/*
++ * Get counter of input serial line interrupts (DCD,RI,DSR,CTS)
++ * Return: write counters to the user passed counter struct
++ * NB: both 1->0 and 0->1 transitions are counted except for
++ *     RI where only 0->1 is counted.
++ */
++static int msgl_get_icount(struct tty_struct *tty,
++				struct serial_icounter_struct *icount)
++
++{
++	struct mgsl_struct * info = tty->driver_data;
++	struct mgsl_icount cnow;	/* kernel counter temps */
++	unsigned long flags;
++
++	spin_lock_irqsave(&info->irq_spinlock,flags);
++	cnow = info->icount;
++	spin_unlock_irqrestore(&info->irq_spinlock,flags);
++
++	icount->cts = cnow.cts;
++	icount->dsr = cnow.dsr;
++	icount->rng = cnow.rng;
++	icount->dcd = cnow.dcd;
++	icount->rx = cnow.rx;
++	icount->tx = cnow.tx;
++	icount->frame = cnow.frame;
++	icount->overrun = cnow.overrun;
++	icount->parity = cnow.parity;
++	icount->brk = cnow.brk;
++	icount->buf_overrun = cnow.buf_overrun;
++	return 0;
++}
++
+ /* mgsl_ioctl()	Service an IOCTL request
+  * 	
+  * Arguments:
+@@ -2945,7 +2977,7 @@ static int mgsl_ioctl(struct tty_struct *tty, struct file * file,
+ 		return -ENODEV;
+ 
+ 	if ((cmd != TIOCGSERIAL) && (cmd != TIOCSSERIAL) &&
+-	    (cmd != TIOCMIWAIT) && (cmd != TIOCGICOUNT)) {
++	    (cmd != TIOCMIWAIT)) {
+ 		if (tty->flags & (1 << TTY_IO_ERROR))
+ 		    return -EIO;
+ 	}
+@@ -2958,11 +2990,7 @@ static int mgsl_ioctl(struct tty_struct *tty, struct file * file,
+ 
+ static int mgsl_ioctl_common(struct mgsl_struct *info, unsigned int cmd, unsigned long arg)
+ {
+-	int error;
+-	struct mgsl_icount cnow;	/* kernel counter temps */
+ 	void __user *argp = (void __user *)arg;
+-	struct serial_icounter_struct __user *p_cuser;	/* user space */
+-	unsigned long flags;
+ 	
+ 	switch (cmd) {
+ 		case MGSL_IOCGPARAMS:
+@@ -2991,40 +3019,6 @@ static int mgsl_ioctl_common(struct mgsl_struct *info, unsigned int cmd, unsigne
+ 		case TIOCMIWAIT:
+ 			return modem_input_wait(info,(int)arg);
+ 
+-		/* 
+-		 * Get counter of input serial line interrupts (DCD,RI,DSR,CTS)
+-		 * Return: write counters to the user passed counter struct
+-		 * NB: both 1->0 and 0->1 transitions are counted except for
+-		 *     RI where only 0->1 is counted.
+-		 */
+-		case TIOCGICOUNT:
+-			spin_lock_irqsave(&info->irq_spinlock,flags);
+-			cnow = info->icount;
+-			spin_unlock_irqrestore(&info->irq_spinlock,flags);
+-			p_cuser = argp;
+-			PUT_USER(error,cnow.cts, &p_cuser->cts);
+-			if (error) return error;
+-			PUT_USER(error,cnow.dsr, &p_cuser->dsr);
+-			if (error) return error;
+-			PUT_USER(error,cnow.rng, &p_cuser->rng);
+-			if (error) return error;
+-			PUT_USER(error,cnow.dcd, &p_cuser->dcd);
+-			if (error) return error;
+-			PUT_USER(error,cnow.rx, &p_cuser->rx);
+-			if (error) return error;
+-			PUT_USER(error,cnow.tx, &p_cuser->tx);
+-			if (error) return error;
+-			PUT_USER(error,cnow.frame, &p_cuser->frame);
+-			if (error) return error;
+-			PUT_USER(error,cnow.overrun, &p_cuser->overrun);
+-			if (error) return error;
+-			PUT_USER(error,cnow.parity, &p_cuser->parity);
+-			if (error) return error;
+-			PUT_USER(error,cnow.brk, &p_cuser->brk);
+-			if (error) return error;
+-			PUT_USER(error,cnow.buf_overrun, &p_cuser->buf_overrun);
+-			if (error) return error;
+-			return 0;
+ 		default:
+ 			return -ENOIOCTLCMD;
+ 	}
+@@ -4325,6 +4319,7 @@ static const struct tty_operations mgsl_ops = {
+ 	.hangup = mgsl_hangup,
+ 	.tiocmget = tiocmget,
+ 	.tiocmset = tiocmset,
++	.get_icount = msgl_get_icount,
+ 	.proc_fops = &mgsl_proc_fops,
+ };
+ 
+diff --git a/drivers/char/synclink_gt.c b/drivers/char/synclink_gt.c
+index 8678f0c..c300ff6 100644
+--- a/drivers/char/synclink_gt.c
++++ b/drivers/char/synclink_gt.c
+@@ -1057,9 +1057,6 @@ static int ioctl(struct tty_struct *tty, struct file *file,
+ 		 unsigned int cmd, unsigned long arg)
+ {
+ 	struct slgt_info *info = tty->driver_data;
+-	struct mgsl_icount cnow;	/* kernel counter temps */
+-	struct serial_icounter_struct __user *p_cuser;	/* user space */
+-	unsigned long flags;
+ 	void __user *argp = (void __user *)arg;
+ 	int ret;
+ 
+@@ -1068,7 +1065,7 @@ static int ioctl(struct tty_struct *tty, struct file *file,
+ 	DBGINFO(("%s ioctl() cmd=%08X\n", info->device_name, cmd));
+ 
+ 	if ((cmd != TIOCGSERIAL) && (cmd != TIOCSSERIAL) &&
+-	    (cmd != TIOCMIWAIT) && (cmd != TIOCGICOUNT)) {
++	    (cmd != TIOCMIWAIT)) {
+ 		if (tty->flags & (1 << TTY_IO_ERROR))
+ 		    return -EIO;
+ 	}
+@@ -1121,25 +1118,6 @@ static int ioctl(struct tty_struct *tty, struct file *file,
+ 	case MGSL_IOCWAITGPIO:
+ 		ret = wait_gpio(info, argp);
+ 		break;
+-	case TIOCGICOUNT:
+-		spin_lock_irqsave(&info->lock,flags);
+-		cnow = info->icount;
+-		spin_unlock_irqrestore(&info->lock,flags);
+-		p_cuser = argp;
+-		if (put_user(cnow.cts, &p_cuser->cts) ||
+-		    put_user(cnow.dsr, &p_cuser->dsr) ||
+-		    put_user(cnow.rng, &p_cuser->rng) ||
+-		    put_user(cnow.dcd, &p_cuser->dcd) ||
+-		    put_user(cnow.rx, &p_cuser->rx) ||
+-		    put_user(cnow.tx, &p_cuser->tx) ||
+-		    put_user(cnow.frame, &p_cuser->frame) ||
+-		    put_user(cnow.overrun, &p_cuser->overrun) ||
+-		    put_user(cnow.parity, &p_cuser->parity) ||
+-		    put_user(cnow.brk, &p_cuser->brk) ||
+-		    put_user(cnow.buf_overrun, &p_cuser->buf_overrun))
+-			ret = -EFAULT;
+-		ret = 0;
+-		break;
+ 	default:
+ 		ret = -ENOIOCTLCMD;
+ 	}
+@@ -1147,6 +1125,33 @@ static int ioctl(struct tty_struct *tty, struct file *file,
+ 	return ret;
+ }
+ 
++static int get_icount(struct tty_struct *tty,
++				struct serial_icounter_struct *icount)
++
++{
++	struct slgt_info *info = tty->driver_data;
++	struct mgsl_icount cnow;	/* kernel counter temps */
++	unsigned long flags;
++
++	spin_lock_irqsave(&info->lock,flags);
++	cnow = info->icount;
++	spin_unlock_irqrestore(&info->lock,flags);
++
++	icount->cts = cnow.cts;
++	icount->dsr = cnow.dsr;
++	icount->rng = cnow.rng;
++	icount->dcd = cnow.dcd;
++	icount->rx = cnow.rx;
++	icount->tx = cnow.tx;
++	icount->frame = cnow.frame;
++	icount->overrun = cnow.overrun;
++	icount->parity = cnow.parity;
++	icount->brk = cnow.brk;
++	icount->buf_overrun = cnow.buf_overrun;
++
++	return 0;
++}
++
+ /*
+  * support for 32 bit ioctl calls on 64 bit systems
+  */
+@@ -1236,10 +1241,6 @@ static long slgt_compat_ioctl(struct tty_struct *tty, struct file *file,
+ 	case MGSL_IOCSGPIO:
+ 	case MGSL_IOCGGPIO:
+ 	case MGSL_IOCWAITGPIO:
+-	case TIOCGICOUNT:
+-		rc = ioctl(tty, file, cmd, (unsigned long)(compat_ptr(arg)));
+-		break;
+-
+ 	case MGSL_IOCSTXIDLE:
+ 	case MGSL_IOCTXENABLE:
+ 	case MGSL_IOCRXENABLE:
+@@ -3639,6 +3640,7 @@ static const struct tty_operations ops = {
+ 	.hangup = hangup,
+ 	.tiocmget = tiocmget,
+ 	.tiocmset = tiocmset,
++	.get_icount = get_icount,
+ 	.proc_fops = &synclink_gt_proc_fops,
+ };
+ 
+diff --git a/drivers/char/synclinkmp.c b/drivers/char/synclinkmp.c
+index 2b18adc..951b65f 100644
+--- a/drivers/char/synclinkmp.c
++++ b/drivers/char/synclinkmp.c
+@@ -1255,10 +1255,6 @@ static int do_ioctl(struct tty_struct *tty, struct file *file,
+ 		 unsigned int cmd, unsigned long arg)
+ {
+ 	SLMP_INFO *info = tty->driver_data;
+-	int error;
+-	struct mgsl_icount cnow;	/* kernel counter temps */
+-	struct serial_icounter_struct __user *p_cuser;	/* user space */
+-	unsigned long flags;
+ 	void __user *argp = (void __user *)arg;
+ 
+ 	if (debug_level >= DEBUG_LEVEL_INFO)
+@@ -1269,7 +1265,7 @@ static int do_ioctl(struct tty_struct *tty, struct file *file,
+ 		return -ENODEV;
+ 
+ 	if ((cmd != TIOCGSERIAL) && (cmd != TIOCSSERIAL) &&
+-	    (cmd != TIOCMIWAIT) && (cmd != TIOCGICOUNT)) {
++	    (cmd != TIOCMIWAIT)) {
+ 		if (tty->flags & (1 << TTY_IO_ERROR))
+ 		    return -EIO;
+ 	}
+@@ -1307,40 +1303,38 @@ static int do_ioctl(struct tty_struct *tty, struct file *file,
+ 		 * NB: both 1->0 and 0->1 transitions are counted except for
+ 		 *     RI where only 0->1 is counted.
+ 		 */
+-	case TIOCGICOUNT:
+-		spin_lock_irqsave(&info->lock,flags);
+-		cnow = info->icount;
+-		spin_unlock_irqrestore(&info->lock,flags);
+-		p_cuser = argp;
+-		PUT_USER(error,cnow.cts, &p_cuser->cts);
+-		if (error) return error;
+-		PUT_USER(error,cnow.dsr, &p_cuser->dsr);
+-		if (error) return error;
+-		PUT_USER(error,cnow.rng, &p_cuser->rng);
+-		if (error) return error;
+-		PUT_USER(error,cnow.dcd, &p_cuser->dcd);
+-		if (error) return error;
+-		PUT_USER(error,cnow.rx, &p_cuser->rx);
+-		if (error) return error;
+-		PUT_USER(error,cnow.tx, &p_cuser->tx);
+-		if (error) return error;
+-		PUT_USER(error,cnow.frame, &p_cuser->frame);
+-		if (error) return error;
+-		PUT_USER(error,cnow.overrun, &p_cuser->overrun);
+-		if (error) return error;
+-		PUT_USER(error,cnow.parity, &p_cuser->parity);
+-		if (error) return error;
+-		PUT_USER(error,cnow.brk, &p_cuser->brk);
+-		if (error) return error;
+-		PUT_USER(error,cnow.buf_overrun, &p_cuser->buf_overrun);
+-		if (error) return error;
+-		return 0;
+ 	default:
+ 		return -ENOIOCTLCMD;
+ 	}
+ 	return 0;
+ }
+ 
++static int get_icount(struct tty_struct *tty,
++				struct serial_icounter_struct *icount)
++{
++	SLMP_INFO *info = tty->driver_data;
++	struct mgsl_icount cnow;	/* kernel counter temps */
++	unsigned long flags;
++
++	spin_lock_irqsave(&info->lock,flags);
++	cnow = info->icount;
++	spin_unlock_irqrestore(&info->lock,flags);
++
++	icount->cts = cnow.cts;
++	icount->dsr = cnow.dsr;
++	icount->rng = cnow.rng;
++	icount->dcd = cnow.dcd;
++	icount->rx = cnow.rx;
++	icount->tx = cnow.tx;
++	icount->frame = cnow.frame;
++	icount->overrun = cnow.overrun;
++	icount->parity = cnow.parity;
++	icount->brk = cnow.brk;
++	icount->buf_overrun = cnow.buf_overrun;
++
++	return 0;
++}
++
+ static int ioctl(struct tty_struct *tty, struct file *file,
+ 		 unsigned int cmd, unsigned long arg)
+ {
+@@ -3908,6 +3902,7 @@ static const struct tty_operations ops = {
+ 	.hangup = hangup,
+ 	.tiocmget = tiocmget,
+ 	.tiocmset = tiocmset,
++	.get_icount = get_icount,
+ 	.proc_fops = &synclinkmp_proc_fops,
+ };
+ 
+diff --git a/drivers/char/tty_io.c b/drivers/char/tty_io.c
+index 53ffcfc..123cedf 100644
+--- a/drivers/char/tty_io.c
++++ b/drivers/char/tty_io.c
+@@ -96,6 +96,7 @@
+ #include <linux/bitops.h>
+ #include <linux/delay.h>
+ #include <linux/seq_file.h>
++#include <linux/serial.h>
+ 
+ #include <linux/uaccess.h>
+ #include <asm/system.h>
+@@ -2436,6 +2437,20 @@ static int tty_tiocmset(struct tty_struct *tty, struct file *file, unsigned int
+ 	return tty->ops->tiocmset(tty, file, set, clear);
+ }
+ 
++static int tty_tiocgicount(struct tty_struct *tty, void __user *arg)
++{
++	int retval = -EINVAL;
++	struct serial_icounter_struct icount;
++	memset(&icount, 0, sizeof(icount));
++	if (tty->ops->get_icount)
++		retval = tty->ops->get_icount(tty, &icount);
++	if (retval != 0)
++		return retval;
++	if (copy_to_user(arg, &icount, sizeof(icount)))
++		return -EFAULT;
++	return 0;
++}
++
+ struct tty_struct *tty_pair_get_tty(struct tty_struct *tty)
+ {
+ 	if (tty->driver->type == TTY_DRIVER_TYPE_PTY &&
+@@ -2556,6 +2571,12 @@ long tty_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+ 	case TIOCMBIC:
+ 	case TIOCMBIS:
+ 		return tty_tiocmset(tty, file, cmd, p);
++	case TIOCGICOUNT:
++		retval = tty_tiocgicount(tty, p);
++		/* For the moment allow fall through to the old method */
++        	if (retval != -EINVAL)
++			return retval;
++		break;
+ 	case TCFLSH:
+ 		switch (arg) {
+ 		case TCIFLUSH:
+diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
+index 3ada62b..27a3074 100644
+diff --git a/drivers/md/raid5.c b/drivers/md/raid5.c
+index cf59d64..883215d 100644
+--- a/drivers/md/raid5.c
++++ b/drivers/md/raid5.c
+@@ -3038,12 +3038,16 @@ static void handle_stripe5(struct stripe_head *sh)
+ 	/* check if the array has lost two devices and, if so, some requests might
+ 	 * need to be failed
+ 	 */
+-	if (s.failed > 1 && s.to_read+s.to_write+s.written)
+-		handle_failed_stripe(conf, sh, &s, disks, &return_bi);
+-	if (s.failed > 1 && s.syncing) {
+-		md_done_sync(conf->mddev, STRIPE_SECTORS,0);
+-		clear_bit(STRIPE_SYNCING, &sh->state);
+-		s.syncing = 0;
++	if (s.failed > 1) {
++		sh->check_state = 0;
++		sh->reconstruct_state = 0;
++		if (s.to_read+s.to_write+s.written)
++			handle_failed_stripe(conf, sh, &s, disks, &return_bi);
++		if (s.syncing) {
++			md_done_sync(conf->mddev, STRIPE_SECTORS,0);
++			clear_bit(STRIPE_SYNCING, &sh->state);
++			s.syncing = 0;
++		}
+ 	}
+ 
+ 	/* might be able to return some write requests if the parity block
+@@ -3314,12 +3318,16 @@ static void handle_stripe6(struct stripe_head *sh)
+ 	/* check if the array has lost >2 devices and, if so, some requests
+ 	 * might need to be failed
+ 	 */
+-	if (s.failed > 2 && s.to_read+s.to_write+s.written)
+-		handle_failed_stripe(conf, sh, &s, disks, &return_bi);
+-	if (s.failed > 2 && s.syncing) {
+-		md_done_sync(conf->mddev, STRIPE_SECTORS,0);
+-		clear_bit(STRIPE_SYNCING, &sh->state);
+-		s.syncing = 0;
++	if (s.failed > 2) {
++		sh->check_state = 0;
++		sh->reconstruct_state = 0;
++		if (s.to_read+s.to_write+s.written)
++			handle_failed_stripe(conf, sh, &s, disks, &return_bi);
++		if (s.syncing) {
++			md_done_sync(conf->mddev, STRIPE_SECTORS,0);
++			clear_bit(STRIPE_SYNCING, &sh->state);
++			s.syncing = 0;
++		}
+ 	}
+ 
+ 	/*
+diff --git a/drivers/mtd/mtdchar.c b/drivers/mtd/mtdchar.c
+index 5b081cb..726a1b8 100644
+--- a/drivers/mtd/mtdchar.c
++++ b/drivers/mtd/mtdchar.c
+@@ -290,6 +290,7 @@ static ssize_t mtd_write(struct file *file, const char __user *buf, size_t count
+ 			ops.mode = MTD_OOB_RAW;
+ 			ops.datbuf = kbuf;
+ 			ops.oobbuf = NULL;
++			ops.ooboffs = 0;
+ 			ops.len = len;
+ 
+ 			ret = mtd->write_oob(mtd, *ppos, &ops);
+diff --git a/drivers/scsi/hosts.c b/drivers/scsi/hosts.c
+index 554626e..d03a926 100644
+--- a/drivers/scsi/hosts.c
++++ b/drivers/scsi/hosts.c
+@@ -275,6 +275,7 @@ static void scsi_host_dev_release(struct device *dev)
+ {
+ 	struct Scsi_Host *shost = dev_to_shost(dev);
+ 	struct device *parent = dev->parent;
++	struct request_queue *q;
+ 
+ 	scsi_proc_hostdir_rm(shost->hostt);
+ 
+@@ -282,9 +283,11 @@ static void scsi_host_dev_release(struct device *dev)
+ 		kthread_stop(shost->ehandler);
+ 	if (shost->work_q)
+ 		destroy_workqueue(shost->work_q);
+-	if (shost->uspace_req_q) {
+-		kfree(shost->uspace_req_q->queuedata);
+-		scsi_free_queue(shost->uspace_req_q);
++	q = shost->uspace_req_q;
++	if (q) {
++		kfree(q->queuedata);
++		q->queuedata = NULL;
++		scsi_free_queue(q);
+ 	}
+ 
+ 	scsi_destroy_command_freelist(shost);
+diff --git a/drivers/scsi/scsi_lib.c b/drivers/scsi/scsi_lib.c
+index 1492e3e..1ae7b7c 100644
+--- a/drivers/scsi/scsi_lib.c
++++ b/drivers/scsi/scsi_lib.c
+@@ -1672,6 +1672,15 @@ struct request_queue *scsi_alloc_queue(struct scsi_device *sdev)
+ 
+ void scsi_free_queue(struct request_queue *q)
+ {
++	unsigned long flags;
++
++	WARN_ON(q->queuedata);
++
++	/* cause scsi_request_fn() to kill all non-finished requests */
++	spin_lock_irqsave(q->queue_lock, flags);
++	q->request_fn(q);
++	spin_unlock_irqrestore(q->queue_lock, flags);
++
+ 	blk_cleanup_queue(q);
+ }
+ 
+diff --git a/drivers/scsi/st.c b/drivers/scsi/st.c
+index 5081f97..723da1d 100644
+--- a/drivers/scsi/st.c
++++ b/drivers/scsi/st.c
+@@ -461,14 +461,16 @@ static void st_scsi_execute_end(struct request *req, int uptodate)
+ {
+ 	struct st_request *SRpnt = req->end_io_data;
+ 	struct scsi_tape *STp = SRpnt->stp;
++	struct bio *tmp;
+ 
+ 	STp->buffer->cmdstat.midlevel_result = SRpnt->result = req->errors;
+ 	STp->buffer->cmdstat.residual = req->resid_len;
+ 
++	tmp = SRpnt->bio;
+ 	if (SRpnt->waiting)
+ 		complete(SRpnt->waiting);
+ 
+-	blk_rq_unmap_user(SRpnt->bio);
++	blk_rq_unmap_user(tmp);
+ 	__blk_put_request(req->q, req);
+ }
+ 
+diff --git a/drivers/serial/68360serial.c b/drivers/serial/68360serial.c
+index 24661cd..1e4f831 100644
+--- a/drivers/serial/68360serial.c
++++ b/drivers/serial/68360serial.c
+@@ -1381,6 +1381,30 @@ static void send_break(ser_info_t *info, unsigned int duration)
+ }
+ 
+ 
++/*
++ * Get counter of input serial line interrupts (DCD,RI,DSR,CTS)
++ * Return: write counters to the user passed counter struct
++ * NB: both 1->0 and 0->1 transitions are counted except for
++ *     RI where only 0->1 is counted.
++ */
++static int rs_360_get_icount(struct tty_struct *tty,
++				struct serial_icounter_struct *icount)
++{
++	ser_info_t *info = (ser_info_t *)tty->driver_data;
++	struct async_icount cnow;
++
++	local_irq_disable();
++	cnow = info->state->icount;
++	local_irq_enable();
++
++	icount->cts = cnow.cts;
++	icount->dsr = cnow.dsr;
++	icount->rng = cnow.rng;
++	icount->dcd = cnow.dcd;
++
++	return 0;
++}
++
+ static int rs_360_ioctl(struct tty_struct *tty, struct file * file,
+ 		    unsigned int cmd, unsigned long arg)
+ {
+@@ -1394,7 +1418,7 @@ static int rs_360_ioctl(struct tty_struct *tty, struct file * file,
+ 	if (serial_paranoia_check(info, tty->name, "rs_ioctl"))
+ 		return -ENODEV;
+ 
+-	if ((cmd != TIOCMIWAIT) && (cmd != TIOCGICOUNT)) {
++	if (cmd != TIOCMIWAIT) {
+ 		if (tty->flags & (1 << TTY_IO_ERROR))
+ 		    return -EIO;
+ 	}
+@@ -1477,31 +1501,6 @@ static int rs_360_ioctl(struct tty_struct *tty, struct file * file,
+ 			return 0;
+ #endif
+ 
+-		/* 
+-		 * Get counter of input serial line interrupts (DCD,RI,DSR,CTS)
+-		 * Return: write counters to the user passed counter struct
+-		 * NB: both 1->0 and 0->1 transitions are counted except for
+-		 *     RI where only 0->1 is counted.
+-		 */
+-		case TIOCGICOUNT:
+-			local_irq_disable();
+-			cnow = info->state->icount;
+-			local_irq_enable();
+-			p_cuser = (struct serial_icounter_struct *) arg;
+-/* 			error = put_user(cnow.cts, &p_cuser->cts); */
+-/* 			if (error) return error; */
+-/* 			error = put_user(cnow.dsr, &p_cuser->dsr); */
+-/* 			if (error) return error; */
+-/* 			error = put_user(cnow.rng, &p_cuser->rng); */
+-/* 			if (error) return error; */
+-/* 			error = put_user(cnow.dcd, &p_cuser->dcd); */
+-/* 			if (error) return error; */
+-
+-			put_user(cnow.cts, &p_cuser->cts);
+-			put_user(cnow.dsr, &p_cuser->dsr);
+-			put_user(cnow.rng, &p_cuser->rng);
+-			put_user(cnow.dcd, &p_cuser->dcd);
+-			return 0;
+ 
+ 		default:
+ 			return -ENOIOCTLCMD;
+diff --git a/drivers/serial/serial_core.c b/drivers/serial/serial_core.c
+index dcc7244..772d9d8 100644
+--- a/drivers/serial/serial_core.c
++++ b/drivers/serial/serial_core.c
+@@ -1067,10 +1067,10 @@ uart_wait_modem_status(struct uart_state *state, unsigned long arg)
+  * NB: both 1->0 and 0->1 transitions are counted except for
+  *     RI where only 0->1 is counted.
+  */
+-static int uart_get_count(struct uart_state *state,
+-			  struct serial_icounter_struct __user *icnt)
++static int uart_get_icount(struct tty_struct *tty,
++			  struct serial_icounter_struct *icount)
+ {
+-	struct serial_icounter_struct icount;
++	struct uart_state *state = tty->driver_data;
+ 	struct uart_icount cnow;
+ 	struct uart_port *uport = state->uart_port;
+ 
+@@ -1078,19 +1078,19 @@ static int uart_get_count(struct uart_state *state,
+ 	memcpy(&cnow, &uport->icount, sizeof(struct uart_icount));
+ 	spin_unlock_irq(&uport->lock);
+ 
+-	icount.cts         = cnow.cts;
+-	icount.dsr         = cnow.dsr;
+-	icount.rng         = cnow.rng;
+-	icount.dcd         = cnow.dcd;
+-	icount.rx          = cnow.rx;
+-	icount.tx          = cnow.tx;
+-	icount.frame       = cnow.frame;
+-	icount.overrun     = cnow.overrun;
+-	icount.parity      = cnow.parity;
+-	icount.brk         = cnow.brk;
+-	icount.buf_overrun = cnow.buf_overrun;
++	icount->cts         = cnow.cts;
++	icount->dsr         = cnow.dsr;
++	icount->rng         = cnow.rng;
++	icount->dcd         = cnow.dcd;
++	icount->rx          = cnow.rx;
++	icount->tx          = cnow.tx;
++	icount->frame       = cnow.frame;
++	icount->overrun     = cnow.overrun;
++	icount->parity      = cnow.parity;
++	icount->brk         = cnow.brk;
++	icount->buf_overrun = cnow.buf_overrun;
+ 
+-	return copy_to_user(icnt, &icount, sizeof(icount)) ? -EFAULT : 0;
++	return 0;
+ }
+ 
+ /*
+@@ -1143,10 +1143,6 @@ uart_ioctl(struct tty_struct *tty, struct file *filp, unsigned int cmd,
+ 	case TIOCMIWAIT:
+ 		ret = uart_wait_modem_status(state, arg);
+ 		break;
+-
+-	case TIOCGICOUNT:
+-		ret = uart_get_count(state, uarg);
+-		break;
+ 	}
+ 
+ 	if (ret != -ENOIOCTLCMD)
+@@ -2322,6 +2318,7 @@ static const struct tty_operations uart_ops = {
+ #endif
+ 	.tiocmget	= uart_tiocmget,
+ 	.tiocmset	= uart_tiocmset,
++	.get_icount	= uart_get_icount,
+ #ifdef CONFIG_CONSOLE_POLL
+ 	.poll_init	= uart_poll_init,
+ 	.poll_get_char	= uart_poll_get_char,
+diff --git a/drivers/usb/core/quirks.c b/drivers/usb/core/quirks.c
+index 93448eb..e163df9 100644
+--- a/drivers/usb/core/quirks.c
++++ b/drivers/usb/core/quirks.c
+@@ -47,15 +47,42 @@ static const struct usb_device_id usb_quirk_list[] = {
+ 	/* Logitech Webcam B/C500 */
+ 	{ USB_DEVICE(0x046d, 0x0807), .driver_info = USB_QUIRK_RESET_RESUME },
+ 
++	/* Logitech Webcam C600 */
++	{ USB_DEVICE(0x046d, 0x0808), .driver_info = USB_QUIRK_RESET_RESUME },
++
+ 	/* Logitech Webcam Pro 9000 */
+ 	{ USB_DEVICE(0x046d, 0x0809), .driver_info = USB_QUIRK_RESET_RESUME },
+ 
++	/* Logitech Webcam C905 */
++	{ USB_DEVICE(0x046d, 0x080a), .driver_info = USB_QUIRK_RESET_RESUME },
++
++	/* Logitech Webcam C210 */
++	{ USB_DEVICE(0x046d, 0x0819), .driver_info = USB_QUIRK_RESET_RESUME },
++
++	/* Logitech Webcam C260 */
++	{ USB_DEVICE(0x046d, 0x081a), .driver_info = USB_QUIRK_RESET_RESUME },
++
+ 	/* Logitech Webcam C310 */
+ 	{ USB_DEVICE(0x046d, 0x081b), .driver_info = USB_QUIRK_RESET_RESUME },
+ 
++	/* Logitech Webcam C910 */
++	{ USB_DEVICE(0x046d, 0x0821), .driver_info = USB_QUIRK_RESET_RESUME },
++
++	/* Logitech Webcam C160 */
++	{ USB_DEVICE(0x046d, 0x0824), .driver_info = USB_QUIRK_RESET_RESUME },
++
+ 	/* Logitech Webcam C270 */
+ 	{ USB_DEVICE(0x046d, 0x0825), .driver_info = USB_QUIRK_RESET_RESUME },
+ 
++	/* Logitech Quickcam Pro 9000 */
++	{ USB_DEVICE(0x046d, 0x0990), .driver_info = USB_QUIRK_RESET_RESUME },
++
++	/* Logitech Quickcam E3500 */
++	{ USB_DEVICE(0x046d, 0x09a4), .driver_info = USB_QUIRK_RESET_RESUME },
++
++	/* Logitech Quickcam Vision Pro */
++	{ USB_DEVICE(0x046d, 0x09a6), .driver_info = USB_QUIRK_RESET_RESUME },
++
+ 	/* Logitech Harmony 700-series */
+ 	{ USB_DEVICE(0x046d, 0xc122), .driver_info = USB_QUIRK_DELAY_INIT },
+ 
+diff --git a/drivers/usb/serial/ftdi_sio.c b/drivers/usb/serial/ftdi_sio.c
+index 7a4b41c..5689b90 100644
+--- a/drivers/usb/serial/ftdi_sio.c
++++ b/drivers/usb/serial/ftdi_sio.c
+@@ -2355,13 +2355,19 @@ static void ftdi_set_termios(struct tty_struct *tty,
+ 
+ 	cflag = termios->c_cflag;
+ 
+-	/* FIXME -For this cut I don't care if the line is really changing or
+-	   not  - so just do the change regardless  - should be able to
+-	   compare old_termios and tty->termios */
++	if (old_termios->c_cflag == termios->c_cflag
++	    && old_termios->c_ispeed == termios->c_ispeed
++	    && old_termios->c_ospeed == termios->c_ospeed)
++		goto no_c_cflag_changes;
++
+ 	/* NOTE These routines can get interrupted by
+ 	   ftdi_sio_read_bulk_callback  - need to examine what this means -
+ 	   don't see any problems yet */
+ 
++	if ((old_termios->c_cflag & (CSIZE|PARODD|PARENB|CMSPAR|CSTOPB)) ==
++	    (termios->c_cflag & (CSIZE|PARODD|PARENB|CMSPAR|CSTOPB)))
++		goto no_data_parity_stop_changes;
++
+ 	/* Set number of data bits, parity, stop bits */
+ 
+ 	termios->c_cflag &= ~CMSPAR;
+@@ -2398,6 +2404,7 @@ static void ftdi_set_termios(struct tty_struct *tty,
+ 	}
+ 
+ 	/* Now do the baudrate */
++no_data_parity_stop_changes:
+ 	if ((cflag & CBAUD) == B0) {
+ 		/* Disable flow control */
+ 		if (usb_control_msg(dev, usb_sndctrlpipe(dev, 0),
+@@ -2423,6 +2430,7 @@ static void ftdi_set_termios(struct tty_struct *tty,
+ 
+ 	/* Set flow control */
+ 	/* Note device also supports DTR/CD (ugh) and Xon/Xoff in hardware */
++no_c_cflag_changes:
+ 	if (cflag & CRTSCTS) {
+ 		dbg("%s Setting to CRTSCTS flow control", __func__);
+ 		if (usb_control_msg(dev,
+diff --git a/drivers/usb/serial/pl2303.c b/drivers/usb/serial/pl2303.c
+index 150cad4..9f89940 100644
+--- a/drivers/usb/serial/pl2303.c
++++ b/drivers/usb/serial/pl2303.c
+@@ -101,7 +101,6 @@ static struct usb_device_id id_table [] = {
+ 	{ USB_DEVICE(SONY_VENDOR_ID, SONY_QN3USB_PRODUCT_ID) },
+ 	{ USB_DEVICE(SANWA_VENDOR_ID, SANWA_PRODUCT_ID) },
+ 	{ USB_DEVICE(ADLINK_VENDOR_ID, ADLINK_ND6530_PRODUCT_ID) },
+-	{ USB_DEVICE(WINCHIPHEAD_VENDOR_ID, WINCHIPHEAD_USBSER_PRODUCT_ID) },
+ 	{ USB_DEVICE(SMART_VENDOR_ID, SMART_PRODUCT_ID) },
+ 	{ }					/* Terminating entry */
+ };
+diff --git a/drivers/usb/serial/pl2303.h b/drivers/usb/serial/pl2303.h
+index 3d10d7f..c38b8c0 100644
+--- a/drivers/usb/serial/pl2303.h
++++ b/drivers/usb/serial/pl2303.h
+@@ -145,10 +145,6 @@
+ #define ADLINK_VENDOR_ID		0x0b63
+ #define ADLINK_ND6530_PRODUCT_ID	0x6530
+ 
+-/* WinChipHead USB->RS 232 adapter */
+-#define WINCHIPHEAD_VENDOR_ID		0x4348
+-#define WINCHIPHEAD_USBSER_PRODUCT_ID	0x5523
+-
+ /* SMART USB Serial Adapter */
+ #define SMART_VENDOR_ID	0x0b8c
+ #define SMART_PRODUCT_ID	0x2303
+diff --git a/drivers/usb/serial/usb-serial.c b/drivers/usb/serial/usb-serial.c
+index bd3fa7f..f23f3b4 100644
+--- a/drivers/usb/serial/usb-serial.c
++++ b/drivers/usb/serial/usb-serial.c
+@@ -562,6 +562,18 @@ static int serial_tiocmset(struct tty_struct *tty, struct file *file,
+ 	return -EINVAL;
+ }
+ 
++static int serial_get_icount(struct tty_struct *tty,
++				struct serial_icounter_struct *icount)
++{
++	struct usb_serial_port *port = tty->driver_data;
++
++	dbg("%s - port %d", __func__, port->number);
++
++	if (port->serial->type->get_icount)
++		return port->serial->type->get_icount(tty, icount);
++	return -EINVAL;
++}
++
+ /*
+  * We would be calling tty_wakeup here, but unfortunately some line
+  * disciplines have an annoying habit of calling tty->write from
+@@ -1214,6 +1226,7 @@ static const struct tty_operations serial_ops = {
+ 	.chars_in_buffer =	serial_chars_in_buffer,
+ 	.tiocmget =		serial_tiocmget,
+ 	.tiocmset =		serial_tiocmset,
++	.get_icount = 		serial_get_icount,
+ 	.cleanup = 		serial_cleanup,
+ 	.install = 		serial_install,
+ 	.proc_fops =		&serial_proc_fops,
+diff --git a/drivers/usb/storage/protocol.c b/drivers/usb/storage/protocol.c
+index fc310f7..0fded39 100644
+--- a/drivers/usb/storage/protocol.c
++++ b/drivers/usb/storage/protocol.c
+@@ -58,7 +58,9 @@
+ 
+ void usb_stor_pad12_command(struct scsi_cmnd *srb, struct us_data *us)
+ {
+-	/* Pad the SCSI command with zeros out to 12 bytes
++	/*
++	 * Pad the SCSI command with zeros out to 12 bytes.  If the
++	 * command already is 12 bytes or longer, leave it alone.
+ 	 *
+ 	 * NOTE: This only works because a scsi_cmnd struct field contains
+ 	 * a unsigned char cmnd[16], so we know we have storage available
+@@ -66,9 +68,6 @@ void usb_stor_pad12_command(struct scsi_cmnd *srb, struct us_data *us)
+ 	for (; srb->cmd_len<12; srb->cmd_len++)
+ 		srb->cmnd[srb->cmd_len] = 0;
+ 
+-	/* set command length to 12 bytes */
+-	srb->cmd_len = 12;
+-
+ 	/* send the command to the transport layer */
+ 	usb_stor_invoke_transport(srb, us);
+ }
+diff --git a/drivers/xen/events.c b/drivers/xen/events.c
+index 009ca4e..15ed43e 100644
+--- a/drivers/xen/events.c
++++ b/drivers/xen/events.c
+@@ -536,7 +536,7 @@ int bind_ipi_to_irqhandler(enum ipi_vector ipi,
+ 	if (irq < 0)
+ 		return irq;
+ 
+-	irqflags |= IRQF_NO_SUSPEND | IRQF_FORCE_RESUME;
++	irqflags |= IRQF_NO_SUSPEND | IRQF_FORCE_RESUME | IRQF_EARLY_RESUME;
+ 	retval = request_irq(irq, handler, irqflags, devname, dev_id);
+ 	if (retval != 0) {
+ 		unbind_from_irq(irq);
+diff --git a/fs/hfs/trans.c b/fs/hfs/trans.c
+index e673a88..b1ce4c7 100644
+--- a/fs/hfs/trans.c
++++ b/fs/hfs/trans.c
+@@ -40,6 +40,8 @@ int hfs_mac2asc(struct super_block *sb, char *out, const struct hfs_name *in)
+ 
+ 	src = in->name;
+ 	srclen = in->len;
++	if (srclen > HFS_NAMELEN)
++		srclen = HFS_NAMELEN;
+ 	dst = out;
+ 	dstlen = HFS_MAX_NAMELEN;
+ 	if (nls_io) {
+diff --git a/include/linux/interrupt.h b/include/linux/interrupt.h
+index 4528f29..c739150 100644
+--- a/include/linux/interrupt.h
++++ b/include/linux/interrupt.h
+@@ -54,6 +54,8 @@
+  *                irq line disabled until the threaded handler has been run.
+  * IRQF_NO_SUSPEND - Do not disable this IRQ during suspend
+  * IRQF_FORCE_RESUME - Force enable it on resume even if IRQF_NO_SUSPEND is set
++ * IRQF_EARLY_RESUME - Resume IRQ early during syscore instead of at device
++ *                resume time.
+  */
+ #define IRQF_DISABLED		0x00000020
+ #define IRQF_SAMPLE_RANDOM	0x00000040
+@@ -66,6 +68,7 @@
+ #define IRQF_ONESHOT		0x00002000
+ #define IRQF_NO_SUSPEND		0x00004000
+ #define IRQF_FORCE_RESUME	0x00008000
++#define IRQF_EARLY_RESUME	0x00020000
+ 
+ #define IRQF_TIMER		(__IRQF_TIMER | IRQF_NO_SUSPEND)
+ 
+@@ -198,13 +201,16 @@ extern void suspend_device_irqs(void);
+ extern void resume_device_irqs(void);
+ #ifdef CONFIG_PM_SLEEP
+ extern int check_wakeup_irqs(void);
++extern void irq_pm_syscore_resume(void);
+ #else
+ static inline int check_wakeup_irqs(void) { return 0; }
++static inline void irq_pm_syscore_resume(void) { };
+ #endif
+ #else
+ static inline void suspend_device_irqs(void) { };
+ static inline void resume_device_irqs(void) { };
+ static inline int check_wakeup_irqs(void) { return 0; }
++static inline void irq_pm_syscore_resume(void) { };
+ #endif
+ 
+ #if defined(CONFIG_SMP) && defined(CONFIG_GENERIC_HARDIRQS)
+diff --git a/include/linux/tty_driver.h b/include/linux/tty_driver.h
+index b086779..db2d227 100644
+--- a/include/linux/tty_driver.h
++++ b/include/linux/tty_driver.h
+@@ -224,6 +224,12 @@
+  *	unless the tty also has a valid tty->termiox pointer.
+  *
+  *	Optional: Called under the termios lock
++ *
++ * int (*get_icount)(struct tty_struct *tty, struct serial_icounter *icount);
++ *
++ *	Called when the device receives a TIOCGICOUNT ioctl. Passed a kernel
++ *	structure to complete. This method is optional and will only be called
++ *	if provided (otherwise EINVAL will be returned).
+  */
+ 
+ #include <linux/fs.h>
+@@ -232,6 +238,7 @@
+ 
+ struct tty_struct;
+ struct tty_driver;
++struct serial_icounter_struct;
+ 
+ struct tty_operations {
+ 	struct tty_struct * (*lookup)(struct tty_driver *driver,
+@@ -268,6 +275,8 @@ struct tty_operations {
+ 			unsigned int set, unsigned int clear);
+ 	int (*resize)(struct tty_struct *tty, struct winsize *ws);
+ 	int (*set_termiox)(struct tty_struct *tty, struct termiox *tnew);
++	int (*get_icount)(struct tty_struct *tty,
++				struct serial_icounter_struct *icount);
+ #ifdef CONFIG_CONSOLE_POLL
+ 	int (*poll_init)(struct tty_driver *driver, int line, char *options);
+ 	int (*poll_get_char)(struct tty_driver *driver, int line);
+diff --git a/include/linux/usb/serial.h b/include/linux/usb/serial.h
+index bb911e3..78670cb 100644
+--- a/include/linux/usb/serial.h
++++ b/include/linux/usb/serial.h
+@@ -259,6 +259,8 @@ struct usb_serial_driver {
+ 	int  (*tiocmget)(struct tty_struct *tty, struct file *file);
+ 	int  (*tiocmset)(struct tty_struct *tty, struct file *file,
+ 			 unsigned int set, unsigned int clear);
++	int  (*get_icount)(struct tty_struct *tty,
++			struct serial_icounter_struct *icount);
+ 	/* Called by the tty layer for port level work. There may or may not
+ 	   be an attached tty at this point */
+ 	void (*dtr_rts)(struct usb_serial_port *port, int on);
+diff --git a/include/linux/vmalloc.h b/include/linux/vmalloc.h
+index 3c123c3..819a634 100644
+--- a/include/linux/vmalloc.h
++++ b/include/linux/vmalloc.h
+@@ -13,6 +13,7 @@ struct vm_area_struct;		/* vma defining user mapping in mm_types.h */
+ #define VM_MAP		0x00000004	/* vmap()ed pages */
+ #define VM_USERMAP	0x00000008	/* suitable for remap_vmalloc_range */
+ #define VM_VPAGES	0x00000010	/* buffer for pages was vmalloc'ed */
++#define VM_UNLIST	0x00000020	/* vm_struct is not listed in vmlist */
+ /* bits [20..32] reserved for arch specific ioremap internals */
+ 
+ /*
+diff --git a/kernel/irq/pm.c b/kernel/irq/pm.c
+index 0067abb..b1fc3dd 100644
+--- a/kernel/irq/pm.c
++++ b/kernel/irq/pm.c
+@@ -39,25 +39,46 @@ void suspend_device_irqs(void)
+ }
+ EXPORT_SYMBOL_GPL(suspend_device_irqs);
+ 
+-/**
+- * resume_device_irqs - enable interrupt lines disabled by suspend_device_irqs()
+- *
+- * Enable all interrupt lines previously disabled by suspend_device_irqs() that
+- * have the IRQ_SUSPENDED flag set.
+- */
+-void resume_device_irqs(void)
++static void resume_irqs(bool want_early)
+ {
+ 	struct irq_desc *desc;
+ 	int irq;
+ 
+ 	for_each_irq_desc(irq, desc) {
+ 		unsigned long flags;
++		bool is_early = desc->action &&
++			desc->action->flags & IRQF_EARLY_RESUME;
++
++		if (is_early != want_early)
++			continue;
+ 
+ 		spin_lock_irqsave(&desc->lock, flags);
+ 		__enable_irq(desc, irq, true);
+ 		spin_unlock_irqrestore(&desc->lock, flags);
+ 	}
+ }
++
++/**
++ * irq_pm_syscore_ops - enable interrupt lines early
++ *
++ * Enable all interrupt lines with %IRQF_EARLY_RESUME set.
++ */
++void irq_pm_syscore_resume(void)
++{
++	resume_irqs(true);
++}
++
++/**
++ * resume_device_irqs - enable interrupt lines disabled by suspend_device_irqs()
++ *
++ * Enable all non-%IRQF_EARLY_RESUME interrupt lines previously
++ * disabled by suspend_device_irqs() that have the IRQS_SUSPENDED flag
++ * set as well as those with %IRQF_FORCE_RESUME.
++ */
++void resume_device_irqs(void)
++{
++	resume_irqs(false);
++}
+ EXPORT_SYMBOL_GPL(resume_device_irqs);
+ 
+ /**
+diff --git a/kernel/power/suspend.c b/kernel/power/suspend.c
+index 6f10dfc..40dd021 100644
+--- a/kernel/power/suspend.c
++++ b/kernel/power/suspend.c
+@@ -293,7 +293,7 @@ int enter_state(suspend_state_t state)
+  */
+ int pm_suspend(suspend_state_t state)
+ {
+-	if (state > PM_SUSPEND_ON && state <= PM_SUSPEND_MAX)
++	if (state > PM_SUSPEND_ON && state < PM_SUSPEND_MAX)
+ 		return enter_state(state);
+ 	return -EINVAL;
+ }
+diff --git a/lib/nlattr.c b/lib/nlattr.c
+index c4706eb..109d4fe 100644
+--- a/lib/nlattr.c
++++ b/lib/nlattr.c
+@@ -20,6 +20,7 @@ static u16 nla_attr_minlen[NLA_TYPE_MAX+1] __read_mostly = {
+ 	[NLA_U16]	= sizeof(u16),
+ 	[NLA_U32]	= sizeof(u32),
+ 	[NLA_U64]	= sizeof(u64),
++	[NLA_MSECS]	= sizeof(u64),
+ 	[NLA_NESTED]	= NLA_HDRLEN,
+ };
+ 
+diff --git a/mm/vmalloc.c b/mm/vmalloc.c
+index 7221e9e..f34ffd0 100644
+--- a/mm/vmalloc.c
++++ b/mm/vmalloc.c
+@@ -1203,17 +1203,22 @@ EXPORT_SYMBOL_GPL(map_vm_area);
+ DEFINE_RWLOCK(vmlist_lock);
+ struct vm_struct *vmlist;
+ 
+-static void insert_vmalloc_vm(struct vm_struct *vm, struct vmap_area *va,
++static void setup_vmalloc_vm(struct vm_struct *vm, struct vmap_area *va,
+ 			      unsigned long flags, void *caller)
+ {
+-	struct vm_struct *tmp, **p;
+-
+ 	vm->flags = flags;
+ 	vm->addr = (void *)va->va_start;
+ 	vm->size = va->va_end - va->va_start;
+ 	vm->caller = caller;
+ 	va->private = vm;
+ 	va->flags |= VM_VM_AREA;
++}
++
++static void insert_vmalloc_vmlist(struct vm_struct *vm)
++{
++	struct vm_struct *tmp, **p;
++
++	vm->flags &= ~VM_UNLIST;
+ 
+ 	write_lock(&vmlist_lock);
+ 	for (p = &vmlist; (tmp = *p) != NULL; p = &tmp->next) {
+@@ -1225,6 +1230,13 @@ static void insert_vmalloc_vm(struct vm_struct *vm, struct vmap_area *va,
+ 	write_unlock(&vmlist_lock);
+ }
+ 
++static void insert_vmalloc_vm(struct vm_struct *vm, struct vmap_area *va,
++			      unsigned long flags, void *caller)
++{
++	setup_vmalloc_vm(vm, va, flags, caller);
++	insert_vmalloc_vmlist(vm);
++}
++
+ static struct vm_struct *__get_vm_area_node(unsigned long size,
+ 		unsigned long align, unsigned long flags, unsigned long start,
+ 		unsigned long end, int node, gfp_t gfp_mask, void *caller)
+@@ -1263,7 +1275,18 @@ static struct vm_struct *__get_vm_area_node(unsigned long size,
+ 		return NULL;
+ 	}
+ 
+-	insert_vmalloc_vm(area, va, flags, caller);
++	/*
++	 * When this function is called from __vmalloc_node,
++	 * we do not add vm_struct to vmlist here to avoid
++	 * accessing uninitialized members of vm_struct such as
++	 * pages and nr_pages fields. They will be set later.
++	 * To distinguish it from others, we use a VM_UNLIST flag.
++	 */
++	if (flags & VM_UNLIST)
++		setup_vmalloc_vm(area, va, flags, caller);
++	else
++		insert_vmalloc_vm(area, va, flags, caller);
++
+ 	return area;
+ }
+ 
+@@ -1338,17 +1361,20 @@ struct vm_struct *remove_vm_area(const void *addr)
+ 	va = find_vmap_area((unsigned long)addr);
+ 	if (va && va->flags & VM_VM_AREA) {
+ 		struct vm_struct *vm = va->private;
+-		struct vm_struct *tmp, **p;
+-		/*
+-		 * remove from list and disallow access to this vm_struct
+-		 * before unmap. (address range confliction is maintained by
+-		 * vmap.)
+-		 */
+-		write_lock(&vmlist_lock);
+-		for (p = &vmlist; (tmp = *p) != vm; p = &tmp->next)
+-			;
+-		*p = tmp->next;
+-		write_unlock(&vmlist_lock);
++
++		if (!(vm->flags & VM_UNLIST)) {
++			struct vm_struct *tmp, **p;
++			/*
++			 * remove from list and disallow access to
++			 * this vm_struct before unmap. (address range
++			 * confliction is maintained by vmap.)
++			 */
++			write_lock(&vmlist_lock);
++			for (p = &vmlist; (tmp = *p) != vm; p = &tmp->next)
++				;
++			*p = tmp->next;
++			write_unlock(&vmlist_lock);
++		}
+ 
+ 		vmap_debug_free_range(va->va_start, va->va_end);
+ 		free_unmap_vmap_area(va);
+@@ -1568,8 +1594,9 @@ static void *__vmalloc_node(unsigned long size, unsigned long align,
+ 	if (!size || (size >> PAGE_SHIFT) > totalram_pages)
+ 		return NULL;
+ 
+-	area = __get_vm_area_node(size, align, VM_ALLOC, VMALLOC_START,
+-				  VMALLOC_END, node, gfp_mask, caller);
++	area = __get_vm_area_node(size, align, VM_ALLOC | VM_UNLIST,
++				  VMALLOC_START, VMALLOC_END, node,
++				  gfp_mask, caller);
+ 
+ 	if (!area)
+ 		return NULL;
+@@ -1577,6 +1604,12 @@ static void *__vmalloc_node(unsigned long size, unsigned long align,
+ 	addr = __vmalloc_area_node(area, gfp_mask, prot, node, caller);
+ 
+ 	/*
++	 * In this function, newly allocated vm_struct is not added
++	 * to vmlist at __get_vm_area_node(). so, it is added here.
++	 */
++	insert_vmalloc_vmlist(area);
++
++	/*
+ 	 * A ref_count = 3 is needed because the vm_struct and vmap_area
+ 	 * structures allocated in the __get_vm_area_node() function contain
+ 	 * references to the virtual address of the vmalloc'ed block.
+diff --git a/net/bluetooth/rfcomm/tty.c b/net/bluetooth/rfcomm/tty.c
+index cab71ea..5f6a305 100644
+--- a/net/bluetooth/rfcomm/tty.c
++++ b/net/bluetooth/rfcomm/tty.c
+@@ -844,10 +844,6 @@ static int rfcomm_tty_ioctl(struct tty_struct *tty, struct file *filp, unsigned
+ 		BT_DBG("TIOCMIWAIT");
+ 		break;
+ 
+-	case TIOCGICOUNT:
+-		BT_DBG("TIOCGICOUNT");
+-		break;
+-
+ 	case TIOCGSERIAL:
+ 		BT_ERR("TIOCGSERIAL is not supported");
+ 		return -ENOIOCTLCMD;
+diff --git a/net/ipv6/udp.c b/net/ipv6/udp.c
+index ca520d4..9cc6289 100644
+--- a/net/ipv6/udp.c
++++ b/net/ipv6/udp.c
+@@ -1141,7 +1141,7 @@ static struct sk_buff *udp6_ufo_fragment(struct sk_buff *skb, int features)
+ 	skb->ip_summed = CHECKSUM_NONE;
+ 
+ 	/* Check if there is enough headroom to insert fragment header. */
+-	if ((skb_headroom(skb) < frag_hdr_sz) &&
++	if ((skb_mac_header(skb) < skb->head + frag_hdr_sz) &&
+ 	    pskb_expand_head(skb, frag_hdr_sz, 0, GFP_ATOMIC))
+ 		goto out;
+ 
+diff --git a/net/sunrpc/auth_unix.c b/net/sunrpc/auth_unix.c
+index 46b2647..adaa02c 100644
+--- a/net/sunrpc/auth_unix.c
++++ b/net/sunrpc/auth_unix.c
+@@ -129,6 +129,9 @@ unx_match(struct auth_cred *acred, struct rpc_cred *rcred, int flags)
+ 	for (i = 0; i < groups ; i++)
+ 		if (cred->uc_gids[i] != GROUP_AT(acred->group_info, i))
+ 			return 0;
++	if (groups < NFS_NGROUPS &&
++	    cred->uc_gids[groups] != NOGROUP)
++		return 0;
+ 	return 1;
+ }
+ 
+diff --git a/scripts/Kbuild.include b/scripts/Kbuild.include
+index c67e73e..92b62a8 100644
+--- a/scripts/Kbuild.include
++++ b/scripts/Kbuild.include
+@@ -118,6 +118,11 @@ cc-option-yn = $(call try-run,\
+ cc-option-align = $(subst -functions=0,,\
+ 	$(call cc-option,-falign-functions=0,-malign-functions=0))
+ 
++# cc-disable-warning
++# Usage: cflags-y += $(call cc-disable-warning,unused-but-set-variable)
++cc-disable-warning = $(call try-run,\
++	$(CC) $(KBUILD_CPPFLAGS) $(KBUILD_CFLAGS) -W$(strip $(1)) -c -xc /dev/null -o "$$TMP",-Wno-$(strip $(1)))
++
+ # cc-version
+ # Usage gcc-ver := $(call cc-version)
+ cc-version = $(shell $(CONFIG_SHELL) $(srctree)/scripts/gcc-version.sh $(CC))
+diff --git a/sound/pci/hda/patch_realtek.c b/sound/pci/hda/patch_realtek.c
+index 2db8b5a..ba44dc0 100644
+--- a/sound/pci/hda/patch_realtek.c
++++ b/sound/pci/hda/patch_realtek.c
+@@ -12664,7 +12664,6 @@ static struct snd_pci_quirk alc268_cfg_tbl[] = {
+ 	SND_PCI_QUIRK(0x1025, 0x015b, "Acer Aspire One",
+ 						ALC268_ACER_ASPIRE_ONE),
+ 	SND_PCI_QUIRK(0x1028, 0x0253, "Dell OEM", ALC268_DELL),
+-	SND_PCI_QUIRK(0x1028, 0x02b0, "Dell Inspiron 910", ALC268_AUTO),
+ 	SND_PCI_QUIRK_MASK(0x1028, 0xfff0, 0x02b0,
+ 			"Dell Inspiron Mini9/Vostro A90", ALC268_DELL),
+ 	/* almost compatible with toshiba but with optional digital outs;
+diff --git a/sound/soc/codecs/wm8940.c b/sound/soc/codecs/wm8940.c
+index 63bc2ae..6fa3152 100644
+--- a/sound/soc/codecs/wm8940.c
++++ b/sound/soc/codecs/wm8940.c
+@@ -472,6 +472,7 @@ static int wm8940_set_bias_level(struct snd_soc_codec *codec,
+ 		ret = snd_soc_write(codec, WM8940_POWER1, pwr_reg);
+ 		break;
+ 	}
++	codec->bias_level = level;
+ 
+ 	return ret;
+ }
