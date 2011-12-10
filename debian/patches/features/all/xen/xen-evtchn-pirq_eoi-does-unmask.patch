@@ -1,0 +1,109 @@
+From a7bdd47532a8182eb9a6e46f03ff5f39d40ca4bb Mon Sep 17 00:00:00 2001
+From: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+Date: Thu, 2 Sep 2010 21:36:48 -0700
+Subject: [PATCH 09/26] xen/evtchn: pirq_eoi does unmask
+
+pirq_eoi() unmasks the event channel, so 1) there's no need to do it
+explicitly, and 2) don't do it before we're ready to unmask.
+
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+(cherry picked from commit 43d8a5030a502074f3c4aafed4d6095ebd76067c)
+
+Signed-off-by: Ian Campbell <ijc@hellion.org.uk>
+---
+ drivers/xen/events.c |   42 +++++++++++++++++++-----------------------
+ 1 files changed, 19 insertions(+), 23 deletions(-)
+
+diff --git a/drivers/xen/events.c b/drivers/xen/events.c
+index 7241a20..045313c 100644
+--- a/drivers/xen/events.c
++++ b/drivers/xen/events.c
+@@ -331,6 +331,14 @@ static void mask_evtchn(int port)
+ 	sync_set_bit(port, &s->evtchn_mask[0]);
+ }
+ 
++static void mask_irq(unsigned int irq)
++{
++	int evtchn = evtchn_from_irq(irq);
++
++	if (VALID_EVTCHN(evtchn))
++		mask_evtchn(evtchn);
++}
++
+ static void unmask_evtchn(int port)
+ {
+ 	struct shared_info *s = HYPERVISOR_shared_info;
+@@ -361,6 +369,14 @@ static void unmask_evtchn(int port)
+ 	put_cpu();
+ }
+ 
++static void unmask_irq(unsigned int irq)
++{
++	int evtchn = evtchn_from_irq(irq);
++
++	if (VALID_EVTCHN(evtchn))
++		unmask_evtchn(evtchn);
++}
++
+ static int get_nr_hw_irqs(void)
+ {
+ 	int ret = 1;
+@@ -424,7 +440,8 @@ static void pirq_eoi(int irq)
+ 	if (unlikely(pirq_needs_eoi(irq))) {
+ 		int rc = HYPERVISOR_physdev_op(PHYSDEVOP_eoi, &eoi);
+ 		WARN_ON(rc);
+-	}
++	} else
++		unmask_irq(irq);
+ }
+ 
+ static void pirq_query_unmask(int irq)
+@@ -482,7 +499,6 @@ static unsigned int startup_pirq(unsigned int irq)
+ 	info->evtchn = evtchn;
+ 
+  out:
+-	unmask_evtchn(evtchn);
+ 	pirq_eoi(irq);
+ 
+ 	return 0;
+@@ -512,13 +528,9 @@ static void shutdown_pirq(unsigned int irq)
+ 
+ static void ack_pirq(unsigned int irq)
+ {
+-	int evtchn = evtchn_from_irq(irq);
+-
+-	pirq_eoi(irq);
+ 	move_masked_irq(irq);
+ 	
+-	if (VALID_EVTCHN(evtchn))
+-		unmask_evtchn(evtchn);
++	pirq_eoi(irq);
+ }
+ 
+ static void end_pirq(unsigned int irq)
+@@ -1169,22 +1181,6 @@ int resend_irq_on_evtchn(unsigned int irq)
+ 	return 1;
+ }
+ 
+-static void unmask_irq(unsigned int irq)
+-{
+-	int evtchn = evtchn_from_irq(irq);
+-
+-	if (VALID_EVTCHN(evtchn))
+-		unmask_evtchn(evtchn);
+-}
+-
+-static void mask_irq(unsigned int irq)
+-{
+-	int evtchn = evtchn_from_irq(irq);
+-
+-	if (VALID_EVTCHN(evtchn))
+-		mask_evtchn(evtchn);
+-}
+-
+ static void ack_dynirq(unsigned int irq)
+ {
+ 	int evtchn = evtchn_from_irq(irq);
+-- 
+1.7.5.4
+

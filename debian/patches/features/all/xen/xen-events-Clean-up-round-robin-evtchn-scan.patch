@@ -1,0 +1,115 @@
+From 25791d4cdda9b91422643f52651ce765684aa9a6 Mon Sep 17 00:00:00 2001
+From: Keir Fraser <keir.fraser@citrix.com>
+Date: Fri, 4 Mar 2011 09:07:13 +0000
+Subject: [PATCH 22/26] xen: events: Clean up round-robin evtchn scan.
+
+Also fixes a couple of boundary cases.
+
+Signed-off-by: Keir Fraser <keir.fraser@citrix.com>
+Signed-off-by: Ian Campbell <ian.campbell@citrix.com>
+[ijc: forward ported from linux-2.6.18-xen.hg 988:c88a02a22a05]
+(cherry picked from commit 188449f889c6c30709c7e9e8710b9eff14fd963f)
+
+Signed-off-by: Ian Campbell <ijc@hellion.org.uk>
+---
+ drivers/xen/events.c |   44 ++++++++++++++++++++------------------------
+ 1 files changed, 20 insertions(+), 24 deletions(-)
+
+diff --git a/drivers/xen/events.c b/drivers/xen/events.c
+index df70c1e..9890ecd 100644
+--- a/drivers/xen/events.c
++++ b/drivers/xen/events.c
+@@ -1034,8 +1034,8 @@ irqreturn_t xen_debug_interrupt(int irq, void *dev_id)
+ }
+ 
+ static DEFINE_PER_CPU(unsigned, xed_nesting_count);
+-static DEFINE_PER_CPU(unsigned int, last_word_idx) = { BITS_PER_LONG - 1 };
+-static DEFINE_PER_CPU(unsigned int, last_bit_idx) = { BITS_PER_LONG - 1 };
++static DEFINE_PER_CPU(unsigned int, current_word_idx);
++static DEFINE_PER_CPU(unsigned int, current_bit_idx);
+ 
+ /*
+  * Mask out the i least significant bits of w
+@@ -1073,23 +1073,21 @@ static void __xen_evtchn_do_upcall(struct pt_regs *regs)
+ #endif
+ 		pending_words = xchg(&vcpu_info->evtchn_pending_sel, 0);
+ 
+-		word_idx = __get_cpu_var(last_word_idx);
+-		bit_idx = __get_cpu_var(last_bit_idx);
++		word_idx = __get_cpu_var(current_word_idx);
++		bit_idx = __get_cpu_var(current_bit_idx);
+ 
+ 		while (pending_words != 0) {
+ 			unsigned long pending_bits;
+ 			unsigned long words;
+ 
+-			word_idx = (word_idx + 1) % BITS_PER_LONG;
+ 			words = MASK_LSBS(pending_words, word_idx);
+ 
+ 			/*
+-			 * If we masked out all events, wrap around to the
+-			 * beginning.
++			 * If we masked out all events, wrap to beginning.
+ 			 */
+ 			if (words == 0) {
+-				word_idx = BITS_PER_LONG - 1;
+-				bit_idx = BITS_PER_LONG - 1;
++				word_idx = 0;
++				bit_idx = 0;
+ 				continue;
+ 			}
+ 			word_idx = __ffs(words);
+@@ -1101,14 +1099,11 @@ static void __xen_evtchn_do_upcall(struct pt_regs *regs)
+ 
+ 				pending_bits = active_evtchns(cpu, s, word_idx);
+ 
+-				bit_idx = (bit_idx + 1) % BITS_PER_LONG;
+ 				bits = MASK_LSBS(pending_bits, bit_idx);
+ 
+ 				/* If we masked out all events, move on. */
+-				if (bits == 0) {
+-					bit_idx = BITS_PER_LONG - 1;
++				if (bits == 0)
+ 					break;
+-				}
+ 
+ 				bit_idx = __ffs(bits);
+ 
+@@ -1125,22 +1120,23 @@ static void __xen_evtchn_do_upcall(struct pt_regs *regs)
+ 						generic_handle_irq_desc(irq, desc);
+ 				}
+ 
+-				/*
+-				 * If this is the final port processed, we'll
+-				 * pick up here+1 next time.
+-				 */
+-				__get_cpu_var(last_word_idx) = word_idx;
+-				__get_cpu_var(last_bit_idx) = bit_idx;
+-			} while (bit_idx != BITS_PER_LONG - 1);
++				bit_idx = (bit_idx + 1) % BITS_PER_LONG;
++
++				/* Next caller starts at last processed + 1 */
++				__get_cpu_var(current_word_idx) =
++						 bit_idx ? word_idx :
++						 (word_idx+1) % BITS_PER_LONG;
++				__get_cpu_var(current_bit_idx) = bit_idx;
++			} while (bit_idx != 0);
+ 
+ 			pending_bits = active_evtchns(cpu, s, word_idx);
+ 
+-			/*
+-			 * We handled all ports, so we can clear the
+-			 * selector bit.
+-			 */
++			/* If we handled all ports, clear the selector bit. */
+ 			if (pending_bits == 0)
+ 				pending_words &= ~(1UL << word_idx);
++
++			word_idx = (word_idx + 1) % BITS_PER_LONG;
++			bit_idx = 0;
+ 		}
+ 
+ 		BUG_ON(!irqs_disabled());
+-- 
+1.7.5.4
+

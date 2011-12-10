@@ -1,0 +1,160 @@
+From e3f489ab3865656743b5cb2dc1feb7cefc5f8108 Mon Sep 17 00:00:00 2001
+From: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+Date: Fri, 3 Sep 2010 11:47:15 -0700
+Subject: [PATCH 11/26] xen/events: use PHYSDEVOP_pirq_eoi_gmfn to get pirq
+ need-EOI info
+
+Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
+(cherry picked from commit 2390c371ecd32d9f06e22871636185382bf70ab7)
+
+Conflicts:
+
+	drivers/xen/events.c
+---
+ drivers/xen/events.c            |   43 +++++++++++++++++++++++++++++++++-----
+ include/xen/interface/physdev.h |   13 +++++++++++
+ 2 files changed, 50 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/xen/events.c b/drivers/xen/events.c
+index 220485c..7a18773 100644
+--- a/drivers/xen/events.c
++++ b/drivers/xen/events.c
+@@ -50,6 +50,7 @@
+ #include <xen/interface/event_channel.h>
+ #include <xen/interface/hvm/hvm_op.h>
+ #include <xen/interface/hvm/params.h>
++#include <xen/page.h>
+ 
+ #include "../pci/msi.h"
+ 
+@@ -102,9 +103,12 @@ struct irq_info
+ 		} pirq;
+ 	} u;
+ };
+-#define PIRQ_NEEDS_EOI	(1 << 0)
+ #define PIRQ_SHAREABLE	(1 << 1)
+ 
++/* Bitmap indicating which PIRQs require Xen to be notified on unmask. */
++static bool pirq_eoi_does_unmask;
++static unsigned long *pirq_needs_eoi_bits;
++
+ static struct irq_info *irq_info;
+ 
+ static int *evtchn_to_irq;
+@@ -247,7 +251,7 @@ static bool pirq_needs_eoi(unsigned irq)
+ 
+ 	BUG_ON(info->type != IRQT_PIRQ);
+ 
+-	return info->u.pirq.flags & PIRQ_NEEDS_EOI;
++	return test_bit(info->u.pirq.gsi, pirq_needs_eoi_bits);
+ }
+ 
+ static inline unsigned long active_evtchns(unsigned int cpu,
+@@ -436,12 +440,17 @@ static void pirq_eoi(int irq)
+ {
+ 	struct irq_info *info = info_for_irq(irq);
+ 	struct physdev_eoi eoi = { .irq = info->u.pirq.gsi };
++	bool need_eoi;
++
++	need_eoi = pirq_needs_eoi(irq);
++
++	if (!need_eoi || !pirq_eoi_does_unmask)
++		unmask_evtchn(info->evtchn);
+ 
+-	if (pirq_needs_eoi(irq)) {
++	if (need_eoi) {
+ 		int rc = HYPERVISOR_physdev_op(PHYSDEVOP_eoi, &eoi);
+ 		WARN_ON(rc);
+ 	}
+-	unmask_irq(irq);
+ }
+ 
+ static void pirq_query_unmask(int irq)
+@@ -449,15 +458,18 @@ static void pirq_query_unmask(int irq)
+ 	struct physdev_irq_status_query irq_status;
+ 	struct irq_info *info = info_for_irq(irq);
+ 
++	if (pirq_eoi_does_unmask)
++		return;
++
+ 	BUG_ON(info->type != IRQT_PIRQ);
+ 
+ 	irq_status.irq = info->u.pirq.gsi;
+ 	if (HYPERVISOR_physdev_op(PHYSDEVOP_irq_status_query, &irq_status))
+ 		irq_status.flags = 0;
+ 
+-	info->u.pirq.flags &= ~PIRQ_NEEDS_EOI;
++	clear_bit(info->u.pirq.gsi, pirq_needs_eoi_bits);
+ 	if (irq_status.flags & XENIRQSTAT_needs_eoi)
+-		info->u.pirq.flags |= PIRQ_NEEDS_EOI;
++		set_bit(info->u.pirq.gsi, pirq_needs_eoi_bits);
+ }
+ 
+ static bool probing_irq(int irq)
+@@ -1348,6 +1360,16 @@ void xen_irq_resume(void)
+ 		restore_cpu_virqs(cpu);
+ 		restore_cpu_ipis(cpu);
+ 	}
++
++	if (pirq_eoi_does_unmask) {
++		struct physdev_pirq_eoi_gmfn eoi_gmfn;
++		
++		eoi_gmfn.gmfn = virt_to_mfn(pirq_needs_eoi_bits);
++		if (HYPERVISOR_physdev_op(PHYSDEVOP_pirq_eoi_gmfn, &eoi_gmfn) == 0) {
++			/* Could recover by reverting to old method...? */
++			BUG();
++		}
++	}
+ }
+ 
+ static struct irq_chip xen_dynamic_chip __read_mostly = {
+@@ -1442,6 +1464,8 @@ void xen_callback_vector(void)
+ void __init xen_init_IRQ(void)
+ {
+ 	int i;
++	struct physdev_pirq_eoi_gmfn eoi_gmfn;
++	int nr_pirqs = NR_IRQS;
+ 
+ 	cpu_evtchn_mask_p = kcalloc(nr_cpu_ids, sizeof(struct cpu_evtchn_s),
+ 				    GFP_KERNEL);
+@@ -1452,6 +1476,13 @@ void __init xen_init_IRQ(void)
+ 	for(i = 0; i < NR_EVENT_CHANNELS; i++)
+ 		evtchn_to_irq[i] = -1;
+ 
++	i = get_order(sizeof(unsigned long) * BITS_TO_LONGS(nr_pirqs));
++	pirq_needs_eoi_bits = (void *)__get_free_pages(GFP_KERNEL|__GFP_ZERO, i);
++
++ 	eoi_gmfn.gmfn = virt_to_mfn(pirq_needs_eoi_bits);
++	if (HYPERVISOR_physdev_op(PHYSDEVOP_pirq_eoi_gmfn, &eoi_gmfn) == 0)
++		pirq_eoi_does_unmask = true;
++
+ 	init_evtchn_cpu_bindings();
+ 
+ 	/* No event channels are 'live' right now. */
+diff --git a/include/xen/interface/physdev.h b/include/xen/interface/physdev.h
+index 66122aa..0703ef6 100644
+--- a/include/xen/interface/physdev.h
++++ b/include/xen/interface/physdev.h
+@@ -39,6 +39,19 @@ struct physdev_eoi {
+ };
+ 
+ /*
++ * Register a shared page for the hypervisor to indicate whether the guest
++ * must issue PHYSDEVOP_eoi. The semantics of PHYSDEVOP_eoi change slightly
++ * once the guest used this function in that the associated event channel
++ * will automatically get unmasked. The page registered is used as a bit
++ * array indexed by Xen's PIRQ value.
++ */
++#define PHYSDEVOP_pirq_eoi_gmfn         17
++struct physdev_pirq_eoi_gmfn {
++    /* IN */
++    unsigned long gmfn;
++};
++
++/*
+  * Query the status of an IRQ line.
+  * @arg == pointer to physdev_irq_status_query structure.
+  */
+-- 
+1.7.5.4
+

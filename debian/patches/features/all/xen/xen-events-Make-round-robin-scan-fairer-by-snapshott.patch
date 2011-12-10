@@ -1,0 +1,89 @@
+From 991c43e0facafcbc2712e651d9784e67bb2607db Mon Sep 17 00:00:00 2001
+From: Keir Fraser <keir.fraser@citrix.com>
+Date: Fri, 4 Mar 2011 09:08:07 +0000
+Subject: [PATCH 23/26] xen: events: Make round-robin scan fairer by
+ snapshotting each l2 word
+
+once only (except for starting l2 word, which we scan in two parts).
+Signed-off-by: Keir Fraser <keir.fraser@citrix.com>
+Signed-off-by: Ian Campbell <ian.campbell@citrix.com>
+[ijc: forward ported from linux-2.6.18-xen.hg 990:427276ac595d]
+(cherry picked from commit 0e2ec1fb16f9ca84f91de3d9427a0964d679738a)
+
+Signed-off-by: Ian Campbell <ijc@hellion.org.uk>
+---
+ drivers/xen/events.c |   30 +++++++++++++++++++++---------
+ 1 files changed, 21 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/xen/events.c b/drivers/xen/events.c
+index 9890ecd..5a34789 100644
+--- a/drivers/xen/events.c
++++ b/drivers/xen/events.c
+@@ -1053,7 +1053,9 @@ static DEFINE_PER_CPU(unsigned int, current_bit_idx);
+  */
+ static void __xen_evtchn_do_upcall(struct pt_regs *regs)
+ {
++	int start_word_idx, start_bit_idx;
+ 	int word_idx, bit_idx;
++	int i;
+ 	int cpu = get_cpu();
+ 	struct shared_info *s = HYPERVISOR_shared_info;
+ 	struct vcpu_info *vcpu_info = __get_cpu_var(xen_vcpu);
+@@ -1073,10 +1075,12 @@ static void __xen_evtchn_do_upcall(struct pt_regs *regs)
+ #endif
+ 		pending_words = xchg(&vcpu_info->evtchn_pending_sel, 0);
+ 
+-		word_idx = __get_cpu_var(current_word_idx);
+-		bit_idx = __get_cpu_var(current_bit_idx);
++		start_word_idx = __get_cpu_var(current_word_idx);
++		start_bit_idx = __get_cpu_var(current_bit_idx);
++
++		word_idx = start_word_idx;
+ 
+-		while (pending_words != 0) {
++		for (i = 0; pending_words != 0; i++) {
+ 			unsigned long pending_bits;
+ 			unsigned long words;
+ 
+@@ -1092,13 +1096,23 @@ static void __xen_evtchn_do_upcall(struct pt_regs *regs)
+ 			}
+ 			word_idx = __ffs(words);
+ 
++			pending_bits = active_evtchns(cpu, s, word_idx);
++			bit_idx = 0; /* usually scan entire word from start */
++			if (word_idx == start_word_idx) {
++				/* We scan the starting word in two parts */
++				if (i == 0)
++					/* 1st time: start in the middle */
++					bit_idx = start_bit_idx;
++				else
++					/* 2nd time: mask bits done already */
++					bit_idx &= (1UL << start_bit_idx) - 1;
++			}
++
+ 			do {
+ 				unsigned long bits;
+ 				int port, irq;
+ 				struct irq_desc *desc;
+ 
+-				pending_bits = active_evtchns(cpu, s, word_idx);
+-
+ 				bits = MASK_LSBS(pending_bits, bit_idx);
+ 
+ 				/* If we masked out all events, move on. */
+@@ -1129,10 +1143,8 @@ static void __xen_evtchn_do_upcall(struct pt_regs *regs)
+ 				__get_cpu_var(current_bit_idx) = bit_idx;
+ 			} while (bit_idx != 0);
+ 
+-			pending_bits = active_evtchns(cpu, s, word_idx);
+-
+-			/* If we handled all ports, clear the selector bit. */
+-			if (pending_bits == 0)
++			/* Scan start_l1i twice; all others once. */
++			if ((word_idx != start_word_idx) || (i != 0))
+ 				pending_words &= ~(1UL << word_idx);
+ 
+ 			word_idx = (word_idx + 1) % BITS_PER_LONG;
+-- 
+1.7.5.4
+

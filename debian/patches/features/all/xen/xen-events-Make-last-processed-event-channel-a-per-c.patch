@@ -1,0 +1,64 @@
+From 2045aed6dc50dfb9e07606ce99997be45bfd6026 Mon Sep 17 00:00:00 2001
+From: Ian Campbell <ian.campbell@citrix.com>
+Date: Fri, 4 Mar 2011 09:05:19 +0000
+Subject: [PATCH 21/26] xen: events: Make last processed event channel a
+ per-cpu variable.
+
+Signed-off-by: Ian Campbell <ian.campbell@xensource.com>
+Signed-off-by: Ian Campbell <ian.campbell@citrix.com>
+[ijc: forward ported from linux-2.6.18-xen.hg 325:b2768401db94]
+(cherry picked from commit 1acdebd2d67f71d230f5857c28843e636b7dd92e)
+
+Signed-off-by: Ian Campbell <ijc@hellion.org.uk>
+---
+ drivers/xen/events.c |   13 ++++++-------
+ 1 files changed, 6 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/xen/events.c b/drivers/xen/events.c
+index a06fe5e..df70c1e 100644
+--- a/drivers/xen/events.c
++++ b/drivers/xen/events.c
+@@ -1034,6 +1034,8 @@ irqreturn_t xen_debug_interrupt(int irq, void *dev_id)
+ }
+ 
+ static DEFINE_PER_CPU(unsigned, xed_nesting_count);
++static DEFINE_PER_CPU(unsigned int, last_word_idx) = { BITS_PER_LONG - 1 };
++static DEFINE_PER_CPU(unsigned int, last_bit_idx) = { BITS_PER_LONG - 1 };
+ 
+ /*
+  * Mask out the i least significant bits of w
+@@ -1051,8 +1053,6 @@ static DEFINE_PER_CPU(unsigned, xed_nesting_count);
+  */
+ static void __xen_evtchn_do_upcall(struct pt_regs *regs)
+ {
+-	static unsigned int last_word_idx = BITS_PER_LONG - 1;
+-	static unsigned int last_bit_idx = BITS_PER_LONG - 1;
+ 	int word_idx, bit_idx;
+ 	int cpu = get_cpu();
+ 	struct shared_info *s = HYPERVISOR_shared_info;
+@@ -1073,8 +1073,8 @@ static void __xen_evtchn_do_upcall(struct pt_regs *regs)
+ #endif
+ 		pending_words = xchg(&vcpu_info->evtchn_pending_sel, 0);
+ 
+-		word_idx = last_word_idx;
+-		bit_idx = last_bit_idx;
++		word_idx = __get_cpu_var(last_word_idx);
++		bit_idx = __get_cpu_var(last_bit_idx);
+ 
+ 		while (pending_words != 0) {
+ 			unsigned long pending_bits;
+@@ -1129,9 +1129,8 @@ static void __xen_evtchn_do_upcall(struct pt_regs *regs)
+ 				 * If this is the final port processed, we'll
+ 				 * pick up here+1 next time.
+ 				 */
+-				last_word_idx = word_idx;
+-				last_bit_idx = bit_idx;
+-
++				__get_cpu_var(last_word_idx) = word_idx;
++				__get_cpu_var(last_bit_idx) = bit_idx;
+ 			} while (bit_idx != BITS_PER_LONG - 1);
+ 
+ 			pending_bits = active_evtchns(cpu, s, word_idx);
+-- 
+1.7.5.4
+
