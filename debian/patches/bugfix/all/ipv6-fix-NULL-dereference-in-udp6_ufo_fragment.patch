@@ -1,0 +1,108 @@
+From: Jason Wang <jasowang@redhat.com>
+Date: Sun, 9 Oct 2011 10:56:44 +0800
+Subject: [PATCH] ipv6: fix NULL dereference in udp6_ufo_fragment()
+
+commit a1b7ab0836a56fa4c9578f88ba1042398d7d9316 in 3.0-stable.
+
+This patch fixes the issue caused by ef81bb40bf15f350fe865f31fa42f1082772a576
+which is a backport of upstream 87c48fa3b4630905f98268dde838ee43626a060c. The
+problem does not exist in upstream.
+
+We do not check whether route is attached before trying to assign ip
+identification through route dest which lead NULL pointer dereference. This
+happens when host bridge transmit a packet from guest.
+
+This patch changes ipv6_select_ident() to accept in6_addr as its paramter and
+fix the issue by using the destination address in ipv6 header when no route is
+attached.
+
+Signed-off-by: Jason Wang <jasowang@redhat.com>
+Acked-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+---
+ include/net/ipv6.h    |    2 +-
+ net/ipv6/ip6_output.c |   10 +++++-----
+ net/ipv6/udp.c        |    4 +++-
+ 3 files changed, 9 insertions(+), 7 deletions(-)
+
+diff --git a/include/net/ipv6.h b/include/net/ipv6.h
+index 52d86da..b75a4dd 100644
+--- a/include/net/ipv6.h
++++ b/include/net/ipv6.h
+@@ -449,7 +449,7 @@ static inline int ipv6_addr_diff(const struct in6_addr *a1, const struct in6_add
+ 	return __ipv6_addr_diff(a1, a2, sizeof(struct in6_addr));
+ }
+ 
+-extern void ipv6_select_ident(struct frag_hdr *fhdr, struct rt6_info *rt);
++extern void ipv6_select_ident(struct frag_hdr *fhdr, struct in6_addr *addr);
+ 
+ /*
+  *	Prototypes exported by ipv6
+diff --git a/net/ipv6/ip6_output.c b/net/ipv6/ip6_output.c
+index 6ba0fe2..c48245c 100644
+--- a/net/ipv6/ip6_output.c
++++ b/net/ipv6/ip6_output.c
+@@ -628,9 +628,9 @@ static u32 __ipv6_select_ident(const struct in6_addr *addr)
+ 	return hash + newid;
+ }
+ 
+-void ipv6_select_ident(struct frag_hdr *fhdr, struct rt6_info *rt)
++void ipv6_select_ident(struct frag_hdr *fhdr, struct in6_addr *addr)
+ {
+-	fhdr->identification = htonl(__ipv6_select_ident(&rt->rt6i_dst.addr));
++	fhdr->identification = htonl(__ipv6_select_ident(addr));
+ }
+ 
+ static int ip6_fragment(struct sk_buff *skb, int (*output)(struct sk_buff *))
+@@ -718,7 +718,7 @@ static int ip6_fragment(struct sk_buff *skb, int (*output)(struct sk_buff *))
+ 		skb_reset_network_header(skb);
+ 		memcpy(skb_network_header(skb), tmp_hdr, hlen);
+ 
+-		ipv6_select_ident(fh, rt);
++		ipv6_select_ident(fh, &rt->rt6i_dst.addr);
+ 		fh->nexthdr = nexthdr;
+ 		fh->reserved = 0;
+ 		fh->frag_off = htons(IP6_MF);
+@@ -864,7 +864,7 @@ slow_path:
+ 		fh->nexthdr = nexthdr;
+ 		fh->reserved = 0;
+ 		if (!frag_id) {
+-			ipv6_select_ident(fh, rt);
++			ipv6_select_ident(fh, &rt->rt6i_dst.addr);
+ 			frag_id = fh->identification;
+ 		} else
+ 			fh->identification = frag_id;
+@@ -1114,7 +1114,7 @@ static inline int ip6_ufo_append_data(struct sock *sk,
+ 		skb_shinfo(skb)->gso_size = (mtu - fragheaderlen -
+ 					     sizeof(struct frag_hdr)) & ~7;
+ 		skb_shinfo(skb)->gso_type = SKB_GSO_UDP;
+-		ipv6_select_ident(&fhdr, rt);
++		ipv6_select_ident(&fhdr, &rt->rt6i_dst.addr);
+ 		skb_shinfo(skb)->ip6_frag_id = fhdr.identification;
+ 		__skb_queue_tail(&sk->sk_write_queue, skb);
+ 
+diff --git a/net/ipv6/udp.c b/net/ipv6/udp.c
+index cd7ce31..4ae5ee3 100644
+--- a/net/ipv6/udp.c
++++ b/net/ipv6/udp.c
+@@ -1120,6 +1120,7 @@ static struct sk_buff *udp6_ufo_fragment(struct sk_buff *skb, int features)
+ 	u8 frag_hdr_sz = sizeof(struct frag_hdr);
+ 	int offset;
+ 	__wsum csum;
++	struct rt6_info *rt = (struct rt6_info *)skb_dst(skb);
+ 
+ 	mss = skb_shinfo(skb)->gso_size;
+ 	if (unlikely(skb->len <= mss))
+@@ -1170,7 +1171,8 @@ static struct sk_buff *udp6_ufo_fragment(struct sk_buff *skb, int features)
+ 	fptr = (struct frag_hdr *)(skb_network_header(skb) + unfrag_ip6hlen);
+ 	fptr->nexthdr = nexthdr;
+ 	fptr->reserved = 0;
+-	ipv6_select_ident(fptr, (struct rt6_info *)skb_dst(skb));
++	ipv6_select_ident(fptr,
++			  rt ? &rt->rt6i_dst.addr : &ipv6_hdr(skb)->daddr);
+ 
+ 	/* Fragment the skb. ipv6 header and the remaining fields of the
+ 	 * fragment header are updated in ipv6_gso_segment()
+-- 
+1.7.7.3
+
