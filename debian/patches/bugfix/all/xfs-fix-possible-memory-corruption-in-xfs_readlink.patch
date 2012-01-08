@@ -1,0 +1,65 @@
+commit b52a360b2aa1c59ba9970fb0f52bbb093fcc7a24
+Author: Carlos Maiolino <cmaiolino@redhat.com>
+Date:   Mon Nov 7 16:10:24 2011 +0000
+
+    xfs: Fix possible memory corruption in xfs_readlink
+    
+    Fixes a possible memory corruption when the link is larger than
+    MAXPATHLEN and XFS_DEBUG is not enabled. This also remove the
+    S_ISLNK assert, since the inode mode is checked previously in
+    xfs_readlink_by_handle() and via VFS.
+    
+    Updated to address concerns raised by Ben Hutchings about the loose
+    attention paid to 32- vs 64-bit values, and the lack of handling a
+    potentially negative pathlen value:
+     - Changed type of "pathlen" to be xfs_fsize_t, to match that of
+       ip->i_d.di_size
+     - Added checking for a negative pathlen to the too-long pathlen
+       test, and generalized the message that gets reported in that case
+       to reflect the change
+    As a result, if a negative pathlen were encountered, this function
+    would return EFSCORRUPTED (and would fail an assertion for a debug
+    build)--just as would a too-long pathlen.
+    
+    Signed-off-by: Alex Elder <aelder@sgi.com>
+    Signed-off-by: Carlos Maiolino <cmaiolino@redhat.com>
+    Reviewed-by: Christoph Hellwig <hch@lst.de>
+    [dannf: backported to Debian's 2.6.32]
+
+diff --git a/fs/xfs/xfs_vnodeops.c b/fs/xfs/xfs_vnodeops.c
+index 8f32f50..1638884 100644
+--- a/fs/xfs/xfs_vnodeops.c
++++ b/fs/xfs/xfs_vnodeops.c
+@@ -554,7 +554,7 @@ xfs_readlink(
+ 	char		*link)
+ {
+ 	xfs_mount_t	*mp = ip->i_mount;
+-	int		pathlen;
++	xfs_fsize_t	pathlen;
+ 	int		error = 0;
+ 
+ 	xfs_itrace_entry(ip);
+@@ -564,13 +564,20 @@ xfs_readlink(
+ 
+ 	xfs_ilock(ip, XFS_ILOCK_SHARED);
+ 
+-	ASSERT((ip->i_d.di_mode & S_IFMT) == S_IFLNK);
+-	ASSERT(ip->i_d.di_size <= MAXPATHLEN);
+-
+ 	pathlen = ip->i_d.di_size;
+ 	if (!pathlen)
+ 		goto out;
+ 
++	if (pathlen < 0 || pathlen > MAXPATHLEN) {
++		xfs_fs_cmn_err(CE_ALERT, mp,
++			 "%s: inode (%llu) bad symlink length (%lld)",
++			 __func__, (unsigned long long) ip->i_ino,
++			 (long long) pathlen);
++		ASSERT(0);
++		return XFS_ERROR(EFSCORRUPTED);
++	}
++
++
+ 	if (ip->i_df.if_flags & XFS_IFINLINE) {
+ 		memcpy(link, ip->i_df.if_u1.if_data, pathlen);
+ 		link[pathlen] = '\0';
