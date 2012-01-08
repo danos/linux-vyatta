@@ -1,0 +1,159 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Wed, 29 Sep 2010 21:39:37 +0000
+Subject: [PATCH 131/166] e1000e: 82579 performance improvements
+
+commit 828bac87bb074f3366621724fdfbe314f98ccc7e upstream.
+
+The initial support for 82579 was tuned poorly for performance.  Adjust the
+packet buffer allocation appropriately for both standard and jumbo frames;
+and for jumbo frames increase the receive descriptor pre-fetch, disable
+adaptive interrupt moderation and set the DMA latency tolerance.
+
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Tested-by: Jeff Pieper <jeffrey.e.pieper@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+[bwh: Adjust context for omitted pm_qos changes]
+---
+ drivers/net/e1000e/e1000.h   |    1 +
+ drivers/net/e1000e/ich8lan.c |    2 +-
+ drivers/net/e1000e/netdev.c  |   50 ++++++++++++++++++++++++++++++++++++-----
+ 3 files changed, 46 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/net/e1000e/e1000.h b/drivers/net/e1000e/e1000.h
+index 5ec0af5..cee882d 100644
+--- a/drivers/net/e1000e/e1000.h
++++ b/drivers/net/e1000e/e1000.h
+@@ -453,6 +453,7 @@ struct e1000_info {
+ #define FLAG2_HAS_PHY_STATS               (1 << 4)
+ #define FLAG2_HAS_EEE                     (1 << 5)
+ #define FLAG2_DMA_BURST                   (1 << 6)
++#define FLAG2_DISABLE_AIM                 (1 << 8)
+ 
+ #define E1000_RX_DESC_PS(R, i)	    \
+ 	(&(((union e1000_rx_desc_packet_split *)((R).desc))[i]))
+diff --git a/drivers/net/e1000e/ich8lan.c b/drivers/net/e1000e/ich8lan.c
+index 57b5435..e3374d9 100644
+--- a/drivers/net/e1000e/ich8lan.c
++++ b/drivers/net/e1000e/ich8lan.c
+@@ -3986,7 +3986,7 @@ struct e1000_info e1000_pch2_info = {
+ 				  | FLAG_APME_IN_WUC,
+ 	.flags2			= FLAG2_HAS_PHY_STATS
+ 				  | FLAG2_HAS_EEE,
+-	.pba			= 18,
++	.pba			= 26,
+ 	.max_hw_frame_size	= DEFAULT_JUMBO,
+ 	.get_variants		= e1000_get_variants_ich8lan,
+ 	.mac_ops		= &ich8_mac_ops,
+diff --git a/drivers/net/e1000e/netdev.c b/drivers/net/e1000e/netdev.c
+index 340ed9c..8f6999c 100644
+--- a/drivers/net/e1000e/netdev.c
++++ b/drivers/net/e1000e/netdev.c
+@@ -2289,6 +2289,11 @@ static void e1000_set_itr(struct e1000_adapter *adapter)
+ 		goto set_itr_now;
+ 	}
+ 
++	if (adapter->flags2 & FLAG2_DISABLE_AIM) {
++		new_itr = 0;
++		goto set_itr_now;
++	}
++
+ 	adapter->tx_itr = e1000_update_itr(adapter,
+ 				    adapter->tx_itr,
+ 				    adapter->total_tx_packets,
+@@ -2337,7 +2342,10 @@ set_itr_now:
+ 		if (adapter->msix_entries)
+ 			adapter->rx_ring->set_itr = 1;
+ 		else
+-			ew32(ITR, 1000000000 / (new_itr * 256));
++			if (new_itr)
++				ew32(ITR, 1000000000 / (new_itr * 256));
++			else
++				ew32(ITR, 0);
+ 	}
+ }
+ 
+@@ -2919,7 +2927,7 @@ static void e1000_configure_rx(struct e1000_adapter *adapter)
+ 
+ 	/* irq moderation */
+ 	ew32(RADV, adapter->rx_abs_int_delay);
+-	if (adapter->itr_setting != 0)
++	if ((adapter->itr_setting != 0) && (adapter->itr != 0))
+ 		ew32(ITR, 1000000000 / (adapter->itr * 256));
+ 
+ 	ctrl_ext = er32(CTRL_EXT);
+@@ -2964,11 +2972,13 @@ static void e1000_configure_rx(struct e1000_adapter *adapter)
+ 	 * packet size is equal or larger than the specified value (in 8 byte
+ 	 * units), e.g. using jumbo frames when setting to E1000_ERT_2048
+ 	 */
+-	if (adapter->flags & FLAG_HAS_ERT) {
++	if ((adapter->flags & FLAG_HAS_ERT) ||
++	    (adapter->hw.mac.type == e1000_pch2lan)) {
+ 		if (adapter->netdev->mtu > ETH_DATA_LEN) {
+ 			u32 rxdctl = er32(RXDCTL(0));
+ 			ew32(RXDCTL(0), rxdctl | 0x3);
+-			ew32(ERT, E1000_ERT_2048 | (1 << 13));
++			if (adapter->flags & FLAG_HAS_ERT)
++				ew32(ERT, E1000_ERT_2048 | (1 << 13));
+ 			/*
+ 			 * With jumbo frames and early-receive enabled,
+ 			 * excessive C-state transition latencies result in
+@@ -3232,9 +3242,35 @@ void e1000e_reset(struct e1000_adapter *adapter)
+ 		fc->low_water = 0x05048;
+ 		fc->pause_time = 0x0650;
+ 		fc->refresh_time = 0x0400;
++		if (adapter->netdev->mtu > ETH_DATA_LEN) {
++			pba = 14;
++			ew32(PBA, pba);
++		}
+ 		break;
+ 	}
+ 
++	/*
++	 * Disable Adaptive Interrupt Moderation if 2 full packets cannot
++	 * fit in receive buffer and early-receive not supported.
++	 */
++	if (adapter->itr_setting & 0x3) {
++		if (((adapter->max_frame_size * 2) > (pba << 10)) &&
++		    !(adapter->flags & FLAG_HAS_ERT)) {
++			if (!(adapter->flags2 & FLAG2_DISABLE_AIM)) {
++				dev_info(&adapter->pdev->dev,
++					"Interrupt Throttle Rate turned off\n");
++				adapter->flags2 |= FLAG2_DISABLE_AIM;
++				ew32(ITR, 0);
++			}
++		} else if (adapter->flags2 & FLAG2_DISABLE_AIM) {
++			dev_info(&adapter->pdev->dev,
++				 "Interrupt Throttle Rate turned on\n");
++			adapter->flags2 &= ~FLAG2_DISABLE_AIM;
++			adapter->itr = 20000;
++			ew32(ITR, 1000000000 / (adapter->itr * 256));
++		}
++	}
++
+ 	/* Allow time for pending master requests to run */
+ 	mac->ops.reset_hw(hw);
+ 
+@@ -3277,7 +3313,8 @@ int e1000e_up(struct e1000_adapter *adapter)
+ 	struct e1000_hw *hw = &adapter->hw;
+ 
+ 	/* DMA latency requirement to workaround early-receive/jumbo issue */
+-	if (adapter->flags & FLAG_HAS_ERT)
++	if ((adapter->flags & FLAG_HAS_ERT) ||
++	    (adapter->hw.mac.type == e1000_pch2lan))
+ 		pm_qos_add_requirement(PM_QOS_CPU_DMA_LATENCY,
+ 		                       adapter->netdev->name,
+ 				       PM_QOS_DEFAULT_VALUE);
+@@ -3345,7 +3382,8 @@ void e1000e_down(struct e1000_adapter *adapter)
+ 	e1000_clean_tx_ring(adapter);
+ 	e1000_clean_rx_ring(adapter);
+ 
+-	if (adapter->flags & FLAG_HAS_ERT)
++	if ((adapter->flags & FLAG_HAS_ERT) ||
++	    (adapter->hw.mac.type == e1000_pch2lan))
+ 		pm_qos_remove_requirement(PM_QOS_CPU_DMA_LATENCY,
+ 		                          adapter->netdev->name);
+ 
+-- 
+1.7.5.4
+

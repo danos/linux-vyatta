@@ -1,0 +1,83 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Wed, 24 Nov 2010 06:01:35 +0000
+Subject: [PATCH 144/166] e1000e: 82571 Serdes can fail to get link
+
+commit d9c76f99c2a79feb413e3e751362d59c0f5323f6 upstream.
+
+When link partner is sending continuous Config symbols, the 82571 Serdes
+FIFO can overflow resulting in Invalid bit getting set.  To resolve this,
+if Sync and Config bits are both 1 ignore the Invalid bit and restart
+auto-negotiation.
+
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Tested-by: Emil Tantilov <emil.s.tantilov@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/e1000e/82571.c |   35 +++++++++++++++++++++++++++--------
+ 1 files changed, 27 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/net/e1000e/82571.c b/drivers/net/e1000e/82571.c
+index b44789a..99aeca9 100644
+--- a/drivers/net/e1000e/82571.c
++++ b/drivers/net/e1000e/82571.c
+@@ -52,6 +52,7 @@
+ 			      (ID_LED_DEF1_DEF2))
+ 
+ #define E1000_GCR_L1_ACT_WITHOUT_L0S_RX 0x08000000
++#define AN_RETRY_COUNT          5 /* Autoneg Retry Count value */
+ #define E1000_BASE1000T_STATUS          10
+ #define E1000_IDLE_ERROR_COUNT_MASK     0xFF
+ #define E1000_RECEIVE_ERROR_COUNTER     21
+@@ -1503,6 +1504,8 @@ static s32 e1000_check_for_serdes_link_82571(struct e1000_hw *hw)
+ 	u32 rxcw;
+ 	u32 ctrl;
+ 	u32 status;
++	u32 txcw;
++	u32 i;
+ 	s32 ret_val = 0;
+ 
+ 	ctrl = er32(CTRL);
+@@ -1613,16 +1616,32 @@ static s32 e1000_check_for_serdes_link_82571(struct e1000_hw *hw)
+ 			e_dbg("ANYSTATE  -> DOWN\n");
+ 		} else {
+ 			/*
+-			 * We have sync, and can tolerate one invalid (IV)
+-			 * codeword before declaring link down, so reread
+-			 * to look again.
++			 * Check several times, if Sync and Config
++			 * both are consistently 1 then simply ignore
++			 * the Invalid bit and restart Autoneg
+ 			 */
+-			udelay(10);
+-			rxcw = er32(RXCW);
+-			if (rxcw & E1000_RXCW_IV) {
+-				mac->serdes_link_state = e1000_serdes_link_down;
++			for (i = 0; i < AN_RETRY_COUNT; i++) {
++				udelay(10);
++				rxcw = er32(RXCW);
++				if ((rxcw & E1000_RXCW_IV) &&
++				    !((rxcw & E1000_RXCW_SYNCH) &&
++				      (rxcw & E1000_RXCW_C))) {
++					mac->serdes_has_link = false;
++					mac->serdes_link_state =
++					    e1000_serdes_link_down;
++					e_dbg("ANYSTATE  -> DOWN\n");
++					break;
++				}
++			}
++
++			if (i == AN_RETRY_COUNT) {
++				txcw = er32(TXCW);
++				txcw |= E1000_TXCW_ANE;
++				ew32(TXCW, txcw);
++				mac->serdes_link_state =
++				    e1000_serdes_link_autoneg_progress;
+ 				mac->serdes_has_link = false;
+-				e_dbg("ANYSTATE  -> DOWN\n");
++				e_dbg("ANYSTATE  -> AN_PROG\n");
+ 			}
+ 		}
+ 	}
+-- 
+1.7.5.4
+

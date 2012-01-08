@@ -1,0 +1,102 @@
+From: David Decotigny <decot@google.com>
+Date: Wed, 27 Apr 2011 18:32:43 +0000
+Subject: [PATCH 187/200] net/igb/e1000/e1000e: more robust ethtool
+ duplex/speed configuration
+
+commit 14ad2513ed5b709e566a853f4b515d91c5d83311 upstream.
+
+This makes sure that one cannot request a 99Mbps full-duplex and get a
+100Mbps half-duplex configuration in return due to the way the
+speed/duplex parameters are handled internally.
+
+Tested: e1000 works
+Signed-off-by: David Decotigny <decot@google.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+[bwh: Restricted to drivers/net/igb{,vf}/]
+---
+ drivers/net/igb/igb.h         |    2 +-
+ drivers/net/igb/igb_ethtool.c |    2 +-
+ drivers/net/igb/igb_main.c    |   23 +++++++++++++++--------
+ 3 files changed, 17 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/net/igb/igb.h b/drivers/net/igb/igb.h
+index 977c33da..229c59c 100644
+--- a/drivers/net/igb/igb.h
++++ b/drivers/net/igb/igb.h
+@@ -348,7 +348,7 @@ extern int igb_up(struct igb_adapter *);
+ extern void igb_down(struct igb_adapter *);
+ extern void igb_reinit_locked(struct igb_adapter *);
+ extern void igb_reset(struct igb_adapter *);
+-extern int igb_set_spd_dplx(struct igb_adapter *, u16);
++extern int igb_set_spd_dplx(struct igb_adapter *, u32, u8);
+ extern int igb_setup_tx_resources(struct igb_ring *);
+ extern int igb_setup_rx_resources(struct igb_ring *);
+ extern void igb_free_tx_resources(struct igb_ring *);
+diff --git a/drivers/net/igb/igb_ethtool.c b/drivers/net/igb/igb_ethtool.c
+index d9fa8e7..18eafa0 100644
+--- a/drivers/net/igb/igb_ethtool.c
++++ b/drivers/net/igb/igb_ethtool.c
+@@ -223,7 +223,7 @@ static int igb_set_settings(struct net_device *netdev, struct ethtool_cmd *ecmd)
+ 			hw->fc.requested_mode = e1000_fc_default;
+ 	} else {
+ 		u32 speed = ethtool_cmd_speed(ecmd);
+-		if (igb_set_spd_dplx(adapter, speed + ecmd->duplex)) {
++		if (igb_set_spd_dplx(adapter, speed, ecmd->duplex)) {
+ 			clear_bit(__IGB_RESETTING, &adapter->state);
+ 			return -EINVAL;
+ 		}
+diff --git a/drivers/net/igb/igb_main.c b/drivers/net/igb/igb_main.c
+index a07d3a3..23609b6 100644
+--- a/drivers/net/igb/igb_main.c
++++ b/drivers/net/igb/igb_main.c
+@@ -6208,21 +6208,25 @@ static void igb_restore_vlan(struct igb_adapter *adapter)
+ 	}
+ }
+ 
+-int igb_set_spd_dplx(struct igb_adapter *adapter, u16 spddplx)
++int igb_set_spd_dplx(struct igb_adapter *adapter, u32 spd, u8 dplx)
+ {
+ 	struct pci_dev *pdev = adapter->pdev;
+ 	struct e1000_mac_info *mac = &adapter->hw.mac;
+ 
+ 	mac->autoneg = 0;
+ 
++	/* Make sure dplx is at most 1 bit and lsb of speed is not set
++	 * for the switch() below to work */
++	if ((spd & 1) || (dplx & ~1))
++		goto err_inval;
++
+ 	/* Fiber NIC's only allow 1000 Gbps Full duplex */
+ 	if ((adapter->hw.phy.media_type == e1000_media_type_internal_serdes) &&
+-		spddplx != (SPEED_1000 + DUPLEX_FULL)) {
+-		dev_err(&pdev->dev, "Unsupported Speed/Duplex configuration\n");
+-		return -EINVAL;
+-	}
++	    spd != SPEED_1000 &&
++	    dplx != DUPLEX_FULL)
++		goto err_inval;
+ 
+-	switch (spddplx) {
++	switch (spd + dplx) {
+ 	case SPEED_10 + DUPLEX_HALF:
+ 		mac->forced_speed_duplex = ADVERTISE_10_HALF;
+ 		break;
+@@ -6241,10 +6245,13 @@ int igb_set_spd_dplx(struct igb_adapter *adapter, u16 spddplx)
+ 		break;
+ 	case SPEED_1000 + DUPLEX_HALF: /* not supported */
+ 	default:
+-		dev_err(&pdev->dev, "Unsupported Speed/Duplex configuration\n");
+-		return -EINVAL;
++		goto err_inval;
+ 	}
+ 	return 0;
++
++err_inval:
++	dev_err(&pdev->dev, "Unsupported Speed/Duplex configuration\n");
++	return -EINVAL;
+ }
+ 
+ static int __igb_shutdown(struct pci_dev *pdev, bool *enable_wake)
+-- 
+1.7.5.4
+

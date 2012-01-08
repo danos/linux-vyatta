@@ -1,0 +1,65 @@
+From: Alexander Duyck <alexander.h.duyck@intel.com>
+Date: Tue, 27 Oct 2009 23:49:40 +0000
+Subject: [PATCH 050/165] igb: change queue ordering for 82576 based adapters
+
+commit ee1b9f06dca9c406b159904e9b13ea2dfa5ed037 upstream.
+
+This patch changes the queue ordering for 82576 adapters so that if VFs are
+enabled the queues will first be allocated out of the PF pool.  Any
+remaining queues will be allocated out of other VMDq pools.
+
+Signed-off-by: Alexander Duyck <alexander.h.duyck@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/igb/igb_main.c |   25 +++++++++++++------------
+ 1 files changed, 13 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/net/igb/igb_main.c b/drivers/net/igb/igb_main.c
+index 340b295..0fad094 100644
+--- a/drivers/net/igb/igb_main.c
++++ b/drivers/net/igb/igb_main.c
+@@ -285,7 +285,7 @@ module_exit(igb_exit_module);
+  **/
+ static void igb_cache_ring_register(struct igb_adapter *adapter)
+ {
+-	int i;
++	int i = 0, j = 0;
+ 	u32 rbase_offset = adapter->vfs_allocated_count;
+ 
+ 	switch (adapter->hw.mac.type) {
+@@ -295,19 +295,20 @@ static void igb_cache_ring_register(struct igb_adapter *adapter)
+ 		 * In order to avoid collision we start at the first free queue
+ 		 * and continue consuming queues in the same sequence
+ 		 */
+-		for (i = 0; i < adapter->num_rx_queues; i++)
+-			adapter->rx_ring[i].reg_idx = rbase_offset +
+-			                              Q_IDX_82576(i);
+-		for (i = 0; i < adapter->num_tx_queues; i++)
+-			adapter->tx_ring[i].reg_idx = rbase_offset +
+-			                              Q_IDX_82576(i);
+-		break;
++		if (adapter->vfs_allocated_count) {
++			for (; i < adapter->num_rx_queues; i++)
++				adapter->rx_ring[i].reg_idx = rbase_offset +
++				                              Q_IDX_82576(i);
++			for (; j < adapter->num_tx_queues; j++)
++				adapter->tx_ring[j].reg_idx = rbase_offset +
++				                              Q_IDX_82576(j);
++		}
+ 	case e1000_82575:
+ 	default:
+-		for (i = 0; i < adapter->num_rx_queues; i++)
+-			adapter->rx_ring[i].reg_idx = i;
+-		for (i = 0; i < adapter->num_tx_queues; i++)
+-			adapter->tx_ring[i].reg_idx = i;
++		for (; i < adapter->num_rx_queues; i++)
++			adapter->rx_ring[i].reg_idx = rbase_offset + i;
++		for (; j < adapter->num_tx_queues; j++)
++			adapter->tx_ring[j].reg_idx = rbase_offset + j;
+ 		break;
+ 	}
+ }
+-- 
+1.7.5.4
+

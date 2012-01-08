@@ -1,0 +1,86 @@
+From: Matt Carlson <mcarlson@broadcom.com>
+Date: Fri, 12 Feb 2010 14:47:06 +0000
+Subject: [PATCH 070/207] tg3: Prevent rx producer ring overruns
+
+commit e92967bfb1f4fa7da7c425df9239c4bb615dec30 upstream.
+
+When operating in RSS mode, it is possible for one rx return ring to
+submit enough rx buffers back to the hardware such that it inadvertently
+overwrites data needed by another rx return ring.  This patch addresses
+the problem by looking for non-NULL skb pointers in the
+rx_[std|jmb]_buffers rings that parallel the rx producer rings.
+
+Signed-off-by: Matt Carlson <mcarlson@broadcom.com>
+Signed-off-by: Michael Chan <mchan@broadcom.com>
+Reviewed-by: Benjamin Li <benli@broadcom.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/tg3.c |   38 ++++++++++++++++++++++++++++++++++++++
+ 1 files changed, 38 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/net/tg3.c b/drivers/net/tg3.c
+index eab518b..4fc1a36 100644
+--- a/drivers/net/tg3.c
++++ b/drivers/net/tg3.c
+@@ -4552,6 +4552,12 @@ static void tg3_recycle_rx(struct tg3_napi *tnapi,
+ 			   pci_unmap_addr(src_map, mapping));
+ 	dest_desc->addr_hi = src_desc->addr_hi;
+ 	dest_desc->addr_lo = src_desc->addr_lo;
++
++	/* Ensure that the update to the skb happens after the physical
++	 * addresses have been transferred to the new BD location.
++	 */
++	smp_wmb();
++
+ 	src_map->skb = NULL;
+ }
+ 
+@@ -4816,6 +4822,22 @@ static void tg3_rx_prodring_xfer(struct tg3 *tp,
+ 		si = spr->rx_std_cons_idx;
+ 		di = dpr->rx_std_prod_idx;
+ 
++		for (i = di; i < di + cpycnt; i++) {
++			if (dpr->rx_std_buffers[i].skb) {
++				cpycnt = i - di;
++				break;
++			}
++		}
++
++		if (!cpycnt)
++			break;
++
++		/* Ensure that updates to the rx_std_buffers ring and the
++		 * shadowed hardware producer ring from tg3_recycle_skb() are
++		 * ordered correctly WRT the skb check above.
++		 */
++		smp_rmb();
++
+ 		memcpy(&dpr->rx_std_buffers[di],
+ 		       &spr->rx_std_buffers[si],
+ 		       cpycnt * sizeof(struct ring_info));
+@@ -4856,6 +4878,22 @@ static void tg3_rx_prodring_xfer(struct tg3 *tp,
+ 		si = spr->rx_jmb_cons_idx;
+ 		di = dpr->rx_jmb_prod_idx;
+ 
++		for (i = di; i < di + cpycnt; i++) {
++			if (dpr->rx_jmb_buffers[i].skb) {
++				cpycnt = i - di;
++				break;
++			}
++		}
++
++		if (!cpycnt)
++			break;
++
++		/* Ensure that updates to the rx_jmb_buffers ring and the
++		 * shadowed hardware producer ring from tg3_recycle_skb() are
++		 * ordered correctly WRT the skb check above.
++		 */
++		smp_rmb();
++
+ 		memcpy(&dpr->rx_jmb_buffers[di],
+ 		       &spr->rx_jmb_buffers[si],
+ 		       cpycnt * sizeof(struct ring_info));
+-- 
+1.7.5.4
+

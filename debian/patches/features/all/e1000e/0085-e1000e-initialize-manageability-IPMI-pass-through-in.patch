@@ -1,0 +1,150 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Mon, 10 May 2010 14:59:51 +0000
+Subject: [PATCH 085/166] e1000e: initialize manageability (IPMI) pass-through
+ in 82574/82583
+
+commit cd791618c28f524598bcfa941d948b1126a2394a upstream.
+
+82574/82583 uses different registers/bits to setup manageability filters
+than all other parts supported by e1000e; set them accordingly for IPMI
+pass-through.  Rename the function to better reflect what it does.
+
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/e1000e/defines.h |    5 +++
+ drivers/net/e1000e/hw.h      |    2 +
+ drivers/net/e1000e/netdev.c  |   57 +++++++++++++++++++++++++++++++++++------
+ 3 files changed, 55 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/net/e1000e/defines.h b/drivers/net/e1000e/defines.h
+index 7f760aa..227147f 100644
+--- a/drivers/net/e1000e/defines.h
++++ b/drivers/net/e1000e/defines.h
+@@ -138,6 +138,11 @@
+ /* Enable MNG packets to host memory */
+ #define E1000_MANC_EN_MNG2HOST   0x00200000
+ 
++#define E1000_MANC2H_PORT_623    0x00000020 /* Port 0x26f */
++#define E1000_MANC2H_PORT_664    0x00000040 /* Port 0x298 */
++#define E1000_MDEF_PORT_623      0x00000800 /* Port 0x26f */
++#define E1000_MDEF_PORT_664      0x00000400 /* Port 0x298 */
++
+ /* Receive Control */
+ #define E1000_RCTL_EN             0x00000002    /* enable */
+ #define E1000_RCTL_SBP            0x00000004    /* store bad packet */
+diff --git a/drivers/net/e1000e/hw.h b/drivers/net/e1000e/hw.h
+index 4fc3147..49d19d8 100644
+--- a/drivers/net/e1000e/hw.h
++++ b/drivers/net/e1000e/hw.h
+@@ -208,6 +208,8 @@ enum e1e_registers {
+ 
+ 	E1000_KMRNCTRLSTA = 0x00034, /* MAC-PHY interface - RW */
+ 	E1000_MANC2H    = 0x05860, /* Management Control To Host - RW */
++	E1000_MDEF_BASE = 0x05890, /* Management Decision Filters */
++#define E1000_MDEF(_n)   (E1000_MDEF_BASE + ((_n) * 4))
+ 	E1000_SW_FW_SYNC = 0x05B5C, /* Software-Firmware Synchronization - RW */
+ 	E1000_GCR	= 0x05B00, /* PCI-Ex Control */
+ 	E1000_GCR2      = 0x05B64, /* PCI-Ex Control #2 */
+diff --git a/drivers/net/e1000e/netdev.c b/drivers/net/e1000e/netdev.c
+index 2404022..6c0ac82 100644
+--- a/drivers/net/e1000e/netdev.c
++++ b/drivers/net/e1000e/netdev.c
+@@ -2526,10 +2526,10 @@ static void e1000_restore_vlan(struct e1000_adapter *adapter)
+ 	}
+ }
+ 
+-static void e1000_init_manageability(struct e1000_adapter *adapter)
++static void e1000_init_manageability_pt(struct e1000_adapter *adapter)
+ {
+ 	struct e1000_hw *hw = &adapter->hw;
+-	u32 manc, manc2h;
++	u32 manc, manc2h, mdef, i, j;
+ 
+ 	if (!(adapter->flags & FLAG_MNG_PT_ENABLED))
+ 		return;
+@@ -2543,10 +2543,49 @@ static void e1000_init_manageability(struct e1000_adapter *adapter)
+ 	 */
+ 	manc |= E1000_MANC_EN_MNG2HOST;
+ 	manc2h = er32(MANC2H);
+-#define E1000_MNG2HOST_PORT_623 (1 << 5)
+-#define E1000_MNG2HOST_PORT_664 (1 << 6)
+-	manc2h |= E1000_MNG2HOST_PORT_623;
+-	manc2h |= E1000_MNG2HOST_PORT_664;
++
++	switch (hw->mac.type) {
++	default:
++		manc2h |= (E1000_MANC2H_PORT_623 | E1000_MANC2H_PORT_664);
++		break;
++	case e1000_82574:
++	case e1000_82583:
++		/*
++		 * Check if IPMI pass-through decision filter already exists;
++		 * if so, enable it.
++		 */
++		for (i = 0, j = 0; i < 8; i++) {
++			mdef = er32(MDEF(i));
++
++			/* Ignore filters with anything other than IPMI ports */
++			if (mdef & !(E1000_MDEF_PORT_623 | E1000_MDEF_PORT_664))
++				continue;
++
++			/* Enable this decision filter in MANC2H */
++			if (mdef)
++				manc2h |= (1 << i);
++
++			j |= mdef;
++		}
++
++		if (j == (E1000_MDEF_PORT_623 | E1000_MDEF_PORT_664))
++			break;
++
++		/* Create new decision filter in an empty filter */
++		for (i = 0, j = 0; i < 8; i++)
++			if (er32(MDEF(i)) == 0) {
++				ew32(MDEF(i), (E1000_MDEF_PORT_623 |
++					       E1000_MDEF_PORT_664));
++				manc2h |= (1 << 1);
++				j++;
++				break;
++			}
++
++		if (!j)
++			e_warn("Unable to create IPMI pass-through filter\n");
++		break;
++	}
++
+ 	ew32(MANC2H, manc2h);
+ 	ew32(MANC, manc);
+ }
+@@ -2962,7 +3001,7 @@ static void e1000_configure(struct e1000_adapter *adapter)
+ 	e1000_set_multi(adapter->netdev);
+ 
+ 	e1000_restore_vlan(adapter);
+-	e1000_init_manageability(adapter);
++	e1000_init_manageability_pt(adapter);
+ 
+ 	e1000_configure_tx(adapter);
+ 	e1000_setup_rctl(adapter);
+@@ -5110,7 +5149,7 @@ static int __e1000_resume(struct pci_dev *pdev)
+ 
+ 	e1000e_reset(adapter);
+ 
+-	e1000_init_manageability(adapter);
++	e1000_init_manageability_pt(adapter);
+ 
+ 	if (netif_running(netdev))
+ 		e1000e_up(adapter);
+@@ -5311,7 +5350,7 @@ static void e1000_io_resume(struct pci_dev *pdev)
+ 	struct net_device *netdev = pci_get_drvdata(pdev);
+ 	struct e1000_adapter *adapter = netdev_priv(netdev);
+ 
+-	e1000_init_manageability(adapter);
++	e1000_init_manageability_pt(adapter);
+ 
+ 	if (netif_running(netdev)) {
+ 		if (e1000e_up(adapter)) {
+-- 
+1.7.5.4
+

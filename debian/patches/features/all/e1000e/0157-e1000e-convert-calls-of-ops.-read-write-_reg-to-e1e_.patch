@@ -1,0 +1,309 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Thu, 6 Jan 2011 14:29:49 +0000
+Subject: [PATCH 157/166] e1000e: convert calls of ops.[read|write]_reg to
+ e1e_[r|w]phy
+
+commit 482fed85e64958f678a138a4b5f8891190d2b169 upstream.
+
+Cleans up the code a bit by using the driver-specific e1e_rphy and
+e1e_wphy macros instead of the full function pointer variants.  Fix
+a couple whitespace issue with two already existing calls to e1e_wphy.
+
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Tested-by: Jeff Pieper <jeffrey.e.pieper@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/e1000e/ich8lan.c |   54 +++++++++++++++++++----------------------
+ drivers/net/e1000e/lib.c     |    3 +-
+ drivers/net/e1000e/phy.c     |   40 +++++++++++++------------------
+ 3 files changed, 44 insertions(+), 53 deletions(-)
+
+diff --git a/drivers/net/e1000e/ich8lan.c b/drivers/net/e1000e/ich8lan.c
+index 728cf8a..5759545 100644
+--- a/drivers/net/e1000e/ich8lan.c
++++ b/drivers/net/e1000e/ich8lan.c
+@@ -3118,7 +3118,7 @@ static s32 e1000_init_hw_ich8lan(struct e1000_hw *hw)
+ 	 * Reset the phy after disabling host wakeup to reset the Rx buffer.
+ 	 */
+ 	if (hw->phy.type == e1000_phy_82578) {
+-		hw->phy.ops.read_reg(hw, BM_WUC, &i);
++		e1e_rphy(hw, BM_WUC, &i);
+ 		ret_val = e1000_phy_hw_reset_ich8lan(hw);
+ 		if (ret_val)
+ 			return ret_val;
+@@ -3276,9 +3276,8 @@ static s32 e1000_setup_link_ich8lan(struct e1000_hw *hw)
+ 	    (hw->phy.type == e1000_phy_82577)) {
+ 		ew32(FCRTV_PCH, hw->fc.refresh_time);
+ 
+-		ret_val = hw->phy.ops.write_reg(hw,
+-		                             PHY_REG(BM_PORT_CTRL_PAGE, 27),
+-		                             hw->fc.pause_time);
++		ret_val = e1e_wphy(hw, PHY_REG(BM_PORT_CTRL_PAGE, 27),
++				   hw->fc.pause_time);
+ 		if (ret_val)
+ 			return ret_val;
+ 	}
+@@ -3342,8 +3341,7 @@ static s32 e1000_setup_copper_link_ich8lan(struct e1000_hw *hw)
+ 			return ret_val;
+ 		break;
+ 	case e1000_phy_ife:
+-		ret_val = hw->phy.ops.read_reg(hw, IFE_PHY_MDIX_CONTROL,
+-		                               &reg_data);
++		ret_val = e1e_rphy(hw, IFE_PHY_MDIX_CONTROL, &reg_data);
+ 		if (ret_val)
+ 			return ret_val;
+ 
+@@ -3361,8 +3359,7 @@ static s32 e1000_setup_copper_link_ich8lan(struct e1000_hw *hw)
+ 			reg_data |= IFE_PMC_AUTO_MDIX;
+ 			break;
+ 		}
+-		ret_val = hw->phy.ops.write_reg(hw, IFE_PHY_MDIX_CONTROL,
+-		                                reg_data);
++		ret_val = e1e_wphy(hw, IFE_PHY_MDIX_CONTROL, reg_data);
+ 		if (ret_val)
+ 			return ret_val;
+ 		break;
+@@ -3646,7 +3643,8 @@ static s32 e1000_led_off_ich8lan(struct e1000_hw *hw)
+ {
+ 	if (hw->phy.type == e1000_phy_ife)
+ 		return e1e_wphy(hw, IFE_PHY_SPECIAL_CONTROL_LED,
+-			       (IFE_PSCL_PROBE_MODE | IFE_PSCL_PROBE_LEDS_OFF));
++				(IFE_PSCL_PROBE_MODE |
++				 IFE_PSCL_PROBE_LEDS_OFF));
+ 
+ 	ew32(LEDCTL, hw->mac.ledctl_mode1);
+ 	return 0;
+@@ -3660,8 +3658,7 @@ static s32 e1000_led_off_ich8lan(struct e1000_hw *hw)
+  **/
+ static s32 e1000_setup_led_pchlan(struct e1000_hw *hw)
+ {
+-	return hw->phy.ops.write_reg(hw, HV_LED_CONFIG,
+-					(u16)hw->mac.ledctl_mode1);
++	return e1e_wphy(hw, HV_LED_CONFIG, (u16)hw->mac.ledctl_mode1);
+ }
+ 
+ /**
+@@ -3672,8 +3669,7 @@ static s32 e1000_setup_led_pchlan(struct e1000_hw *hw)
+  **/
+ static s32 e1000_cleanup_led_pchlan(struct e1000_hw *hw)
+ {
+-	return hw->phy.ops.write_reg(hw, HV_LED_CONFIG,
+-					(u16)hw->mac.ledctl_default);
++	return e1e_wphy(hw, HV_LED_CONFIG, (u16)hw->mac.ledctl_default);
+ }
+ 
+ /**
+@@ -3704,7 +3700,7 @@ static s32 e1000_led_on_pchlan(struct e1000_hw *hw)
+ 		}
+ 	}
+ 
+-	return hw->phy.ops.write_reg(hw, HV_LED_CONFIG, data);
++	return e1e_wphy(hw, HV_LED_CONFIG, data);
+ }
+ 
+ /**
+@@ -3735,7 +3731,7 @@ static s32 e1000_led_off_pchlan(struct e1000_hw *hw)
+ 		}
+ 	}
+ 
+-	return hw->phy.ops.write_reg(hw, HV_LED_CONFIG, data);
++	return e1e_wphy(hw, HV_LED_CONFIG, data);
+ }
+ 
+ /**
+@@ -3844,20 +3840,20 @@ static void e1000_clear_hw_cntrs_ich8lan(struct e1000_hw *hw)
+ 	if ((hw->phy.type == e1000_phy_82578) ||
+ 	    (hw->phy.type == e1000_phy_82579) ||
+ 	    (hw->phy.type == e1000_phy_82577)) {
+-		hw->phy.ops.read_reg(hw, HV_SCC_UPPER, &phy_data);
+-		hw->phy.ops.read_reg(hw, HV_SCC_LOWER, &phy_data);
+-		hw->phy.ops.read_reg(hw, HV_ECOL_UPPER, &phy_data);
+-		hw->phy.ops.read_reg(hw, HV_ECOL_LOWER, &phy_data);
+-		hw->phy.ops.read_reg(hw, HV_MCC_UPPER, &phy_data);
+-		hw->phy.ops.read_reg(hw, HV_MCC_LOWER, &phy_data);
+-		hw->phy.ops.read_reg(hw, HV_LATECOL_UPPER, &phy_data);
+-		hw->phy.ops.read_reg(hw, HV_LATECOL_LOWER, &phy_data);
+-		hw->phy.ops.read_reg(hw, HV_COLC_UPPER, &phy_data);
+-		hw->phy.ops.read_reg(hw, HV_COLC_LOWER, &phy_data);
+-		hw->phy.ops.read_reg(hw, HV_DC_UPPER, &phy_data);
+-		hw->phy.ops.read_reg(hw, HV_DC_LOWER, &phy_data);
+-		hw->phy.ops.read_reg(hw, HV_TNCRS_UPPER, &phy_data);
+-		hw->phy.ops.read_reg(hw, HV_TNCRS_LOWER, &phy_data);
++		e1e_rphy(hw, HV_SCC_UPPER, &phy_data);
++		e1e_rphy(hw, HV_SCC_LOWER, &phy_data);
++		e1e_rphy(hw, HV_ECOL_UPPER, &phy_data);
++		e1e_rphy(hw, HV_ECOL_LOWER, &phy_data);
++		e1e_rphy(hw, HV_MCC_UPPER, &phy_data);
++		e1e_rphy(hw, HV_MCC_LOWER, &phy_data);
++		e1e_rphy(hw, HV_LATECOL_UPPER, &phy_data);
++		e1e_rphy(hw, HV_LATECOL_LOWER, &phy_data);
++		e1e_rphy(hw, HV_COLC_UPPER, &phy_data);
++		e1e_rphy(hw, HV_COLC_LOWER, &phy_data);
++		e1e_rphy(hw, HV_DC_UPPER, &phy_data);
++		e1e_rphy(hw, HV_DC_LOWER, &phy_data);
++		e1e_rphy(hw, HV_TNCRS_UPPER, &phy_data);
++		e1e_rphy(hw, HV_TNCRS_LOWER, &phy_data);
+ 	}
+ }
+ 
+diff --git a/drivers/net/e1000e/lib.c b/drivers/net/e1000e/lib.c
+index 7e55170..ff28721 100644
+--- a/drivers/net/e1000e/lib.c
++++ b/drivers/net/e1000e/lib.c
+@@ -1135,7 +1135,8 @@ s32 e1000e_config_fc_after_link_up(struct e1000_hw *hw)
+ 		ret_val = e1e_rphy(hw, PHY_AUTONEG_ADV, &mii_nway_adv_reg);
+ 		if (ret_val)
+ 			return ret_val;
+-		ret_val = e1e_rphy(hw, PHY_LP_ABILITY, &mii_nway_lp_ability_reg);
++		ret_val =
++		    e1e_rphy(hw, PHY_LP_ABILITY, &mii_nway_lp_ability_reg);
+ 		if (ret_val)
+ 			return ret_val;
+ 
+diff --git a/drivers/net/e1000e/phy.c b/drivers/net/e1000e/phy.c
+index 4d6c57e..00f89e8 100644
+--- a/drivers/net/e1000e/phy.c
++++ b/drivers/net/e1000e/phy.c
+@@ -637,12 +637,11 @@ s32 e1000e_write_kmrn_reg_locked(struct e1000_hw *hw, u32 offset, u16 data)
+  **/
+ s32 e1000_copper_link_setup_82577(struct e1000_hw *hw)
+ {
+-	struct e1000_phy_info *phy = &hw->phy;
+ 	s32 ret_val;
+ 	u16 phy_data;
+ 
+ 	/* Enable CRS on TX. This must be set for half-duplex operation. */
+-	ret_val = phy->ops.read_reg(hw, I82577_CFG_REG, &phy_data);
++	ret_val = e1e_rphy(hw, I82577_CFG_REG, &phy_data);
+ 	if (ret_val)
+ 		goto out;
+ 
+@@ -651,7 +650,7 @@ s32 e1000_copper_link_setup_82577(struct e1000_hw *hw)
+ 	/* Enable downshift */
+ 	phy_data |= I82577_CFG_ENABLE_DOWNSHIFT;
+ 
+-	ret_val = phy->ops.write_reg(hw, I82577_CFG_REG, phy_data);
++	ret_val = e1e_wphy(hw, I82577_CFG_REG, phy_data);
+ 
+ out:
+ 	return ret_val;
+@@ -774,16 +773,14 @@ s32 e1000e_copper_link_setup_m88(struct e1000_hw *hw)
+ 	}
+ 
+ 	if (phy->type == e1000_phy_82578) {
+-		ret_val = phy->ops.read_reg(hw, M88E1000_EXT_PHY_SPEC_CTRL,
+-		                            &phy_data);
++		ret_val = e1e_rphy(hw, M88E1000_EXT_PHY_SPEC_CTRL, &phy_data);
+ 		if (ret_val)
+ 			return ret_val;
+ 
+ 		/* 82578 PHY - set the downshift count to 1x. */
+ 		phy_data |= I82578_EPSCR_DOWNSHIFT_ENABLE;
+ 		phy_data &= ~I82578_EPSCR_DOWNSHIFT_COUNTER_MASK;
+-		ret_val = phy->ops.write_reg(hw, M88E1000_EXT_PHY_SPEC_CTRL,
+-		                             phy_data);
++		ret_val = e1e_wphy(hw, M88E1000_EXT_PHY_SPEC_CTRL, phy_data);
+ 		if (ret_val)
+ 			return ret_val;
+ 	}
+@@ -1319,9 +1316,8 @@ s32 e1000e_phy_force_speed_duplex_m88(struct e1000_hw *hw)
+ 				 * We didn't get link.
+ 				 * Reset the DSP and cross our fingers.
+ 				 */
+-				ret_val = e1e_wphy(hw,
+-						M88E1000_PHY_PAGE_SELECT,
+-						0x001d);
++				ret_val = e1e_wphy(hw, M88E1000_PHY_PAGE_SELECT,
++						   0x001d);
+ 				if (ret_val)
+ 					return ret_val;
+ 				ret_val = e1000e_phy_reset_dsp(hw);
+@@ -3071,12 +3067,12 @@ s32 e1000_link_stall_workaround_hv(struct e1000_hw *hw)
+ 		goto out;
+ 
+ 	/* Do not apply workaround if in PHY loopback bit 14 set */
+-	hw->phy.ops.read_reg(hw, PHY_CONTROL, &data);
++	e1e_rphy(hw, PHY_CONTROL, &data);
+ 	if (data & PHY_CONTROL_LB)
+ 		goto out;
+ 
+ 	/* check if link is up and at 1Gbps */
+-	ret_val = hw->phy.ops.read_reg(hw, BM_CS_STATUS, &data);
++	ret_val = e1e_rphy(hw, BM_CS_STATUS, &data);
+ 	if (ret_val)
+ 		goto out;
+ 
+@@ -3092,14 +3088,12 @@ s32 e1000_link_stall_workaround_hv(struct e1000_hw *hw)
+ 	mdelay(200);
+ 
+ 	/* flush the packets in the fifo buffer */
+-	ret_val = hw->phy.ops.write_reg(hw, HV_MUX_DATA_CTRL,
+-	                                HV_MUX_DATA_CTRL_GEN_TO_MAC |
+-	                                HV_MUX_DATA_CTRL_FORCE_SPEED);
++	ret_val = e1e_wphy(hw, HV_MUX_DATA_CTRL, HV_MUX_DATA_CTRL_GEN_TO_MAC |
++			   HV_MUX_DATA_CTRL_FORCE_SPEED);
+ 	if (ret_val)
+ 		goto out;
+ 
+-	ret_val = hw->phy.ops.write_reg(hw, HV_MUX_DATA_CTRL,
+-	                                HV_MUX_DATA_CTRL_GEN_TO_MAC);
++	ret_val = e1e_wphy(hw, HV_MUX_DATA_CTRL, HV_MUX_DATA_CTRL_GEN_TO_MAC);
+ 
+ out:
+ 	return ret_val;
+@@ -3119,7 +3113,7 @@ s32 e1000_check_polarity_82577(struct e1000_hw *hw)
+ 	s32 ret_val;
+ 	u16 data;
+ 
+-	ret_val = phy->ops.read_reg(hw, I82577_PHY_STATUS_2, &data);
++	ret_val = e1e_rphy(hw, I82577_PHY_STATUS_2, &data);
+ 
+ 	if (!ret_val)
+ 		phy->cable_polarity = (data & I82577_PHY_STATUS2_REV_POLARITY)
+@@ -3142,13 +3136,13 @@ s32 e1000_phy_force_speed_duplex_82577(struct e1000_hw *hw)
+ 	u16 phy_data;
+ 	bool link;
+ 
+-	ret_val = phy->ops.read_reg(hw, PHY_CONTROL, &phy_data);
++	ret_val = e1e_rphy(hw, PHY_CONTROL, &phy_data);
+ 	if (ret_val)
+ 		goto out;
+ 
+ 	e1000e_phy_force_speed_duplex_setup(hw, &phy_data);
+ 
+-	ret_val = phy->ops.write_reg(hw, PHY_CONTROL, phy_data);
++	ret_val = e1e_wphy(hw, PHY_CONTROL, phy_data);
+ 	if (ret_val)
+ 		goto out;
+ 
+@@ -3212,7 +3206,7 @@ s32 e1000_get_phy_info_82577(struct e1000_hw *hw)
+ 	if (ret_val)
+ 		goto out;
+ 
+-	ret_val = phy->ops.read_reg(hw, I82577_PHY_STATUS_2, &data);
++	ret_val = e1e_rphy(hw, I82577_PHY_STATUS_2, &data);
+ 	if (ret_val)
+ 		goto out;
+ 
+@@ -3224,7 +3218,7 @@ s32 e1000_get_phy_info_82577(struct e1000_hw *hw)
+ 		if (ret_val)
+ 			goto out;
+ 
+-		ret_val = phy->ops.read_reg(hw, PHY_1000T_STATUS, &data);
++		ret_val = e1e_rphy(hw, PHY_1000T_STATUS, &data);
+ 		if (ret_val)
+ 			goto out;
+ 
+@@ -3258,7 +3252,7 @@ s32 e1000_get_cable_length_82577(struct e1000_hw *hw)
+ 	s32 ret_val;
+ 	u16 phy_data, length;
+ 
+-	ret_val = phy->ops.read_reg(hw, I82577_PHY_DIAG_STATUS, &phy_data);
++	ret_val = e1e_rphy(hw, I82577_PHY_DIAG_STATUS, &phy_data);
+ 	if (ret_val)
+ 		goto out;
+ 
+-- 
+1.7.5.4
+

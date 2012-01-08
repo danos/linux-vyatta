@@ -1,0 +1,91 @@
+From: Matt Carlson <mcarlson@broadcom.com>
+Date: Fri, 13 Nov 2009 13:03:39 +0000
+Subject: [PATCH 028/207] tg3: Use tg3_start_xmit_dma_bug for 5717 A0
+
+commit 615774fe598f8ee971a8dfeb1f2ec4211241c433 upstream.
+
+The A0 revision of the 5717 has problems with short packet fragments.
+It needs to use the tg3_start_xmit_dma_bug() routine.
+
+Signed-off-by: Matt Carlson <mcarlson@broadcom.com>
+Reviewed-by: Michael Chan <mchan@broadcom.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/tg3.c |   27 ++++++++++++++++++---------
+ drivers/net/tg3.h |    1 +
+ 2 files changed, 19 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/net/tg3.c b/drivers/net/tg3.c
+index 9f7129d..47e365f 100644
+--- a/drivers/net/tg3.c
++++ b/drivers/net/tg3.c
+@@ -5454,7 +5454,12 @@ static netdev_tx_t tg3_start_xmit_dma_bug(struct sk_buff *skb,
+ 								 IPPROTO_TCP,
+ 								 0);
+ 
+-		if (tp->tg3_flags2 & TG3_FLG2_HW_TSO_2)
++		if (tp->tg3_flags2 & TG3_FLG2_HW_TSO_3) {
++			mss |= (hdr_len & 0xc) << 12;
++			if (hdr_len & 0x10)
++				base_flags |= 0x00000010;
++			base_flags |= (hdr_len & 0x3e0) << 5;
++		} else if (tp->tg3_flags2 & TG3_FLG2_HW_TSO_2)
+ 			mss |= hdr_len << 9;
+ 		else if ((tp->tg3_flags2 & TG3_FLG2_HW_TSO_1) ||
+ 			 GET_ASIC_REV(tp->pci_chip_rev_id) == ASIC_REV_5705) {
+@@ -5479,6 +5484,10 @@ static netdev_tx_t tg3_start_xmit_dma_bug(struct sk_buff *skb,
+ 			       (vlan_tx_tag_get(skb) << 16));
+ #endif
+ 
++	if (GET_ASIC_REV(tp->pci_chip_rev_id) == ASIC_REV_5717 &&
++	    !mss && skb->len > ETH_DATA_LEN)
++		base_flags |= TXD_FLAG_JMB_PKT;
++
+ 	if (skb_dma_map(&tp->pdev->dev, skb, DMA_TO_DEVICE)) {
+ 		dev_kfree_skb(skb);
+ 		goto out_unlock;
+@@ -12715,13 +12724,12 @@ static int __devinit tg3_get_invariants(struct tg3 *tp)
+ 		}
+ 	}
+ 
+-	if (!(tp->tg3_flags3 & TG3_FLG3_5755_PLUS)) {
+-		if (GET_ASIC_REV(tp->pci_chip_rev_id) == ASIC_REV_5906)
+-			tp->tg3_flags3 |= TG3_FLG3_SHORT_DMA_BUG;
+-		else {
+-			tp->tg3_flags3 |= TG3_FLG3_4G_DMA_BNDRY_BUG;
+-			tp->tg3_flags3 |= TG3_FLG3_40BIT_DMA_LIMIT_BUG;
+-		}
++	if (GET_ASIC_REV(tp->pci_chip_rev_id) == ASIC_REV_5717 ||
++	    GET_ASIC_REV(tp->pci_chip_rev_id) == ASIC_REV_5906)
++		tp->tg3_flags3 |= TG3_FLG3_SHORT_DMA_BUG;
++	else if (!(tp->tg3_flags3 & TG3_FLG3_5755_PLUS)) {
++		tp->tg3_flags3 |= TG3_FLG3_4G_DMA_BNDRY_BUG;
++		tp->tg3_flags3 |= TG3_FLG3_40BIT_DMA_LIMIT_BUG;
+ 	}
+ 
+ 	if (!(tp->tg3_flags2 & TG3_FLG2_5705_PLUS) ||
+@@ -14078,7 +14086,8 @@ static int __devinit tg3_init_one(struct pci_dev *pdev,
+ 		goto err_out_iounmap;
+ 	}
+ 
+-	if (tp->tg3_flags3 & TG3_FLG3_5755_PLUS)
++	if ((tp->tg3_flags3 & TG3_FLG3_5755_PLUS) &&
++	    tp->pci_chip_rev_id != CHIPREV_ID_5717_A0)
+ 		dev->netdev_ops = &tg3_netdev_ops;
+ 	else
+ 		dev->netdev_ops = &tg3_netdev_ops_dma_bug;
+diff --git a/drivers/net/tg3.h b/drivers/net/tg3.h
+index 5fe5760..e7916bd 100644
+--- a/drivers/net/tg3.h
++++ b/drivers/net/tg3.h
+@@ -103,6 +103,7 @@
+ #define  CHIPREV_ID_5906_A1		 0xc001
+ #define  CHIPREV_ID_57780_A0		 0x57780000
+ #define  CHIPREV_ID_57780_A1		 0x57780001
++#define  CHIPREV_ID_5717_A0		 0x05717000
+ #define  GET_ASIC_REV(CHIP_REV_ID)	((CHIP_REV_ID) >> 12)
+ #define   ASIC_REV_5700			 0x07
+ #define   ASIC_REV_5701			 0x00
+-- 
+1.7.5.4
+

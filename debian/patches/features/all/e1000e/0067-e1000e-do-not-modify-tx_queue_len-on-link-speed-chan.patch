@@ -1,0 +1,82 @@
+From: Emil Tantilov <emil.s.tantilov@intel.com>
+Date: Wed, 24 Mar 2010 12:55:02 +0000
+Subject: [PATCH 067/166] e1000e: do not modify tx_queue_len on link speed
+ change
+
+commit f49c57e141c7f53353e4265a31dc2324e6215037 upstream.
+
+Previously the driver tweaked txqueuelen to avoid false Tx hang reports seen at half duplex.
+This had the effect of overriding user set values on link change/reset. Testing shows that
+adjusting only the timeout factor is sufficient to prevent Tx hang reports at half duplex.
+
+This patch removes all instances of tx_queue_len in the driver.
+
+Originally reported and patched by Franco Fichtner
+CC: Franco Fichtner <franco@lastsummer.de>
+Signed-off-by: Emil Tantilov <emil.s.tantilov@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/e1000e/e1000.h  |    1 -
+ drivers/net/e1000e/netdev.c |   11 +----------
+ 2 files changed, 1 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/net/e1000e/e1000.h b/drivers/net/e1000e/e1000.h
+index a99c240..17debaa 100644
+--- a/drivers/net/e1000e/e1000.h
++++ b/drivers/net/e1000e/e1000.h
+@@ -283,7 +283,6 @@ struct e1000_adapter {
+ 
+ 	struct napi_struct napi;
+ 
+-	unsigned long tx_queue_len;
+ 	unsigned int restart_queue;
+ 	u32 txd_cmd;
+ 
+diff --git a/drivers/net/e1000e/netdev.c b/drivers/net/e1000e/netdev.c
+index a4f9292..97a4658 100644
+--- a/drivers/net/e1000e/netdev.c
++++ b/drivers/net/e1000e/netdev.c
+@@ -2292,8 +2292,6 @@ static void e1000_configure_tx(struct e1000_adapter *adapter)
+ 	ew32(TCTL, tctl);
+ 
+ 	e1000e_config_collision_dist(hw);
+-
+-	adapter->tx_queue_len = adapter->netdev->tx_queue_len;
+ }
+ 
+ /**
+@@ -2880,7 +2878,6 @@ void e1000e_down(struct e1000_adapter *adapter)
+ 	del_timer_sync(&adapter->watchdog_timer);
+ 	del_timer_sync(&adapter->phy_info_timer);
+ 
+-	netdev->tx_queue_len = adapter->tx_queue_len;
+ 	netif_carrier_off(netdev);
+ 	adapter->link_speed = 0;
+ 	adapter->link_duplex = 0;
+@@ -3618,21 +3615,15 @@ static void e1000_watchdog_task(struct work_struct *work)
+ 					       "link gets many collisions.\n");
+ 			}
+ 
+-			/*
+-			 * tweak tx_queue_len according to speed/duplex
+-			 * and adjust the timeout factor
+-			 */
+-			netdev->tx_queue_len = adapter->tx_queue_len;
++			/* adjust timeout factor according to speed/duplex */
+ 			adapter->tx_timeout_factor = 1;
+ 			switch (adapter->link_speed) {
+ 			case SPEED_10:
+ 				txb2b = 0;
+-				netdev->tx_queue_len = 10;
+ 				adapter->tx_timeout_factor = 16;
+ 				break;
+ 			case SPEED_100:
+ 				txb2b = 0;
+-				netdev->tx_queue_len = 100;
+ 				adapter->tx_timeout_factor = 10;
+ 				break;
+ 			}
+-- 
+1.7.5.4
+

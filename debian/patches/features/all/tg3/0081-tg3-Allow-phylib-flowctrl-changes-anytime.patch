@@ -1,0 +1,132 @@
+From: Matt Carlson <mcarlson@broadcom.com>
+Date: Wed, 17 Feb 2010 15:16:57 +0000
+Subject: [PATCH 081/207] tg3: Allow phylib flowctrl changes anytime
+
+commit 2712168f856e8cd42265e7ef855d64702da20089 upstream.
+
+This patch loosens the restriction that the phylib interface must be up
+and running to change the flow control parameters.
+
+Signed-off-by: Matt Carlson <mcarlson@broadcom.com>
+Reviewed-by: Michael Chan <mchan@broadcom.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/tg3.c |   94 +++++++++++++++++++++++++++++-----------------------
+ 1 files changed, 52 insertions(+), 42 deletions(-)
+
+diff --git a/drivers/net/tg3.c b/drivers/net/tg3.c
+index 67a1cf7..40ee66e 100644
+--- a/drivers/net/tg3.c
++++ b/drivers/net/tg3.c
+@@ -10094,56 +10094,66 @@ static int tg3_set_pauseparam(struct net_device *dev, struct ethtool_pauseparam
+ 	int err = 0;
+ 
+ 	if (tp->tg3_flags3 & TG3_FLG3_USE_PHYLIB) {
+-		if (!(tp->tg3_flags3 & TG3_FLG3_PHY_CONNECTED))
+-			return -EAGAIN;
++		u32 newadv;
++		struct phy_device *phydev;
+ 
+-		if (epause->autoneg) {
+-			u32 newadv;
+-			struct phy_device *phydev;
++		phydev = tp->mdio_bus->phy_map[TG3_PHY_MII_ADDR];
+ 
+-			phydev = tp->mdio_bus->phy_map[TG3_PHY_MII_ADDR];
++		if (!(phydev->supported & SUPPORTED_Pause) ||
++		    (!(phydev->supported & SUPPORTED_Asym_Pause) &&
++		     ((epause->rx_pause && !epause->tx_pause) ||
++		      (!epause->rx_pause && epause->tx_pause))))
++			return -EINVAL;
+ 
+-			if (epause->rx_pause) {
+-				if (epause->tx_pause)
+-					newadv = ADVERTISED_Pause;
+-				else
+-					newadv = ADVERTISED_Pause |
+-						 ADVERTISED_Asym_Pause;
+-			} else if (epause->tx_pause) {
+-				newadv = ADVERTISED_Asym_Pause;
++		tp->link_config.flowctrl = 0;
++		if (epause->rx_pause) {
++			tp->link_config.flowctrl |= FLOW_CTRL_RX;
++
++			if (epause->tx_pause) {
++				tp->link_config.flowctrl |= FLOW_CTRL_TX;
++				newadv = ADVERTISED_Pause;
+ 			} else
+-				newadv = 0;
+-
+-			if (tp->tg3_flags3 & TG3_FLG3_PHY_CONNECTED) {
+-				u32 oldadv = phydev->advertising &
+-					     (ADVERTISED_Pause |
+-					      ADVERTISED_Asym_Pause);
+-				if (oldadv != newadv) {
+-					phydev->advertising &=
+-						~(ADVERTISED_Pause |
+-						  ADVERTISED_Asym_Pause);
+-					phydev->advertising |= newadv;
+-					err = phy_start_aneg(phydev);
++				newadv = ADVERTISED_Pause |
++					 ADVERTISED_Asym_Pause;
++		} else if (epause->tx_pause) {
++			tp->link_config.flowctrl |= FLOW_CTRL_TX;
++			newadv = ADVERTISED_Asym_Pause;
++		} else
++			newadv = 0;
++
++		if (epause->autoneg)
++			tp->tg3_flags |= TG3_FLAG_PAUSE_AUTONEG;
++		else
++			tp->tg3_flags &= ~TG3_FLAG_PAUSE_AUTONEG;
++
++		if (tp->tg3_flags3 & TG3_FLG3_PHY_CONNECTED) {
++			u32 oldadv = phydev->advertising &
++				     (ADVERTISED_Pause | ADVERTISED_Asym_Pause);
++			if (oldadv != newadv) {
++				phydev->advertising &=
++					~(ADVERTISED_Pause |
++					  ADVERTISED_Asym_Pause);
++				phydev->advertising |= newadv;
++				if (phydev->autoneg) {
++					/*
++					 * Always renegotiate the link to
++					 * inform our link partner of our
++					 * flow control settings, even if the
++					 * flow control is forced.  Let
++					 * tg3_adjust_link() do the final
++					 * flow control setup.
++					 */
++					return phy_start_aneg(phydev);
+ 				}
+-			} else {
+-				tp->link_config.advertising &=
+-						~(ADVERTISED_Pause |
+-						  ADVERTISED_Asym_Pause);
+-				tp->link_config.advertising |= newadv;
+ 			}
+-		} else {
+-			if (epause->rx_pause)
+-				tp->link_config.flowctrl |= FLOW_CTRL_RX;
+-			else
+-				tp->link_config.flowctrl &= ~FLOW_CTRL_RX;
+-
+-			if (epause->tx_pause)
+-				tp->link_config.flowctrl |= FLOW_CTRL_TX;
+-			else
+-				tp->link_config.flowctrl &= ~FLOW_CTRL_TX;
+ 
+-			if (netif_running(dev))
++			if (!epause->autoneg)
+ 				tg3_setup_flow_control(tp, 0, 0);
++		} else {
++			tp->link_config.orig_advertising &=
++					~(ADVERTISED_Pause |
++					  ADVERTISED_Asym_Pause);
++			tp->link_config.orig_advertising |= newadv;
+ 		}
+ 	} else {
+ 		int irq_sync = 0;
+-- 
+1.7.5.4
+

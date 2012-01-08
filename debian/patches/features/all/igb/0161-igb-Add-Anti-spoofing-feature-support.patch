@@ -1,0 +1,195 @@
+From: Greg Rose <gregory.v.rose@intel.com>
+Date: Sat, 6 Nov 2010 02:08:26 +0000
+Subject: [PATCH 161/165] igb: Add Anti-spoofing feature support
+
+commit 13800469d40bf4dc9fbed17f4692b2ebe94d4526 upstream.
+
+Add support for the anti-spoofing feature in the HW.  Packets from
+VF devices with spoofed MAC addresses or VLAN tags will be blocked
+and an event generated.  When the watchdog task runs it will call a
+function to check if any spoof events occurred.  If an event was
+detected then a warning message is dumped to the system log.
+
+Signed-off-by: Greg Rose <gregory.v.rose@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/igb/e1000_82575.c |   33 ++++++++++++++++++++++++++++
+ drivers/net/igb/e1000_82575.h |    5 ++++
+ drivers/net/igb/e1000_regs.h  |    1 +
+ drivers/net/igb/igb.h         |    1 +
+ drivers/net/igb/igb_main.c    |   47 +++++++++++++++++++++++++++++++++++++++++
+ 5 files changed, 87 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/net/igb/e1000_82575.c b/drivers/net/igb/e1000_82575.c
+index 50f6e96..0a2368f 100644
+--- a/drivers/net/igb/e1000_82575.c
++++ b/drivers/net/igb/e1000_82575.c
+@@ -1480,6 +1480,39 @@ out:
+ }
+ 
+ /**
++ *  igb_vmdq_set_anti_spoofing_pf - enable or disable anti-spoofing
++ *  @hw: pointer to the hardware struct
++ *  @enable: state to enter, either enabled or disabled
++ *  @pf: Physical Function pool - do not set anti-spoofing for the PF
++ *
++ *  enables/disables L2 switch anti-spoofing functionality.
++ **/
++void igb_vmdq_set_anti_spoofing_pf(struct e1000_hw *hw, bool enable, int pf)
++{
++	u32 dtxswc;
++
++	switch (hw->mac.type) {
++	case e1000_82576:
++	case e1000_i350:
++		dtxswc = rd32(E1000_DTXSWC);
++		if (enable) {
++			dtxswc |= (E1000_DTXSWC_MAC_SPOOF_MASK |
++				   E1000_DTXSWC_VLAN_SPOOF_MASK);
++			/* The PF can spoof - it has to in order to
++			 * support emulation mode NICs */
++			dtxswc ^= (1 << pf | 1 << (pf + MAX_NUM_VFS));
++		} else {
++			dtxswc &= ~(E1000_DTXSWC_MAC_SPOOF_MASK |
++				    E1000_DTXSWC_VLAN_SPOOF_MASK);
++		}
++		wr32(E1000_DTXSWC, dtxswc);
++		break;
++	default:
++		break;
++	}
++}
++
++/**
+  *  igb_vmdq_set_loopback_pf - enable or disable vmdq loopback
+  *  @hw: pointer to the hardware struct
+  *  @enable: state to enter, either enabled or disabled
+diff --git a/drivers/net/igb/e1000_82575.h b/drivers/net/igb/e1000_82575.h
+index d4980e4..1518691 100644
+--- a/drivers/net/igb/e1000_82575.h
++++ b/drivers/net/igb/e1000_82575.h
+@@ -194,6 +194,10 @@ struct e1000_adv_tx_context_desc {
+ #define E1000_NVM_APME_82575          0x0400
+ #define MAX_NUM_VFS                   8
+ 
++#define E1000_DTXSWC_MAC_SPOOF_MASK   0x000000FF /* Per VF MAC spoof control */
++#define E1000_DTXSWC_VLAN_SPOOF_MASK  0x0000FF00 /* Per VF VLAN spoof control */
++#define E1000_DTXSWC_LLE_MASK         0x00FF0000 /* Per VF Local LB enables */
++#define E1000_DTXSWC_VLAN_SPOOF_SHIFT 8
+ #define E1000_DTXSWC_VMDQ_LOOPBACK_EN (1 << 31)  /* global VF LB enable */
+ 
+ /* Easy defines for setting default pool, would normally be left a zero */
+@@ -240,6 +244,7 @@ struct e1000_adv_tx_context_desc {
+ 
+ /* RX packet buffer size defines */
+ #define E1000_RXPBS_SIZE_MASK_82576  0x0000007F
++void igb_vmdq_set_anti_spoofing_pf(struct e1000_hw *, bool, int);
+ void igb_vmdq_set_loopback_pf(struct e1000_hw *, bool);
+ void igb_vmdq_set_replication_pf(struct e1000_hw *, bool);
+ u16 igb_rxpbs_adjust_82580(u32 data);
+diff --git a/drivers/net/igb/e1000_regs.h b/drivers/net/igb/e1000_regs.h
+index dd4e6ff..78be261 100644
+--- a/drivers/net/igb/e1000_regs.h
++++ b/drivers/net/igb/e1000_regs.h
+@@ -301,6 +301,7 @@
+ #define E1000_VFTE      0x00C90 /* VF Transmit Enables */
+ #define E1000_QDE       0x02408 /* Queue Drop Enable - RW */
+ #define E1000_DTXSWC    0x03500 /* DMA Tx Switch Control - RW */
++#define E1000_WVBR      0x03554 /* VM Wrong Behavior - RWS */
+ #define E1000_RPLOLR    0x05AF0 /* Replication Offload - RW */
+ #define E1000_UTA       0x0A000 /* Unicast Table Array - RW */
+ #define E1000_IOVTCL    0x05BBC /* IOV Control Register */
+diff --git a/drivers/net/igb/igb.h b/drivers/net/igb/igb.h
+index de2e779..0b99bd5 100644
+--- a/drivers/net/igb/igb.h
++++ b/drivers/net/igb/igb.h
+@@ -314,6 +314,7 @@ struct igb_adapter {
+ 	unsigned int vfs_allocated_count;
+ 	struct vf_data_storage *vf_data;
+ 	u32 rss_queues;
++	u32 wvbr;
+ };
+ 
+ #define IGB_FLAG_HAS_MSI           (1 << 0)
+diff --git a/drivers/net/igb/igb_main.c b/drivers/net/igb/igb_main.c
+index 2262af2..860830f 100644
+--- a/drivers/net/igb/igb_main.c
++++ b/drivers/net/igb/igb_main.c
+@@ -3343,6 +3343,45 @@ static void igb_set_rx_mode(struct net_device *netdev)
+ 	igb_restore_vf_multicasts(adapter);
+ }
+ 
++static void igb_check_wvbr(struct igb_adapter *adapter)
++{
++	struct e1000_hw *hw = &adapter->hw;
++	u32 wvbr = 0;
++
++	switch (hw->mac.type) {
++	case e1000_82576:
++	case e1000_i350:
++		if (!(wvbr = rd32(E1000_WVBR)))
++			return;
++		break;
++	default:
++		break;
++	}
++
++	adapter->wvbr |= wvbr;
++}
++
++#define IGB_STAGGERED_QUEUE_OFFSET 8
++
++static void igb_spoof_check(struct igb_adapter *adapter)
++{
++	int j;
++
++	if (!adapter->wvbr)
++		return;
++
++	for(j = 0; j < adapter->vfs_allocated_count; j++) {
++		if (adapter->wvbr & (1 << j) ||
++		    adapter->wvbr & (1 << (j + IGB_STAGGERED_QUEUE_OFFSET))) {
++			dev_warn(&adapter->pdev->dev,
++				"Spoof event(s) detected on VF %d\n", j);
++			adapter->wvbr &=
++				~((1 << j) |
++				  (1 << (j + IGB_STAGGERED_QUEUE_OFFSET)));
++		}
++	}
++}
++
+ /* Need to wait a few seconds after link up to get diagnostic information from
+  * the phy */
+ static void igb_update_phy_info(unsigned long data)
+@@ -3500,6 +3539,8 @@ static void igb_watchdog_task(struct work_struct *work)
+ 		wr32(E1000_ICS, E1000_ICS_RXDMT0);
+ 	}
+ 
++	igb_spoof_check(adapter);
++
+ 	/* Reset the timer */
+ 	if (!test_bit(__IGB_DOWN, &adapter->state))
+ 		mod_timer(&adapter->watchdog_timer,
+@@ -4467,6 +4508,10 @@ static irqreturn_t igb_msix_other(int irq, void *data)
+ 	if (icr & E1000_ICR_DOUTSYNC) {
+ 		/* HW is reporting DMA is out of sync */
+ 		adapter->stats.doosync++;
++		/* The DMA Out of Sync is also indication of a spoof event
++		 * in IOV mode. Check the Wrong VM Behavior register to
++		 * see if it is really a spoof event. */
++		igb_check_wvbr(adapter);
+ 	}
+ 
+ 	/* Check for a mailbox event */
+@@ -6419,6 +6464,8 @@ static void igb_vmm_control(struct igb_adapter *adapter)
+ 	if (adapter->vfs_allocated_count) {
+ 		igb_vmdq_set_loopback_pf(hw, true);
+ 		igb_vmdq_set_replication_pf(hw, true);
++		igb_vmdq_set_anti_spoofing_pf(hw, true,
++						adapter->vfs_allocated_count);
+ 	} else {
+ 		igb_vmdq_set_loopback_pf(hw, false);
+ 		igb_vmdq_set_replication_pf(hw, false);
+-- 
+1.7.5.4
+

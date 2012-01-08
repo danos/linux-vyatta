@@ -1,0 +1,89 @@
+From: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Date: Sun, 8 Aug 2010 16:02:31 +0000
+Subject: [PATCH 116/166] e100/e1000*/igb*/ixgb*: Add missing read memory
+ barrier
+
+commit 2d0bb1c1f4524befe9f0fcf0d0cd3081a451223f upstream.
+
+Based on patches from Sonny Rao and Milton Miller...
+
+Combined the patches to fix up clean_tx_irq and clean_rx_irq.
+
+The PowerPC architecture does not require loads to independent bytes
+to be ordered without adding an explicit barrier.
+
+In ixgbe_clean_rx_irq we load the status bit then load the packet data.
+With packet split disabled if these loads go out of order we get a
+stale packet, but we will notice the bad sequence numbers and drop it.
+
+The problem occurs with packet split enabled where the TCP/IP header
+and data are in different descriptors. If the reads go out of order
+we may have data that doesn't match the TCP/IP header. Since we use
+hardware checksumming this bad data is never verified and it makes it
+all the way to the application.
+
+This bug was found during stress testing and adding this barrier has
+been shown to fix it.  The bug can manifest as a data integrity issue
+(bad payload data) or as a BUG in skb_pull().
+
+This was a nasty bug to hunt down, if people agree with the fix I think
+it's a candidate for stable.
+
+Previously Submitted to e1000-devel only for ixgbe
+
+http://marc.info/?l=e1000-devel&m=126593062701537&w=3
+
+We've now seen this problem hit with other device drivers (e1000e mostly)
+So I'm resubmitting with fixes for other Intel Device Drivers with
+similar issues.
+
+CC: Milton Miller <miltonm@bga.com>
+CC: Anton Blanchard <anton@samba.org>
+CC: Sonny Rao <sonnyrao@us.ibm.com>
+CC: stable <stable@kernel.org>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+[bwh: Restricted to drivers/net/e1000e]
+---
+ drivers/net/e1000e/netdev.c |    4 ++++
+ 1 files changed, 4 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/net/e1000e/netdev.c b/drivers/net/e1000e/netdev.c
+index 393ac11..2a697d3 100644
+--- a/drivers/net/e1000e/netdev.c
++++ b/drivers/net/e1000e/netdev.c
+@@ -781,6 +781,7 @@ static bool e1000_clean_rx_irq(struct e1000_adapter *adapter,
+ 		if (*work_done >= work_to_do)
+ 			break;
+ 		(*work_done)++;
++		rmb();	/* read descriptor and rx_buffer_info after status DD */
+ 
+ 		status = rx_desc->status;
+ 		skb = buffer_info->skb;
+@@ -991,6 +992,7 @@ static bool e1000_clean_tx_irq(struct e1000_adapter *adapter)
+ 	while ((eop_desc->upper.data & cpu_to_le32(E1000_TXD_STAT_DD)) &&
+ 	       (count < tx_ring->count)) {
+ 		bool cleaned = false;
++		rmb(); /* read buffer_info after eop_desc */
+ 		for (; !cleaned; count++) {
+ 			tx_desc = E1000_TX_DESC(*tx_ring, i);
+ 			buffer_info = &tx_ring->buffer_info[i];
+@@ -1087,6 +1089,7 @@ static bool e1000_clean_rx_irq_ps(struct e1000_adapter *adapter,
+ 			break;
+ 		(*work_done)++;
+ 		skb = buffer_info->skb;
++		rmb();	/* read descriptor and rx_buffer_info after status DD */
+ 
+ 		/* in the packet split case this is header only */
+ 		prefetch(skb->data - NET_IP_ALIGN);
+@@ -1286,6 +1289,7 @@ static bool e1000_clean_jumbo_rx_irq(struct e1000_adapter *adapter,
+ 		if (*work_done >= work_to_do)
+ 			break;
+ 		(*work_done)++;
++		rmb();	/* read descriptor and rx_buffer_info after status DD */
+ 
+ 		status = rx_desc->status;
+ 		skb = buffer_info->skb;
+-- 
+1.7.5.4
+

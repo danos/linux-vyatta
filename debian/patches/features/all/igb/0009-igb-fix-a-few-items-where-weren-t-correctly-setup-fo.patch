@@ -1,0 +1,78 @@
+From: Alexander Duyck <alexander.h.duyck@intel.com>
+Date: Mon, 5 Oct 2009 06:34:05 +0000
+Subject: [PATCH 009/165] igb: fix a few items where weren't correctly setup
+ for mbx timeout
+
+commit 3272686c98da64d6eeaa2434782f42270b110758 upstream.
+
+The mailbox timeout routines need to be updated as they were not correctly
+handling the case of a mailbox timeout and could cause issues with long
+delays when used.
+
+Signed-off-by: Alexander Duyck <alexander.h.duyck@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/igb/e1000_mbx.c |   19 ++++++++++++++-----
+ 1 files changed, 14 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/net/igb/e1000_mbx.c b/drivers/net/igb/e1000_mbx.c
+index ef645f6..c474cdb 100644
+--- a/drivers/net/igb/e1000_mbx.c
++++ b/drivers/net/igb/e1000_mbx.c
+@@ -143,12 +143,16 @@ static s32 igb_poll_for_msg(struct e1000_hw *hw, u16 mbx_id)
+ 	if (!countdown || !mbx->ops.check_for_msg)
+ 		goto out;
+ 
+-	while (mbx->ops.check_for_msg(hw, mbx_id)) {
++	while (countdown && mbx->ops.check_for_msg(hw, mbx_id)) {
+ 		countdown--;
+ 		if (!countdown)
+ 			break;
+ 		udelay(mbx->usec_delay);
+ 	}
++
++	/* if we failed, all future posted messages fail until reset */
++	if (!countdown)
++		mbx->timeout = 0;
+ out:
+ 	return countdown ? 0 : -E1000_ERR_MBX;
+ }
+@@ -168,12 +172,16 @@ static s32 igb_poll_for_ack(struct e1000_hw *hw, u16 mbx_id)
+ 	if (!countdown || !mbx->ops.check_for_ack)
+ 		goto out;
+ 
+-	while (mbx->ops.check_for_ack(hw, mbx_id)) {
++	while (countdown && mbx->ops.check_for_ack(hw, mbx_id)) {
+ 		countdown--;
+ 		if (!countdown)
+ 			break;
+ 		udelay(mbx->usec_delay);
+ 	}
++
++	/* if we failed, all future posted messages fail until reset */
++	if (!countdown)
++		mbx->timeout = 0;
+ out:
+ 	return countdown ? 0 : -E1000_ERR_MBX;
+ }
+@@ -217,12 +225,13 @@ out:
+ static s32 igb_write_posted_mbx(struct e1000_hw *hw, u32 *msg, u16 size, u16 mbx_id)
+ {
+ 	struct e1000_mbx_info *mbx = &hw->mbx;
+-	s32 ret_val = 0;
++	s32 ret_val = -E1000_ERR_MBX;
+ 
+-	if (!mbx->ops.write)
++	/* exit if either we can't write or there isn't a defined timeout */
++	if (!mbx->ops.write || !mbx->timeout)
+ 		goto out;
+ 
+-	/* send msg*/
++	/* send msg */
+ 	ret_val = mbx->ops.write(hw, msg, size, mbx_id);
+ 
+ 	/* if msg sent wait until we receive an ack */
+-- 
+1.7.5.4
+

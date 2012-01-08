@@ -1,0 +1,65 @@
+From: Alexander Duyck <alexander.h.duyck@intel.com>
+Date: Fri, 11 Dec 2009 22:58:14 -0800
+Subject: [PATCH 077/165] igbvf: avoid reset storms due to mailbox issues
+
+commit 7227909340477c1e5225bb2df76cdcc95b5e1da1 upstream.
+
+From: Alexander Duyck <alexander.h.duyck@intel.com>
+
+This change makes it so that reset/interrupt storms can be avoided when
+there are mailbox issues.  The new behavior is to only allow the device to
+trigger mailbox related resets only once every 10 seconds.
+
+Signed-off-by: Alexander Duyck <alexander.h.duyck@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/igbvf/igbvf.h  |    1 +
+ drivers/net/igbvf/netdev.c |    8 +++++++-
+ 2 files changed, 8 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/net/igbvf/igbvf.h b/drivers/net/igbvf/igbvf.h
+index b48de85..fd2cca4 100644
+--- a/drivers/net/igbvf/igbvf.h
++++ b/drivers/net/igbvf/igbvf.h
+@@ -275,6 +275,7 @@ struct igbvf_adapter {
+ 	unsigned long led_status;
+ 
+ 	unsigned int flags;
++	unsigned long last_reset;
+ };
+ 
+ struct igbvf_info {
+diff --git a/drivers/net/igbvf/netdev.c b/drivers/net/igbvf/netdev.c
+index a127620..e9dd95f 100644
+--- a/drivers/net/igbvf/netdev.c
++++ b/drivers/net/igbvf/netdev.c
+@@ -1469,6 +1469,8 @@ static void igbvf_reset(struct igbvf_adapter *adapter)
+ 		memcpy(netdev->perm_addr, adapter->hw.mac.addr,
+ 		       netdev->addr_len);
+ 	}
++
++	adapter->last_reset = jiffies;
+ }
+ 
+ int igbvf_up(struct igbvf_adapter *adapter)
+@@ -1812,11 +1814,15 @@ static bool igbvf_has_link(struct igbvf_adapter *adapter)
+ 	s32 ret_val = E1000_SUCCESS;
+ 	bool link_active;
+ 
++	/* If interface is down, stay link down */
++	if (test_bit(__IGBVF_DOWN, &adapter->state))
++		return false;
++
+ 	ret_val = hw->mac.ops.check_for_link(hw);
+ 	link_active = !hw->mac.get_link_status;
+ 
+ 	/* if check for link returns error we will need to reset */
+-	if (ret_val)
++	if (ret_val && time_after(jiffies, adapter->last_reset + (10 * HZ)))
+ 		schedule_work(&adapter->reset_task);
+ 
+ 	return link_active;
+-- 
+1.7.5.4
+

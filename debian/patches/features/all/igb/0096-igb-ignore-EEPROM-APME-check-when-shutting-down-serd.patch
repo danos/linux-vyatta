@@ -1,0 +1,65 @@
+From: Nick Nunley <nicholasx.d.nunley@intel.com>
+Date: Wed, 17 Feb 2010 01:01:40 +0000
+Subject: [PATCH 096/165] igb: ignore EEPROM APME check when shutting down
+ serdes link
+
+commit 53c992fa8497286f24f279ebec5a8c7a58d4e68c upstream.
+
+Checking the EEPROM APME state unnecessarily prevents the link from
+shutting down. The standard power down routines should be
+sufficient to determine whether the serdes link can power down
+when going into D3.
+
+Signed-off-by: Nicholas Nunley <nicholasx.d.nunley@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/igb/e1000_82575.c |   21 ++-------------------
+ 1 files changed, 2 insertions(+), 19 deletions(-)
+
+diff --git a/drivers/net/igb/e1000_82575.c b/drivers/net/igb/e1000_82575.c
+index c505b50..59817bc 100644
+--- a/drivers/net/igb/e1000_82575.c
++++ b/drivers/net/igb/e1000_82575.c
+@@ -791,27 +791,12 @@ static s32 igb_get_pcs_speed_and_duplex_82575(struct e1000_hw *hw, u16 *speed,
+ void igb_shutdown_serdes_link_82575(struct e1000_hw *hw)
+ {
+ 	u32 reg;
+-	u16 eeprom_data = 0;
+ 
+-	if (hw->phy.media_type != e1000_media_type_internal_serdes ||
++	if (hw->phy.media_type != e1000_media_type_internal_serdes &&
+ 	    igb_sgmii_active_82575(hw))
+ 		return;
+ 
+-	if (hw->bus.func == E1000_FUNC_0)
+-		hw->nvm.ops.read(hw, NVM_INIT_CONTROL3_PORT_A, 1, &eeprom_data);
+-	else if (hw->mac.type == e1000_82580)
+-		hw->nvm.ops.read(hw, NVM_INIT_CONTROL3_PORT_A +
+-		                 NVM_82580_LAN_FUNC_OFFSET(hw->bus.func), 1,
+-		                 &eeprom_data);
+-	else if (hw->bus.func == E1000_FUNC_1)
+-		hw->nvm.ops.read(hw, NVM_INIT_CONTROL3_PORT_B, 1, &eeprom_data);
+-
+-	/*
+-	 * If APM is not enabled in the EEPROM and management interface is
+-	 * not enabled, then power down.
+-	 */
+-	if (!(eeprom_data & E1000_NVM_APME_82575) &&
+-	    !igb_enable_mng_pass_thru(hw)) {
++	if (!igb_enable_mng_pass_thru(hw)) {
+ 		/* Disable PCS to turn off link */
+ 		reg = rd32(E1000_PCS_CFG0);
+ 		reg &= ~E1000_PCS_CFG_PCS_EN;
+@@ -826,8 +811,6 @@ void igb_shutdown_serdes_link_82575(struct e1000_hw *hw)
+ 		wrfl();
+ 		msleep(1);
+ 	}
+-
+-	return;
+ }
+ 
+ /**
+-- 
+1.7.5.4
+

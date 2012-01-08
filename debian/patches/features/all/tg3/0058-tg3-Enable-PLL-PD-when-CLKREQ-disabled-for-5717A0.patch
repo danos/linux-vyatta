@@ -1,0 +1,103 @@
+From: Matt Carlson <mcarlson@broadcom.com>
+Date: Wed, 20 Jan 2010 16:58:02 +0000
+Subject: [PATCH 058/207] tg3: Enable PLL PD when CLKREQ disabled for 5717A0
+
+commit 614b05900ec3516b835cd06f848ef6bc915beeea upstream.
+
+PCIe PLL power down cannot be used if CLKREQ is enabled because data
+corruption will occur.  If CLKREQ is disabled though, enabling PCIE P1
+PLL power-down saves some power.
+
+Signed-off-by: Matt Carlson <mcarlson@broadcom.com>
+Signed-off-by: Michael Chan <mchan@broadcom.com>
+Reviewed-by: Benjamin Li <benli@broadcom.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/tg3.c |   16 ++++++++++++++++
+ drivers/net/tg3.h |   14 ++++++++++++++
+ 2 files changed, 30 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/net/tg3.c b/drivers/net/tg3.c
+index 0e6bac0..fe09b96 100644
+--- a/drivers/net/tg3.c
++++ b/drivers/net/tg3.c
+@@ -7574,6 +7574,20 @@ static int tg3_reset_hw(struct tg3 *tp, int reset_phy)
+ 		tw32(TG3_PCIE_LNKCTL, val | TG3_PCIE_LNKCTL_L1_PLL_PD_DIS);
+ 	}
+ 
++	if (tp->tg3_flags3 & TG3_FLG3_L1PLLPD_EN) {
++		u32 grc_mode = tr32(GRC_MODE);
++
++		/* Access the lower 1K of PL PCIE block registers. */
++		val = grc_mode & ~GRC_MODE_PCIE_PORT_MASK;
++		tw32(GRC_MODE, val | GRC_MODE_PCIE_PL_SEL);
++
++		val = tr32(TG3_PCIE_TLDLPL_PORT + TG3_PCIE_PL_LO_PHYCTL1);
++		tw32(TG3_PCIE_TLDLPL_PORT + TG3_PCIE_PL_LO_PHYCTL1,
++		     val | TG3_PCIE_PL_LO_PHYCTL1_L1PLLPD_EN);
++
++		tw32(GRC_MODE, grc_mode);
++	}
++
+ 	/* This works around an issue with Athlon chipsets on
+ 	 * B3 tigon3 silicon.  This bit has no effect on any
+ 	 * other revision.  But do not set this on PCI Express
+@@ -13103,6 +13117,8 @@ static int __devinit tg3_get_invariants(struct tg3 *tp)
+ 			    tp->pci_chip_rev_id == CHIPREV_ID_57780_A0 ||
+ 			    tp->pci_chip_rev_id == CHIPREV_ID_57780_A1)
+ 				tp->tg3_flags3 |= TG3_FLG3_CLKREQ_BUG;
++		} else if (tp->pci_chip_rev_id == CHIPREV_ID_5717_A0) {
++			tp->tg3_flags3 |= TG3_FLG3_L1PLLPD_EN;
+ 		}
+ 	} else if (GET_ASIC_REV(tp->pci_chip_rev_id) == ASIC_REV_5785) {
+ 		tp->tg3_flags2 |= TG3_FLG2_PCI_EXPRESS;
+diff --git a/drivers/net/tg3.h b/drivers/net/tg3.h
+index 8a16791..4f4d0ac 100644
+--- a/drivers/net/tg3.h
++++ b/drivers/net/tg3.h
+@@ -1543,6 +1543,8 @@
+ #define  GRC_MODE_HOST_SENDBDS		0x00020000
+ #define  GRC_MODE_NO_TX_PHDR_CSUM	0x00100000
+ #define  GRC_MODE_NVRAM_WR_ENABLE	0x00200000
++#define  GRC_MODE_PCIE_TL_SEL		0x00000000
++#define  GRC_MODE_PCIE_PL_SEL		0x00400000
+ #define  GRC_MODE_NO_RX_PHDR_CSUM	0x00800000
+ #define  GRC_MODE_IRQ_ON_TX_CPU_ATTN	0x01000000
+ #define  GRC_MODE_IRQ_ON_RX_CPU_ATTN	0x02000000
+@@ -1550,7 +1552,13 @@
+ #define  GRC_MODE_IRQ_ON_DMA_ATTN	0x08000000
+ #define  GRC_MODE_IRQ_ON_FLOW_ATTN	0x10000000
+ #define  GRC_MODE_4X_NIC_SEND_RINGS	0x20000000
++#define  GRC_MODE_PCIE_DL_SEL		0x20000000
+ #define  GRC_MODE_MCAST_FRM_ENABLE	0x40000000
++#define  GRC_MODE_PCIE_HI_1K_EN		0x80000000
++#define  GRC_MODE_PCIE_PORT_MASK	(GRC_MODE_PCIE_TL_SEL | \
++					 GRC_MODE_PCIE_PL_SEL | \
++					 GRC_MODE_PCIE_DL_SEL | \
++					 GRC_MODE_PCIE_HI_1K_EN)
+ #define GRC_MISC_CFG			0x00006804
+ #define  GRC_MISC_CFG_CORECLK_RESET	0x00000001
+ #define  GRC_MISC_CFG_PRESCALAR_MASK	0x000000fe
+@@ -1804,6 +1812,11 @@
+ /* 0x7e74 --> 0x8000 unused */
+ 
+ 
++/* Alternate PCIE definitions */
++#define TG3_PCIE_TLDLPL_PORT		0x00007c00
++#define TG3_PCIE_PL_LO_PHYCTL1		 0x00000004
++#define TG3_PCIE_PL_LO_PHYCTL1_L1PLLPD_EN	  0x00001000
++
+ /* OTP bit definitions */
+ #define TG3_OTP_AGCTGT_MASK		0x000000e0
+ #define TG3_OTP_AGCTGT_SHIFT		1
+@@ -2812,6 +2825,7 @@ struct tg3 {
+ #define TG3_FLG3_40BIT_DMA_LIMIT_BUG	0x00100000
+ #define TG3_FLG3_SHORT_DMA_BUG		0x00200000
+ #define TG3_FLG3_USE_JUMBO_BDFLAG	0x00400000
++#define TG3_FLG3_L1PLLPD_EN		0x00800000
+ 
+ 	struct timer_list		timer;
+ 	u16				timer_counter;
+-- 
+1.7.5.4
+

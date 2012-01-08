@@ -1,0 +1,74 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Thu, 7 Jan 2010 16:31:54 +0000
+Subject: [PATCH 049/166] e1000e: e1000e_enable_tx_pkt_filtering() returns
+ wrong value
+
+commit ca777f9c098f1ea1c9ec61318cc909d0c8f465e1 upstream.
+
+e1000e_enable_tx_pkt_filtering() will return a non-zero value if the
+driver fails to enable the manageability interface on the host for
+any reason; instead it should retun zero to indicate filtering has been
+disabled.  Also provide a single exit point for the function.
+
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/e1000e/lib.c |   16 +++++++++-------
+ 1 files changed, 9 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/net/e1000e/lib.c b/drivers/net/e1000e/lib.c
+index 56b59e4..97649bf 100644
+--- a/drivers/net/e1000e/lib.c
++++ b/drivers/net/e1000e/lib.c
+@@ -2301,10 +2301,12 @@ bool e1000e_enable_tx_pkt_filtering(struct e1000_hw *hw)
+ 	s32 ret_val, hdr_csum, csum;
+ 	u8 i, len;
+ 
++	hw->mac.tx_pkt_filtering = true;
++
+ 	/* No manageability, no filtering */
+ 	if (!e1000e_check_mng_mode(hw)) {
+ 		hw->mac.tx_pkt_filtering = false;
+-		return 0;
++		goto out;
+ 	}
+ 
+ 	/*
+@@ -2312,9 +2314,9 @@ bool e1000e_enable_tx_pkt_filtering(struct e1000_hw *hw)
+ 	 * reason, disable filtering.
+ 	 */
+ 	ret_val = e1000_mng_enable_host_if(hw);
+-	if (ret_val != 0) {
++	if (ret_val) {
+ 		hw->mac.tx_pkt_filtering = false;
+-		return ret_val;
++		goto out;
+ 	}
+ 
+ 	/* Read in the header.  Length and offset are in dwords. */
+@@ -2333,17 +2335,17 @@ bool e1000e_enable_tx_pkt_filtering(struct e1000_hw *hw)
+ 	 */
+ 	if ((hdr_csum != csum) || (hdr->signature != E1000_IAMT_SIGNATURE)) {
+ 		hw->mac.tx_pkt_filtering = true;
+-		return 1;
++		goto out;
+ 	}
+ 
+ 	/* Cookie area is valid, make the final check for filtering. */
+ 	if (!(hdr->status & E1000_MNG_DHCP_COOKIE_STATUS_PARSING)) {
+ 		hw->mac.tx_pkt_filtering = false;
+-		return 0;
++		goto out;
+ 	}
+ 
+-	hw->mac.tx_pkt_filtering = true;
+-	return 1;
++out:
++	return hw->mac.tx_pkt_filtering;
+ }
+ 
+ /**
+-- 
+1.7.5.4
+

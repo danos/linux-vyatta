@@ -1,0 +1,48 @@
+From: Matt Carlson <mcarlson@broadcom.com>
+Date: Wed, 17 Feb 2010 15:16:54 +0000
+Subject: [PATCH 078/207] tg3: Enforce DMA mapping / skb assignment ordering
+
+commit 61e800cf949926b3d463ca3cf3025d964872774b upstream.
+
+Michael Chan noted that there is nothing in the code that would prevent
+the compiler from delaying the access of the "mapping" member of the
+newly arrived packet until much later.  If this happened after the
+skb = NULL assignment, it is possible for the driver to pass a bad
+dma_addr value to pci_unmap_single().  To enforce this ordering, we need
+a write memory barrier.  The pairing read memory barrier already exists
+in tg3_rx_prodring_xfer() under the comments starting with
+"Ensure that updates to the...".
+
+Signed-off-by: Matt Carlson <mcarlson@broadcom.com>
+Signed-off-by: Michael Chan <mchan@broadcom.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/tg3.c |    9 +++++++--
+ 1 files changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/tg3.c b/drivers/net/tg3.c
+index a7233b4..cc014c6 100644
+--- a/drivers/net/tg3.c
++++ b/drivers/net/tg3.c
+@@ -4659,11 +4659,16 @@ static int tg3_rx(struct tg3_napi *tnapi, int budget)
+ 			if (skb_size < 0)
+ 				goto drop_it;
+ 
+-			ri->skb = NULL;
+-
+ 			pci_unmap_single(tp->pdev, dma_addr, skb_size,
+ 					 PCI_DMA_FROMDEVICE);
+ 
++			/* Ensure that the update to the skb happens
++			 * after the usage of the old DMA mapping.
++			 */
++			smp_wmb();
++
++			ri->skb = NULL;
++
+ 			skb_put(skb, len);
+ 		} else {
+ 			struct sk_buff *copy_skb;
+-- 
+1.7.5.4
+

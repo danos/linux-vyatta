@@ -1,0 +1,60 @@
+From: Matt Carlson <mcarlson@broadcom.com>
+Date: Wed, 15 Sep 2010 09:00:00 +0000
+Subject: [PATCH 161/207] tg3: Dynamically allocate VPD data memory
+
+commit a4a8bb15aed20ff74aa3ca14a4f2c0d62efd8391 upstream.
+
+This patch eases stack pressure by dynamically allocating the memory
+used to temporarily store VPD data.
+
+Reviewed-by: Benjamin Li <benli@broadcom.com>
+Reviewed-by: Michael Chan <mchan@broadcom.com>
+Signed-off-by: Matt Carlson <mcarlson@broadcom.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/tg3.c |   15 +++++++++++----
+ 1 files changed, 11 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/net/tg3.c b/drivers/net/tg3.c
+index d13053a..208caa9 100644
+--- a/drivers/net/tg3.c
++++ b/drivers/net/tg3.c
+@@ -12426,14 +12426,18 @@ skip_phy_reset:
+ 
+ static void __devinit tg3_read_vpd(struct tg3 *tp)
+ {
+-	u8 vpd_data[TG3_NVM_VPD_LEN];
++	u8 *vpd_data;
+ 	unsigned int block_end, rosize, len;
+ 	int j, i = 0;
+ 	u32 magic;
+ 
+ 	if ((tp->tg3_flags3 & TG3_FLG3_NO_NVRAM) ||
+ 	    tg3_nvram_read(tp, 0x0, &magic))
+-		goto out_not_found;
++		goto out_no_vpd;
++
++	vpd_data = kmalloc(TG3_NVM_VPD_LEN, GFP_KERNEL);
++	if (!vpd_data)
++		goto out_no_vpd;
+ 
+ 	if (magic == TG3_EEPROM_MAGIC) {
+ 		for (i = 0; i < TG3_NVM_VPD_LEN; i += 4) {
+@@ -12517,9 +12521,12 @@ partno:
+ 
+ 	memcpy(tp->board_part_number, &vpd_data[i], len);
+ 
+-	return;
+-
+ out_not_found:
++	kfree(vpd_data);
++	if (!tp->board_part_number[0])
++		return;
++
++out_no_vpd:
+ 	if (GET_ASIC_REV(tp->pci_chip_rev_id) == ASIC_REV_5906)
+ 		strcpy(tp->board_part_number, "BCM95906");
+ 	else if (GET_ASIC_REV(tp->pci_chip_rev_id) == ASIC_REV_57780 &&
+-- 
+1.7.5.4
+

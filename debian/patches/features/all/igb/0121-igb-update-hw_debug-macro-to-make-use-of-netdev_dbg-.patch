@@ -1,0 +1,109 @@
+From: Alexander Duyck <alexander.h.duyck@intel.com>
+Date: Thu, 25 Mar 2010 13:10:08 +0000
+Subject: [PATCH 121/165] igb: update hw_debug macro to make use of netdev_dbg
+ call
+
+commit c041076a9f79a7cf28e808f73cc76f24cbf97093 upstream.
+
+This change updates the igb driver to make use of the netdev_dbg function
+macros now provided in netdevice.h
+
+This is meant to be provided as an alternative to the patch provided by
+Joe Perches.
+
+It also removes igb_get_time_str since I found that it is unused code that
+is no longer used even in debug.
+
+Signed-off-by: Alexander Duyck <alexander.h.duyck@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/igb/e1000_hw.h |   12 +++++-------
+ drivers/net/igb/igb_main.c |   32 +++-----------------------------
+ 2 files changed, 8 insertions(+), 36 deletions(-)
+
+diff --git a/drivers/net/igb/e1000_hw.h b/drivers/net/igb/e1000_hw.h
+index 593d5fa..cb8db78 100644
+--- a/drivers/net/igb/e1000_hw.h
++++ b/drivers/net/igb/e1000_hw.h
+@@ -31,6 +31,7 @@
+ #include <linux/types.h>
+ #include <linux/delay.h>
+ #include <linux/io.h>
++#include <linux/netdevice.h>
+ 
+ #include "e1000_regs.h"
+ #include "e1000_defines.h"
+@@ -507,14 +508,11 @@ struct e1000_hw {
+ 	u8  revision_id;
+ };
+ 
+-#ifdef DEBUG
+-extern char *igb_get_hw_dev_name(struct e1000_hw *hw);
++extern struct net_device *igb_get_hw_dev(struct e1000_hw *hw);
+ #define hw_dbg(format, arg...) \
+-	printk(KERN_DEBUG "%s: " format, igb_get_hw_dev_name(hw), ##arg)
+-#else
+-#define hw_dbg(format, arg...)
+-#endif
+-#endif
++	netdev_dbg(igb_get_hw_dev(hw), format, ##arg)
++
+ /* These functions must be implemented by drivers */
+ s32  igb_read_pcie_cap_reg(struct e1000_hw *hw, u32 reg, u16 *value);
+ s32  igb_write_pcie_cap_reg(struct e1000_hw *hw, u32 reg, u16 *value);
++#endif /* _E1000_HW_H_ */
+diff --git a/drivers/net/igb/igb_main.c b/drivers/net/igb/igb_main.c
+index 0b35337..ee0c478 100644
+--- a/drivers/net/igb/igb_main.c
++++ b/drivers/net/igb/igb_main.c
+@@ -221,43 +221,17 @@ static cycle_t igb_read_clock(const struct cyclecounter *tc)
+ 	return stamp;
+ }
+ 
+-#ifdef DEBUG
+ /**
+- * igb_get_hw_dev_name - return device name string
++ * igb_get_hw_dev - return device
+  * used by hardware layer to print debugging information
+  **/
+-char *igb_get_hw_dev_name(struct e1000_hw *hw)
++struct net_device *igb_get_hw_dev(struct e1000_hw *hw)
+ {
+ 	struct igb_adapter *adapter = hw->back;
+-	return adapter->netdev->name;
++	return adapter->netdev;
+ }
+ 
+ /**
+- * igb_get_time_str - format current NIC and system time as string
+- */
+-static char *igb_get_time_str(struct igb_adapter *adapter,
+-			      char buffer[160])
+-{
+-	cycle_t hw = adapter->cycles.read(&adapter->cycles);
+-	struct timespec nic = ns_to_timespec(timecounter_read(&adapter->clock));
+-	struct timespec sys;
+-	struct timespec delta;
+-	getnstimeofday(&sys);
+-
+-	delta = timespec_sub(nic, sys);
+-
+-	sprintf(buffer,
+-		"HW %llu, NIC %ld.%09lus, SYS %ld.%09lus, NIC-SYS %lds + %09luns",
+-		hw,
+-		(long)nic.tv_sec, nic.tv_nsec,
+-		(long)sys.tv_sec, sys.tv_nsec,
+-		(long)delta.tv_sec, delta.tv_nsec);
+-
+-	return buffer;
+-}
+-#endif
+-
+-/**
+  * igb_init_module - Driver Registration Routine
+  *
+  * igb_init_module is the first routine called when the driver is
+-- 
+1.7.5.4
+

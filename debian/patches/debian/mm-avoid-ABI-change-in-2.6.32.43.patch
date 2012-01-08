@@ -1,0 +1,65 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Subject: mm: Avoid ABI change in 2.6.32.43
+
+In 2.6.32.43, commit ffdd12eabed263a487ddc05fdf65be6e4fc717b4
+("mm: prevent concurrent unmap_mapping_range() on the same inode")
+added a mutex to struct address_space.  This structure is embedded
+in struct inode and changing it will result in widespread symbol
+version changes.
+
+Replace the mutex with a flag and synchronise on that.  This is
+inefficient, but I think this must be protecting against quite a
+rare race condition and so it doesn't matter that much.
+
+--- a/fs/inode.c
++++ b/fs/inode.c
+@@ -266,7 +266,6 @@
+ 	spin_lock_init(&mapping->private_lock);
+ 	INIT_RAW_PRIO_TREE_ROOT(&mapping->i_mmap);
+ 	INIT_LIST_HEAD(&mapping->i_mmap_nonlinear);
+-	mutex_init(&mapping->unmap_mutex);
+ }
+ EXPORT_SYMBOL(address_space_init_once);
+ 
+--- a/include/linux/fs.h
++++ b/include/linux/fs.h
+@@ -635,7 +635,6 @@
+ 	spinlock_t		private_lock;	/* for use by the address_space */
+ 	struct list_head	private_list;	/* ditto */
+ 	struct address_space	*assoc_mapping;	/* ditto */
+-	struct mutex		unmap_mutex;    /* to protect unmapping */
+ } __attribute__((aligned(sizeof(long))));
+ 	/*
+ 	 * On most architectures that alignment is already the case; but
+--- a/include/linux/pagemap.h
++++ b/include/linux/pagemap.h
+@@ -23,6 +23,7 @@
+ 	AS_ENOSPC	= __GFP_BITS_SHIFT + 1,	/* ENOSPC on async write */
+ 	AS_MM_ALL_LOCKS	= __GFP_BITS_SHIFT + 2,	/* under mm_take_all_locks() */
+ 	AS_UNEVICTABLE	= __GFP_BITS_SHIFT + 3,	/* e.g., ramdisk, SHM_LOCK */
++	AS_UNMAP_MUTEX	= __GFP_BITS_SHIFT + 4, /* ersatz unmap_mutex */
+ };
+ 
+ static inline void mapping_set_error(struct address_space *mapping, int error)
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -2454,7 +2454,8 @@
+ 		details.last_index = ULONG_MAX;
+ 	details.i_mmap_lock = &mapping->i_mmap_lock;
+ 
+-	mutex_lock(&mapping->unmap_mutex);
++	while (test_and_set_bit(AS_UNMAP_MUTEX, &mapping->flags))
++		schedule_timeout_uninterruptible(1);
+ 	spin_lock(&mapping->i_mmap_lock);
+ 
+ 	/* Protect against endless unmapping loops */
+@@ -2471,7 +2472,8 @@
+ 	if (unlikely(!list_empty(&mapping->i_mmap_nonlinear)))
+ 		unmap_mapping_range_list(&mapping->i_mmap_nonlinear, &details);
+ 	spin_unlock(&mapping->i_mmap_lock);
+-	mutex_unlock(&mapping->unmap_mutex);
++	smp_mb__before_clear_bit();
++	clear_bit(AS_UNMAP_MUTEX, &mapping->flags);
+ }
+ EXPORT_SYMBOL(unmap_mapping_range);
+ 

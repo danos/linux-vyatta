@@ -1,0 +1,43 @@
+Date: Sun, 15 May 2011 08:47 -0400
+From: Cyrill Gorcunov <gorcunov@openvz.org>
+Subject: ptrace: Don't allow to trace a process without memory map v2
+
+There is a chance the user start tracing process which
+has no memory map yet because of being a child process
+which moves to VE environment at creation time.
+
+A typical example is to start VE via vzctl with --wait argument
+trace vzctl child process while it's in waiting state. The
+result is NULL dereference and kernel panic.
+
+Fix it by declining to trace such processes.
+
+http://bugzilla.openvz.org/show_bug.cgi?id=1866
+
+v2: Pavel spotted task->mm access without task_lock
+    guardian. Fixed.
+
+Signed-off-by: Cyrill Gorcunov <gorcunov@openvz.org>
+---
+ kernel/ptrace.c |    7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+Index: linux-2.6-ovz/kernel/ptrace.c
+===================================================================
+--- linux-2.6-ovz.orig/kernel/ptrace.c
++++ linux-2.6-ovz/kernel/ptrace.c
+@@ -198,8 +198,13 @@ int ptrace_attach(struct task_struct *ta
+ 	task_unlock(task);
+ 	if (retval)
+ 		goto unlock_creds;
++
+ 	retval = -EACCES;
+-	if (task->mm->vps_dumpable == 2)
++	task_lock(task);
++	if (task->mm && task->mm->vps_dumpable != 2)
++		retval = 0;
++	task_unlock(task);
++	if (retval)
+ 		goto unlock_creds;
+ 
+ 	write_lock_irq(&tasklist_lock);

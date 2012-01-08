@@ -1,0 +1,419 @@
+From: Alexander Duyck <alexander.h.duyck@intel.com>
+Date: Thu, 19 Nov 2009 12:42:21 +0000
+Subject: [PATCH 072/165] igb: Add full support for 82580 devices
+
+commit 55cac248caa4a5f181a11cd2f269a672bef3d3b5 upstream.
+
+This patch makes use of the 82580 PHY and MAC support added and adds a set
+of supported device IDs for said hardware.
+
+Signed-off-by: Alexander Duyck <alexander.h.duyck@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/igb/e1000_defines.h |    7 ++
+ drivers/net/igb/e1000_regs.h    |    4 +
+ drivers/net/igb/igb.h           |    1 +
+ drivers/net/igb/igb_ethtool.c   |   53 ++++++++++++++++
+ drivers/net/igb/igb_main.c      |  131 ++++++++++++++++++++++++++++++++++++++-
+ 5 files changed, 193 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/net/igb/e1000_defines.h b/drivers/net/igb/e1000_defines.h
+index c58c4fd..6e036ae 100644
+--- a/drivers/net/igb/e1000_defines.h
++++ b/drivers/net/igb/e1000_defines.h
+@@ -330,6 +330,7 @@
+ #define E1000_ICR_RXDMT0        0x00000010 /* rx desc min. threshold (0) */
+ #define E1000_ICR_RXT0          0x00000080 /* rx timer intr (ring 0) */
+ #define E1000_ICR_VMMB          0x00000100 /* VM MB event */
++#define E1000_ICR_DRSTA         0x40000000 /* Device Reset Asserted */
+ /* If this bit asserted, the driver should claim the interrupt */
+ #define E1000_ICR_INT_ASSERTED  0x80000000
+ /* LAN connected device generates an interrupt */
+@@ -371,6 +372,7 @@
+ #define E1000_IMS_RXSEQ     E1000_ICR_RXSEQ     /* rx sequence error */
+ #define E1000_IMS_RXDMT0    E1000_ICR_RXDMT0    /* rx desc min. threshold */
+ #define E1000_IMS_RXT0      E1000_ICR_RXT0      /* rx timer intr */
++#define E1000_IMS_DRSTA     E1000_ICR_DRSTA     /* Device Reset Asserted */
+ #define E1000_IMS_DOUTSYNC  E1000_ICR_DOUTSYNC /* NIC DMA out of sync */
+ 
+ /* Extended Interrupt Mask Set */
+@@ -379,6 +381,7 @@
+ /* Interrupt Cause Set */
+ #define E1000_ICS_LSC       E1000_ICR_LSC       /* Link Status Change */
+ #define E1000_ICS_RXDMT0    E1000_ICR_RXDMT0    /* rx desc min. threshold */
++#define E1000_ICS_DRSTA     E1000_ICR_DRSTA     /* Device Reset Aserted */
+ 
+ /* Extended Interrupt Cause Set */
+ 
+@@ -717,4 +720,8 @@
+ #define E1000_VFTA_ENTRY_MASK                0x7F
+ #define E1000_VFTA_ENTRY_BIT_SHIFT_MASK      0x1F
+ 
++/* DMA Coalescing register fields */
++#define E1000_PCIEMISC_LX_DECISION      0x00000080 /* Lx power decision based
++                                                      on DMA coal */
++
+ #endif
+diff --git a/drivers/net/igb/e1000_regs.h b/drivers/net/igb/e1000_regs.h
+index 409c44b..dd4e6ff 100644
+--- a/drivers/net/igb/e1000_regs.h
++++ b/drivers/net/igb/e1000_regs.h
+@@ -89,6 +89,8 @@
+ #define E1000_SYSTIML    0x0B600 /* System time register Low - RO */
+ #define E1000_SYSTIMH    0x0B604 /* System time register High - RO */
+ #define E1000_TIMINCA    0x0B608 /* Increment attributes register - RW */
++#define E1000_TSAUXC     0x0B640 /* Timesync Auxiliary Control register */
++#define E1000_SYSTIMR    0x0B6F8 /* System time register Residue */
+ 
+ /* Filtering Registers */
+ #define E1000_SAQF(_n) (0x5980 + 4 * (_n))
+@@ -318,4 +320,6 @@
+ #define array_rd32(reg, offset) \
+ 	(readl(hw->hw_addr + reg + ((offset) << 2)))
+ 
++/* DMA Coalescing registers */
++#define E1000_PCIEMISC          0x05BB8 /* PCIE misc config register */
+ #endif
+diff --git a/drivers/net/igb/igb.h b/drivers/net/igb/igb.h
+index 63abd1c..c458d9b 100644
+--- a/drivers/net/igb/igb.h
++++ b/drivers/net/igb/igb.h
+@@ -320,6 +320,7 @@ struct igb_adapter {
+ #define IGB_FLAG_QUEUE_PAIRS       (1 << 3)
+ 
+ #define IGB_82576_TSYNC_SHIFT 19
++#define IGB_82580_TSYNC_SHIFT 24
+ enum e1000_state_t {
+ 	__IGB_TESTING,
+ 	__IGB_RESETTING,
+diff --git a/drivers/net/igb/igb_ethtool.c b/drivers/net/igb/igb_ethtool.c
+index 2e238bf..ac9d527 100644
+--- a/drivers/net/igb/igb_ethtool.c
++++ b/drivers/net/igb/igb_ethtool.c
+@@ -881,6 +881,49 @@ struct igb_reg_test {
+ #define TABLE64_TEST_LO	5
+ #define TABLE64_TEST_HI	6
+ 
++/* 82580 reg test */
++static struct igb_reg_test reg_test_82580[] = {
++	{ E1000_FCAL,	   0x100, 1,  PATTERN_TEST, 0xFFFFFFFF, 0xFFFFFFFF },
++	{ E1000_FCAH,	   0x100, 1,  PATTERN_TEST, 0x0000FFFF, 0xFFFFFFFF },
++	{ E1000_FCT,	   0x100, 1,  PATTERN_TEST, 0x0000FFFF, 0xFFFFFFFF },
++	{ E1000_VET,	   0x100, 1,  PATTERN_TEST, 0xFFFFFFFF, 0xFFFFFFFF },
++	{ E1000_RDBAL(0),  0x100, 4,  PATTERN_TEST, 0xFFFFFF80, 0xFFFFFFFF },
++	{ E1000_RDBAH(0),  0x100, 4,  PATTERN_TEST, 0xFFFFFFFF, 0xFFFFFFFF },
++	{ E1000_RDLEN(0),  0x100, 4,  PATTERN_TEST, 0x000FFFF0, 0x000FFFFF },
++	{ E1000_RDBAL(4),  0x40,  4,  PATTERN_TEST, 0xFFFFFF80, 0xFFFFFFFF },
++	{ E1000_RDBAH(4),  0x40,  4,  PATTERN_TEST, 0xFFFFFFFF, 0xFFFFFFFF },
++	{ E1000_RDLEN(4),  0x40,  4,  PATTERN_TEST, 0x000FFFF0, 0x000FFFFF },
++	/* RDH is read-only for 82580, only test RDT. */
++	{ E1000_RDT(0),	   0x100, 4,  PATTERN_TEST, 0x0000FFFF, 0x0000FFFF },
++	{ E1000_RDT(4),	   0x40,  4,  PATTERN_TEST, 0x0000FFFF, 0x0000FFFF },
++	{ E1000_FCRTH,	   0x100, 1,  PATTERN_TEST, 0x0000FFF0, 0x0000FFF0 },
++	{ E1000_FCTTV,	   0x100, 1,  PATTERN_TEST, 0x0000FFFF, 0x0000FFFF },
++	{ E1000_TIPG,	   0x100, 1,  PATTERN_TEST, 0x3FFFFFFF, 0x3FFFFFFF },
++	{ E1000_TDBAL(0),  0x100, 4,  PATTERN_TEST, 0xFFFFFF80, 0xFFFFFFFF },
++	{ E1000_TDBAH(0),  0x100, 4,  PATTERN_TEST, 0xFFFFFFFF, 0xFFFFFFFF },
++	{ E1000_TDLEN(0),  0x100, 4,  PATTERN_TEST, 0x000FFFF0, 0x000FFFFF },
++	{ E1000_TDBAL(4),  0x40,  4,  PATTERN_TEST, 0xFFFFFF80, 0xFFFFFFFF },
++	{ E1000_TDBAH(4),  0x40,  4,  PATTERN_TEST, 0xFFFFFFFF, 0xFFFFFFFF },
++	{ E1000_TDLEN(4),  0x40,  4,  PATTERN_TEST, 0x000FFFF0, 0x000FFFFF },
++	{ E1000_TDT(0),	   0x100, 4,  PATTERN_TEST, 0x0000FFFF, 0x0000FFFF },
++	{ E1000_TDT(4),	   0x40,  4,  PATTERN_TEST, 0x0000FFFF, 0x0000FFFF },
++	{ E1000_RCTL,	   0x100, 1,  SET_READ_TEST, 0xFFFFFFFF, 0x00000000 },
++	{ E1000_RCTL, 	   0x100, 1,  SET_READ_TEST, 0x04CFB0FE, 0x003FFFFB },
++	{ E1000_RCTL, 	   0x100, 1,  SET_READ_TEST, 0x04CFB0FE, 0xFFFFFFFF },
++	{ E1000_TCTL,	   0x100, 1,  SET_READ_TEST, 0xFFFFFFFF, 0x00000000 },
++	{ E1000_RA,	   0, 16, TABLE64_TEST_LO,
++						0xFFFFFFFF, 0xFFFFFFFF },
++	{ E1000_RA,	   0, 16, TABLE64_TEST_HI,
++						0x83FFFFFF, 0xFFFFFFFF },
++	{ E1000_RA2,	   0, 8, TABLE64_TEST_LO,
++						0xFFFFFFFF, 0xFFFFFFFF },
++	{ E1000_RA2,	   0, 8, TABLE64_TEST_HI,
++						0x83FFFFFF, 0xFFFFFFFF },
++	{ E1000_MTA,	   0, 128, TABLE32_TEST,
++						0xFFFFFFFF, 0xFFFFFFFF },
++	{ 0, 0, 0, 0 }
++};
++
+ /* 82576 reg test */
+ static struct igb_reg_test reg_test_82576[] = {
+ 	{ E1000_FCAL,	   0x100, 1,  PATTERN_TEST, 0xFFFFFFFF, 0xFFFFFFFF },
+@@ -1013,6 +1056,10 @@ static int igb_reg_test(struct igb_adapter *adapter, u64 *data)
+ 	u32 i, toggle;
+ 
+ 	switch (adapter->hw.mac.type) {
++	case e1000_82580:
++		test = reg_test_82580;
++		toggle = 0x7FEFF3FF;
++		break;
+ 	case e1000_82576:
+ 		test = reg_test_82576;
+ 		toggle = 0x7FFFF3FF;
+@@ -1167,6 +1214,9 @@ static int igb_intr_test(struct igb_adapter *adapter, u64 *data)
+ 	case e1000_82576:
+ 		ics_mask = 0x77D4FBFD;
+ 		break;
++	case e1000_82580:
++		ics_mask = 0x77DCFED5;
++		break;
+ 	default:
+ 		ics_mask = 0x7FFFFFFF;
+ 		break;
+@@ -1338,6 +1388,9 @@ static int igb_integrated_phy_loopback(struct igb_adapter *adapter)
+ 		igb_write_phy_reg(hw, PHY_CONTROL, 0x9140);
+ 		/* autoneg off */
+ 		igb_write_phy_reg(hw, PHY_CONTROL, 0x8140);
++	} else if (hw->phy.type == e1000_phy_82580) {
++		/* enable MII loopback */
++		igb_write_phy_reg(hw, I82580_PHY_LBK_CTRL, 0x8041);
+ 	}
+ 
+ 	ctrl_reg = rd32(E1000_CTRL);
+diff --git a/drivers/net/igb/igb_main.c b/drivers/net/igb/igb_main.c
+index 1f08719..3fcabcd 100644
+--- a/drivers/net/igb/igb_main.c
++++ b/drivers/net/igb/igb_main.c
+@@ -49,7 +49,7 @@
+ #endif
+ #include "igb.h"
+ 
+-#define DRV_VERSION "1.3.16-k2"
++#define DRV_VERSION "2.1.0-k2"
+ char igb_driver_name[] = "igb";
+ char igb_driver_version[] = DRV_VERSION;
+ static const char igb_driver_string[] =
+@@ -61,6 +61,11 @@ static const struct e1000_info *igb_info_tbl[] = {
+ };
+ 
+ static struct pci_device_id igb_pci_tbl[] = {
++	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_82580_COPPER), board_82575 },
++	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_82580_FIBER), board_82575 },
++	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_82580_SERDES), board_82575 },
++	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_82580_SGMII), board_82575 },
++	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_82580_COPPER_DUAL), board_82575 },
+ 	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_82576), board_82575 },
+ 	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_82576_NS), board_82575 },
+ 	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_82576_NS_SERDES), board_82575 },
+@@ -195,6 +200,16 @@ static cycle_t igb_read_clock(const struct cyclecounter *tc)
+ 	u64 stamp = 0;
+ 	int shift = 0;
+ 
++	/*
++	 * The timestamp latches on lowest register read. For the 82580
++	 * the lowest register is SYSTIMR instead of SYSTIML.  However we never
++	 * adjusted TIMINCA so SYSTIMR will just read as all 0s so ignore it.
++	 */
++	if (hw->mac.type == e1000_82580) {
++		stamp = rd32(E1000_SYSTIMR) >> 8;
++		shift = IGB_82580_TSYNC_SHIFT;
++	}
++
+ 	stamp |= (u64)rd32(E1000_SYSTIML) << shift;
+ 	stamp |= (u64)rd32(E1000_SYSTIMH) << (shift + 32);
+ 	return stamp;
+@@ -304,6 +319,7 @@ static void igb_cache_ring_register(struct igb_adapter *adapter)
+ 				                              Q_IDX_82576(j);
+ 		}
+ 	case e1000_82575:
++	case e1000_82580:
+ 	default:
+ 		for (; i < adapter->num_rx_queues; i++)
+ 			adapter->rx_ring[i].reg_idx = rbase_offset + i;
+@@ -443,6 +459,39 @@ static void igb_assign_vector(struct igb_q_vector *q_vector, int msix_vector)
+ 		}
+ 		q_vector->eims_value = 1 << msix_vector;
+ 		break;
++	case e1000_82580:
++		/* 82580 uses the same table-based approach as 82576 but has fewer
++		   entries as a result we carry over for queues greater than 4. */
++		if (rx_queue > IGB_N0_QUEUE) {
++			index = (rx_queue >> 1);
++			ivar = array_rd32(E1000_IVAR0, index);
++			if (rx_queue & 0x1) {
++				/* vector goes into third byte of register */
++				ivar = ivar & 0xFF00FFFF;
++				ivar |= (msix_vector | E1000_IVAR_VALID) << 16;
++			} else {
++				/* vector goes into low byte of register */
++				ivar = ivar & 0xFFFFFF00;
++				ivar |= msix_vector | E1000_IVAR_VALID;
++			}
++			array_wr32(E1000_IVAR0, index, ivar);
++		}
++		if (tx_queue > IGB_N0_QUEUE) {
++			index = (tx_queue >> 1);
++			ivar = array_rd32(E1000_IVAR0, index);
++			if (tx_queue & 0x1) {
++				/* vector goes into high byte of register */
++				ivar = ivar & 0x00FFFFFF;
++				ivar |= (msix_vector | E1000_IVAR_VALID) << 24;
++			} else {
++				/* vector goes into second byte of register */
++				ivar = ivar & 0xFFFF00FF;
++				ivar |= (msix_vector | E1000_IVAR_VALID) << 8;
++			}
++			array_wr32(E1000_IVAR0, index, ivar);
++		}
++		q_vector->eims_value = 1 << msix_vector;
++		break;
+ 	default:
+ 		BUG();
+ 		break;
+@@ -484,6 +533,7 @@ static void igb_configure_msix(struct igb_adapter *adapter)
+ 		break;
+ 
+ 	case e1000_82576:
++	case e1000_82580:
+ 		/* Turn on MSI-X capability first, or our settings
+ 		 * won't stick.  And it will take days to debug. */
+ 		wr32(E1000_GPIE, E1000_GPIE_MSIX_MODE |
+@@ -866,6 +916,7 @@ static int igb_request_irq(struct igb_adapter *adapter)
+ 			      E1000_EICR_TX_QUEUE0 |
+ 			      E1000_EIMS_OTHER));
+ 			break;
++		case e1000_82580:
+ 		case e1000_82576:
+ 			wr32(E1000_IVAR0, E1000_IVAR_VALID);
+ 			break;
+@@ -959,10 +1010,15 @@ static void igb_irq_enable(struct igb_adapter *adapter)
+ 			wr32(E1000_MBVFIMR, 0xFF);
+ 			ims |= E1000_IMS_VMMB;
+ 		}
++		if (adapter->hw.mac.type == e1000_82580)
++			ims |= E1000_IMS_DRSTA;
++
+ 		wr32(E1000_IMS, ims);
+ 	} else {
+-		wr32(E1000_IMS, IMS_ENABLE_MASK);
+-		wr32(E1000_IAM, IMS_ENABLE_MASK);
++		wr32(E1000_IMS, IMS_ENABLE_MASK |
++				E1000_IMS_DRSTA);
++		wr32(E1000_IAM, IMS_ENABLE_MASK |
++				E1000_IMS_DRSTA);
+ 	}
+ }
+ 
+@@ -1184,6 +1240,10 @@ void igb_reset(struct igb_adapter *adapter)
+ 	 * To take effect CTRL.RST is required.
+ 	 */
+ 	switch (mac->type) {
++	case e1000_82580:
++		pba = rd32(E1000_RXPBS);
++		pba = igb_rxpbs_adjust_82580(pba);
++		break;
+ 	case e1000_82576:
+ 		pba = rd32(E1000_RXPBS);
+ 		pba &= E1000_RXPBS_SIZE_MASK_82576;
+@@ -1278,6 +1338,11 @@ void igb_reset(struct igb_adapter *adapter)
+ 	if (hw->mac.ops.init_hw(hw))
+ 		dev_err(&pdev->dev, "Hardware Error\n");
+ 
++	if (hw->mac.type == e1000_82580) {
++		u32 reg = rd32(E1000_PCIEMISC);
++		wr32(E1000_PCIEMISC,
++		                reg & ~E1000_PCIEMISC_LX_DECISION);
++	}
+ 	igb_update_mng_vlan(adapter);
+ 
+ 	/* Enable h/w to recognize an 802.1Q VLAN Ethernet packet */
+@@ -1508,6 +1573,10 @@ static int __devinit igb_probe(struct pci_dev *pdev,
+ 
+ 	if (hw->bus.func == 0)
+ 		hw->nvm.ops.read(hw, NVM_INIT_CONTROL3_PORT_A, 1, &eeprom_data);
++	else if (hw->mac.type == e1000_82580)
++		hw->nvm.ops.read(hw, NVM_INIT_CONTROL3_PORT_A +
++		                 NVM_82580_LAN_FUNC_OFFSET(hw->bus.func), 1,
++		                 &eeprom_data);
+ 	else if (hw->bus.func == 1)
+ 		hw->nvm.ops.read(hw, NVM_INIT_CONTROL3_PORT_B, 1, &eeprom_data);
+ 
+@@ -1746,6 +1815,48 @@ static void igb_init_hw_timer(struct igb_adapter *adapter)
+ 	struct e1000_hw *hw = &adapter->hw;
+ 
+ 	switch (hw->mac.type) {
++	case e1000_82580:
++		memset(&adapter->cycles, 0, sizeof(adapter->cycles));
++		adapter->cycles.read = igb_read_clock;
++		adapter->cycles.mask = CLOCKSOURCE_MASK(64);
++		adapter->cycles.mult = 1;
++		/*
++		 * The 82580 timesync updates the system timer every 8ns by 8ns
++		 * and the value cannot be shifted.  Instead we need to shift
++		 * the registers to generate a 64bit timer value.  As a result
++		 * SYSTIMR/L/H, TXSTMPL/H, RXSTMPL/H all have to be shifted by
++		 * 24 in order to generate a larger value for synchronization.
++		 */
++		adapter->cycles.shift = IGB_82580_TSYNC_SHIFT;
++		/* disable system timer temporarily by setting bit 31 */
++		wr32(E1000_TSAUXC, 0x80000000);
++		wrfl();
++
++		/* Set registers so that rollover occurs soon to test this. */
++		wr32(E1000_SYSTIMR, 0x00000000);
++		wr32(E1000_SYSTIML, 0x80000000);
++		wr32(E1000_SYSTIMH, 0x000000FF);
++		wrfl();
++
++		/* enable system timer by clearing bit 31 */
++		wr32(E1000_TSAUXC, 0x0);
++		wrfl();
++
++		timecounter_init(&adapter->clock,
++				 &adapter->cycles,
++				 ktime_to_ns(ktime_get_real()));
++		/*
++		 * Synchronize our NIC clock against system wall clock. NIC
++		 * time stamp reading requires ~3us per sample, each sample
++		 * was pretty stable even under load => only require 10
++		 * samples for each offset comparison.
++		 */
++		memset(&adapter->compare, 0, sizeof(adapter->compare));
++		adapter->compare.source = &adapter->clock;
++		adapter->compare.target = ktime_get_real;
++		adapter->compare.num_samples = 10;
++		timecompare_update(&adapter->compare, 0);
++		break;
+ 	case e1000_82576:
+ 		/*
+ 		 * Initialize hardware timer: we keep it running just in case
+@@ -2217,6 +2328,10 @@ static void igb_setup_mrqc(struct igb_adapter *adapter)
+ 	if (adapter->vfs_allocated_count) {
+ 		/* 82575 and 82576 supports 2 RSS queues for VMDq */
+ 		switch (hw->mac.type) {
++		case e1000_82580:
++			num_rx_queues = 1;
++			shift = 0;
++			break;
+ 		case e1000_82576:
+ 			shift = 3;
+ 			num_rx_queues = 2;
+@@ -3694,6 +3809,9 @@ static void igb_tx_timeout(struct net_device *netdev)
+ 	/* Do the reset outside of interrupt context */
+ 	adapter->tx_timeout_count++;
+ 
++	if (hw->mac.type == e1000_82580)
++		hw->dev_spec._82575.global_device_reset = true;
++
+ 	schedule_work(&adapter->reset_task);
+ 	wr32(E1000_EICS,
+ 	     (adapter->eims_enable_mask & ~adapter->eims_other));
+@@ -4700,6 +4818,13 @@ static void igb_systim_to_hwtstamp(struct igb_adapter *adapter,
+ {
+ 	u64 ns;
+ 
++	/*
++	 * The 82580 starts with 1ns at bit 0 in RX/TXSTMPL, shift this up to
++	 * 24 to match clock shift we setup earlier.
++	 */
++	if (adapter->hw.mac.type == e1000_82580)
++		regval <<= IGB_82580_TSYNC_SHIFT;
++
+ 	ns = timecounter_cyc2time(&adapter->clock, regval);
+ 	timecompare_update(&adapter->compare, ns);
+ 	memset(shhwtstamps, 0, sizeof(struct skb_shared_hwtstamps));
+-- 
+1.7.5.4
+

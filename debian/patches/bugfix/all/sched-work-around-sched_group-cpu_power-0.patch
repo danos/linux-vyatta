@@ -1,0 +1,116 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Subject: sched: Work around sched_group::cpu_power = 0
+
+#636797 and others report a division by zero in the scheduler due
+to sched_group::cpu_power.  Try to work out why this is happening,
+and fix it up to something sane it does.
+
+Thanks to Bjoern Boschman <bjoern.boschman@nfon.net> for part of this.
+
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index a5387d5..7d10fbc 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -919,6 +919,15 @@ static inline struct cpumask *sched_group_cpus(struct sched_group *sg)
+ 	return to_cpumask(sg->cpumask);
+ }
+ 
++extern unsigned int sched_warn_zero_power(struct sched_group *group);
++
++static inline unsigned int sched_group_power(struct sched_group *group)
++{
++	unsigned int power = ACCESS_ONCE(group->cpu_power);
++
++	return likely(power > 0) ? power : sched_warn_zero_power(group);
++}
++
+ enum sched_domain_level {
+ 	SD_LV_NONE = 0,
+ 	SD_LV_SIBLING,
+--- a/kernel/sched.c
++++ b/kernel/sched.c
+@@ -3804,6 +3804,7 @@ static void update_cpu_power(struct sched_domain *sd, int cpu)
+ 	unsigned long weight = cpumask_weight(sched_domain_span(sd));
+ 	unsigned long power = SCHED_LOAD_SCALE;
+ 	struct sched_group *sdg = sd->groups;
++	unsigned long scale_rt;
+ 
+ 	if (sched_feat(ARCH_POWER))
+ 		power *= arch_scale_freq_power(sd, cpu);
+@@ -3821,12 +3822,16 @@ static void update_cpu_power(struct sched_domain *sd, int cpu)
+ 		power >>= SCHED_LOAD_SHIFT;
+ 	}
+ 
+-	power *= scale_rt_power(cpu);
++	scale_rt = scale_rt_power(cpu);
++	power *= scale_rt;
+ 	power >>= SCHED_LOAD_SHIFT;
+ 
+ 	if (!power)
+ 		power = 1;
+ 
++	WARN_ONCE((long)power <= 0, "group %p cpu_power = %ld; scale_rt = %ld",
++		  sdg, power, scale_rt);
++
+ 	cpu_rq(cpu)->cpu_power = power;
+ 	sdg->cpu_power = power;
+ }
+@@ -3850,6 +3855,8 @@ static void update_group_power(struct sched_domain *sd, int cpu)
+ 		group = group->next;
+ 	} while (group != child->groups);
+ 
++	WARN_ONCE((long)power <= 0, "group %p cpu_power = %ld", sdg, power);
++
+ 	sdg->cpu_power = power;
+ }
+ 
+@@ -3932,7 +3940,8 @@ static inline void update_sg_lb_stats(struct sched_domain *sd,
+ 	}
+ 
+ 	/* Adjust by relative CPU power of the group */
+-	sgs->avg_load = (sgs->group_load * SCHED_LOAD_SCALE) / group->cpu_power;
++	sgs->avg_load = (sgs->group_load * SCHED_LOAD_SCALE) /
++		sched_group_power(group);
+ 
+ 	/*
+ 	 * Consider the group unbalanced when the imbalance is larger
+@@ -8104,7 +8113,7 @@ static int sched_domain_debug_one(struct sched_domain *sd, int cpu, int level,
+ 
+ 		cpulist_scnprintf(str, sizeof(str), sched_group_cpus(group));
+ 
+-		printk(KERN_CONT " %s", str);
++		printk(KERN_CONT " group %p cpus %s", group, str);
+ 		if (group->cpu_power != SCHED_LOAD_SCALE) {
+ 			printk(KERN_CONT " (cpu_power = %d)",
+ 				group->cpu_power);
+@@ -11190,3 +11199,16 @@ void synchronize_sched_expedited(void)
+ EXPORT_SYMBOL_GPL(synchronize_sched_expedited);
+ 
+ #endif /* #else #ifndef CONFIG_SMP */
++
++#ifdef CONFIG_SMP
++/* Fix up and warn about group with cpu_power = 0 */
++unsigned int sched_warn_zero_power(struct sched_group *group)
++{
++	static char str[256];
++
++	cpulist_scnprintf(str, sizeof(str), sched_group_cpus(group));
++	WARN_ONCE(1, "group %p cpus %s cpu_power = 0", group, str);
++
++	return SCHED_LOAD_SCALE;
++}
++#endif
+diff --git a/kernel/sched_fair.c b/kernel/sched_fair.c
+index d53c9c7..7119d8d 100644
+--- a/kernel/sched_fair.c
++++ b/kernel/sched_fair.c
+@@ -1354,7 +1354,8 @@ find_idlest_group(struct sched_domain *sd, struct task_struct *p,
+ 		}
+ 
+ 		/* Adjust by relative CPU power of the group */
+-		avg_load = (avg_load * SCHED_LOAD_SCALE) / group->cpu_power;
++		avg_load = (avg_load * SCHED_LOAD_SCALE) /
++			sched_group_power(group);
+ 
+ 		if (local_group) {
+ 			this_load = avg_load;

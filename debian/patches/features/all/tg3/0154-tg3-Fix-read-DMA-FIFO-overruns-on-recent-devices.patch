@@ -1,0 +1,66 @@
+From: Matt Carlson <mcarlson@broadcom.com>
+Date: Wed, 15 Sep 2010 08:59:53 +0000
+Subject: [PATCH 154/207] tg3: Fix read DMA FIFO overruns on recent devices
+
+commit 41a8a7ee4a78216962f3afcea5968c04d0ab3b08 upstream.
+
+Earlier versions of tg3 devices had a problem where the read DMA FIFO
+could be overrun in certain edge conditions.  The fix was to limit the
+number of rx BDs the hardware would fetch at a time.  For later devices
+(5761, 5784 and later ASIC revs), there is a hardware fix that must be
+enabled to fix the same problem.  This patch adds that hardware fix.
+
+There is a gap in the ASIC revision lineage where neither fix is
+applied.  This is intentional as these ASIC revisions are not afflicted
+by the bug.
+
+Reviewed-by: Benjamin Li <benli@broadcom.com>
+Reviewed-by: Michael Chan <mchan@broadcom.com>
+Signed-off-by: Matt Carlson <mcarlson@broadcom.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/tg3.c |   10 ++++++++++
+ drivers/net/tg3.h |    6 +++++-
+ 2 files changed, 15 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/net/tg3.c b/drivers/net/tg3.c
+index 8b40c7f..8107ae8 100644
+--- a/drivers/net/tg3.c
++++ b/drivers/net/tg3.c
+@@ -8015,6 +8015,16 @@ static int tg3_reset_hw(struct tg3 *tp, int reset_phy)
+ 	    GET_ASIC_REV(tp->pci_chip_rev_id) == ASIC_REV_57780)
+ 		rdmac_mode |= RDMAC_MODE_IPV6_LSO_EN;
+ 
++	if (GET_ASIC_REV(tp->pci_chip_rev_id) == ASIC_REV_5761 ||
++	    GET_ASIC_REV(tp->pci_chip_rev_id) == ASIC_REV_5784 ||
++	    GET_ASIC_REV(tp->pci_chip_rev_id) == ASIC_REV_5785 ||
++	    GET_ASIC_REV(tp->pci_chip_rev_id) == ASIC_REV_57780 ||
++	    (tp->tg3_flags3 & TG3_FLG3_5717_PLUS)) {
++		val = tr32(TG3_RDMA_RSRVCTRL_REG);
++		tw32(TG3_RDMA_RSRVCTRL_REG,
++		     val | TG3_RDMA_RSRVCTRL_FIFO_OFLW_FIX);
++	}
++
+ 	/* Receive/send statistics. */
+ 	if (tp->tg3_flags2 & TG3_FLG2_5750_PLUS) {
+ 		val = tr32(RCVLPC_STATS_ENABLE);
+diff --git a/drivers/net/tg3.h b/drivers/net/tg3.h
+index 1cd924d..26af216 100644
+--- a/drivers/net/tg3.h
++++ b/drivers/net/tg3.h
+@@ -1302,7 +1302,11 @@
+ #define  RDMAC_STATUS_FIFOURUN		 0x00000080
+ #define  RDMAC_STATUS_FIFOOREAD		 0x00000100
+ #define  RDMAC_STATUS_LNGREAD		 0x00000200
+-/* 0x4808 --> 0x4c00 unused */
++/* 0x4808 --> 0x4900 unused */
++
++#define TG3_RDMA_RSRVCTRL_REG		0x00004900
++#define TG3_RDMA_RSRVCTRL_FIFO_OFLW_FIX	 0x00000004
++/* 0x4904 --> 0x4c00 unused */
+ 
+ /* Write DMA control registers */
+ #define WDMAC_MODE			0x00004c00
+-- 
+1.7.5.4
+

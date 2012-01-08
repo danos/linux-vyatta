@@ -1,0 +1,74 @@
+From: Alexander Duyck <alexander.h.duyck@intel.com>
+Date: Fri, 11 Dec 2009 22:57:34 -0800
+Subject: [PATCH 076/165] igb: fix handling of mailbox collisions between
+ PF/VF
+
+commit fef45f4ce221fc110f70716a00f40be697c5b254 upstream.
+
+This patch changes the handling of collisions between the use of the
+PF/VF sides of the mailbox.
+
+Signed-off-by: Alexander Duyck <alexander.h.duyck@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/igb/igb_main.c |   22 +++++++++++++---------
+ 1 files changed, 13 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/net/igb/igb_main.c b/drivers/net/igb/igb_main.c
+index fb644ce..bb264ee 100644
+--- a/drivers/net/igb/igb_main.c
++++ b/drivers/net/igb/igb_main.c
+@@ -4608,8 +4608,14 @@ static void igb_rcv_msg_from_vf(struct igb_adapter *adapter, u32 vf)
+ 
+ 	retval = igb_read_mbx(hw, msgbuf, E1000_VFMAILBOX_SIZE, vf);
+ 
+-	if (retval)
++	if (retval) {
++		/* if receive failed revoke VF CTS stats and restart init */
+ 		dev_err(&pdev->dev, "Error receiving message from VF\n");
++		vf_data->flags &= ~IGB_VF_FLAG_CTS;
++		if (!time_after(jiffies, vf_data->last_nack + (2 * HZ)))
++			return;
++		goto out;
++	}
+ 
+ 	/* this is a message we already processed, do nothing */
+ 	if (msgbuf[0] & (E1000_VT_MSGTYPE_ACK | E1000_VT_MSGTYPE_NACK))
+@@ -4626,12 +4632,10 @@ static void igb_rcv_msg_from_vf(struct igb_adapter *adapter, u32 vf)
+ 	}
+ 
+ 	if (!(vf_data->flags & IGB_VF_FLAG_CTS)) {
+-		msgbuf[0] = E1000_VT_MSGTYPE_NACK;
+-		if (time_after(jiffies, vf_data->last_nack + (2 * HZ))) {
+-			igb_write_mbx(hw, msgbuf, 1, vf);
+-			vf_data->last_nack = jiffies;
+-		}
+-		return;
++		if (!time_after(jiffies, vf_data->last_nack + (2 * HZ)))
++			return;
++		retval = -1;
++		goto out;
+ 	}
+ 
+ 	switch ((msgbuf[0] & 0xFFFF)) {
+@@ -4656,14 +4660,14 @@ static void igb_rcv_msg_from_vf(struct igb_adapter *adapter, u32 vf)
+ 		break;
+ 	}
+ 
++	msgbuf[0] |= E1000_VT_MSGTYPE_CTS;
++out:
+ 	/* notify the VF of the results of what it sent us */
+ 	if (retval)
+ 		msgbuf[0] |= E1000_VT_MSGTYPE_NACK;
+ 	else
+ 		msgbuf[0] |= E1000_VT_MSGTYPE_ACK;
+ 
+-	msgbuf[0] |= E1000_VT_MSGTYPE_CTS;
+-
+ 	igb_write_mbx(hw, msgbuf, 1, vf);
+ }
+ 
+-- 
+1.7.5.4
+

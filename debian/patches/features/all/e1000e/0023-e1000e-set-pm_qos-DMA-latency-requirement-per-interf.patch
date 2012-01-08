@@ -1,0 +1,110 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Fri, 20 Nov 2009 23:27:40 +0000
+Subject: [PATCH 023/166] e1000e: set pm_qos DMA latency requirement per
+ interface when needed
+
+commit 53ec5498d107a61b84944351d32324ce52788b74 upstream.
+
+It was pointed out a pm_qos DMA latency requirement set when the driver is
+loaded when parts that support early receive of jumbo frames are probed
+could have that requirement overidden if another part supported by the
+driver (one that does not support early receive of jumbo frames) is probed
+later.  Change the DMA latency requirement to be per-interface if needed
+instead of per driver.
+
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/e1000e/netdev.c |   47 +++++++++++++++++++++++++-----------------
+ 1 files changed, 28 insertions(+), 19 deletions(-)
+
+diff --git a/drivers/net/e1000e/netdev.c b/drivers/net/e1000e/netdev.c
+index c86a0d5..817bb81 100644
+--- a/drivers/net/e1000e/netdev.c
++++ b/drivers/net/e1000e/netdev.c
+@@ -2479,21 +2479,23 @@ static void e1000_configure_rx(struct e1000_adapter *adapter)
+ 	 * packet size is equal or larger than the specified value (in 8 byte
+ 	 * units), e.g. using jumbo frames when setting to E1000_ERT_2048
+ 	 */
+-	if ((adapter->flags & FLAG_HAS_ERT) &&
+-	    (adapter->netdev->mtu > ETH_DATA_LEN)) {
+-		u32 rxdctl = er32(RXDCTL(0));
+-		ew32(RXDCTL(0), rxdctl | 0x3);
+-		ew32(ERT, E1000_ERT_2048 | (1 << 13));
+-		/*
+-		 * With jumbo frames and early-receive enabled, excessive
+-		 * C4->C2 latencies result in dropped transactions.
+-		 */
+-		pm_qos_update_requirement(PM_QOS_CPU_DMA_LATENCY,
+-					  e1000e_driver_name, 55);
+-	} else {
+-		pm_qos_update_requirement(PM_QOS_CPU_DMA_LATENCY,
+-					  e1000e_driver_name,
+-					  PM_QOS_DEFAULT_VALUE);
++	if (adapter->flags & FLAG_HAS_ERT) {
++		if (adapter->netdev->mtu > ETH_DATA_LEN) {
++			u32 rxdctl = er32(RXDCTL(0));
++			ew32(RXDCTL(0), rxdctl | 0x3);
++			ew32(ERT, E1000_ERT_2048 | (1 << 13));
++			/*
++			 * With jumbo frames and early-receive enabled,
++			 * excessive C-state transition latencies result in
++			 * dropped transactions.
++			 */
++			pm_qos_update_requirement(PM_QOS_CPU_DMA_LATENCY,
++						  adapter->netdev->name, 55);
++		} else {
++			pm_qos_update_requirement(PM_QOS_CPU_DMA_LATENCY,
++						  adapter->netdev->name,
++						  PM_QOS_DEFAULT_VALUE);
++		}
+ 	}
+ 
+ 	/* Enable Receives */
+@@ -2828,6 +2830,12 @@ int e1000e_up(struct e1000_adapter *adapter)
+ {
+ 	struct e1000_hw *hw = &adapter->hw;
+ 
++	/* DMA latency requirement to workaround early-receive/jumbo issue */
++	if (adapter->flags & FLAG_HAS_ERT)
++		pm_qos_add_requirement(PM_QOS_CPU_DMA_LATENCY,
++		                       adapter->netdev->name,
++				       PM_QOS_DEFAULT_VALUE);
++
+ 	/* hardware has been reset, we need to reload some things */
+ 	e1000_configure(adapter);
+ 
+@@ -2888,6 +2896,10 @@ void e1000e_down(struct e1000_adapter *adapter)
+ 	e1000_clean_tx_ring(adapter);
+ 	e1000_clean_rx_ring(adapter);
+ 
++	if (adapter->flags & FLAG_HAS_ERT)
++		pm_qos_remove_requirement(PM_QOS_CPU_DMA_LATENCY,
++		                          adapter->netdev->name);
++
+ 	/*
+ 	 * TODO: for power management, we could drop the link and
+ 	 * pci_disable_device here.
+@@ -5387,9 +5399,7 @@ static int __init e1000_init_module(void)
+ 	printk(KERN_INFO "%s: Copyright (c) 1999 - 2009 Intel Corporation.\n",
+ 	       e1000e_driver_name);
+ 	ret = pci_register_driver(&e1000_driver);
+-	pm_qos_add_requirement(PM_QOS_CPU_DMA_LATENCY, e1000e_driver_name,
+-			       PM_QOS_DEFAULT_VALUE);
+-				
++
+ 	return ret;
+ }
+ module_init(e1000_init_module);
+@@ -5403,7 +5413,6 @@ module_init(e1000_init_module);
+ static void __exit e1000_exit_module(void)
+ {
+ 	pci_unregister_driver(&e1000_driver);
+-	pm_qos_remove_requirement(PM_QOS_CPU_DMA_LATENCY, e1000e_driver_name);
+ }
+ module_exit(e1000_exit_module);
+ 
+-- 
+1.7.5.4
+
