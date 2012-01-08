@@ -1,0 +1,59 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Sun, 28 Nov 2010 23:46:46 +0000
+Subject: [PATCH 2/2] dm: Deal with merge_bvec_fn in component devices better
+
+This is analogous to commit 627a2d3c29427637f4c5d31ccc7fcbd8d312cd71,
+which does the same for md-devices at the top of the stack.  The
+following explanation is taken from that commit.  Thanks to Neil Brown
+<neilb@suse.de> for the advice.
+
+If a component device has a merge_bvec_fn then as we never call it
+we must ensure we never need to.  Currently this is done by setting
+max_sector to 1 PAGE, however this does not stop a bio being created
+with several sub-page iovecs that would violate the merge_bvec_fn.
+
+So instead set max_segments to 1 and set the segment boundary to the
+same as a page boundary to ensure there is only ever one single-page
+segment of IO requested at a time.
+
+This can particularly be an issue when 'xen' is used as it is
+known to submit multiple small buffers in a single bio.
+
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+ drivers/md/dm-table.c |   18 ++++++++----------
+ 1 files changed, 8 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/md/dm-table.c b/drivers/md/dm-table.c
+index 94116ea..186445d0 100644
+--- a/drivers/md/dm-table.c
++++ b/drivers/md/dm-table.c
+@@ -506,17 +506,15 @@ void dm_set_device_limits(struct dm_target *ti, struct block_device *bdev)
+ 	rs->max_sectors =
+ 		min_not_zero(rs->max_sectors, q->max_sectors);
+ 
+-	/* FIXME: Device-Mapper on top of RAID-0 breaks because DM
+-	 *        currently doesn't honor MD's merge_bvec_fn routine.
+-	 *        In this case, we'll force DM to use PAGE_SIZE or
+-	 *        smaller I/O, just to be safe. A better fix is in the
+-	 *        works, but add this for the time being so it will at
+-	 *        least operate correctly.
++	/*
++	 * Since we don't call merge_bvec_fn, we must never risk
++	 * violating it, so limit max_phys_segments to 1 lying within
++	 * a single page.
+ 	 */
+-	if (q->merge_bvec_fn)
+-		rs->max_sectors =
+-			min_not_zero(rs->max_sectors,
+-				     (unsigned int) (PAGE_SIZE >> 9));
++	if (q->merge_bvec_fn) {
++		rs->max_phys_segments = 1;
++		rs->seg_boundary_mask = PAGE_CACHE_SIZE - 1;
++	}
+ 
+ 	rs->max_phys_segments =
+ 		min_not_zero(rs->max_phys_segments,
+-- 
+1.7.2.3
+

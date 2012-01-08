@@ -1,0 +1,45 @@
+commit 7404ccad11827e62290b0b4dc2dfe0b6ba70f8ad
+Author: Mikulas Patocka <mpatocka@redhat.com>
+Date:   Tue Feb 16 18:42:55 2010 +0000
+
+    dm raid1: fail writes if errors are not handled and log fails
+    
+    commit 5528d17de1cf1462f285c40ccaf8e0d0e4c64dc0 upstream.
+    
+    If the mirror log fails when the handle_errors option was not selected
+    and there is no remaining valid mirror leg, writes return success even
+    though they weren't actually written to any device.  This patch
+    completes them with EIO instead.
+    
+    This code path is taken:
+    do_writes:
+    	bio_list_merge(&ms->failures, &sync);
+    do_failures:
+    	if (!get_valid_mirror(ms)) (false)
+    	else if (errors_handled(ms)) (false)
+    	else bio_endio(bio, 0);
+    
+    The logic in do_failures is based on presuming that the write was already
+    tried: if it succeeded at least on one leg (without handle_errors) it
+    is reported as success.
+    
+    Reference: https://bugzilla.redhat.com/show_bug.cgi?id=555197
+    
+    Signed-off-by: Mikulas Patocka <mpatocka@redhat.com>
+    Signed-off-by: Alasdair G Kergon <agk@redhat.com>
+    Cc: maximilian attems <max@stro.at>
+    Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+
+diff --git a/drivers/md/dm-raid1.c b/drivers/md/dm-raid1.c
+index 8fe418b..3520607 100644
+--- a/drivers/md/dm-raid1.c
++++ b/drivers/md/dm-raid1.c
+@@ -1198,7 +1198,7 @@ static void do_writes(struct mirror_set *ms, struct bio_list *writes)
+ 	/*
+ 	 * Dispatch io.
+ 	 */
+-	if (unlikely(ms->log_failure)) {
++	if (unlikely(ms->log_failure) && errors_handled(ms)) {
+ 		spin_lock_irq(&ms->lock);
+ 		bio_list_merge(&ms->failures, &sync);
+ 		spin_unlock_irq(&ms->lock);

@@ -1,0 +1,219 @@
+From: NeilBrown <neilb@suse.de>
+Date: Mon, 8 Mar 2010 16:44:38 +1100
+Subject: [PATCH 1/2] md: deal with merge_bvec_fn in component devices better.
+
+commit 627a2d3c29427637f4c5d31ccc7fcbd8d312cd71 upstream.
+
+If a component device has a merge_bvec_fn then as we never call it
+we must ensure we never need to.  Currently this is done by setting
+max_sector to 1 PAGE, however this does not stop a bio being created
+with several sub-page iovecs that would violate the merge_bvec_fn.
+
+So instead set max_segments to 1 and set the segment boundary to the
+same as a page boundary to ensure there is only ever one single-page
+segment of IO requested at a time.
+
+This can particularly be an issue when 'xen' is used as it is
+known to submit multiple small buffers in a single bio.
+
+Signed-off-by: NeilBrown <neilb@suse.de>
+Cc: stable@kernel.org
+[bwh: Backport to Linux 2.6.26]
+---
+ drivers/md/linear.c    |   12 +++++++-----
+ drivers/md/multipath.c |   20 ++++++++++++--------
+ drivers/md/raid0.c     |   13 +++++++------
+ drivers/md/raid1.c     |   28 +++++++++++++++++-----------
+ drivers/md/raid10.c    |   28 +++++++++++++++++-----------
+ 5 files changed, 60 insertions(+), 41 deletions(-)
+
+diff --git a/drivers/md/linear.c b/drivers/md/linear.c
+index ec921f5..fe8508a 100644
+--- a/drivers/md/linear.c
++++ b/drivers/md/linear.c
+@@ -136,12 +136,14 @@ static linear_conf_t *linear_conf(mddev_t *mddev, int raid_disks)
+ 		blk_queue_stack_limits(mddev->queue,
+ 				       rdev->bdev->bd_disk->queue);
+ 		/* as we don't honour merge_bvec_fn, we must never risk
+-		 * violating it, so limit ->max_sector to one PAGE, as
+-		 * a one page request is never in violation.
++		 * violating it, so limit max_segments to 1 lying within
++		 * a single page.
+ 		 */
+-		if (rdev->bdev->bd_disk->queue->merge_bvec_fn &&
+-		    mddev->queue->max_sectors > (PAGE_SIZE>>9))
+-			blk_queue_max_sectors(mddev->queue, PAGE_SIZE>>9);
++		if (rdev->bdev->bd_disk->queue->merge_bvec_fn) {
++			blk_queue_max_phys_segments(mddev->queue, 1);
++			blk_queue_segment_boundary(mddev->queue,
++						   PAGE_CACHE_SIZE - 1);
++		}
+ 
+ 		disk->size = rdev->size;
+ 		conf->array_size += rdev->size;
+diff --git a/drivers/md/multipath.c b/drivers/md/multipath.c
+index e968116..67dd8a3 100644
+--- a/drivers/md/multipath.c
++++ b/drivers/md/multipath.c
+@@ -293,14 +293,16 @@ static int multipath_add_disk(mddev_t *mddev, mdk_rdev_t *rdev)
+ 			blk_queue_stack_limits(mddev->queue, q);
+ 
+ 		/* as we don't honour merge_bvec_fn, we must never risk
+-		 * violating it, so limit ->max_sector to one PAGE, as
+-		 * a one page request is never in violation.
++		 * violating it, so limit ->max_segments to one, lying
++		 * within a single page.
+ 		 * (Note: it is very unlikely that a device with
+ 		 * merge_bvec_fn will be involved in multipath.)
+ 		 */
+-			if (q->merge_bvec_fn &&
+-			    mddev->queue->max_sectors > (PAGE_SIZE>>9))
+-				blk_queue_max_sectors(mddev->queue, PAGE_SIZE>>9);
++			if (q->merge_bvec_fn) {
++				blk_queue_max_phys_segments(mddev->queue, 1);
++				blk_queue_segment_boundary(mddev->queue,
++							   PAGE_CACHE_SIZE - 1);
++			}
+ 
+ 			conf->working_disks++;
+ 			mddev->degraded--;
+@@ -453,9 +455,11 @@ static int multipath_run (mddev_t *mddev)
+ 		/* as we don't honour merge_bvec_fn, we must never risk
+ 		 * violating it, not that we ever expect a device with
+ 		 * a merge_bvec_fn to be involved in multipath */
+-		if (rdev->bdev->bd_disk->queue->merge_bvec_fn &&
+-		    mddev->queue->max_sectors > (PAGE_SIZE>>9))
+-			blk_queue_max_sectors(mddev->queue, PAGE_SIZE>>9);
++		if (rdev->bdev->bd_disk->queue->merge_bvec_fn) {
++			blk_queue_max_phys_segments(mddev->queue, 1);
++			blk_queue_segment_boundary(mddev->queue,
++						   PAGE_CACHE_SIZE - 1);
++		}
+ 
+ 		if (!test_bit(Faulty, &rdev->flags))
+ 			conf->working_disks++;
+diff --git a/drivers/md/raid0.c b/drivers/md/raid0.c
+index 914c04d..b344e0e 100644
+--- a/drivers/md/raid0.c
++++ b/drivers/md/raid0.c
+@@ -141,14 +141,15 @@ static int create_strip_zones (mddev_t *mddev)
+ 		blk_queue_stack_limits(mddev->queue,
+ 				       rdev1->bdev->bd_disk->queue);
+ 		/* as we don't honour merge_bvec_fn, we must never risk
+-		 * violating it, so limit ->max_sector to one PAGE, as
+-		 * a one page request is never in violation.
++		 * violating it, so limit ->max_segments to 1, lying within
++		 * a single page.
+ 		 */
+ 
+-		if (rdev1->bdev->bd_disk->queue->merge_bvec_fn &&
+-		    mddev->queue->max_sectors > (PAGE_SIZE>>9))
+-			blk_queue_max_sectors(mddev->queue, PAGE_SIZE>>9);
+-
++		if (rdev1->bdev->bd_disk->queue->merge_bvec_fn) {
++			blk_queue_max_phys_segments(mddev->queue, 1);
++			blk_queue_segment_boundary(mddev->queue,
++						   PAGE_CACHE_SIZE - 1);
++		}
+ 		if (!smallest || (rdev1->size <smallest->size))
+ 			smallest = rdev1;
+ 		cnt++;
+diff --git a/drivers/md/raid1.c b/drivers/md/raid1.c
+index c610b94..360c079 100644
+--- a/drivers/md/raid1.c
++++ b/drivers/md/raid1.c
+@@ -1109,13 +1109,17 @@ static int raid1_add_disk(mddev_t *mddev, mdk_rdev_t *rdev)
+ 
+ 			blk_queue_stack_limits(mddev->queue,
+ 					       rdev->bdev->bd_disk->queue);
+-			/* as we don't honour merge_bvec_fn, we must never risk
+-			 * violating it, so limit ->max_sector to one PAGE, as
+-			 * a one page request is never in violation.
++			/* as we don't honour merge_bvec_fn, we must
++			 * never risk violating it, so limit
++			 * ->max_segments to one lying with a single
++			 * page, as a one page request is never in
++			 * violation.
+ 			 */
+-			if (rdev->bdev->bd_disk->queue->merge_bvec_fn &&
+-			    mddev->queue->max_sectors > (PAGE_SIZE>>9))
+-				blk_queue_max_sectors(mddev->queue, PAGE_SIZE>>9);
++			if (rdev->bdev->bd_disk->queue->merge_bvec_fn) {
++				blk_queue_max_phys_segments(mddev->queue, 1);
++				blk_queue_segment_boundary(mddev->queue,
++							   PAGE_CACHE_SIZE - 1);
++			}
+ 
+ 			p->head_position = 0;
+ 			rdev->raid_disk = mirror;
+@@ -1971,12 +1975,14 @@ static int run(mddev_t *mddev)
+ 		blk_queue_stack_limits(mddev->queue,
+ 				       rdev->bdev->bd_disk->queue);
+ 		/* as we don't honour merge_bvec_fn, we must never risk
+-		 * violating it, so limit ->max_sector to one PAGE, as
+-		 * a one page request is never in violation.
++		 * violating it, so limit ->max_segments to 1 lying within
++		 * a single page, as a one page request is never in violation.
+ 		 */
+-		if (rdev->bdev->bd_disk->queue->merge_bvec_fn &&
+-		    mddev->queue->max_sectors > (PAGE_SIZE>>9))
+-			blk_queue_max_sectors(mddev->queue, PAGE_SIZE>>9);
++		if (rdev->bdev->bd_disk->queue->merge_bvec_fn) {
++			blk_queue_max_phys_segments(mddev->queue, 1);
++			blk_queue_segment_boundary(mddev->queue,
++						   PAGE_CACHE_SIZE - 1);
++		}
+ 
+ 		disk->head_position = 0;
+ 	}
+diff --git a/drivers/md/raid10.c b/drivers/md/raid10.c
+index a71277b..bf7654d 100644
+--- a/drivers/md/raid10.c
++++ b/drivers/md/raid10.c
+@@ -1135,13 +1135,17 @@ static int raid10_add_disk(mddev_t *mddev, mdk_rdev_t *rdev)
+ 
+ 			blk_queue_stack_limits(mddev->queue,
+ 					       rdev->bdev->bd_disk->queue);
+-			/* as we don't honour merge_bvec_fn, we must never risk
+-			 * violating it, so limit ->max_sector to one PAGE, as
+-			 * a one page request is never in violation.
++			/* as we don't honour merge_bvec_fn, we must
++			 * never risk violating it, so limit
++			 * ->max_segments to one lying with a single
++			 * page, as a one page request is never in
++			 * violation.
+ 			 */
+-			if (rdev->bdev->bd_disk->queue->merge_bvec_fn &&
+-			    mddev->queue->max_sectors > (PAGE_SIZE>>9))
+-				mddev->queue->max_sectors = (PAGE_SIZE>>9);
++			if (rdev->bdev->bd_disk->queue->merge_bvec_fn) {
++				blk_queue_max_phys_segments(mddev->queue, 1);
++				blk_queue_segment_boundary(mddev->queue,
++							   PAGE_CACHE_SIZE - 1);
++			}
+ 
+ 			p->head_position = 0;
+ 			rdev->raid_disk = mirror;
+@@ -2107,12 +2111,14 @@ static int run(mddev_t *mddev)
+ 		blk_queue_stack_limits(mddev->queue,
+ 				       rdev->bdev->bd_disk->queue);
+ 		/* as we don't honour merge_bvec_fn, we must never risk
+-		 * violating it, so limit ->max_sector to one PAGE, as
+-		 * a one page request is never in violation.
++		 * violating it, so limit max_segments to 1 lying
++		 * within a single page.
+ 		 */
+-		if (rdev->bdev->bd_disk->queue->merge_bvec_fn &&
+-		    mddev->queue->max_sectors > (PAGE_SIZE>>9))
+-			mddev->queue->max_sectors = (PAGE_SIZE>>9);
++		if (rdev->bdev->bd_disk->queue->merge_bvec_fn) {
++			blk_queue_max_phys_segments(mddev->queue, 1);
++			blk_queue_segment_boundary(mddev->queue,
++						   PAGE_CACHE_SIZE - 1);
++		}
+ 
+ 		disk->head_position = 0;
+ 	}
+-- 
+1.7.2.3
+
