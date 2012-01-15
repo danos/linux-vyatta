@@ -1,0 +1,65 @@
+From: Paolo Bonzini <pbonzini@redhat.com>
+Date: Thu, 12 Jan 2012 16:01:29 +0100
+Subject: [PATCH 3/3] dm: do not forward ioctls from logical volumes to the
+ underlying device
+
+commit ec8013beddd717d1740cfefb1a9b900deef85462 upstream.
+
+A logical volume can map to just part of underlying physical volume.
+In this case, it must be treated like a partition.
+
+Based on a patch from Alasdair G Kergon.
+
+Cc: Alasdair G Kergon <agk@redhat.com>
+Cc: dm-devel@redhat.com
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+[bwh: Backport to 2.6.32 - drop change to drivers/md/dm-flakey.c]
+---
+ drivers/md/dm-linear.c |   12 +++++++++++-
+ drivers/md/dm-mpath.c  |    6 ++++++
+ 2 files changed, 17 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/md/dm-linear.c b/drivers/md/dm-linear.c
+index 82f7d6e..7ab302d 100644
+--- a/drivers/md/dm-linear.c
++++ b/drivers/md/dm-linear.c
+@@ -116,7 +116,17 @@ static int linear_ioctl(struct dm_target *ti, unsigned int cmd,
+ 			unsigned long arg)
+ {
+ 	struct linear_c *lc = (struct linear_c *) ti->private;
+-	return __blkdev_driver_ioctl(lc->dev->bdev, lc->dev->mode, cmd, arg);
++	struct dm_dev *dev = lc->dev;
++	int r = 0;
++
++	/*
++	 * Only pass ioctls through if the device sizes match exactly.
++	 */
++	if (lc->start ||
++	    ti->len != i_size_read(dev->bdev->bd_inode) >> SECTOR_SHIFT)
++		r = scsi_verify_blk_ioctl(NULL, cmd);
++
++	return r ? : __blkdev_driver_ioctl(dev->bdev, dev->mode, cmd, arg);
+ }
+ 
+ static int linear_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
+diff --git a/drivers/md/dm-mpath.c b/drivers/md/dm-mpath.c
+index b03cd39..4ec5fe2 100644
+--- a/drivers/md/dm-mpath.c
++++ b/drivers/md/dm-mpath.c
+@@ -1464,6 +1464,12 @@ static int multipath_ioctl(struct dm_target *ti, unsigned int cmd,
+ 
+ 	spin_unlock_irqrestore(&m->lock, flags);
+ 
++	/*
++	 * Only pass ioctls through if the device sizes match exactly.
++	 */
++	if (!r && ti->len != i_size_read(bdev->bd_inode) >> SECTOR_SHIFT)
++		r = scsi_verify_blk_ioctl(NULL, cmd);
++
+ 	return r ? : __blkdev_driver_ioctl(bdev, mode, cmd, arg);
+ }
+ 
+-- 
+1.7.8.2
+
