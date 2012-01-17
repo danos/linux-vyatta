@@ -1,0 +1,41 @@
+futex: Nullify robust lists after cleanup
+
+The robust list pointers of user space held futexes are kept intact
+over an exec() call. When the exec'ed task exits exit_robust_list() is
+called with the stale pointer. The risk of corruption is minimal, but
+still it is incorrect to keep the pointers valid. Actually glibc
+should uninstall the robust list before calling exec() but we have to
+deal with it anyway.
+
+Nullify the pointers after [compat_]exit_robust_list() has been
+called.
+
+Reported-by: Anirban Sinha <ani@anirban.org>
+Signed-off-by: Peter Zijlstra <peterz@infradead.org>
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+LKML-Reference: <new-submission>
+Cc: stable@kernel.org
+[dannf: backported to Debian's 2.6.26]
+
+diff --git a/kernel/fork.c b/kernel/fork.c
+index 3c8bf25..e92ae4e 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -493,11 +493,15 @@ void mm_release(struct task_struct *tsk, struct mm_struct *mm)
+ 
+ 	/* Get rid of any futexes when releasing the mm */
+ #ifdef CONFIG_FUTEX
+-	if (unlikely(tsk->robust_list))
++	if (unlikely(tsk->robust_list)) {
+ 		exit_robust_list(tsk);
++		tsk->robust_list = NULL;
++	}
+ #ifdef CONFIG_COMPAT
+-	if (unlikely(tsk->compat_robust_list))
++	if (unlikely(tsk->compat_robust_list)) {
+ 		compat_exit_robust_list(tsk);
++		tsk->compat_robust_list = NULL;
++	}
+ #endif
+ #endif
+ 
