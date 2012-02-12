@@ -1,0 +1,665 @@
+diff --git a/Makefile b/Makefile
+index 64d4fc6..81ad738 100644
+diff --git a/block/scsi_ioctl.c b/block/scsi_ioctl.c
+index 114ee29..2be0a97 100644
+--- a/block/scsi_ioctl.c
++++ b/block/scsi_ioctl.c
+@@ -24,6 +24,7 @@
+ #include <linux/capability.h>
+ #include <linux/completion.h>
+ #include <linux/cdrom.h>
++#include <linux/ratelimit.h>
+ #include <linux/slab.h>
+ #include <linux/times.h>
+ #include <asm/uaccess.h>
+@@ -689,9 +690,53 @@ int scsi_cmd_ioctl(struct request_queue *q, struct gendisk *bd_disk, fmode_t mod
+ }
+ EXPORT_SYMBOL(scsi_cmd_ioctl);
+ 
++int scsi_verify_blk_ioctl(struct block_device *bd, unsigned int cmd)
++{
++	if (bd && bd == bd->bd_contains)
++		return 0;
++
++	/* Actually none of these is particularly useful on a partition,
++	 * but they are safe.
++	 */
++	switch (cmd) {
++	case SCSI_IOCTL_GET_IDLUN:
++	case SCSI_IOCTL_GET_BUS_NUMBER:
++	case SCSI_IOCTL_GET_PCI:
++	case SCSI_IOCTL_PROBE_HOST:
++	case SG_GET_VERSION_NUM:
++	case SG_SET_TIMEOUT:
++	case SG_GET_TIMEOUT:
++	case SG_GET_RESERVED_SIZE:
++	case SG_SET_RESERVED_SIZE:
++	case SG_EMULATED_HOST:
++		return 0;
++	case CDROM_GET_CAPABILITY:
++		/* Keep this until we remove the printk below.  udev sends it
++		 * and we do not want to spam dmesg about it.   CD-ROMs do
++		 * not have partitions, so we get here only for disks.
++		 */
++		return -ENOTTY;
++	default:
++		break;
++	}
++
++	/* In particular, rule out all resets and host-specific ioctls.  */
++	printk_ratelimited(KERN_WARNING
++			   "%s: sending ioctl %x to a partition!\n", current->comm, cmd);
++
++	return capable(CAP_SYS_RAWIO) ? 0 : -ENOTTY;
++}
++EXPORT_SYMBOL(scsi_verify_blk_ioctl);
++
+ int scsi_cmd_blk_ioctl(struct block_device *bd, fmode_t mode,
+ 		       unsigned int cmd, void __user *arg)
+ {
++	int ret;
++
++	ret = scsi_verify_blk_ioctl(bd, cmd);
++	if (ret < 0)
++		return ret;
++
+ 	return scsi_cmd_ioctl(bd->bd_disk->queue, bd->bd_disk, mode, cmd, arg);
+ }
+ EXPORT_SYMBOL(scsi_cmd_blk_ioctl);
+diff --git a/crypto/sha512_generic.c b/crypto/sha512_generic.c
+index 9ed9f60..88f160b 100644
+--- a/crypto/sha512_generic.c
++++ b/crypto/sha512_generic.c
+@@ -21,8 +21,6 @@
+ #include <linux/percpu.h>
+ #include <asm/byteorder.h>
+ 
+-static DEFINE_PER_CPU(u64[80], msg_schedule);
+-
+ static inline u64 Ch(u64 x, u64 y, u64 z)
+ {
+         return z ^ (x & (y ^ z));
+@@ -80,7 +78,7 @@ static inline void LOAD_OP(int I, u64 *W, const u8 *input)
+ 
+ static inline void BLEND_OP(int I, u64 *W)
+ {
+-	W[I] = s1(W[I-2]) + W[I-7] + s0(W[I-15]) + W[I-16];
++	W[I % 16] += s1(W[(I-2) % 16]) + W[(I-7) % 16] + s0(W[(I-15) % 16]);
+ }
+ 
+ static void
+@@ -89,38 +87,48 @@ sha512_transform(u64 *state, const u8 *input)
+ 	u64 a, b, c, d, e, f, g, h, t1, t2;
+ 
+ 	int i;
+-	u64 *W = get_cpu_var(msg_schedule);
++	u64 W[16];
+ 
+ 	/* load the input */
+         for (i = 0; i < 16; i++)
+                 LOAD_OP(i, W, input);
+ 
+-        for (i = 16; i < 80; i++) {
+-                BLEND_OP(i, W);
+-        }
+-
+ 	/* load the state into our registers */
+ 	a=state[0];   b=state[1];   c=state[2];   d=state[3];
+ 	e=state[4];   f=state[5];   g=state[6];   h=state[7];
+ 
+-	/* now iterate */
+-	for (i=0; i<80; i+=8) {
+-		t1 = h + e1(e) + Ch(e,f,g) + sha512_K[i  ] + W[i  ];
+-		t2 = e0(a) + Maj(a,b,c);    d+=t1;    h=t1+t2;
+-		t1 = g + e1(d) + Ch(d,e,f) + sha512_K[i+1] + W[i+1];
+-		t2 = e0(h) + Maj(h,a,b);    c+=t1;    g=t1+t2;
+-		t1 = f + e1(c) + Ch(c,d,e) + sha512_K[i+2] + W[i+2];
+-		t2 = e0(g) + Maj(g,h,a);    b+=t1;    f=t1+t2;
+-		t1 = e + e1(b) + Ch(b,c,d) + sha512_K[i+3] + W[i+3];
+-		t2 = e0(f) + Maj(f,g,h);    a+=t1;    e=t1+t2;
+-		t1 = d + e1(a) + Ch(a,b,c) + sha512_K[i+4] + W[i+4];
+-		t2 = e0(e) + Maj(e,f,g);    h+=t1;    d=t1+t2;
+-		t1 = c + e1(h) + Ch(h,a,b) + sha512_K[i+5] + W[i+5];
+-		t2 = e0(d) + Maj(d,e,f);    g+=t1;    c=t1+t2;
+-		t1 = b + e1(g) + Ch(g,h,a) + sha512_K[i+6] + W[i+6];
+-		t2 = e0(c) + Maj(c,d,e);    f+=t1;    b=t1+t2;
+-		t1 = a + e1(f) + Ch(f,g,h) + sha512_K[i+7] + W[i+7];
+-		t2 = e0(b) + Maj(b,c,d);    e+=t1;    a=t1+t2;
++#define SHA512_0_15(i, a, b, c, d, e, f, g, h)			\
++	t1 = h + e1(e) + Ch(e, f, g) + sha512_K[i] + W[i];	\
++	t2 = e0(a) + Maj(a, b, c);				\
++	d += t1;						\
++	h = t1 + t2
++
++#define SHA512_16_79(i, a, b, c, d, e, f, g, h)			\
++	BLEND_OP(i, W);						\
++	t1 = h + e1(e) + Ch(e, f, g) + sha512_K[i] + W[(i)%16];	\
++	t2 = e0(a) + Maj(a, b, c);				\
++	d += t1;						\
++	h = t1 + t2
++
++	for (i = 0; i < 16; i += 8) {
++		SHA512_0_15(i, a, b, c, d, e, f, g, h);
++		SHA512_0_15(i + 1, h, a, b, c, d, e, f, g);
++		SHA512_0_15(i + 2, g, h, a, b, c, d, e, f);
++		SHA512_0_15(i + 3, f, g, h, a, b, c, d, e);
++		SHA512_0_15(i + 4, e, f, g, h, a, b, c, d);
++		SHA512_0_15(i + 5, d, e, f, g, h, a, b, c);
++		SHA512_0_15(i + 6, c, d, e, f, g, h, a, b);
++		SHA512_0_15(i + 7, b, c, d, e, f, g, h, a);
++	}
++	for (i = 16; i < 80; i += 8) {
++		SHA512_16_79(i, a, b, c, d, e, f, g, h);
++		SHA512_16_79(i + 1, h, a, b, c, d, e, f, g);
++		SHA512_16_79(i + 2, g, h, a, b, c, d, e, f);
++		SHA512_16_79(i + 3, f, g, h, a, b, c, d, e);
++		SHA512_16_79(i + 4, e, f, g, h, a, b, c, d);
++		SHA512_16_79(i + 5, d, e, f, g, h, a, b, c);
++		SHA512_16_79(i + 6, c, d, e, f, g, h, a, b);
++		SHA512_16_79(i + 7, b, c, d, e, f, g, h, a);
+ 	}
+ 
+ 	state[0] += a; state[1] += b; state[2] += c; state[3] += d;
+@@ -128,8 +136,6 @@ sha512_transform(u64 *state, const u8 *input)
+ 
+ 	/* erase our data */
+ 	a = b = c = d = e = f = g = h = t1 = t2 = 0;
+-	memset(W, 0, sizeof(__get_cpu_var(msg_schedule)));
+-	put_cpu_var(msg_schedule);
+ }
+ 
+ static int
+diff --git a/drivers/gpu/drm/drm_auth.c b/drivers/gpu/drm/drm_auth.c
+index 932b5aa..d676d49 100644
+diff --git a/drivers/gpu/drm/drm_fops.c b/drivers/gpu/drm/drm_fops.c
+index ba14553..519161e 100644
+diff --git a/drivers/hwmon/f71805f.c b/drivers/hwmon/f71805f.c
+index 525a00b..15645ab 100644
+--- a/drivers/hwmon/f71805f.c
++++ b/drivers/hwmon/f71805f.c
+@@ -281,11 +281,11 @@ static inline long temp_from_reg(u8 reg)
+ 
+ static inline u8 temp_to_reg(long val)
+ {
+-	if (val < 0)
+-		val = 0;
+-	else if (val > 1000 * 0xff)
+-		val = 0xff;
+-	return ((val + 500) / 1000);
++	if (val <= 0)
++		return 0;
++	if (val >= 1000 * 0xff)
++		return 0xff;
++	return (val + 500) / 1000;
+ }
+ 
+ /*
+diff --git a/drivers/hwmon/sht15.c b/drivers/hwmon/sht15.c
+index 2040507..740785e 100644
+--- a/drivers/hwmon/sht15.c
++++ b/drivers/hwmon/sht15.c
+@@ -515,7 +515,7 @@ static int sht15_invalidate_voltage(struct notifier_block *nb,
+ 
+ static int __devinit sht15_probe(struct platform_device *pdev)
+ {
+-	int ret = 0;
++	int ret;
+ 	struct sht15_data *data = kzalloc(sizeof(*data), GFP_KERNEL);
+ 
+ 	if (!data) {
+@@ -532,6 +532,7 @@ static int __devinit sht15_probe(struct platform_device *pdev)
+ 	init_waitqueue_head(&data->wait_queue);
+ 
+ 	if (pdev->dev.platform_data == NULL) {
++		ret = -EINVAL;
+ 		dev_err(&pdev->dev, "no platform data supplied");
+ 		goto err_free_data;
+ 	}
+diff --git a/drivers/md/dm-linear.c b/drivers/md/dm-linear.c
+index 82f7d6e..7ab302d 100644
+--- a/drivers/md/dm-linear.c
++++ b/drivers/md/dm-linear.c
+@@ -116,7 +116,17 @@ static int linear_ioctl(struct dm_target *ti, unsigned int cmd,
+ 			unsigned long arg)
+ {
+ 	struct linear_c *lc = (struct linear_c *) ti->private;
+-	return __blkdev_driver_ioctl(lc->dev->bdev, lc->dev->mode, cmd, arg);
++	struct dm_dev *dev = lc->dev;
++	int r = 0;
++
++	/*
++	 * Only pass ioctls through if the device sizes match exactly.
++	 */
++	if (lc->start ||
++	    ti->len != i_size_read(dev->bdev->bd_inode) >> SECTOR_SHIFT)
++		r = scsi_verify_blk_ioctl(NULL, cmd);
++
++	return r ? : __blkdev_driver_ioctl(dev->bdev, dev->mode, cmd, arg);
+ }
+ 
+ static int linear_merge(struct dm_target *ti, struct bvec_merge_data *bvm,
+diff --git a/drivers/md/dm-mpath.c b/drivers/md/dm-mpath.c
+index b03cd39..4ec5fe2 100644
+--- a/drivers/md/dm-mpath.c
++++ b/drivers/md/dm-mpath.c
+@@ -1464,6 +1464,12 @@ static int multipath_ioctl(struct dm_target *ti, unsigned int cmd,
+ 
+ 	spin_unlock_irqrestore(&m->lock, flags);
+ 
++	/*
++	 * Only pass ioctls through if the device sizes match exactly.
++	 */
++	if (!r && ti->len != i_size_read(bdev->bd_inode) >> SECTOR_SHIFT)
++		r = scsi_verify_blk_ioctl(NULL, cmd);
++
+ 	return r ? : __blkdev_driver_ioctl(bdev, mode, cmd, arg);
+ }
+ 
+diff --git a/drivers/mmc/host/mmci.c b/drivers/mmc/host/mmci.c
+index 68d800f..705a589 100644
+--- a/drivers/mmc/host/mmci.c
++++ b/drivers/mmc/host/mmci.c
+@@ -232,12 +232,8 @@ mmci_cmd_irq(struct mmci_host *host, struct mmc_command *cmd,
+ 	}
+ 
+ 	if (!cmd->data || cmd->error) {
+-		if (host->data) {
+-			/* Terminate the DMA transfer */
+-			if (dma_inprogress(host))
+-				mmci_dma_data_error(host);
++		if (host->data)
+ 			mmci_stop_data(host);
+-		}
+ 		mmci_request_end(host, cmd->mrq);
+ 	} else if (!(cmd->data->flags & MMC_DATA_READ)) {
+ 		mmci_start_data(host, cmd->data);
+diff --git a/drivers/scsi/sd.c b/drivers/scsi/sd.c
+index 2dd1b73..a5b55fe 100644
+--- a/drivers/scsi/sd.c
++++ b/drivers/scsi/sd.c
+@@ -817,6 +817,10 @@ static int sd_ioctl(struct block_device *bdev, fmode_t mode,
+ 	SCSI_LOG_IOCTL(1, printk("sd_ioctl: disk=%s, cmd=0x%x\n",
+ 						disk->disk_name, cmd));
+ 
++	error = scsi_verify_blk_ioctl(bdev, cmd);
++	if (error < 0)
++		return error;
++
+ 	/*
+ 	 * If we are in the middle of error recovery, don't let anyone
+ 	 * else try and use this device.  Also, if error recovery fails, it
+@@ -996,6 +1000,11 @@ static int sd_compat_ioctl(struct block_device *bdev, fmode_t mode,
+ 			   unsigned int cmd, unsigned long arg)
+ {
+ 	struct scsi_device *sdev = scsi_disk(bdev->bd_disk)->device;
++	int ret;
++
++	ret = scsi_verify_blk_ioctl(bdev, cmd);
++	if (ret < 0)
++		return -ENOIOCTLCMD;
+ 
+ 	/*
+ 	 * If we are in the middle of error recovery, don't let anyone
+@@ -1007,8 +1016,6 @@ static int sd_compat_ioctl(struct block_device *bdev, fmode_t mode,
+ 		return -ENODEV;
+ 	       
+ 	if (sdev->host->hostt->compat_ioctl) {
+-		int ret;
+-
+ 		ret = sdev->host->hostt->compat_ioctl(sdev, cmd, (void __user *)arg);
+ 
+ 		return ret;
+diff --git a/drivers/usb/class/cdc-wdm.c b/drivers/usb/class/cdc-wdm.c
+index 696ca75f..d71514b 100644
+--- a/drivers/usb/class/cdc-wdm.c
++++ b/drivers/usb/class/cdc-wdm.c
+@@ -458,7 +458,9 @@ retry:
+ 	for (i = 0; i < desc->length - cntr; i++)
+ 		desc->ubuf[i] = desc->ubuf[i + cntr];
+ 
++	spin_lock_irq(&desc->iuspin);
+ 	desc->length -= cntr;
++	spin_unlock_irq(&desc->iuspin);
+ 	/* in case we had outstanding data */
+ 	if (!desc->length)
+ 		clear_bit(WDM_READ, &desc->flags);
+diff --git a/drivers/usb/misc/usbsevseg.c b/drivers/usb/misc/usbsevseg.c
+index cd8726c..6bc0bf3 100644
+--- a/drivers/usb/misc/usbsevseg.c
++++ b/drivers/usb/misc/usbsevseg.c
+@@ -24,7 +24,7 @@
+ 
+ #define VENDOR_ID	0x0fc5
+ #define PRODUCT_ID	0x1227
+-#define MAXLEN		6
++#define MAXLEN		8
+ 
+ /* table of devices that work with this driver */
+ static struct usb_device_id id_table[] = {
+diff --git a/drivers/usb/serial/cp210x.c b/drivers/usb/serial/cp210x.c
+index 8dcaf42..bb16725 100644
+--- a/drivers/usb/serial/cp210x.c
++++ b/drivers/usb/serial/cp210x.c
+@@ -140,6 +140,7 @@ static struct usb_device_id id_table [] = {
+ 	{ USB_DEVICE(0x1843, 0x0200) }, /* Vaisala USB Instrument Cable */
+ 	{ USB_DEVICE(0x18EF, 0xE00F) }, /* ELV USB-I2C-Interface */
+ 	{ USB_DEVICE(0x1BE3, 0x07A6) }, /* WAGO 750-923 USB Service Cable */
++	{ USB_DEVICE(0x3195, 0xF190) }, /* Link Instruments MSO-19 */
+ 	{ USB_DEVICE(0x413C, 0x9500) }, /* DW700 GPS USB interface */
+ 	{ } /* Terminating Entry */
+ };
+@@ -360,8 +361,8 @@ static inline int cp210x_set_config_single(struct usb_serial_port *port,
+  * Quantises the baud rate as per AN205 Table 1
+  */
+ static unsigned int cp210x_quantise_baudrate(unsigned int baud) {
+-	if      (baud <= 56)       baud = 0;
+-	else if (baud <= 300)      baud = 300;
++	if (baud <= 300)
++		baud = 300;
+ 	else if (baud <= 600)      baud = 600;
+ 	else if (baud <= 1200)     baud = 1200;
+ 	else if (baud <= 1800)     baud = 1800;
+diff --git a/drivers/usb/serial/ftdi_sio.c b/drivers/usb/serial/ftdi_sio.c
+index 5ce2cb9..85d630e 100644
+--- a/drivers/usb/serial/ftdi_sio.c
++++ b/drivers/usb/serial/ftdi_sio.c
+@@ -798,6 +798,7 @@ static struct usb_device_id id_table_combined [] = {
+ 		.driver_info = (kernel_ulong_t)&ftdi_jtag_quirk },
+ 	{ USB_DEVICE(ADI_VID, ADI_GNICEPLUS_PID),
+ 		.driver_info = (kernel_ulong_t)&ftdi_jtag_quirk },
++	{ USB_DEVICE(HORNBY_VID, HORNBY_ELITE_PID) },
+ 	{ USB_DEVICE(JETI_VID, JETI_SPC1201_PID) },
+ 	{ USB_DEVICE(MARVELL_VID, MARVELL_SHEEVAPLUG_PID),
+ 		.driver_info = (kernel_ulong_t)&ftdi_jtag_quirk },
+@@ -806,6 +807,8 @@ static struct usb_device_id id_table_combined [] = {
+ 	{ USB_DEVICE(BAYER_VID, BAYER_CONTOUR_CABLE_PID) },
+ 	{ USB_DEVICE(FTDI_VID, MARVELL_OPENRD_PID),
+ 		.driver_info = (kernel_ulong_t)&ftdi_jtag_quirk },
++	{ USB_DEVICE(FTDI_VID, TI_XDS100V2_PID),
++		.driver_info = (kernel_ulong_t)&ftdi_jtag_quirk },
+ 	{ USB_DEVICE(FTDI_VID, HAMEG_HO820_PID) },
+ 	{ USB_DEVICE(FTDI_VID, HAMEG_HO720_PID) },
+ 	{ USB_DEVICE(FTDI_VID, HAMEG_HO730_PID) },
+@@ -842,6 +845,7 @@ static struct usb_device_id id_table_combined [] = {
+ 		.driver_info = (kernel_ulong_t)&ftdi_jtag_quirk },
+ 	{ USB_DEVICE(ST_VID, ST_STMCLT1030_PID),
+ 		.driver_info = (kernel_ulong_t)&ftdi_stmclite_quirk },
++	{ USB_DEVICE(FTDI_VID, FTDI_RF_R106) },
+ 	{ },					/* Optional parameter entry */
+ 	{ }					/* Terminating entry */
+ };
+@@ -1351,8 +1355,7 @@ static int set_serial_info(struct tty_struct *tty,
+ 		goto check_and_exit;
+ 	}
+ 
+-	if ((new_serial.baud_base != priv->baud_base) &&
+-	    (new_serial.baud_base < 9600)) {
++	if (new_serial.baud_base != priv->baud_base) {
+ 	    	unlock_kernel();
+ 		return -EINVAL;
+ 	}
+@@ -1865,6 +1868,7 @@ static int ftdi_submit_read_urb(struct usb_serial_port *port, gfp_t mem_flags)
+ 
+ static int ftdi_open(struct tty_struct *tty, struct usb_serial_port *port)
+ { /* ftdi_open */
++	struct ktermios dummy;
+ 	struct usb_device *dev = port->serial->dev;
+ 	struct ftdi_private *priv = usb_get_serial_port_data(port);
+ 	unsigned long flags;
+@@ -1892,8 +1896,10 @@ static int ftdi_open(struct tty_struct *tty, struct usb_serial_port *port)
+ 	   This is same behaviour as serial.c/rs_open() - Kuba */
+ 
+ 	/* ftdi_set_termios  will send usb control messages */
+-	if (tty)
+-		ftdi_set_termios(tty, port, tty->termios);
++	if (tty) {
++		memset(&dummy, 0, sizeof(dummy));
++		ftdi_set_termios(tty, port, &dummy);
++	}
+ 
+ 	/* Not throttled */
+ 	spin_lock_irqsave(&port->lock, flags);
+diff --git a/drivers/usb/serial/ftdi_sio_ids.h b/drivers/usb/serial/ftdi_sio_ids.h
+index 8ce1bcb..212fc41 100644
+--- a/drivers/usb/serial/ftdi_sio_ids.h
++++ b/drivers/usb/serial/ftdi_sio_ids.h
+@@ -38,6 +38,13 @@
+ /* www.candapter.com Ewert Energy Systems CANdapter device */
+ #define FTDI_CANDAPTER_PID 0x9F80 /* Product Id */
+ 
++/*
++ * Texas Instruments XDS100v2 JTAG / BeagleBone A3
++ * http://processors.wiki.ti.com/index.php/XDS100
++ * http://beagleboard.org/bone
++ */
++#define TI_XDS100V2_PID		0xa6d0
++
+ #define FTDI_NXTCAM_PID		0xABB8 /* NXTCam for Mindstorms NXT */
+ 
+ /* US Interface Navigator (http://www.usinterface.com/) */
+@@ -524,6 +531,12 @@
+ #define ADI_GNICEPLUS_PID 	0xF001
+ 
+ /*
++ * Hornby Elite
++ */
++#define HORNBY_VID		0x04D8
++#define HORNBY_ELITE_PID	0x000A
++
++/*
+  * RATOC REX-USB60F
+  */
+ #define RATOC_VENDOR_ID		0x0584
+@@ -1173,3 +1186,9 @@
+  */
+ /* TagTracer MIFARE*/
+ #define FTDI_ZEITCONTROL_TAGTRACE_MIFARE_PID	0xF7C0
++
++/*
++ * Rainforest Automation
++ */
++/* ZigBee controller */
++#define FTDI_RF_R106		0x8A28
+diff --git a/drivers/usb/serial/io_ti.c b/drivers/usb/serial/io_ti.c
+index fbdbac5..14d51e6 100644
+--- a/drivers/usb/serial/io_ti.c
++++ b/drivers/usb/serial/io_ti.c
+@@ -2664,15 +2664,7 @@ cleanup:
+ 
+ static void edge_disconnect(struct usb_serial *serial)
+ {
+-	int i;
+-	struct edgeport_port *edge_port;
+-
+ 	dbg("%s", __func__);
+-
+-	for (i = 0; i < serial->num_ports; ++i) {
+-		edge_port = usb_get_serial_port_data(serial->port[i]);
+-		edge_remove_sysfs_attrs(edge_port->port);
+-	}
+ }
+ 
+ static void edge_release(struct usb_serial *serial)
+@@ -2927,6 +2919,7 @@ static struct usb_serial_driver edgeport_1port_device = {
+ 	.disconnect		= edge_disconnect,
+ 	.release		= edge_release,
+ 	.port_probe		= edge_create_sysfs_attrs,
++	.port_remove		= edge_remove_sysfs_attrs,
+ 	.ioctl			= edge_ioctl,
+ 	.set_termios		= edge_set_termios,
+ 	.tiocmget		= edge_tiocmget,
+@@ -2957,6 +2950,7 @@ static struct usb_serial_driver edgeport_2port_device = {
+ 	.disconnect		= edge_disconnect,
+ 	.release		= edge_release,
+ 	.port_probe		= edge_create_sysfs_attrs,
++	.port_remove		= edge_remove_sysfs_attrs,
+ 	.ioctl			= edge_ioctl,
+ 	.set_termios		= edge_set_termios,
+ 	.tiocmget		= edge_tiocmget,
+diff --git a/fs/ecryptfs/crypto.c b/fs/ecryptfs/crypto.c
+index 443947f..7a5f1ac 100644
+--- a/fs/ecryptfs/crypto.c
++++ b/fs/ecryptfs/crypto.c
+@@ -1609,7 +1609,8 @@ int ecryptfs_read_metadata(struct dentry *ecryptfs_dentry)
+ 		rc = ecryptfs_read_xattr_region(page_virt, ecryptfs_inode);
+ 		if (rc) {
+ 			printk(KERN_DEBUG "Valid eCryptfs headers not found in "
+-			       "file header region or xattr region\n");
++			       "file header region or xattr region, inode %lu\n",
++				ecryptfs_inode->i_ino);
+ 			rc = -EINVAL;
+ 			goto out;
+ 		}
+@@ -1618,7 +1619,8 @@ int ecryptfs_read_metadata(struct dentry *ecryptfs_dentry)
+ 						ECRYPTFS_DONT_VALIDATE_HEADER_SIZE);
+ 		if (rc) {
+ 			printk(KERN_DEBUG "Valid eCryptfs headers not found in "
+-			       "file xattr region either\n");
++			       "file xattr region either, inode %lu\n",
++				ecryptfs_inode->i_ino);
+ 			rc = -EINVAL;
+ 		}
+ 		if (crypt_stat->mount_crypt_stat->flags
+@@ -1629,7 +1631,8 @@ int ecryptfs_read_metadata(struct dentry *ecryptfs_dentry)
+ 			       "crypto metadata only in the extended attribute "
+ 			       "region, but eCryptfs was mounted without "
+ 			       "xattr support enabled. eCryptfs will not treat "
+-			       "this like an encrypted file.\n");
++			       "this like an encrypted file, inode %lu\n",
++				ecryptfs_inode->i_ino);
+ 			rc = -EINVAL;
+ 		}
+ 	}
+diff --git a/fs/ecryptfs/miscdev.c b/fs/ecryptfs/miscdev.c
+index 4ec8f61..c4b0bc5 100644
+--- a/fs/ecryptfs/miscdev.c
++++ b/fs/ecryptfs/miscdev.c
+@@ -408,11 +408,47 @@ ecryptfs_miscdev_write(struct file *file, const char __user *buf,
+ 	ssize_t sz = 0;
+ 	char *data;
+ 	uid_t euid = current_euid();
++	unsigned char packet_size_peek[3];
+ 	int rc;
+ 
+-	if (count == 0)
++	if (count == 0) {
+ 		goto out;
++	} else if (count == (1 + 4)) {
++		/* Likely a harmless MSG_HELO or MSG_QUIT - no packet length */
++		goto memdup;
++	} else if (count < (1 + 4 + 1)
++		   || count > (1 + 4 + 2 + sizeof(struct ecryptfs_message) + 4
++			       + ECRYPTFS_MAX_ENCRYPTED_KEY_BYTES)) {
++		printk(KERN_WARNING "%s: Acceptable packet size range is "
++		       "[%d-%lu], but amount of data written is [%zu].",
++		       __func__, (1 + 4 + 1),
++		       (1 + 4 + 2 + sizeof(struct ecryptfs_message) + 4
++			+ ECRYPTFS_MAX_ENCRYPTED_KEY_BYTES), count);
++		return -EINVAL;
++	}
++
++	if (copy_from_user(packet_size_peek, (buf + 1 + 4),
++			   sizeof(packet_size_peek))) {
++		printk(KERN_WARNING "%s: Error while inspecting packet size\n",
++		       __func__);
++		return -EFAULT;
++	}
++
++	rc = ecryptfs_parse_packet_length(packet_size_peek, &packet_size,
++					  &packet_size_length);
++	if (rc) {
++		printk(KERN_WARNING "%s: Error parsing packet length; "
++		       "rc = [%d]\n", __func__, rc);
++		return rc;
++	}
++
++	if ((1 + 4 + packet_size_length + packet_size) != count) {
++		printk(KERN_WARNING "%s: Invalid packet size [%zu]\n", __func__,
++		       packet_size);
++		return -EINVAL;
++	}
+ 
++memdup:
+ 	data = memdup_user(buf, count);
+ 	if (IS_ERR(data)) {
+ 		printk(KERN_ERR "%s: memdup_user returned error [%ld]\n",
+@@ -434,23 +470,7 @@ ecryptfs_miscdev_write(struct file *file, const char __user *buf,
+ 		}
+ 		memcpy(&counter_nbo, &data[i], 4);
+ 		seq = be32_to_cpu(counter_nbo);
+-		i += 4;
+-		rc = ecryptfs_parse_packet_length(&data[i], &packet_size,
+-						  &packet_size_length);
+-		if (rc) {
+-			printk(KERN_WARNING "%s: Error parsing packet length; "
+-			       "rc = [%d]\n", __func__, rc);
+-			goto out_free;
+-		}
+-		i += packet_size_length;
+-		if ((1 + 4 + packet_size_length + packet_size) != count) {
+-			printk(KERN_WARNING "%s: (1 + packet_size_length([%zd])"
+-			       " + packet_size([%zd]))([%zd]) != "
+-			       "count([%zd]). Invalid packet format.\n",
+-			       __func__, packet_size_length, packet_size,
+-			       (1 + packet_size_length + packet_size), count);
+-			goto out_free;
+-		}
++		i += 4 + packet_size_length;
+ 		rc = ecryptfs_miscdev_response(&data[i], packet_size,
+ 					       euid, current_user_ns(),
+ 					       task_pid(current), seq);
+diff --git a/fs/ecryptfs/read_write.c b/fs/ecryptfs/read_write.c
+index 0cc4faf..6b78546 100644
+--- a/fs/ecryptfs/read_write.c
++++ b/fs/ecryptfs/read_write.c
+@@ -136,6 +136,11 @@ int ecryptfs_write(struct file *ecryptfs_file, char *data, loff_t offset,
+ 		size_t num_bytes = (PAGE_CACHE_SIZE - start_offset_in_page);
+ 		size_t total_remaining_bytes = ((offset + size) - pos);
+ 
++		if (fatal_signal_pending(current)) {
++			rc = -EINTR;
++			break;
++		}
++
+ 		if (num_bytes > total_remaining_bytes)
+ 			num_bytes = total_remaining_bytes;
+ 		if (pos < offset) {
+@@ -197,15 +202,19 @@ int ecryptfs_write(struct file *ecryptfs_file, char *data, loff_t offset,
+ 		}
+ 		pos += num_bytes;
+ 	}
+-	if ((offset + size) > ecryptfs_file_size) {
+-		i_size_write(ecryptfs_inode, (offset + size));
++	if (pos > ecryptfs_file_size) {
++		i_size_write(ecryptfs_inode, pos);
+ 		if (crypt_stat->flags & ECRYPTFS_ENCRYPTED) {
+-			rc = ecryptfs_write_inode_size_to_metadata(
++			int rc2;
++
++			rc2 = ecryptfs_write_inode_size_to_metadata(
+ 								ecryptfs_inode);
+-			if (rc) {
++			if (rc2) {
+ 				printk(KERN_ERR	"Problem with "
+ 				       "ecryptfs_write_inode_size_to_metadata; "
+-				       "rc = [%d]\n", rc);
++				       "rc = [%d]\n", rc2);
++				if (!rc)
++					rc = rc2;
+ 				goto out;
+ 			}
+ 		}
+diff --git a/include/drm/drmP.h b/include/drm/drmP.h
+index 66713c6..ebab6a6 100644
+diff --git a/include/linux/blkdev.h b/include/linux/blkdev.h
+index 63070ad..5eb6cb0 100644
+--- a/include/linux/blkdev.h
++++ b/include/linux/blkdev.h
+@@ -777,6 +777,7 @@ extern void blk_plug_device(struct request_queue *);
+ extern void blk_plug_device_unlocked(struct request_queue *);
+ extern int blk_remove_plug(struct request_queue *);
+ extern void blk_recount_segments(struct request_queue *, struct bio *);
++extern int scsi_verify_blk_ioctl(struct block_device *, unsigned int);
+ extern int scsi_cmd_blk_ioctl(struct block_device *, fmode_t,
+ 			      unsigned int, void __user *);
+ extern int scsi_cmd_ioctl(struct request_queue *, struct gendisk *, fmode_t,
