@@ -1,0 +1,540 @@
+diff --git a/Makefile b/Makefile
+index 81ad738..3377650 100644
+diff --git a/drivers/gpu/drm/i915/intel_tv.c b/drivers/gpu/drm/i915/intel_tv.c
+index 5b28b4e..d156b25 100644
+diff --git a/drivers/infiniband/hw/mlx4/mad.c b/drivers/infiniband/hw/mlx4/mad.c
+index 19e68ab..c0206dc 100644
+--- a/drivers/infiniband/hw/mlx4/mad.c
++++ b/drivers/infiniband/hw/mlx4/mad.c
+@@ -252,12 +252,9 @@ int mlx4_ib_process_mad(struct ib_device *ibdev, int mad_flags,	u8 port_num,
+ 			return IB_MAD_RESULT_SUCCESS;
+ 
+ 		/*
+-		 * Don't process SMInfo queries or vendor-specific
+-		 * MADs -- the SMA can't handle them.
++		 * Don't process SMInfo queries -- the SMA can't handle them.
+ 		 */
+-		if (in_mad->mad_hdr.attr_id == IB_SMP_ATTR_SM_INFO ||
+-		    ((in_mad->mad_hdr.attr_id & IB_SMP_ATTR_VENDOR_MASK) ==
+-		     IB_SMP_ATTR_VENDOR_MASK))
++		if (in_mad->mad_hdr.attr_id == IB_SMP_ATTR_SM_INFO)
+ 			return IB_MAD_RESULT_SUCCESS;
+ 	} else if (in_mad->mad_hdr.mgmt_class == IB_MGMT_CLASS_PERF_MGMT ||
+ 		   in_mad->mad_hdr.mgmt_class == MLX4_IB_VENDOR_CLASS1   ||
+diff --git a/drivers/misc/cb710/core.c b/drivers/misc/cb710/core.c
+index b14eab0..e43777e 100644
+--- a/drivers/misc/cb710/core.c
++++ b/drivers/misc/cb710/core.c
+@@ -244,6 +244,7 @@ static int __devinit cb710_probe(struct pci_dev *pdev,
+ 	if (err)
+ 		return err;
+ 
++	spin_lock_init(&chip->irq_lock);
+ 	chip->pdev = pdev;
+ 	chip->iobase = pcim_iomap_table(pdev)[0];
+ 
+diff --git a/drivers/staging/android/binder.c b/drivers/staging/android/binder.c
+index 99010d4..b9b37ff 100644
+--- a/drivers/staging/android/binder.c
++++ b/drivers/staging/android/binder.c
+@@ -36,6 +36,7 @@
+ 
+ static DEFINE_MUTEX(binder_lock);
+ static DEFINE_MUTEX(binder_deferred_lock);
++static DEFINE_MUTEX(binder_mmap_lock);
+ 
+ static HLIST_HEAD(binder_procs);
+ static HLIST_HEAD(binder_deferred_list);
+@@ -614,6 +615,11 @@ static int binder_update_page_range(struct binder_proc *proc, int allocate,
+ 	if (mm) {
+ 		down_write(&mm->mmap_sem);
+ 		vma = proc->vma;
++		if (vma && mm != vma->vm_mm) {
++			pr_err("binder: %d: vma mm and task mm mismatch\n",
++				proc->pid);
++			vma = NULL;
++		}
+ 	}
+ 
+ 	if (allocate == 0)
+@@ -2741,7 +2747,6 @@ static void binder_vma_open(struct vm_area_struct *vma)
+ 		     proc->pid, vma->vm_start, vma->vm_end,
+ 		     (vma->vm_end - vma->vm_start) / SZ_1K, vma->vm_flags,
+ 		     (unsigned long)pgprot_val(vma->vm_page_prot));
+-	dump_stack();
+ }
+ 
+ static void binder_vma_close(struct vm_area_struct *vma)
+@@ -2785,6 +2790,7 @@ static int binder_mmap(struct file *filp, struct vm_area_struct *vma)
+ 	}
+ 	vma->vm_flags = (vma->vm_flags | VM_DONTCOPY) & ~VM_MAYWRITE;
+ 
++	mutex_lock(&binder_mmap_lock);
+ 	if (proc->buffer) {
+ 		ret = -EBUSY;
+ 		failure_string = "already mapped";
+@@ -2799,6 +2805,7 @@ static int binder_mmap(struct file *filp, struct vm_area_struct *vma)
+ 	}
+ 	proc->buffer = area->addr;
+ 	proc->user_buffer_offset = vma->vm_start - (uintptr_t)proc->buffer;
++	mutex_unlock(&binder_mmap_lock);
+ 
+ #ifdef CONFIG_CPU_CACHE_VIPT
+ 	if (cache_is_vipt_aliasing()) {
+@@ -2831,7 +2838,7 @@ static int binder_mmap(struct file *filp, struct vm_area_struct *vma)
+ 	binder_insert_free_buffer(proc, buffer);
+ 	proc->free_async_space = proc->buffer_size / 2;
+ 	barrier();
+-	proc->files = get_files_struct(current);
++	proc->files = get_files_struct(proc->tsk);
+ 	proc->vma = vma;
+ 
+ 	/*printk(KERN_INFO "binder_mmap: %d %lx-%lx maps %p\n",
+@@ -2842,10 +2849,12 @@ err_alloc_small_buf_failed:
+ 	kfree(proc->pages);
+ 	proc->pages = NULL;
+ err_alloc_pages_failed:
++	mutex_lock(&binder_mmap_lock);
+ 	vfree(proc->buffer);
+ 	proc->buffer = NULL;
+ err_get_vm_area_failed:
+ err_already_mapped:
++	mutex_unlock(&binder_mmap_lock);
+ err_bad_arg:
+ 	printk(KERN_ERR "binder_mmap: %d %lx-%lx %s failed %d\n",
+ 	       proc->pid, vma->vm_start, vma->vm_end, failure_string, ret);
+diff --git a/drivers/staging/asus_oled/asus_oled.c b/drivers/staging/asus_oled/asus_oled.c
+index 8a05725..ea99f05 100644
+--- a/drivers/staging/asus_oled/asus_oled.c
++++ b/drivers/staging/asus_oled/asus_oled.c
+@@ -349,7 +349,14 @@ static void send_data(struct asus_oled_dev *odev)
+ 
+ static int append_values(struct asus_oled_dev *odev, uint8_t val, size_t count)
+ {
+-	while (count-- > 0 && val) {
++	odev->last_val = val;
++
++	if (val == 0) {
++		odev->buf_offs += count;
++		return 0;
++	}
++
++	while (count-- > 0) {
+ 		size_t x = odev->buf_offs % odev->width;
+ 		size_t y = odev->buf_offs / odev->width;
+ 		size_t i;
+@@ -400,7 +407,6 @@ static int append_values(struct asus_oled_dev *odev, uint8_t val, size_t count)
+ 			;
+ 		}
+ 
+-		odev->last_val = val;
+ 		odev->buf_offs++;
+ 	}
+ 
+diff --git a/drivers/usb/gadget/f_loopback.c b/drivers/usb/gadget/f_loopback.c
+index 6cb29d3..8b4dbfc 100644
+--- a/drivers/usb/gadget/f_loopback.c
++++ b/drivers/usb/gadget/f_loopback.c
+@@ -373,7 +373,7 @@ int __init loopback_add(struct usb_composite_dev *cdev, bool autoresume)
+ 
+ 	/* support autoresume for remote wakeup testing */
+ 	if (autoresume)
+-		sourcesink_driver.bmAttributes |= USB_CONFIG_ATT_WAKEUP;
++		loopback_driver.bmAttributes |= USB_CONFIG_ATT_WAKEUP;
+ 
+ 	/* support OTG systems */
+ 	if (gadget_is_otg(cdev->gadget)) {
+diff --git a/drivers/usb/host/pci-quirks.c b/drivers/usb/host/pci-quirks.c
+index eae8b18..8213f79 100644
+--- a/drivers/usb/host/pci-quirks.c
++++ b/drivers/usb/host/pci-quirks.c
+@@ -498,6 +498,12 @@ hc_init:
+ 
+ static void __devinit quirk_usb_early_handoff(struct pci_dev *pdev)
+ {
++	/* Skip Netlogic mips SoC's internal PCI USB controller.
++	 * This device does not need/support EHCI/OHCI handoff
++	 */
++	if (pdev->vendor == 0x184e)	/* vendor Netlogic */
++		return;
++
+ 	if (pdev->class == PCI_CLASS_SERIAL_USB_UHCI)
+ 		quirk_usb_handoff_uhci(pdev);
+ 	else if (pdev->class == PCI_CLASS_SERIAL_USB_OHCI)
+diff --git a/drivers/usb/serial/ftdi_sio.c b/drivers/usb/serial/ftdi_sio.c
+index 85d630e..0a1ccaa 100644
+--- a/drivers/usb/serial/ftdi_sio.c
++++ b/drivers/usb/serial/ftdi_sio.c
+@@ -840,6 +840,7 @@ static struct usb_device_id id_table_combined [] = {
+ 	{ USB_DEVICE(FTDI_VID, FTDI_SCIENCESCOPE_LOGBOOKML_PID) },
+ 	{ USB_DEVICE(FTDI_VID, FTDI_SCIENCESCOPE_LS_LOGBOOK_PID) },
+ 	{ USB_DEVICE(FTDI_VID, FTDI_SCIENCESCOPE_HS_LOGBOOK_PID) },
++	{ USB_DEVICE(FTDI_VID, FTDI_CINTERION_MC55I_PID) },
+ 	{ USB_DEVICE(FTDI_VID, FTDI_DOTEC_PID) },
+ 	{ USB_DEVICE(QIHARDWARE_VID, MILKYMISTONE_JTAGSERIAL_PID),
+ 		.driver_info = (kernel_ulong_t)&ftdi_jtag_quirk },
+diff --git a/drivers/usb/serial/ftdi_sio_ids.h b/drivers/usb/serial/ftdi_sio_ids.h
+index 212fc41..7bc0abd 100644
+--- a/drivers/usb/serial/ftdi_sio_ids.h
++++ b/drivers/usb/serial/ftdi_sio_ids.h
+@@ -1192,3 +1192,10 @@
+  */
+ /* ZigBee controller */
+ #define FTDI_RF_R106		0x8A28
++
++/*
++ * Product: HCP HIT GPRS modem
++ * Manufacturer: HCP d.o.o.
++ * ATI command output: Cinterion MC55i
++ */
++#define FTDI_CINTERION_MC55I_PID	0xA951
+diff --git a/drivers/video/atmel_lcdfb.c b/drivers/video/atmel_lcdfb.c
+index d5e8010..8c5e432 100644
+--- a/drivers/video/atmel_lcdfb.c
++++ b/drivers/video/atmel_lcdfb.c
+@@ -1052,7 +1052,7 @@ static int atmel_lcdfb_suspend(struct platform_device *pdev, pm_message_t mesg)
+ 	 */
+ 	lcdc_writel(sinfo, ATMEL_LCDC_IDR, ~0UL);
+ 
+-	sinfo->saved_lcdcon = lcdc_readl(sinfo, ATMEL_LCDC_CONTRAST_VAL);
++	sinfo->saved_lcdcon = lcdc_readl(sinfo, ATMEL_LCDC_CONTRAST_CTR);
+ 	lcdc_writel(sinfo, ATMEL_LCDC_CONTRAST_CTR, 0);
+ 	if (sinfo->atmel_lcdfb_power_control)
+ 		sinfo->atmel_lcdfb_power_control(0);
+diff --git a/fs/ecryptfs/read_write.c b/fs/ecryptfs/read_write.c
+index 6b78546..0404659 100644
+--- a/fs/ecryptfs/read_write.c
++++ b/fs/ecryptfs/read_write.c
+@@ -134,7 +134,7 @@ int ecryptfs_write(struct file *ecryptfs_file, char *data, loff_t offset,
+ 		pgoff_t ecryptfs_page_idx = (pos >> PAGE_CACHE_SHIFT);
+ 		size_t start_offset_in_page = (pos & ~PAGE_CACHE_MASK);
+ 		size_t num_bytes = (PAGE_CACHE_SIZE - start_offset_in_page);
+-		size_t total_remaining_bytes = ((offset + size) - pos);
++		loff_t total_remaining_bytes = ((offset + size) - pos);
+ 
+ 		if (fatal_signal_pending(current)) {
+ 			rc = -EINTR;
+@@ -145,7 +145,7 @@ int ecryptfs_write(struct file *ecryptfs_file, char *data, loff_t offset,
+ 			num_bytes = total_remaining_bytes;
+ 		if (pos < offset) {
+ 			/* remaining zeros to write, up to destination offset */
+-			size_t total_remaining_zeros = (offset - pos);
++			loff_t total_remaining_zeros = (offset - pos);
+ 
+ 			if (num_bytes > total_remaining_zeros)
+ 				num_bytes = total_remaining_zeros;
+diff --git a/fs/nfs/nfs4proc.c b/fs/nfs/nfs4proc.c
+index eb4421b..3c759df 100644
+--- a/fs/nfs/nfs4proc.c
++++ b/fs/nfs/nfs4proc.c
+@@ -1067,6 +1067,7 @@ static int nfs4_open_recover(struct nfs4_opendata *opendata, struct nfs4_state *
+ 	clear_bit(NFS_DELEGATED_STATE, &state->flags);
+ 	smp_rmb();
+ 	if (state->n_rdwr != 0) {
++		clear_bit(NFS_O_RDWR_STATE, &state->flags);
+ 		ret = nfs4_open_recover_helper(opendata, FMODE_READ|FMODE_WRITE, &newstate);
+ 		if (ret != 0)
+ 			return ret;
+@@ -1074,6 +1075,7 @@ static int nfs4_open_recover(struct nfs4_opendata *opendata, struct nfs4_state *
+ 			return -ESTALE;
+ 	}
+ 	if (state->n_wronly != 0) {
++		clear_bit(NFS_O_WRONLY_STATE, &state->flags);
+ 		ret = nfs4_open_recover_helper(opendata, FMODE_WRITE, &newstate);
+ 		if (ret != 0)
+ 			return ret;
+@@ -1081,6 +1083,7 @@ static int nfs4_open_recover(struct nfs4_opendata *opendata, struct nfs4_state *
+ 			return -ESTALE;
+ 	}
+ 	if (state->n_rdonly != 0) {
++		clear_bit(NFS_O_RDONLY_STATE, &state->flags);
+ 		ret = nfs4_open_recover_helper(opendata, FMODE_READ, &newstate);
+ 		if (ret != 0)
+ 			return ret;
+@@ -1490,7 +1493,7 @@ static int _nfs4_open_expired(struct nfs_open_context *ctx, struct nfs4_state *s
+ 	return ret;
+ }
+ 
+-static inline int nfs4_do_open_expired(struct nfs_open_context *ctx, struct nfs4_state *state)
++static int nfs4_do_open_expired(struct nfs_open_context *ctx, struct nfs4_state *state)
+ {
+ 	struct nfs_server *server = NFS_SERVER(state->inode);
+ 	struct nfs4_exception exception = { };
+@@ -1498,10 +1501,16 @@ static inline int nfs4_do_open_expired(struct nfs_open_context *ctx, struct nfs4
+ 
+ 	do {
+ 		err = _nfs4_open_expired(ctx, state);
+-		if (err != -NFS4ERR_DELAY)
+-			break;
+-		nfs4_handle_exception(server, err, &exception);
++		switch (err) {
++		default:
++			goto out;
++		case -NFS4ERR_GRACE:
++		case -NFS4ERR_DELAY:
++			nfs4_handle_exception(server, err, &exception);
++			err = 0;
++		}
+ 	} while (exception.retry);
++out:
+ 	return err;
+ }
+ 
+@@ -4111,10 +4120,16 @@ static int nfs4_lock_expired(struct nfs4_state *state, struct file_lock *request
+ 		if (test_bit(NFS_DELEGATED_STATE, &state->flags) != 0)
+ 			return 0;
+ 		err = _nfs4_do_setlk(state, F_SETLK, request, 0);
+-		if (err != -NFS4ERR_DELAY)
+-			break;
+-		nfs4_handle_exception(server, err, &exception);
++		switch (err) {
++		default:
++			goto out;
++		case -NFS4ERR_GRACE:
++		case -NFS4ERR_DELAY:
++			nfs4_handle_exception(server, err, &exception);
++			err = 0;
++		}
+ 	} while (exception.retry);
++out:
+ 	return err;
+ }
+ 
+diff --git a/fs/nfs/nfs4state.c b/fs/nfs/nfs4state.c
+index 2fd5287..2a7f163 100644
+--- a/fs/nfs/nfs4state.c
++++ b/fs/nfs/nfs4state.c
+@@ -1051,15 +1051,19 @@ static void nfs4_state_end_reclaim_nograce(struct nfs_client *clp)
+ 	clear_bit(NFS4CLNT_RECLAIM_NOGRACE, &clp->cl_state);
+ }
+ 
+-static void nfs4_recovery_handle_error(struct nfs_client *clp, int error)
++static int nfs4_recovery_handle_error(struct nfs_client *clp, int error)
+ {
+ 	switch (error) {
+ 		case -NFS4ERR_CB_PATH_DOWN:
+ 			nfs_handle_cb_pathdown(clp);
+-			break;
++			return 0;
++		case -NFS4ERR_NO_GRACE:
++			nfs4_state_end_reclaim_reboot(clp);
++			return 0;
+ 		case -NFS4ERR_STALE_CLIENTID:
+ 		case -NFS4ERR_LEASE_MOVED:
+ 			set_bit(NFS4CLNT_LEASE_EXPIRED, &clp->cl_state);
++			nfs4_state_end_reclaim_reboot(clp);
+ 			nfs4_state_start_reclaim_reboot(clp);
+ 			break;
+ 		case -NFS4ERR_EXPIRED:
+@@ -1074,6 +1078,7 @@ static void nfs4_recovery_handle_error(struct nfs_client *clp, int error)
+ 		case -NFS4ERR_SEQ_MISORDERED:
+ 			set_bit(NFS4CLNT_SESSION_SETUP, &clp->cl_state);
+ 	}
++	return error;
+ }
+ 
+ static int nfs4_do_reclaim(struct nfs_client *clp, const struct nfs4_state_recovery_ops *ops)
+@@ -1093,8 +1098,7 @@ restart:
+ 		if (status < 0) {
+ 			set_bit(ops->owner_flag_bit, &sp->so_flags);
+ 			nfs4_put_state_owner(sp);
+-			nfs4_recovery_handle_error(clp, status);
+-			return status;
++			return nfs4_recovery_handle_error(clp, status);
+ 		}
+ 		nfs4_put_state_owner(sp);
+ 		goto restart;
+@@ -1124,8 +1128,7 @@ static int nfs4_check_lease(struct nfs_client *clp)
+ 	status = ops->renew_lease(clp, cred);
+ 	put_rpccred(cred);
+ out:
+-	nfs4_recovery_handle_error(clp, status);
+-	return status;
++	return nfs4_recovery_handle_error(clp, status);
+ }
+ 
+ static int nfs4_reclaim_lease(struct nfs_client *clp)
+@@ -1263,7 +1266,7 @@ static void nfs4_state_manager(struct nfs_client *clp)
+ 			}
+ 		}
+ 		/* First recover reboot state... */
+-		if (test_and_clear_bit(NFS4CLNT_RECLAIM_REBOOT, &clp->cl_state)) {
++		if (test_bit(NFS4CLNT_RECLAIM_REBOOT, &clp->cl_state)) {
+ 			status = nfs4_do_reclaim(clp,
+ 				nfs4_reboot_recovery_ops[clp->cl_minorversion]);
+ 			if (status == -NFS4ERR_STALE_CLIENTID)
+@@ -1309,8 +1312,6 @@ static void nfs4_state_manager(struct nfs_client *clp)
+ out_error:
+ 	printk(KERN_WARNING "Error: state manager failed on NFSv4 server %s"
+ 			" with error %d\n", clp->cl_hostname, -status);
+-	if (test_bit(NFS4CLNT_RECLAIM_REBOOT, &clp->cl_state))
+-		nfs4_state_end_reclaim_reboot(clp);
+ 	nfs4_clear_state_manager_bit(clp);
+ }
+ 
+diff --git a/fs/udf/super.c b/fs/udf/super.c
+index 1e4543c..ee6b3af 100644
+--- a/fs/udf/super.c
++++ b/fs/udf/super.c
+@@ -1791,6 +1791,12 @@ static void udf_open_lvid(struct super_block *sb)
+ 			le16_to_cpu(lvid->descTag.descCRCLength)));
+ 
+ 	lvid->descTag.tagChecksum = udf_tag_checksum(&lvid->descTag);
++	/*
++	 * We set buffer uptodate unconditionally here to avoid spurious
++	 * warnings from mark_buffer_dirty() when previous EIO has marked
++	 * the buffer as !uptodate
++	 */
++	set_buffer_uptodate(bh);
+ 	mark_buffer_dirty(bh);
+ 	sbi->s_lvid_dirty = 0;
+ }
+diff --git a/include/net/sock.h b/include/net/sock.h
+index 9f96394..78adf52 100644
+--- a/include/net/sock.h
++++ b/include/net/sock.h
+@@ -1354,20 +1354,7 @@ extern void sk_stop_timer(struct sock *sk, struct timer_list* timer);
+ 
+ extern int sock_queue_rcv_skb(struct sock *sk, struct sk_buff *skb);
+ 
+-static inline int sock_queue_err_skb(struct sock *sk, struct sk_buff *skb)
+-{
+-	/* Cast skb->rcvbuf to unsigned... It's pointless, but reduces
+-	   number of warnings when compiling with -W --ANK
+-	 */
+-	if (atomic_read(&sk->sk_rmem_alloc) + skb->truesize >=
+-	    (unsigned)sk->sk_rcvbuf)
+-		return -ENOMEM;
+-	skb_set_owner_r(skb, sk);
+-	skb_queue_tail(&sk->sk_error_queue, skb);
+-	if (!sock_flag(sk, SOCK_DEAD))
+-		sk->sk_data_ready(sk, skb->len);
+-	return 0;
+-}
++extern int sock_queue_err_skb(struct sock *sk, struct sk_buff *skb);
+ 
+ /*
+  *	Recover an error report and clear atomically
+diff --git a/mm/filemap_xip.c b/mm/filemap_xip.c
+index 1888b2d..e395030 100644
+--- a/mm/filemap_xip.c
++++ b/mm/filemap_xip.c
+@@ -262,7 +262,12 @@ found:
+ 							xip_pfn);
+ 		if (err == -ENOMEM)
+ 			return VM_FAULT_OOM;
+-		BUG_ON(err);
++		/*
++		 * err == -EBUSY is fine, we've raced against another thread
++		 * that faulted-in the same page
++		 */
++		if (err != -EBUSY)
++			BUG_ON(err);
+ 		return VM_FAULT_NOPAGE;
+ 	} else {
+ 		int err, ret = VM_FAULT_OOM;
+diff --git a/net/core/skbuff.c b/net/core/skbuff.c
+index a807f8c..025f924 100644
+--- a/net/core/skbuff.c
++++ b/net/core/skbuff.c
+@@ -2977,6 +2977,34 @@ int skb_cow_data(struct sk_buff *skb, int tailbits, struct sk_buff **trailer)
+ }
+ EXPORT_SYMBOL_GPL(skb_cow_data);
+ 
++static void sock_rmem_free(struct sk_buff *skb)
++{
++	struct sock *sk = skb->sk;
++
++	atomic_sub(skb->truesize, &sk->sk_rmem_alloc);
++}
++
++/*
++ * Note: We dont mem charge error packets (no sk_forward_alloc changes)
++ */
++int sock_queue_err_skb(struct sock *sk, struct sk_buff *skb)
++{
++	if (atomic_read(&sk->sk_rmem_alloc) + skb->truesize >=
++	    (unsigned)sk->sk_rcvbuf)
++		return -ENOMEM;
++
++	skb_orphan(skb);
++	skb->sk = sk;
++	skb->destructor = sock_rmem_free;
++	atomic_add(skb->truesize, &sk->sk_rmem_alloc);
++
++	skb_queue_tail(&sk->sk_error_queue, skb);
++	if (!sock_flag(sk, SOCK_DEAD))
++		sk->sk_data_ready(sk, skb->len);
++	return 0;
++}
++EXPORT_SYMBOL(sock_queue_err_skb);
++
+ void skb_tstamp_tx(struct sk_buff *orig_skb,
+ 		struct skb_shared_hwtstamps *hwtstamps)
+ {
+@@ -3008,7 +3036,9 @@ void skb_tstamp_tx(struct sk_buff *orig_skb,
+ 	memset(serr, 0, sizeof(*serr));
+ 	serr->ee.ee_errno = ENOMSG;
+ 	serr->ee.ee_origin = SO_EE_ORIGIN_TIMESTAMPING;
++
+ 	err = sock_queue_err_skb(sk, skb);
++
+ 	if (err)
+ 		kfree_skb(skb);
+ }
+diff --git a/net/ipv4/udp.c b/net/ipv4/udp.c
+index 0ac8833..8e28770 100644
+--- a/net/ipv4/udp.c
++++ b/net/ipv4/udp.c
+@@ -440,9 +440,9 @@ void __udp4_lib_err(struct sk_buff *skb, u32 info, struct udp_table *udptable)
+ 	if (!inet->recverr) {
+ 		if (!harderr || sk->sk_state != TCP_ESTABLISHED)
+ 			goto out;
+-	} else {
++	} else
+ 		ip_icmp_error(sk, skb, err, uh->dest, info, (u8 *)(uh+1));
+-	}
++
+ 	sk->sk_err = err;
+ 	sk->sk_error_report(sk);
+ out:
+diff --git a/net/sunrpc/xprtsock.c b/net/sunrpc/xprtsock.c
+index 683c99d..d37f07c 100644
+--- a/net/sunrpc/xprtsock.c
++++ b/net/sunrpc/xprtsock.c
+@@ -563,8 +563,6 @@ static int xs_udp_send_request(struct rpc_task *task)
+ 		/* Still some bytes left; set up for a retry later. */
+ 		status = -EAGAIN;
+ 	}
+-	if (!transport->sock)
+-		goto out;
+ 
+ 	switch (status) {
+ 	case -ENOTSOCK:
+@@ -584,7 +582,7 @@ static int xs_udp_send_request(struct rpc_task *task)
+ 		 * prompts ECONNREFUSED. */
+ 		clear_bit(SOCK_ASYNC_NOSPACE, &transport->sock->flags);
+ 	}
+-out:
++
+ 	return status;
+ }
+ 
+@@ -666,8 +664,6 @@ static int xs_tcp_send_request(struct rpc_task *task)
+ 		status = -EAGAIN;
+ 		break;
+ 	}
+-	if (!transport->sock)
+-		goto out;
+ 
+ 	switch (status) {
+ 	case -ENOTSOCK:
+@@ -687,7 +683,7 @@ static int xs_tcp_send_request(struct rpc_task *task)
+ 	case -ENOTCONN:
+ 		clear_bit(SOCK_ASYNC_NOSPACE, &transport->sock->flags);
+ 	}
+-out:
++
+ 	return status;
+ }
+ 
