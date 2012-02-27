@@ -1,0 +1,70 @@
+From: Paolo Bonzini <pbonzini@redhat.com>
+Date: Tue, 17 Jan 2012 04:07:31 +0000 (+0000)
+Subject: dm: do not forward ioctls from logical volumes to the underlying device
+X-Git-Tag: v2.6.27.60~1
+X-Git-Url: https://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Fstable%2Flinux-stable.git;a=commitdiff_plain;h=8eca6dc41431c18b75ccdc2f04df589ddca4e0dc
+
+dm: do not forward ioctls from logical volumes to the underlying device
+
+commit ec8013beddd717d1740cfefb1a9b900deef85462 upstream.
+
+A logical volume can map to just part of underlying physical volume.
+In this case, it must be treated like a partition.
+
+Based on a patch from Alasdair G Kergon.
+
+Cc: Alasdair G Kergon <agk@redhat.com>
+Cc: dm-devel@redhat.com
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+[bwh: Backport to 2.6.32 - drop change to drivers/md/dm-flakey.c]
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+
+Signed-off-by: Willy Tarreau <w@1wt.eu>
+[dannf: adjusted to apply to Debian's 2.6.26]
+---
+
+diff --git a/drivers/md/dm-linear.c b/drivers/md/dm-linear.c
+index 17753d8..20a7e83 100644
+--- a/drivers/md/dm-linear.c
++++ b/drivers/md/dm-linear.c
+@@ -106,12 +106,20 @@ static int linear_ioctl(struct dm_target *ti, struct inode *inode,
+ 	struct block_device *bdev = lc->dev->bdev;
+ 	struct file fake_file = {};
+ 	struct dentry fake_dentry = {};
++	int r = 0;
+ 
+ 	fake_file.f_mode = lc->dev->mode;
+ 	fake_file.f_path.dentry = &fake_dentry;
+ 	fake_dentry.d_inode = bdev->bd_inode;
+ 
+-	return blkdev_driver_ioctl(bdev->bd_inode, &fake_file, bdev->bd_disk, cmd, arg);
++	/*
++	 * Only pass ioctls through if the device sizes match exactly.
++	 */
++	if (lc->start ||
++	    ti->len != i_size_read(bdev->bd_inode) >> SECTOR_SHIFT)
++		r = scsi_verify_blk_ioctl(NULL, cmd);
++
++	return r ? : blkdev_driver_ioctl(bdev->bd_inode, &fake_file, bdev->bd_disk, cmd, arg);
+ }
+ 
+ static struct target_type linear_target = {
+diff --git a/drivers/md/dm-mpath.c b/drivers/md/dm-mpath.c
+index e7ee59e..69ccb52 100644
+--- a/drivers/md/dm-mpath.c
++++ b/drivers/md/dm-mpath.c
+@@ -1376,6 +1376,12 @@ static int multipath_ioctl(struct dm_target *ti, struct inode *inode,
+ 
+ 	spin_unlock_irqrestore(&m->lock, flags);
+ 
++	/*
++	 * Only pass ioctls through if the device sizes match exactly.
++	 */
++	if (!r && ti->len != i_size_read(bdev->bd_inode) >> SECTOR_SHIFT)
++		r = scsi_verify_blk_ioctl(NULL, cmd);
++
+ 	return r ? : blkdev_driver_ioctl(bdev->bd_inode, &fake_file,
+ 					 bdev->bd_disk, cmd, arg);
+ }

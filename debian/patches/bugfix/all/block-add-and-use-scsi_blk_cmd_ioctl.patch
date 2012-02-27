@@ -1,0 +1,159 @@
+From: Paolo Bonzini <pbonzini@redhat.com>
+Date: Thu, 12 Jan 2012 15:01:27 +0000 (+0100)
+Subject: block: add and use scsi_blk_cmd_ioctl
+X-Git-Tag: v2.6.27.60~3
+X-Git-Url: https://git.kernel.org/?p=linux%2Fkernel%2Fgit%2Fstable%2Flinux-stable.git;a=commitdiff_plain;h=7d064959836f6ab504b80a6ad858ed14aa0bb7a0
+
+block: add and use scsi_blk_cmd_ioctl
+
+commit 577ebb374c78314ac4617242f509e2f5e7156649 upstream.
+
+Introduce a wrapper around scsi_cmd_ioctl that takes a block device.
+
+The function will then be enhanced to detect partition block devices
+and, in that case, subject the ioctls to whitelisting.
+
+Cc: linux-scsi@vger.kernel.org
+Cc: Jens Axboe <axboe@kernel.dk>
+Cc: James Bottomley <JBottomley@parallels.com>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+[bwh: Backport to 2.6.32 - adjust context]
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+[wt: slightly changed the interface to match 2.6.27's scsi_cmd_ioctl()
+     which still needs the file pointer but has no mode parameter].
+
+Signed-off-by: Willy Tarreau <w@1wt.eu>
+[dannf: backported to Debian's 2.6.26]
+---
+
+diff --git a/block/scsi_ioctl.c b/block/scsi_ioctl.c
+index 29c6b82..1b2dbab 100644
+--- a/block/scsi_ioctl.c
++++ b/block/scsi_ioctl.c
+@@ -676,3 +676,11 @@ int scsi_cmd_ioctl(struct file *file, struct request_queue *q,
+ }
+ 
+ EXPORT_SYMBOL(scsi_cmd_ioctl);
++
++int scsi_cmd_blk_ioctl(struct file *file, struct block_device *bd,
++                       unsigned int cmd, void __user *arg)
++{
++	return scsi_cmd_ioctl(file, bd->bd_disk->queue, bd->bd_disk, cmd, arg);
++}
++EXPORT_SYMBOL(scsi_cmd_blk_ioctl);
++
+diff --git a/drivers/block/cciss.c b/drivers/block/cciss.c
+index 8ac9563..d7f2125 100644
+--- a/drivers/block/cciss.c
++++ b/drivers/block/cciss.c
+@@ -1230,7 +1230,7 @@ static int cciss_ioctl(struct inode *inode, struct file *filep,
+ 			return status;
+ 		}
+ 
+-	/* scsi_cmd_ioctl handles these, below, though some are not */
++	/* scsi_cmd_blk_ioctl handles these, below, though some are not */
+ 	/* very meaningful for cciss.  SG_IO is the main one people want. */
+ 
+ 	case SG_GET_VERSION_NUM:
+@@ -1241,9 +1241,9 @@ static int cciss_ioctl(struct inode *inode, struct file *filep,
+ 	case SG_EMULATED_HOST:
+ 	case SG_IO:
+ 	case SCSI_IOCTL_SEND_COMMAND:
+-		return scsi_cmd_ioctl(filep, disk->queue, disk, cmd, argp);
++		return scsi_cmd_blk_ioctl(filep, bdev, cmd, argp);
+ 
+-	/* scsi_cmd_ioctl would normally handle these, below, but */
++	/* scsi_cmd_blk_ioctl would normally handle these, below, but */
+ 	/* they aren't a good fit for cciss, as CD-ROMs are */
+ 	/* not supported, and we don't have any bus/target/lun */
+ 	/* which we present to the kernel. */
+diff --git a/drivers/block/ub.c b/drivers/block/ub.c
+index 3a281ef..a05a76f 100644
+--- a/drivers/block/ub.c
++++ b/drivers/block/ub.c
+@@ -1729,10 +1729,9 @@ static int ub_bd_release(struct inode *inode, struct file *filp)
+ static int ub_bd_ioctl(struct inode *inode, struct file *filp,
+     unsigned int cmd, unsigned long arg)
+ {
+-	struct gendisk *disk = inode->i_bdev->bd_disk;
+ 	void __user *usermem = (void __user *) arg;
+ 
+-	return scsi_cmd_ioctl(filp, disk->queue, disk, cmd, usermem);
++	return scsi_cmd_blk_ioctl(filp, inode->i_bdev, cmd, usermem);
+ }
+ 
+ /*
+diff --git a/drivers/block/virtio_blk.c b/drivers/block/virtio_blk.c
+index 141c0e7..6e763d0 100644
+--- a/drivers/block/virtio_blk.c
++++ b/drivers/block/virtio_blk.c
+@@ -149,8 +149,7 @@ static void do_virtblk_request(struct request_queue *q)
+ static int virtblk_ioctl(struct inode *inode, struct file *filp,
+ 			 unsigned cmd, unsigned long data)
+ {
+-	return scsi_cmd_ioctl(filp, inode->i_bdev->bd_disk->queue,
+-			      inode->i_bdev->bd_disk, cmd,
++	return scsi_cmd_blk_ioctl(filp, inode->i_bdev, cmd,
+ 			      (void __user *)data);
+ }
+ 
+diff --git a/drivers/cdrom/cdrom.c b/drivers/cdrom/cdrom.c
+index 69f26eb..262808b 100644
+--- a/drivers/cdrom/cdrom.c
++++ b/drivers/cdrom/cdrom.c
+@@ -2766,12 +2766,11 @@ int cdrom_ioctl(struct file * file, struct cdrom_device_info *cdi,
+ {
+ 	void __user *argp = (void __user *)arg;
+ 	int ret;
+-	struct gendisk *disk = ip->i_bdev->bd_disk;
+ 
+ 	/*
+ 	 * Try the generic SCSI command ioctl's first.
+ 	 */
+-	ret = scsi_cmd_ioctl(file, disk->queue, disk, cmd, argp);
++	ret = scsi_cmd_blk_ioctl(file, ip->i_bdev, cmd, argp);
+ 	if (ret != -ENOTTY)
+ 		return ret;
+ 
+diff --git a/drivers/ide/ide-floppy.c b/drivers/ide/ide-floppy.c
+index f05fbc2..8dcff31 100644
+--- a/drivers/ide/ide-floppy.c
++++ b/drivers/ide/ide-floppy.c
+@@ -1562,8 +1562,7 @@ static int idefloppy_ioctl(struct inode *inode, struct file *file,
+ 	 * and CDROM_SEND_PACKET (legacy) ioctls
+ 	 */
+ 	if (cmd != CDROM_SEND_PACKET && cmd != SCSI_IOCTL_SEND_COMMAND)
+-		err = scsi_cmd_ioctl(file, bdev->bd_disk->queue,
+-					bdev->bd_disk, cmd, argp);
++		err = scsi_cmd_blk_ioctl(file, bdev, cmd, argp);
+ 	else
+ 		err = -ENOTTY;
+ 
+diff --git a/drivers/scsi/sd.c b/drivers/scsi/sd.c
+index 01cefbb..0df5754 100644
+--- a/drivers/scsi/sd.c
++++ b/drivers/scsi/sd.c
+@@ -729,7 +729,7 @@ static int sd_ioctl(struct inode * inode, struct file * filp,
+ 		case SCSI_IOCTL_GET_BUS_NUMBER:
+ 			return scsi_ioctl(sdp, cmd, p);
+ 		default:
+-			error = scsi_cmd_ioctl(filp, disk->queue, disk, cmd, p);
++			error = scsi_cmd_blk_ioctl(filp, bdev, cmd, p);
+ 			if (error != -ENOTTY)
+ 				return error;
+ 	}
+diff --git a/include/linux/blkdev.h b/include/linux/blkdev.h
+index 024ee49..7242514 100644
+--- a/include/linux/blkdev.h
++++ b/include/linux/blkdev.h
+@@ -633,6 +633,8 @@ extern int blk_remove_plug(struct request_queue *);
+ extern void blk_recount_segments(struct request_queue *, struct bio *);
+ extern int scsi_cmd_ioctl(struct file *, struct request_queue *,
+ 			  struct gendisk *, unsigned int, void __user *);
++extern int scsi_cmd_blk_ioctl(struct file *, struct block_device *,
++                              unsigned int, void __user *);
+ extern int sg_scsi_ioctl(struct file *, struct request_queue *,
+ 		struct gendisk *, struct scsi_ioctl_command __user *);
+ 
