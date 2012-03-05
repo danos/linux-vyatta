@@ -1,0 +1,1239 @@
+diff --git a/Makefile b/Makefile
+index 3377650..ed78982 100644
+diff --git a/arch/arm/include/asm/assembler.h b/arch/arm/include/asm/assembler.h
+index eea4947..9cc3fe5 100644
+--- a/arch/arm/include/asm/assembler.h
++++ b/arch/arm/include/asm/assembler.h
+@@ -133,6 +133,11 @@
+ 	disable_irq
+ 	.endm
+ 
++	.macro	save_and_disable_irqs_notrace, oldcpsr
++	mrs	\oldcpsr, cpsr
++	disable_irq_notrace
++	.endm
++
+ /*
+  * Restore interrupt state previously stored in a register.  We don't
+  * guarantee that this will preserve the flags.
+diff --git a/arch/arm/mm/cache-v7.S b/arch/arm/mm/cache-v7.S
+index e1bd975..632b626 100644
+--- a/arch/arm/mm/cache-v7.S
++++ b/arch/arm/mm/cache-v7.S
+@@ -39,9 +39,15 @@ loop1:
+ 	and	r1, r1, #7			@ mask of the bits for current cache only
+ 	cmp	r1, #2				@ see what cache we have at this level
+ 	blt	skip				@ skip if no cache, or just i-cache
++#ifdef CONFIG_PREEMPT
++	save_and_disable_irqs_notrace r9	@ make cssr&csidr read atomic
++#endif
+ 	mcr	p15, 2, r10, c0, c0, 0		@ select current cache level in cssr
+ 	isb					@ isb to sych the new cssr&csidr
+ 	mrc	p15, 1, r1, c0, c0, 0		@ read the new csidr
++#ifdef CONFIG_PREEMPT
++	restore_irqs_notrace r9
++#endif
+ 	and	r2, r1, #7			@ extract the length of the cache lines
+ 	add	r2, r2, #4			@ add 4 (line length offset)
+ 	ldr	r4, =0x3ff
+diff --git a/arch/s390/include/asm/compat.h b/arch/s390/include/asm/compat.h
+index 0c940d3..82c882c 100644
+--- a/arch/s390/include/asm/compat.h
++++ b/arch/s390/include/asm/compat.h
+@@ -171,13 +171,6 @@ static inline int is_compat_task(void)
+ 	return test_thread_flag(TIF_31BIT);
+ }
+ 
+-#else
+-
+-static inline int is_compat_task(void)
+-{
+-	return 0;
+-}
+-
+ #endif
+ 
+ static inline void __user *arch_compat_alloc_user_space(long len)
+diff --git a/arch/s390/kernel/process.c b/arch/s390/kernel/process.c
+index 5417eb5..cea2855 100644
+--- a/arch/s390/kernel/process.c
++++ b/arch/s390/kernel/process.c
+@@ -32,7 +32,6 @@
+ #include <linux/kernel_stat.h>
+ #include <linux/syscalls.h>
+ #include <linux/compat.h>
+-#include <asm/compat.h>
+ #include <asm/uaccess.h>
+ #include <asm/pgtable.h>
+ #include <asm/system.h>
+diff --git a/arch/s390/kernel/ptrace.c b/arch/s390/kernel/ptrace.c
+index 08f8838..170e7af 100644
+--- a/arch/s390/kernel/ptrace.c
++++ b/arch/s390/kernel/ptrace.c
+@@ -36,8 +36,8 @@
+ #include <linux/regset.h>
+ #include <linux/tracehook.h>
+ #include <linux/seccomp.h>
++#include <linux/compat.h>
+ #include <trace/syscall.h>
+-#include <asm/compat.h>
+ #include <asm/segment.h>
+ #include <asm/page.h>
+ #include <asm/pgtable.h>
+diff --git a/arch/s390/kernel/setup.c b/arch/s390/kernel/setup.c
+index 061479f..0b2573a 100644
+--- a/arch/s390/kernel/setup.c
++++ b/arch/s390/kernel/setup.c
+@@ -43,6 +43,7 @@
+ #include <linux/reboot.h>
+ #include <linux/topology.h>
+ #include <linux/ftrace.h>
++#include <linux/compat.h>
+ 
+ #include <asm/ipl.h>
+ #include <asm/uaccess.h>
+@@ -56,7 +57,6 @@
+ #include <asm/ptrace.h>
+ #include <asm/sections.h>
+ #include <asm/ebcdic.h>
+-#include <asm/compat.h>
+ #include <asm/kvm_virtio.h>
+ 
+ long psw_kernel_bits	= (PSW_BASE_BITS | PSW_MASK_DAT | PSW_ASC_PRIMARY |
+diff --git a/arch/s390/mm/mmap.c b/arch/s390/mm/mmap.c
+index f4558cc..0ab74ae 100644
+--- a/arch/s390/mm/mmap.c
++++ b/arch/s390/mm/mmap.c
+@@ -27,8 +27,8 @@
+ #include <linux/personality.h>
+ #include <linux/mm.h>
+ #include <linux/module.h>
++#include <linux/compat.h>
+ #include <asm/pgalloc.h>
+-#include <asm/compat.h>
+ 
+ /*
+  * Top of mmap area (just below the process stack).
+diff --git a/crypto/sha512_generic.c b/crypto/sha512_generic.c
+index 88f160b..107f6f7 100644
+--- a/crypto/sha512_generic.c
++++ b/crypto/sha512_generic.c
+@@ -31,11 +31,6 @@ static inline u64 Maj(u64 x, u64 y, u64 z)
+         return (x & y) | (z & (x | y));
+ }
+ 
+-static inline u64 RORu64(u64 x, u64 y)
+-{
+-        return (x >> y) | (x << (64 - y));
+-}
+-
+ static const u64 sha512_K[80] = {
+         0x428a2f98d728ae22ULL, 0x7137449123ef65cdULL, 0xb5c0fbcfec4d3b2fULL,
+         0xe9b5dba58189dbbcULL, 0x3956c25bf348b538ULL, 0x59f111f1b605d019ULL,
+@@ -66,10 +61,10 @@ static const u64 sha512_K[80] = {
+         0x5fcb6fab3ad6faecULL, 0x6c44198c4a475817ULL,
+ };
+ 
+-#define e0(x)       (RORu64(x,28) ^ RORu64(x,34) ^ RORu64(x,39))
+-#define e1(x)       (RORu64(x,14) ^ RORu64(x,18) ^ RORu64(x,41))
+-#define s0(x)       (RORu64(x, 1) ^ RORu64(x, 8) ^ (x >> 7))
+-#define s1(x)       (RORu64(x,19) ^ RORu64(x,61) ^ (x >> 6))
++#define e0(x)       (ror64(x,28) ^ ror64(x,34) ^ ror64(x,39))
++#define e1(x)       (ror64(x,14) ^ ror64(x,18) ^ ror64(x,41))
++#define s0(x)       (ror64(x, 1) ^ ror64(x, 8) ^ (x >> 7))
++#define s1(x)       (ror64(x,19) ^ ror64(x,61) ^ (x >> 6))
+ 
+ static inline void LOAD_OP(int I, u64 *W, const u8 *input)
+ {
+@@ -78,7 +73,7 @@ static inline void LOAD_OP(int I, u64 *W, const u8 *input)
+ 
+ static inline void BLEND_OP(int I, u64 *W)
+ {
+-	W[I % 16] += s1(W[(I-2) % 16]) + W[(I-7) % 16] + s0(W[(I-15) % 16]);
++	W[I & 15] += s1(W[(I-2) & 15]) + W[(I-7) & 15] + s0(W[(I-15) & 15]);
+ }
+ 
+ static void
+@@ -89,46 +84,42 @@ sha512_transform(u64 *state, const u8 *input)
+ 	int i;
+ 	u64 W[16];
+ 
+-	/* load the input */
+-        for (i = 0; i < 16; i++)
+-                LOAD_OP(i, W, input);
+-
+ 	/* load the state into our registers */
+ 	a=state[0];   b=state[1];   c=state[2];   d=state[3];
+ 	e=state[4];   f=state[5];   g=state[6];   h=state[7];
+ 
+-#define SHA512_0_15(i, a, b, c, d, e, f, g, h)			\
+-	t1 = h + e1(e) + Ch(e, f, g) + sha512_K[i] + W[i];	\
+-	t2 = e0(a) + Maj(a, b, c);				\
+-	d += t1;						\
+-	h = t1 + t2
+-
+-#define SHA512_16_79(i, a, b, c, d, e, f, g, h)			\
+-	BLEND_OP(i, W);						\
+-	t1 = h + e1(e) + Ch(e, f, g) + sha512_K[i] + W[(i)%16];	\
+-	t2 = e0(a) + Maj(a, b, c);				\
+-	d += t1;						\
+-	h = t1 + t2
+-
+-	for (i = 0; i < 16; i += 8) {
+-		SHA512_0_15(i, a, b, c, d, e, f, g, h);
+-		SHA512_0_15(i + 1, h, a, b, c, d, e, f, g);
+-		SHA512_0_15(i + 2, g, h, a, b, c, d, e, f);
+-		SHA512_0_15(i + 3, f, g, h, a, b, c, d, e);
+-		SHA512_0_15(i + 4, e, f, g, h, a, b, c, d);
+-		SHA512_0_15(i + 5, d, e, f, g, h, a, b, c);
+-		SHA512_0_15(i + 6, c, d, e, f, g, h, a, b);
+-		SHA512_0_15(i + 7, b, c, d, e, f, g, h, a);
+-	}
+-	for (i = 16; i < 80; i += 8) {
+-		SHA512_16_79(i, a, b, c, d, e, f, g, h);
+-		SHA512_16_79(i + 1, h, a, b, c, d, e, f, g);
+-		SHA512_16_79(i + 2, g, h, a, b, c, d, e, f);
+-		SHA512_16_79(i + 3, f, g, h, a, b, c, d, e);
+-		SHA512_16_79(i + 4, e, f, g, h, a, b, c, d);
+-		SHA512_16_79(i + 5, d, e, f, g, h, a, b, c);
+-		SHA512_16_79(i + 6, c, d, e, f, g, h, a, b);
+-		SHA512_16_79(i + 7, b, c, d, e, f, g, h, a);
++	/* now iterate */
++	for (i=0; i<80; i+=8) {
++		if (!(i & 8)) {
++			int j;
++
++			if (i < 16) {
++				/* load the input */
++				for (j = 0; j < 16; j++)
++					LOAD_OP(i + j, W, input);
++			} else {
++				for (j = 0; j < 16; j++) {
++					BLEND_OP(i + j, W);
++				}
++			}
++		}
++
++		t1 = h + e1(e) + Ch(e,f,g) + sha512_K[i  ] + W[(i & 15)];
++		t2 = e0(a) + Maj(a,b,c);    d+=t1;    h=t1+t2;
++		t1 = g + e1(d) + Ch(d,e,f) + sha512_K[i+1] + W[(i & 15) + 1];
++		t2 = e0(h) + Maj(h,a,b);    c+=t1;    g=t1+t2;
++		t1 = f + e1(c) + Ch(c,d,e) + sha512_K[i+2] + W[(i & 15) + 2];
++		t2 = e0(g) + Maj(g,h,a);    b+=t1;    f=t1+t2;
++		t1 = e + e1(b) + Ch(b,c,d) + sha512_K[i+3] + W[(i & 15) + 3];
++		t2 = e0(f) + Maj(f,g,h);    a+=t1;    e=t1+t2;
++		t1 = d + e1(a) + Ch(a,b,c) + sha512_K[i+4] + W[(i & 15) + 4];
++		t2 = e0(e) + Maj(e,f,g);    h+=t1;    d=t1+t2;
++		t1 = c + e1(h) + Ch(h,a,b) + sha512_K[i+5] + W[(i & 15) + 5];
++		t2 = e0(d) + Maj(d,e,f);    g+=t1;    c=t1+t2;
++		t1 = b + e1(g) + Ch(g,h,a) + sha512_K[i+6] + W[(i & 15) + 6];
++		t2 = e0(c) + Maj(c,d,e);    f+=t1;    b=t1+t2;
++		t1 = a + e1(f) + Ch(f,g,h) + sha512_K[i+7] + W[(i & 15) + 7];
++		t2 = e0(b) + Maj(b,c,d);    e+=t1;    a=t1+t2;
+ 	}
+ 
+ 	state[0] += a; state[1] += b; state[2] += c; state[3] += d;
+diff --git a/drivers/base/firmware_class.c b/drivers/base/firmware_class.c
+index f6872f9..9589b7f 100644
+--- a/drivers/base/firmware_class.c
++++ b/drivers/base/firmware_class.c
+@@ -493,8 +493,7 @@ _request_firmware(const struct firmware **firmware_p, const char *name,
+ 	if (!firmware) {
+ 		dev_err(device, "%s: kmalloc(struct firmware) failed\n",
+ 			__func__);
+-		retval = -ENOMEM;
+-		goto out;
++		return -ENOMEM;
+ 	}
+ 
+ 	for (builtin = __start_builtin_fw; builtin != __end_builtin_fw;
+@@ -508,6 +507,14 @@ _request_firmware(const struct firmware **firmware_p, const char *name,
+ 		return 0;
+ 	}
+ 
++	read_lock_usermodehelper();
++
++	if (WARN_ON(usermodehelper_is_disabled())) {
++		dev_err(device, "firmware: %s will not be loaded\n", name);
++		retval = -EBUSY;
++		goto out;
++	}
++
+ 	if (uevent)
+ 		dev_info(device, "firmware: requesting %s\n", name);
+ 
+@@ -545,6 +552,7 @@ error_kfree_fw:
+ 	kfree(firmware);
+ 	*firmware_p = NULL;
+ out:
++	read_unlock_usermodehelper();
+ 	return retval;
+ }
+ 
+diff --git a/drivers/cdrom/cdrom.c b/drivers/cdrom/cdrom.c
+index 59cccc9..a4592ec 100644
+--- a/drivers/cdrom/cdrom.c
++++ b/drivers/cdrom/cdrom.c
+@@ -2057,11 +2057,6 @@ static int cdrom_read_cdda_old(struct cdrom_device_info *cdi, __u8 __user *ubuf,
+ 	if (!nr)
+ 		return -ENOMEM;
+ 
+-	if (!access_ok(VERIFY_WRITE, ubuf, nframes * CD_FRAMESIZE_RAW)) {
+-		ret = -EFAULT;
+-		goto out;
+-	}
+-
+ 	cgc.data_direction = CGC_DATA_READ;
+ 	while (nframes > 0) {
+ 		if (nr > nframes)
+@@ -2070,7 +2065,7 @@ static int cdrom_read_cdda_old(struct cdrom_device_info *cdi, __u8 __user *ubuf,
+ 		ret = cdrom_read_block(cdi, &cgc, lba, nr, 1, CD_FRAMESIZE_RAW);
+ 		if (ret)
+ 			break;
+-		if (__copy_to_user(ubuf, cgc.buffer, CD_FRAMESIZE_RAW * nr)) {
++		if (copy_to_user(ubuf, cgc.buffer, CD_FRAMESIZE_RAW * nr)) {
+ 			ret = -EFAULT;
+ 			break;
+ 		}
+@@ -2078,7 +2073,6 @@ static int cdrom_read_cdda_old(struct cdrom_device_info *cdi, __u8 __user *ubuf,
+ 		nframes -= nr;
+ 		lba += nr;
+ 	}
+-out:
+ 	kfree(cgc.buffer);
+ 	return ret;
+ }
+diff --git a/drivers/gpu/drm/i915/intel_lvds.c b/drivers/gpu/drm/i915/intel_lvds.c
+index 96b39fc..6476022 100644
+diff --git a/drivers/gpu/drm/radeon/r100.c b/drivers/gpu/drm/radeon/r100.c
+index c9e93ea..a2ae151 100644
+diff --git a/drivers/gpu/drm/radeon/rs600.c b/drivers/gpu/drm/radeon/rs600.c
+index 1700297..52b7799 100644
+diff --git a/drivers/hwmon/f75375s.c b/drivers/hwmon/f75375s.c
+index afebc34..9ae1bae 100644
+--- a/drivers/hwmon/f75375s.c
++++ b/drivers/hwmon/f75375s.c
+@@ -159,7 +159,7 @@ static inline void f75375_write8(struct i2c_client *client, u8 reg,
+ static inline void f75375_write16(struct i2c_client *client, u8 reg,
+ 		u16 value)
+ {
+-	int err = i2c_smbus_write_byte_data(client, reg, (value << 8));
++	int err = i2c_smbus_write_byte_data(client, reg, (value >> 8));
+ 	if (err)
+ 		return;
+ 	i2c_smbus_write_byte_data(client, reg + 1, (value & 0xFF));
+@@ -311,7 +311,7 @@ static int set_pwm_enable_direct(struct i2c_client *client, int nr, int val)
+ 		fanmode  |= (3 << FAN_CTRL_MODE(nr));
+ 		break;
+ 	case 2: /* AUTOMATIC*/
+-		fanmode  |= (2 << FAN_CTRL_MODE(nr));
++		fanmode  |= (1 << FAN_CTRL_MODE(nr));
+ 		break;
+ 	case 3: /* fan speed */
+ 		break;
+diff --git a/drivers/media/video/hdpvr/hdpvr-video.c b/drivers/media/video/hdpvr/hdpvr-video.c
+index 2eb9dc2..09f0ee0 100644
+--- a/drivers/media/video/hdpvr/hdpvr-video.c
++++ b/drivers/media/video/hdpvr/hdpvr-video.c
+@@ -279,12 +279,13 @@ static int hdpvr_start_streaming(struct hdpvr_device *dev)
+ 
+ 		hdpvr_config_call(dev, CTRL_START_STREAMING_VALUE, 0x00);
+ 
++		dev->status = STATUS_STREAMING;
++
+ 		INIT_WORK(&dev->worker, hdpvr_transmit_buffers);
+ 		queue_work(dev->workqueue, &dev->worker);
+ 
+ 		v4l2_dbg(MSG_BUFFER, hdpvr_debug, &dev->v4l2_dev,
+ 			 "streaming started\n");
+-		dev->status = STATUS_STREAMING;
+ 
+ 		return 0;
+ 	}
+diff --git a/drivers/s390/block/dasd_eckd.c b/drivers/s390/block/dasd_eckd.c
+index 4460e00..ee23d4e 100644
+--- a/drivers/s390/block/dasd_eckd.c
++++ b/drivers/s390/block/dasd_eckd.c
+@@ -19,6 +19,7 @@
+ #include <linux/bio.h>
+ #include <linux/module.h>
+ #include <linux/init.h>
++#include <linux/compat.h>
+ 
+ #include <asm/debug.h>
+ #include <asm/idals.h>
+diff --git a/drivers/s390/block/dasd_ioctl.c b/drivers/s390/block/dasd_ioctl.c
+index a5354b8..0400e7c 100644
+--- a/drivers/s390/block/dasd_ioctl.c
++++ b/drivers/s390/block/dasd_ioctl.c
+@@ -13,6 +13,7 @@
+ #define KMSG_COMPONENT "dasd"
+ 
+ #include <linux/interrupt.h>
++#include <linux/compat.h>
+ #include <linux/major.h>
+ #include <linux/fs.h>
+ #include <linux/blkpg.h>
+diff --git a/drivers/s390/char/fs3270.c b/drivers/s390/char/fs3270.c
+index 097d384..8d1d18c 100644
+--- a/drivers/s390/char/fs3270.c
++++ b/drivers/s390/char/fs3270.c
+@@ -14,6 +14,7 @@
+ #include <linux/list.h>
+ #include <linux/types.h>
+ #include <linux/smp_lock.h>
++#include <linux/compat.h>
+ 
+ #include <asm/ccwdev.h>
+ #include <asm/cio.h>
+diff --git a/drivers/s390/char/vmcp.c b/drivers/s390/char/vmcp.c
+index a6087ce..99cc483 100644
+--- a/drivers/s390/char/vmcp.c
++++ b/drivers/s390/char/vmcp.c
+@@ -16,6 +16,7 @@
+ 
+ #include <linux/fs.h>
+ #include <linux/init.h>
++#include <linux/compat.h>
+ #include <linux/kernel.h>
+ #include <linux/miscdevice.h>
+ #include <linux/module.h>
+diff --git a/drivers/s390/cio/chsc_sch.c b/drivers/s390/cio/chsc_sch.c
+index cc5144b..d0b03bc 100644
+--- a/drivers/s390/cio/chsc_sch.c
++++ b/drivers/s390/cio/chsc_sch.c
+@@ -11,6 +11,7 @@
+ #include <linux/module.h>
+ #include <linux/uaccess.h>
+ #include <linux/miscdevice.h>
++#include <linux/compat.h>
+ 
+ #include <asm/cio.h>
+ #include <asm/chsc.h>
+diff --git a/drivers/s390/scsi/zfcp_cfdc.c b/drivers/s390/scsi/zfcp_cfdc.c
+index ef681df..2e37ac9 100644
+--- a/drivers/s390/scsi/zfcp_cfdc.c
++++ b/drivers/s390/scsi/zfcp_cfdc.c
+@@ -12,6 +12,7 @@
+ 
+ #include <linux/types.h>
+ #include <linux/miscdevice.h>
++#include <linux/compat.h>
+ #include <asm/ccwdev.h>
+ #include "zfcp_def.h"
+ #include "zfcp_ext.h"
+diff --git a/drivers/scsi/3w-9xxx.c b/drivers/scsi/3w-9xxx.c
+index 3e250ca..1549eea 100644
+--- a/drivers/scsi/3w-9xxx.c
++++ b/drivers/scsi/3w-9xxx.c
+@@ -76,6 +76,7 @@
+                  Fix bug in twa_get_param() on 4GB+.
+                  Use pci_resource_len() for ioremap().
+    2.26.02.012 - Add power management support.
++   2.26.02.013 - Fix bug in twa_load_sgl().
+ */
+ 
+ #include <linux/module.h>
+@@ -100,7 +101,7 @@
+ #include "3w-9xxx.h"
+ 
+ /* Globals */
+-#define TW_DRIVER_VERSION "2.26.02.012"
++#define TW_DRIVER_VERSION "2.26.02.013"
+ static TW_Device_Extension *twa_device_extension_list[TW_MAX_SLOT];
+ static unsigned int twa_device_extension_count;
+ static int twa_major = -1;
+@@ -1378,10 +1379,12 @@ static void twa_load_sgl(TW_Device_Extension *tw_dev, TW_Command_Full *full_comm
+ 		newcommand = &full_command_packet->command.newcommand;
+ 		newcommand->request_id__lunl =
+ 			cpu_to_le16(TW_REQ_LUN_IN(TW_LUN_OUT(newcommand->request_id__lunl), request_id));
+-		newcommand->sg_list[0].address = TW_CPU_TO_SGL(dma_handle + sizeof(TW_Ioctl_Buf_Apache) - 1);
+-		newcommand->sg_list[0].length = cpu_to_le32(length);
++		if (length) {
++			newcommand->sg_list[0].address = TW_CPU_TO_SGL(dma_handle + sizeof(TW_Ioctl_Buf_Apache) - 1);
++			newcommand->sg_list[0].length = cpu_to_le32(length);
++		}
+ 		newcommand->sgl_entries__lunh =
+-			cpu_to_le16(TW_REQ_LUN_IN(TW_LUN_OUT(newcommand->sgl_entries__lunh), 1));
++			cpu_to_le16(TW_REQ_LUN_IN(TW_LUN_OUT(newcommand->sgl_entries__lunh), length ? 1 : 0));
+ 	} else {
+ 		oldcommand = &full_command_packet->command.oldcommand;
+ 		oldcommand->request_id = request_id;
+diff --git a/drivers/usb/host/pci-quirks.c b/drivers/usb/host/pci-quirks.c
+index 8213f79..0ff157a 100644
+--- a/drivers/usb/host/pci-quirks.c
++++ b/drivers/usb/host/pci-quirks.c
+@@ -503,7 +503,17 @@ static void __devinit quirk_usb_early_handoff(struct pci_dev *pdev)
+ 	 */
+ 	if (pdev->vendor == 0x184e)	/* vendor Netlogic */
+ 		return;
++	if (pdev->class != PCI_CLASS_SERIAL_USB_UHCI &&
++			pdev->class != PCI_CLASS_SERIAL_USB_OHCI &&
++			pdev->class != PCI_CLASS_SERIAL_USB_EHCI &&
++			pdev->class != PCI_CLASS_SERIAL_USB_XHCI)
++		return;
+ 
++	if (pci_enable_device(pdev) < 0) {
++		dev_warn(&pdev->dev, "Can't enable PCI device, "
++				"BIOS handoff failed.\n");
++		return;
++	}
+ 	if (pdev->class == PCI_CLASS_SERIAL_USB_UHCI)
+ 		quirk_usb_handoff_uhci(pdev);
+ 	else if (pdev->class == PCI_CLASS_SERIAL_USB_OHCI)
+@@ -512,5 +522,6 @@ static void __devinit quirk_usb_early_handoff(struct pci_dev *pdev)
+ 		quirk_usb_disable_ehci(pdev);
+ 	else if (pdev->class == PCI_CLASS_SERIAL_USB_XHCI)
+ 		quirk_usb_handoff_xhci(pdev);
++	pci_disable_device(pdev);
+ }
+ DECLARE_PCI_FIXUP_FINAL(PCI_ANY_ID, PCI_ANY_ID, quirk_usb_early_handoff);
+diff --git a/drivers/usb/host/xhci-mem.c b/drivers/usb/host/xhci-mem.c
+index a2f2f79..8c29073 100644
+--- a/drivers/usb/host/xhci-mem.c
++++ b/drivers/usb/host/xhci-mem.c
+@@ -472,26 +472,42 @@ static unsigned int xhci_parse_exponent_interval(struct usb_device *udev,
+ }
+ 
+ /*
+- * Convert bInterval expressed in frames (in 1-255 range) to exponent of
++ * Convert bInterval expressed in microframes (in 1-255 range) to exponent of
+  * microframes, rounded down to nearest power of 2.
+  */
+-static unsigned int xhci_parse_frame_interval(struct usb_device *udev,
+-		struct usb_host_endpoint *ep)
++static unsigned int xhci_microframes_to_exponent(struct usb_device *udev,
++		struct usb_host_endpoint *ep, unsigned int desc_interval,
++		unsigned int min_exponent, unsigned int max_exponent)
+ {
+ 	unsigned int interval;
+ 
+-	interval = fls(8 * ep->desc.bInterval) - 1;
+-	interval = clamp_val(interval, 3, 10);
+-	if ((1 << interval) != 8 * ep->desc.bInterval)
++	interval = fls(desc_interval) - 1;
++	interval = clamp_val(interval, min_exponent, max_exponent);
++	if ((1 << interval) != desc_interval)
+ 		dev_warn(&udev->dev,
+ 			 "ep %#x - rounding interval to %d microframes, ep desc says %d microframes\n",
+ 			 ep->desc.bEndpointAddress,
+ 			 1 << interval,
+-			 8 * ep->desc.bInterval);
++			 desc_interval);
+ 
+ 	return interval;
+ }
+ 
++static unsigned int xhci_parse_microframe_interval(struct usb_device *udev,
++		struct usb_host_endpoint *ep)
++{
++	return xhci_microframes_to_exponent(udev, ep,
++			ep->desc.bInterval, 0, 15);
++}
++
++
++static unsigned int xhci_parse_frame_interval(struct usb_device *udev,
++		struct usb_host_endpoint *ep)
++{
++	return xhci_microframes_to_exponent(udev, ep,
++			ep->desc.bInterval * 8, 3, 10);
++}
++
+ /* Return the polling or NAK interval.
+  *
+  * The polling interval is expressed in "microframes".  If xHCI's Interval field
+@@ -510,7 +526,7 @@ static inline unsigned int xhci_get_endpoint_interval(struct usb_device *udev,
+ 		/* Max NAK rate */
+ 		if (usb_endpoint_xfer_control(&ep->desc) ||
+ 		    usb_endpoint_xfer_bulk(&ep->desc)) {
+-			interval = ep->desc.bInterval;
++			interval = xhci_parse_microframe_interval(udev, ep);
+ 			break;
+ 		}
+ 		/* Fall through - SS and HS isoc/int have same decoding */
+diff --git a/drivers/usb/serial/cp210x.c b/drivers/usb/serial/cp210x.c
+index bb16725..feb96e9 100644
+--- a/drivers/usb/serial/cp210x.c
++++ b/drivers/usb/serial/cp210x.c
+@@ -136,6 +136,8 @@ static struct usb_device_id id_table [] = {
+ 	{ USB_DEVICE(0x16DC, 0x0011) }, /* W-IE-NE-R Plein & Baus GmbH RCM Remote Control for MARATON Power Supply */
+ 	{ USB_DEVICE(0x16DC, 0x0012) }, /* W-IE-NE-R Plein & Baus GmbH MPOD Multi Channel Power Supply */
+ 	{ USB_DEVICE(0x16DC, 0x0015) }, /* W-IE-NE-R Plein & Baus GmbH CML Control, Monitoring and Data Logger */
++	{ USB_DEVICE(0x17A8, 0x0001) }, /* Kamstrup Optical Eye/3-wire */
++	{ USB_DEVICE(0x17A8, 0x0005) }, /* Kamstrup M-Bus Master MultiPort 250D */
+ 	{ USB_DEVICE(0x17F4, 0xAAAA) }, /* Wavesense Jazz blood glucose meter */
+ 	{ USB_DEVICE(0x1843, 0x0200) }, /* Vaisala USB Instrument Cable */
+ 	{ USB_DEVICE(0x18EF, 0xE00F) }, /* ELV USB-I2C-Interface */
+diff --git a/fs/autofs4/autofs_i.h b/fs/autofs4/autofs_i.h
+index 8f7cdde..5d8d9a0 100644
+--- a/fs/autofs4/autofs_i.h
++++ b/fs/autofs4/autofs_i.h
+@@ -125,6 +125,7 @@ struct autofs_sb_info {
+ 	int sub_version;
+ 	int min_proto;
+ 	int max_proto;
++	int compat_daemon;
+ 	unsigned long exp_timeout;
+ 	unsigned int type;
+ 	int reghost_enabled;
+diff --git a/fs/autofs4/dev-ioctl.c b/fs/autofs4/dev-ioctl.c
+index 00bf8fc..5bb5a2a 100644
+--- a/fs/autofs4/dev-ioctl.c
++++ b/fs/autofs4/dev-ioctl.c
+@@ -389,6 +389,7 @@ static int autofs_dev_ioctl_setpipefd(struct file *fp,
+ 		sbi->pipefd = pipefd;
+ 		sbi->pipe = pipe;
+ 		sbi->catatonic = 0;
++		sbi->compat_daemon = is_compat_task();
+ 	}
+ out:
+ 	mutex_unlock(&sbi->wq_mutex);
+diff --git a/fs/autofs4/inode.c b/fs/autofs4/inode.c
+index 69c8142..0ca145a 100644
+--- a/fs/autofs4/inode.c
++++ b/fs/autofs4/inode.c
+@@ -19,6 +19,7 @@
+ #include <linux/parser.h>
+ #include <linux/bitops.h>
+ #include <linux/magic.h>
++#include <linux/compat.h>
+ #include "autofs_i.h"
+ #include <linux/module.h>
+ 
+@@ -341,6 +342,7 @@ int autofs4_fill_super(struct super_block *s, void *data, int silent)
+ 	set_autofs_type_indirect(&sbi->type);
+ 	sbi->min_proto = 0;
+ 	sbi->max_proto = 0;
++	sbi->compat_daemon = is_compat_task();
+ 	mutex_init(&sbi->wq_mutex);
+ 	spin_lock_init(&sbi->fs_lock);
+ 	sbi->queues = NULL;
+diff --git a/fs/autofs4/waitq.c b/fs/autofs4/waitq.c
+index 2341375..136a0d6 100644
+--- a/fs/autofs4/waitq.c
++++ b/fs/autofs4/waitq.c
+@@ -90,7 +90,24 @@ static int autofs4_write(struct file *file, const void *addr, int bytes)
+ 
+ 	return (bytes > 0);
+ }
+-	
++
++/*
++ * The autofs_v5 packet was misdesigned.
++ *
++ * The packets are identical on x86-32 and x86-64, but have different
++ * alignment. Which means that 'sizeof()' will give different results.
++ * Fix it up for the case of running 32-bit user mode on a 64-bit kernel.
++ */
++static noinline size_t autofs_v5_packet_size(struct autofs_sb_info *sbi)
++{
++	size_t pktsz = sizeof(struct autofs_v5_packet);
++#if defined(CONFIG_X86_64) && defined(CONFIG_COMPAT)
++	if (sbi->compat_daemon > 0)
++		pktsz -= 4;
++#endif
++	return pktsz;
++}
++
+ static void autofs4_notify_daemon(struct autofs_sb_info *sbi,
+ 				 struct autofs_wait_queue *wq,
+ 				 int type)
+@@ -147,8 +164,7 @@ static void autofs4_notify_daemon(struct autofs_sb_info *sbi,
+ 	{
+ 		struct autofs_v5_packet *packet = &pkt.v5_pkt.v5_packet;
+ 
+-		pktsz = sizeof(*packet);
+-
++		pktsz = autofs_v5_packet_size(sbi);
+ 		packet->wait_queue_token = wq->wait_queue_token;
+ 		packet->len = wq->name.len;
+ 		memcpy(packet->name, wq->name.name, wq->name.len);
+diff --git a/fs/ecryptfs/file.c b/fs/ecryptfs/file.c
+index 4e25328..3015389 100644
+--- a/fs/ecryptfs/file.c
++++ b/fs/ecryptfs/file.c
+@@ -323,11 +323,11 @@ ecryptfs_compat_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+ 
+ const struct file_operations ecryptfs_dir_fops = {
+ 	.readdir = ecryptfs_readdir,
++	.read = generic_read_dir,
+ 	.unlocked_ioctl = ecryptfs_unlocked_ioctl,
+ #ifdef CONFIG_COMPAT
+ 	.compat_ioctl = ecryptfs_compat_ioctl,
+ #endif
+-	.mmap = generic_file_mmap,
+ 	.open = ecryptfs_open,
+ 	.flush = ecryptfs_flush,
+ 	.release = ecryptfs_release,
+diff --git a/fs/ecryptfs/inode.c b/fs/ecryptfs/inode.c
+index 88ba4d4..4434e8f 100644
+--- a/fs/ecryptfs/inode.c
++++ b/fs/ecryptfs/inode.c
+@@ -575,8 +575,8 @@ static int ecryptfs_rmdir(struct inode *dir, struct dentry *dentry)
+ 	dget(lower_dentry);
+ 	rc = vfs_rmdir(lower_dir_dentry->d_inode, lower_dentry);
+ 	dput(lower_dentry);
+-	if (!rc)
+-		d_delete(lower_dentry);
++	if (!rc && dentry->d_inode)
++		clear_nlink(dentry->d_inode);
+ 	fsstack_copy_attr_times(dir, lower_dir_dentry->d_inode);
+ 	dir->i_nlink = lower_dir_dentry->d_inode->i_nlink;
+ 	unlock_dir(lower_dir_dentry);
+@@ -758,18 +758,23 @@ upper_size_to_lower_size(struct ecryptfs_crypt_stat *crypt_stat,
+ }
+ 
+ /**
+- * ecryptfs_truncate
++ * truncate_upper
+  * @dentry: The ecryptfs layer dentry
+- * @new_length: The length to expand the file to
++ * @ia: Address of the ecryptfs inode's attributes
++ * @lower_ia: Address of the lower inode's attributes
+  *
+  * Function to handle truncations modifying the size of the file. Note
+  * that the file sizes are interpolated. When expanding, we are simply
+- * writing strings of 0's out. When truncating, we need to modify the
+- * underlying file size according to the page index interpolations.
++ * writing strings of 0's out. When truncating, we truncate the upper
++ * inode and update the lower_ia according to the page index
++ * interpolations. If ATTR_SIZE is set in lower_ia->ia_valid upon return,
++ * the caller must use lower_ia in a call to notify_change() to perform
++ * the truncation of the lower inode.
+  *
+  * Returns zero on success; non-zero otherwise
+  */
+-int ecryptfs_truncate(struct dentry *dentry, loff_t new_length)
++static int truncate_upper(struct dentry *dentry, struct iattr *ia,
++			  struct iattr *lower_ia)
+ {
+ 	int rc = 0;
+ 	struct inode *inode = dentry->d_inode;
+@@ -780,8 +785,10 @@ int ecryptfs_truncate(struct dentry *dentry, loff_t new_length)
+ 	loff_t lower_size_before_truncate;
+ 	loff_t lower_size_after_truncate;
+ 
+-	if (unlikely((new_length == i_size)))
++	if (unlikely((ia->ia_size == i_size))) {
++		lower_ia->ia_valid &= ~ATTR_SIZE;
+ 		goto out;
++	}
+ 	crypt_stat = &ecryptfs_inode_to_private(dentry->d_inode)->crypt_stat;
+ 	/* Set up a fake ecryptfs file, this is used to interface with
+ 	 * the file in the underlying filesystem so that the
+@@ -801,28 +808,30 @@ int ecryptfs_truncate(struct dentry *dentry, loff_t new_length)
+ 		&fake_ecryptfs_file,
+ 		ecryptfs_inode_to_private(dentry->d_inode)->lower_file);
+ 	/* Switch on growing or shrinking file */
+-	if (new_length > i_size) {
++	if (ia->ia_size > i_size) {
+ 		char zero[] = { 0x00 };
+ 
++		lower_ia->ia_valid &= ~ATTR_SIZE;
+ 		/* Write a single 0 at the last position of the file;
+ 		 * this triggers code that will fill in 0's throughout
+ 		 * the intermediate portion of the previous end of the
+ 		 * file and the new and of the file */
+ 		rc = ecryptfs_write(&fake_ecryptfs_file, zero,
+-				    (new_length - 1), 1);
+-	} else { /* new_length < i_size_read(inode) */
+-		/* We're chopping off all the pages down do the page
+-		 * in which new_length is located. Fill in the end of
+-		 * that page from (new_length & ~PAGE_CACHE_MASK) to
++				    (ia->ia_size - 1), 1);
++	} else { /* ia->ia_size < i_size_read(inode) */
++		/* We're chopping off all the pages down to the page
++		 * in which ia->ia_size is located. Fill in the end of
++		 * that page from (ia->ia_size & ~PAGE_CACHE_MASK) to
+ 		 * PAGE_CACHE_SIZE with zeros. */
+ 		size_t num_zeros = (PAGE_CACHE_SIZE
+-				    - (new_length & ~PAGE_CACHE_MASK));
++				    - (ia->ia_size & ~PAGE_CACHE_MASK));
+ 
+ 		if (!(crypt_stat->flags & ECRYPTFS_ENCRYPTED)) {
+-			rc = vmtruncate(inode, new_length);
++			rc = vmtruncate(inode, ia->ia_size);
+ 			if (rc)
+ 				goto out_free;
+-			rc = vmtruncate(lower_dentry->d_inode, new_length);
++			lower_ia->ia_size = ia->ia_size;
++			lower_ia->ia_valid |= ATTR_SIZE;
+ 			goto out_free;
+ 		}
+ 		if (num_zeros) {
+@@ -834,7 +843,7 @@ int ecryptfs_truncate(struct dentry *dentry, loff_t new_length)
+ 				goto out_free;
+ 			}
+ 			rc = ecryptfs_write(&fake_ecryptfs_file, zeros_virt,
+-					    new_length, num_zeros);
++					    ia->ia_size, num_zeros);
+ 			kfree(zeros_virt);
+ 			if (rc) {
+ 				printk(KERN_ERR "Error attempting to zero out "
+@@ -843,7 +852,7 @@ int ecryptfs_truncate(struct dentry *dentry, loff_t new_length)
+ 				goto out_free;
+ 			}
+ 		}
+-		vmtruncate(inode, new_length);
++		vmtruncate(inode, ia->ia_size);
+ 		rc = ecryptfs_write_inode_size_to_metadata(inode);
+ 		if (rc) {
+ 			printk(KERN_ERR	"Problem with "
+@@ -856,10 +865,12 @@ int ecryptfs_truncate(struct dentry *dentry, loff_t new_length)
+ 		lower_size_before_truncate =
+ 		    upper_size_to_lower_size(crypt_stat, i_size);
+ 		lower_size_after_truncate =
+-		    upper_size_to_lower_size(crypt_stat, new_length);
+-		if (lower_size_after_truncate < lower_size_before_truncate)
+-			vmtruncate(lower_dentry->d_inode,
+-				   lower_size_after_truncate);
++		    upper_size_to_lower_size(crypt_stat, ia->ia_size);
++		if (lower_size_after_truncate < lower_size_before_truncate) {
++			lower_ia->ia_size = lower_size_after_truncate;
++			lower_ia->ia_valid |= ATTR_SIZE;
++		} else
++			lower_ia->ia_valid &= ~ATTR_SIZE;
+ 	}
+ out_free:
+ 	if (ecryptfs_file_to_private(&fake_ecryptfs_file))
+@@ -869,6 +880,33 @@ out:
+ 	return rc;
+ }
+ 
++/**
++ * ecryptfs_truncate
++ * @dentry: The ecryptfs layer dentry
++ * @new_length: The length to expand the file to
++ *
++ * Simple function that handles the truncation of an eCryptfs inode and
++ * its corresponding lower inode.
++ *
++ * Returns zero on success; non-zero otherwise
++ */
++int ecryptfs_truncate(struct dentry *dentry, loff_t new_length)
++{
++	struct iattr ia = { .ia_valid = ATTR_SIZE, .ia_size = new_length };
++	struct iattr lower_ia = { .ia_valid = 0 };
++	int rc;
++
++	rc = truncate_upper(dentry, &ia, &lower_ia);
++	if (!rc && lower_ia.ia_valid & ATTR_SIZE) {
++		struct dentry *lower_dentry = ecryptfs_dentry_to_lower(dentry);
++
++		mutex_lock(&lower_dentry->d_inode->i_mutex);
++		rc = notify_change(lower_dentry, &lower_ia);
++		mutex_unlock(&lower_dentry->d_inode->i_mutex);
++	}
++	return rc;
++}
++
+ static int
+ ecryptfs_permission(struct inode *inode, int mask)
+ {
+@@ -891,6 +929,7 @@ static int ecryptfs_setattr(struct dentry *dentry, struct iattr *ia)
+ {
+ 	int rc = 0;
+ 	struct dentry *lower_dentry;
++	struct iattr lower_ia;
+ 	struct inode *inode;
+ 	struct inode *lower_inode;
+ 	struct ecryptfs_crypt_stat *crypt_stat;
+@@ -929,15 +968,11 @@ static int ecryptfs_setattr(struct dentry *dentry, struct iattr *ia)
+ 		}
+ 	}
+ 	mutex_unlock(&crypt_stat->cs_mutex);
++	memcpy(&lower_ia, ia, sizeof(lower_ia));
++	if (ia->ia_valid & ATTR_FILE)
++		lower_ia.ia_file = ecryptfs_file_to_lower(ia->ia_file);
+ 	if (ia->ia_valid & ATTR_SIZE) {
+-		ecryptfs_printk(KERN_DEBUG,
+-				"ia->ia_valid = [0x%x] ATTR_SIZE" " = [0x%x]\n",
+-				ia->ia_valid, ATTR_SIZE);
+-		rc = ecryptfs_truncate(dentry, ia->ia_size);
+-		/* ecryptfs_truncate handles resizing of the lower file */
+-		ia->ia_valid &= ~ATTR_SIZE;
+-		ecryptfs_printk(KERN_DEBUG, "ia->ia_valid = [%x]\n",
+-				ia->ia_valid);
++		rc = truncate_upper(dentry, ia, &lower_ia);
+ 		if (rc < 0)
+ 			goto out;
+ 	}
+@@ -946,11 +981,11 @@ static int ecryptfs_setattr(struct dentry *dentry, struct iattr *ia)
+ 	 * mode change is for clearing setuid/setgid bits. Allow lower fs
+ 	 * to interpret this in its own way.
+ 	 */
+-	if (ia->ia_valid & (ATTR_KILL_SUID | ATTR_KILL_SGID))
+-		ia->ia_valid &= ~ATTR_MODE;
++	if (lower_ia.ia_valid & (ATTR_KILL_SUID | ATTR_KILL_SGID))
++		lower_ia.ia_valid &= ~ATTR_MODE;
+ 
+ 	mutex_lock(&lower_dentry->d_inode->i_mutex);
+-	rc = notify_change(lower_dentry, ia);
++	rc = notify_change(lower_dentry, &lower_ia);
+ 	mutex_unlock(&lower_dentry->d_inode->i_mutex);
+ out:
+ 	fsstack_copy_attr_all(inode, lower_inode, NULL);
+diff --git a/fs/ecryptfs/main.c b/fs/ecryptfs/main.c
+index c6ac85d..e2f18ad 100644
+--- a/fs/ecryptfs/main.c
++++ b/fs/ecryptfs/main.c
+@@ -212,7 +212,8 @@ enum { ecryptfs_opt_sig, ecryptfs_opt_ecryptfs_sig,
+        ecryptfs_opt_passthrough, ecryptfs_opt_xattr_metadata,
+        ecryptfs_opt_encrypted_view, ecryptfs_opt_fnek_sig,
+        ecryptfs_opt_fn_cipher, ecryptfs_opt_fn_cipher_key_bytes,
+-       ecryptfs_opt_unlink_sigs, ecryptfs_opt_err };
++       ecryptfs_opt_unlink_sigs, ecryptfs_opt_check_dev_ruid,
++       ecryptfs_opt_err };
+ 
+ static const match_table_t tokens = {
+ 	{ecryptfs_opt_sig, "sig=%s"},
+@@ -227,6 +228,7 @@ static const match_table_t tokens = {
+ 	{ecryptfs_opt_fn_cipher, "ecryptfs_fn_cipher=%s"},
+ 	{ecryptfs_opt_fn_cipher_key_bytes, "ecryptfs_fn_key_bytes=%u"},
+ 	{ecryptfs_opt_unlink_sigs, "ecryptfs_unlink_sigs"},
++	{ecryptfs_opt_check_dev_ruid, "ecryptfs_check_dev_ruid"},
+ 	{ecryptfs_opt_err, NULL}
+ };
+ 
+@@ -270,6 +272,7 @@ static void ecryptfs_init_mount_crypt_stat(
+  * ecryptfs_parse_options
+  * @sb: The ecryptfs super block
+  * @options: The options pased to the kernel
++ * @check_ruid: set to 1 if device uid should be checked against the ruid
+  *
+  * Parse mount options:
+  * debug=N 	   - ecryptfs_verbosity level for debug output
+@@ -285,7 +288,8 @@ static void ecryptfs_init_mount_crypt_stat(
+  *
+  * Returns zero on success; non-zero on error
+  */
+-static int ecryptfs_parse_options(struct super_block *sb, char *options)
++static int ecryptfs_parse_options(struct super_block *sb, char *options,
++					uid_t *check_ruid)
+ {
+ 	char *p;
+ 	int rc = 0;
+@@ -310,6 +314,8 @@ static int ecryptfs_parse_options(struct super_block *sb, char *options)
+ 	char *cipher_key_bytes_src;
+ 	char *fn_cipher_key_bytes_src;
+ 
++	*check_ruid = 0;
++
+ 	if (!options) {
+ 		rc = -EINVAL;
+ 		goto out;
+@@ -410,6 +416,9 @@ static int ecryptfs_parse_options(struct super_block *sb, char *options)
+ 		case ecryptfs_opt_unlink_sigs:
+ 			mount_crypt_stat->flags |= ECRYPTFS_UNLINK_SIGS;
+ 			break;
++		case ecryptfs_opt_check_dev_ruid:
++			*check_ruid = 1;
++			break;
+ 		case ecryptfs_opt_err:
+ 		default:
+ 			printk(KERN_WARNING
+@@ -487,6 +496,7 @@ out:
+ }
+ 
+ struct kmem_cache *ecryptfs_sb_info_cache;
++static struct file_system_type ecryptfs_fs_type;
+ 
+ /**
+  * ecryptfs_fill_super
+@@ -551,7 +561,8 @@ out:
+  * ecryptfs_interpose to create our initial inode and super block
+  * struct.
+  */
+-static int ecryptfs_read_super(struct super_block *sb, const char *dev_name)
++static int ecryptfs_read_super(struct super_block *sb, const char *dev_name,
++				uid_t check_ruid)
+ {
+ 	struct path path;
+ 	int rc;
+@@ -561,6 +572,22 @@ static int ecryptfs_read_super(struct super_block *sb, const char *dev_name)
+ 		ecryptfs_printk(KERN_WARNING, "path_lookup() failed\n");
+ 		goto out;
+ 	}
++	if (path.dentry->d_sb->s_type == &ecryptfs_fs_type) {
++		rc = -EINVAL;
++		printk(KERN_ERR "Mount on filesystem of type "
++			"eCryptfs explicitly disallowed due to "
++			"known incompatibilities\n");
++		goto out_free;
++	}
++
++	if (check_ruid && path.dentry->d_inode->i_uid != current_uid()) {
++		rc = -EPERM;
++		printk(KERN_ERR "Mount of device (uid: %d) not owned by "
++		       "requested user (uid: %d)\n",
++		       path.dentry->d_inode->i_uid, current_uid());
++		goto out_free;
++	}
++
+ 	ecryptfs_set_superblock_lower(sb, path.dentry->d_sb);
+ 	sb->s_maxbytes = path.dentry->d_sb->s_maxbytes;
+ 	sb->s_blocksize = path.dentry->d_sb->s_blocksize;
+@@ -599,6 +626,7 @@ static int ecryptfs_get_sb(struct file_system_type *fs_type, int flags,
+ {
+ 	int rc;
+ 	struct super_block *sb;
++	uid_t check_ruid;
+ 
+ 	rc = get_sb_nodev(fs_type, flags, raw_data, ecryptfs_fill_super, mnt);
+ 	if (rc < 0) {
+@@ -606,12 +634,12 @@ static int ecryptfs_get_sb(struct file_system_type *fs_type, int flags,
+ 		goto out;
+ 	}
+ 	sb = mnt->mnt_sb;
+-	rc = ecryptfs_parse_options(sb, raw_data);
++	rc = ecryptfs_parse_options(sb, raw_data, &check_ruid);
+ 	if (rc) {
+ 		printk(KERN_ERR "Error parsing options; rc = [%d]\n", rc);
+ 		goto out_abort;
+ 	}
+-	rc = ecryptfs_read_super(sb, dev_name);
++	rc = ecryptfs_read_super(sb, dev_name, check_ruid);
+ 	if (rc) {
+ 		printk(KERN_ERR "Reading sb failed; rc = [%d]\n", rc);
+ 		goto out_abort;
+diff --git a/include/linux/bitops.h b/include/linux/bitops.h
+index c05a29c..56835a7 100644
+--- a/include/linux/bitops.h
++++ b/include/linux/bitops.h
+@@ -46,6 +46,26 @@ static inline unsigned long hweight_long(unsigned long w)
+ }
+ 
+ /**
++ * rol64 - rotate a 64-bit value left
++ * @word: value to rotate
++ * @shift: bits to roll
++ */
++static inline __u64 rol64(__u64 word, unsigned int shift)
++{
++	return (word << shift) | (word >> (64 - shift));
++}
++
++/**
++ * ror64 - rotate a 64-bit value right
++ * @word: value to rotate
++ * @shift: bits to roll
++ */
++static inline __u64 ror64(__u64 word, unsigned int shift)
++{
++	return (word >> shift) | (word << (64 - shift));
++}
++
++/**
+  * rol32 - rotate a 32-bit value left
+  * @word: value to rotate
+  * @shift: bits to roll
+diff --git a/include/linux/compat.h b/include/linux/compat.h
+index cab23f2..510266f 100644
+--- a/include/linux/compat.h
++++ b/include/linux/compat.h
+@@ -311,5 +311,9 @@ asmlinkage long compat_sys_openat(unsigned int dfd, const char __user *filename,
+ 
+ extern void __user *compat_alloc_user_space(unsigned long len);
+ 
++#else
++
++#define is_compat_task() (0)
++
+ #endif /* CONFIG_COMPAT */
+ #endif /* _LINUX_COMPAT_H */
+diff --git a/include/linux/kernel.h b/include/linux/kernel.h
+index 1221fe4..9acb92d 100644
+--- a/include/linux/kernel.h
++++ b/include/linux/kernel.h
+@@ -411,14 +411,13 @@ static inline char *pack_hex_byte(char *buf, u8 byte)
+  * no local ratelimit_state used in the !PRINTK case
+  */
+ #ifdef CONFIG_PRINTK
+-#define printk_ratelimited(fmt, ...)  ({		\
+-	static struct ratelimit_state _rs = {		\
+-		.interval = DEFAULT_RATELIMIT_INTERVAL, \
+-		.burst = DEFAULT_RATELIMIT_BURST,       \
+-	};                                              \
+-							\
+-	if (!__ratelimit(&_rs))                         \
+-		printk(fmt, ##__VA_ARGS__);		\
++#define printk_ratelimited(fmt, ...)  ({				\
++	static DEFINE_RATELIMIT_STATE(_rs,				\
++				      DEFAULT_RATELIMIT_INTERVAL,	\
++				      DEFAULT_RATELIMIT_BURST);		\
++									\
++	if (__ratelimit(&_rs))						\
++		printk(fmt, ##__VA_ARGS__);				\
+ })
+ #else
+ /* No effect, but we still get type checking even in the !PRINTK case: */
+diff --git a/include/linux/kmod.h b/include/linux/kmod.h
+index 384ca8b..0546fe7 100644
+--- a/include/linux/kmod.h
++++ b/include/linux/kmod.h
+@@ -104,7 +104,16 @@ struct file;
+ extern int call_usermodehelper_pipe(char *path, char *argv[], char *envp[],
+ 				    struct file **filp);
+ 
++#ifdef CONFIG_PM_SLEEP
+ extern int usermodehelper_disable(void);
+ extern void usermodehelper_enable(void);
++extern bool usermodehelper_is_disabled(void);
++extern void read_lock_usermodehelper(void);
++extern void read_unlock_usermodehelper(void);
++#else
++static inline bool usermodehelper_is_disabled(void) { return false; }
++static inline void read_lock_usermodehelper(void) {}
++static inline void read_unlock_usermodehelper(void) {}
++#endif
+ 
+ #endif /* __LINUX_KMOD_H__ */
+diff --git a/include/linux/proportions.h b/include/linux/proportions.h
+index cf793bb..22653d7 100644
+--- a/include/linux/proportions.h
++++ b/include/linux/proportions.h
+@@ -81,7 +81,11 @@ void prop_inc_percpu(struct prop_descriptor *pd, struct prop_local_percpu *pl)
+  * Limit the time part in order to ensure there are some bits left for the
+  * cycle counter and fraction multiply.
+  */
++#if BITS_PER_LONG == 32
+ #define PROP_MAX_SHIFT (3*BITS_PER_LONG/4)
++#else
++#define PROP_MAX_SHIFT (BITS_PER_LONG/2)
++#endif
+ 
+ #define PROP_FRAC_SHIFT		(BITS_PER_LONG - PROP_MAX_SHIFT - 1)
+ #define PROP_FRAC_BASE		(1UL << PROP_FRAC_SHIFT)
+diff --git a/kernel/kmod.c b/kernel/kmod.c
+index d206078..a061472 100644
+--- a/kernel/kmod.c
++++ b/kernel/kmod.c
+@@ -35,6 +35,7 @@
+ #include <linux/resource.h>
+ #include <linux/notifier.h>
+ #include <linux/suspend.h>
++#include <linux/rwsem.h>
+ #include <asm/uaccess.h>
+ 
+ #include <trace/events/module.h>
+@@ -43,6 +44,8 @@ extern int max_threads;
+ 
+ static struct workqueue_struct *khelper_wq;
+ 
++static DECLARE_RWSEM(umhelper_sem);
++
+ #ifdef CONFIG_MODULES
+ 
+ /*
+@@ -286,6 +289,7 @@ static void __call_usermodehelper(struct work_struct *work)
+  * If set, call_usermodehelper_exec() will exit immediately returning -EBUSY
+  * (used for preventing user land processes from being created after the user
+  * land has been frozen during a system-wide hibernation or suspend operation).
++ * Should always be manipulated under umhelper_sem acquired for write.
+  */
+ static int usermodehelper_disabled;
+ 
+@@ -304,6 +308,18 @@ static DECLARE_WAIT_QUEUE_HEAD(running_helpers_waitq);
+  */
+ #define RUNNING_HELPERS_TIMEOUT	(5 * HZ)
+ 
++void read_lock_usermodehelper(void)
++{
++	down_read(&umhelper_sem);
++}
++EXPORT_SYMBOL_GPL(read_lock_usermodehelper);
++
++void read_unlock_usermodehelper(void)
++{
++	up_read(&umhelper_sem);
++}
++EXPORT_SYMBOL_GPL(read_unlock_usermodehelper);
++
+ /**
+  * usermodehelper_disable - prevent new helpers from being started
+  */
+@@ -311,8 +327,10 @@ int usermodehelper_disable(void)
+ {
+ 	long retval;
+ 
++	down_write(&umhelper_sem);
+ 	usermodehelper_disabled = 1;
+-	smp_mb();
++	up_write(&umhelper_sem);
++
+ 	/*
+ 	 * From now on call_usermodehelper_exec() won't start any new
+ 	 * helpers, so it is sufficient if running_helpers turns out to
+@@ -325,7 +343,9 @@ int usermodehelper_disable(void)
+ 	if (retval)
+ 		return 0;
+ 
++	down_write(&umhelper_sem);
+ 	usermodehelper_disabled = 0;
++	up_write(&umhelper_sem);
+ 	return -EAGAIN;
+ }
+ 
+@@ -334,8 +354,19 @@ int usermodehelper_disable(void)
+  */
+ void usermodehelper_enable(void)
+ {
++	down_write(&umhelper_sem);
+ 	usermodehelper_disabled = 0;
++	up_write(&umhelper_sem);
++}
++
++/**
++ * usermodehelper_is_disabled - check if new helpers are allowed to be started
++ */
++bool usermodehelper_is_disabled(void)
++{
++	return usermodehelper_disabled;
+ }
++EXPORT_SYMBOL_GPL(usermodehelper_is_disabled);
+ 
+ static void helper_lock(void)
+ {
+diff --git a/kernel/relay.c b/kernel/relay.c
+index 760c262..bf343f5 100644
+--- a/kernel/relay.c
++++ b/kernel/relay.c
+@@ -171,10 +171,14 @@ depopulate:
+  */
+ static struct rchan_buf *relay_create_buf(struct rchan *chan)
+ {
+-	struct rchan_buf *buf = kzalloc(sizeof(struct rchan_buf), GFP_KERNEL);
+-	if (!buf)
++	struct rchan_buf *buf;
++
++	if (chan->n_subbufs > UINT_MAX / sizeof(size_t *))
+ 		return NULL;
+ 
++	buf = kzalloc(sizeof(struct rchan_buf), GFP_KERNEL);
++	if (!buf)
++		return NULL;
+ 	buf->padding = kmalloc(chan->n_subbufs * sizeof(size_t *), GFP_KERNEL);
+ 	if (!buf->padding)
+ 		goto free_buf;
+@@ -581,6 +585,8 @@ struct rchan *relay_open(const char *base_filename,
+ 
+ 	if (!(subbuf_size && n_subbufs))
+ 		return NULL;
++	if (subbuf_size > UINT_MAX / n_subbufs)
++		return NULL;
+ 
+ 	chan = kzalloc(sizeof(struct rchan), GFP_KERNEL);
+ 	if (!chan)
+diff --git a/net/mac80211/rx.c b/net/mac80211/rx.c
+index 38499c4..759f96f 100644
+--- a/net/mac80211/rx.c
++++ b/net/mac80211/rx.c
+@@ -2363,7 +2363,7 @@ static u8 ieee80211_sta_manage_reorder_buf(struct ieee80211_hw *hw,
+ 	index = seq_sub(tid_agg_rx->head_seq_num, tid_agg_rx->ssn)
+ 						% tid_agg_rx->buf_size;
+ 	if (!tid_agg_rx->reorder_buf[index] &&
+-	    tid_agg_rx->stored_mpdu_num > 1) {
++	    tid_agg_rx->stored_mpdu_num) {
+ 		/*
+ 		 * No buffers ready to be released, but check whether any
+ 		 * frames in the reorder buffer have timed out.

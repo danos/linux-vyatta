@@ -15225,14 +15225,6 @@ index 8f7cdde..41b42bd 100644
  	int catatonic;
  	int version;
  	int sub_version;
-@@ -136,6 +136,7 @@ struct autofs_sb_info {
- 	spinlock_t lookup_lock;
- 	struct list_head active_list;
- 	struct list_head expiring_list;
-+	unsigned is32bit:1;
- };
- 
- static inline struct autofs_sb_info *autofs4_sbi(struct super_block *sb)
 @@ -153,7 +154,7 @@ static inline struct autofs_info *autofs4_dentry_ino(struct dentry *dentry)
     filesystem without "magic".) */
  
@@ -15307,7 +15299,7 @@ index 69c8142..47a39bc 100644
  
  	sbi = kzalloc(sizeof(*sbi), GFP_KERNEL);
  	if (!sbi)
-@@ -334,13 +337,16 @@ int autofs4_fill_super(struct super_block *s, void *data, int silent)
+@@ -334,7 +337,6 @@ int autofs4_fill_super(struct super_block *s, void *data, int silent)
  	sbi->pipe = NULL;
  	sbi->catatonic = 1;
  	sbi->exp_timeout = 0;
@@ -15315,16 +15307,6 @@ index 69c8142..47a39bc 100644
  	sbi->sb = s;
  	sbi->version = 0;
  	sbi->sub_version = 0;
- 	set_autofs_type_indirect(&sbi->type);
- 	sbi->min_proto = 0;
- 	sbi->max_proto = 0;
-+#if defined CONFIG_X86_64 && defined CONFIG_IA32_EMULATION
-+	if (test_thread_flag(TIF_IA32))
-+		sbi->is32bit = 1;
-+#endif
- 	mutex_init(&sbi->wq_mutex);
- 	spin_lock_init(&sbi->fs_lock);
- 	sbi->queues = NULL;
 @@ -373,7 +379,7 @@ int autofs4_fill_super(struct super_block *s, void *data, int silent)
  
  	/* Can this call block? */
@@ -15388,27 +15370,6 @@ index b96a3c5..263c27a 100644
  		return -EPERM;
  	
  	switch(cmd) {
-diff --git a/fs/autofs4/waitq.c b/fs/autofs4/waitq.c
-index 2341375..f1408f1 100644
---- a/fs/autofs4/waitq.c
-+++ b/fs/autofs4/waitq.c
-@@ -148,6 +148,16 @@ static void autofs4_notify_daemon(struct autofs_sb_info *sbi,
- 		struct autofs_v5_packet *packet = &pkt.v5_pkt.v5_packet;
- 
- 		pktsz = sizeof(*packet);
-+#if defined CONFIG_X86_64 && defined CONFIG_IA32_EMULATION
-+		/*
-+		 * On x86_64 autofs_v5_packet struct padded with 4 bytes
-+		 * it broke autofs daemon worked in ia32 emulation mode
-+		 *
-+		 * reduce size if work in 32-bit mode to satisfy userspace hope
-+		 */
-+		if (sbi->is32bit)
-+			pktsz -= 4;
-+#endif
- 
- 		packet->wait_queue_token = wq->wait_queue_token;
- 		packet->len = wq->name.len;
 diff --git a/fs/binfmt_aout.c b/fs/binfmt_aout.c
 index 0133b5a..1379e26 100644
 --- a/fs/binfmt_aout.c
