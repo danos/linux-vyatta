@@ -1,0 +1,62 @@
+From 537400450bd43daf3f99efe35efd0ccaf16f38b1 Mon Sep 17 00:00:00 2001
+From: Dan Carpenter <dan.carpenter@oracle.com>
+Date: Thu, 5 Jan 2012 02:27:57 -0300
+Subject: [PATCH] V4L/DVB: v4l2-ioctl: integer overflow in video_usercopy()
+
+commit 6c06108be53ca5e94d8b0e93883d534dd9079646 upstream.
+
+If ctrls->count is too high the multiplication could overflow and
+array_size would be lower than expected.  Mauro and Hans Verkuil
+suggested that we cap it at 1024.  That comes from the maximum
+number of controls with lots of room for expantion.
+
+$ grep V4L2_CID include/linux/videodev2.h | wc -l
+211
+
+Signed-off-by: Dan Carpenter <dan.carpenter@oracle.com>
+Signed-off-by: Mauro Carvalho Chehab <mchehab@redhat.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+---
+ drivers/media/video/v4l2-ioctl.c |    6 ++++++
+ include/linux/videodev2.h        |    1 +
+ 2 files changed, 7 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/media/video/v4l2-ioctl.c b/drivers/media/video/v4l2-ioctl.c
+index 265bfb5..d7332c7 100644
+--- a/drivers/media/video/v4l2-ioctl.c
++++ b/drivers/media/video/v4l2-ioctl.c
+@@ -414,6 +414,9 @@ video_usercopy(struct file *file, unsigned int cmd, unsigned long arg,
+ 		p->error_idx = p->count;
+ 		user_ptr = (void __user *)p->controls;
+ 		if (p->count) {
++			err = -EINVAL;
++			if (p->count > V4L2_CID_MAX_CTRLS)
++				goto out_ext_ctrl;
+ 			ctrls_size = sizeof(struct v4l2_ext_control) * p->count;
+ 			/* Note: v4l2_ext_controls fits in sbuf[] so mbuf is still NULL. */
+ 			mbuf = kmalloc(ctrls_size, GFP_KERNEL);
+@@ -1912,6 +1915,9 @@ long video_ioctl2(struct file *file,
+ 		p->error_idx = p->count;
+ 		user_ptr = (void __user *)p->controls;
+ 		if (p->count) {
++			err = -EINVAL;
++			if (p->count > V4L2_CID_MAX_CTRLS)
++				goto out_ext_ctrl;
+ 			ctrls_size = sizeof(struct v4l2_ext_control) * p->count;
+ 			/* Note: v4l2_ext_controls fits in sbuf[] so mbuf is still NULL. */
+ 			mbuf = kmalloc(ctrls_size, GFP_KERNEL);
+diff --git a/include/linux/videodev2.h b/include/linux/videodev2.h
+index b59e78c..9e2088c 100644
+--- a/include/linux/videodev2.h
++++ b/include/linux/videodev2.h
+@@ -858,6 +858,7 @@ struct v4l2_querymenu {
+ #define V4L2_CTRL_FLAG_NEXT_CTRL	0x80000000
+ 
+ /*  User-class control IDs defined by V4L2 */
++#define V4L2_CID_MAX_CTRLS		1024
+ #define V4L2_CID_BASE			(V4L2_CTRL_CLASS_USER | 0x900)
+ #define V4L2_CID_USER_BASE 		V4L2_CID_BASE
+ /*  IDs reserved for driver specific controls */
+-- 
+1.7.9.1
+

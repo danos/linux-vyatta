@@ -1,0 +1,58 @@
+commit 423873736b78f549fbfa2f715f2e4de7e6c5e1e9
+Author: Alex Williamson <alex.williamson@redhat.com>
+Date:   Tue Dec 20 21:59:03 2011 -0700
+
+    KVM: Remove ability to assign a device without iommu support
+    
+    This option has no users and it exposes a security hole that we
+    can allow devices to be assigned without iommu protection.  Make
+    KVM_DEV_ASSIGN_ENABLE_IOMMU a mandatory option.
+    
+    Signed-off-by: Alex Williamson <alex.williamson@redhat.com>
+    Signed-off-by: Marcelo Tosatti <mtosatti@redhat.com>
+    [dannf: backported to Debian's 2.6.32]
+
+--- a/virt/kvm/kvm_main.c
++++ b/virt/kvm/kvm_main.c
+@@ -582,6 +582,9 @@ static int kvm_vm_ioctl_assign_device(struct kvm *kvm,
+ 	struct kvm_assigned_dev_kernel *match;
+ 	struct pci_dev *dev;
+ 
++	if (!(assigned_dev->flags & KVM_DEV_ASSIGN_ENABLE_IOMMU))
++		return -EINVAL;
++
+ 	down_read(&kvm->slots_lock);
+ 	mutex_lock(&kvm->lock);
+ 
+@@ -635,16 +638,14 @@ static int kvm_vm_ioctl_assign_device(struct kvm *kvm,
+ 
+ 	list_add(&match->list, &kvm->arch.assigned_dev_head);
+ 
+-	if (assigned_dev->flags & KVM_DEV_ASSIGN_ENABLE_IOMMU) {
+-		if (!kvm->arch.iommu_domain) {
+-			r = kvm_iommu_map_guest(kvm);
+-			if (r)
+-				goto out_list_del;
+-		}
+-		r = kvm_assign_device(kvm, match);
++	if (!kvm->arch.iommu_domain) {
++		r = kvm_iommu_map_guest(kvm);
+ 		if (r)
+ 			goto out_list_del;
+ 	}
++	r = kvm_assign_device(kvm, match);
++	if (r)
++		goto out_list_del;
+ 
+ out:
+ 	mutex_unlock(&kvm->lock);
+@@ -683,8 +684,7 @@ static int kvm_vm_ioctl_deassign_device(struct kvm *kvm,
+ 		goto out;
+ 	}
+ 
+-	if (match->flags & KVM_DEV_ASSIGN_ENABLE_IOMMU)
+-		kvm_deassign_device(kvm, match);
++	kvm_deassign_device(kvm, match);
+ 
+ 	kvm_free_assigned_device(kvm, match);
+ 
