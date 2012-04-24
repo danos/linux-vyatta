@@ -21,6 +21,8 @@ Originally-by: Jan Beulich <jbeulich@novell.com>
 LKML-Reference: <4CB88A4C.1080305@goop.org>
 Signed-off-by: Jeremy Fitzhardinge <jeremy.fitzhardinge@citrix.com>
 Signed-off-by: H. Peter Anvin <hpa@linux.intel.com>
+[bwh: Adjust context to apply after backported commit
+ a79e53d85683c6dd9f99c90511028adc2043031f 'x86/mm: Fix pgd_lock deadlock']
 ---
  arch/x86/include/asm/pgtable.h |    2 ++
  arch/x86/mm/fault.c            |   11 ++++++++++-
@@ -28,8 +30,6 @@ Signed-off-by: H. Peter Anvin <hpa@linux.intel.com>
  arch/x86/mm/pgtable.c          |   20 +++++++++++++++++---
  4 files changed, 36 insertions(+), 4 deletions(-)
 
-diff --git a/arch/x86/include/asm/pgtable.h b/arch/x86/include/asm/pgtable.h
-index 2d0a33b..ada823a 100644
 --- a/arch/x86/include/asm/pgtable.h
 +++ b/arch/x86/include/asm/pgtable.h
 @@ -28,6 +28,8 @@ extern unsigned long empty_zero_page[PAGE_SIZE / sizeof(unsigned long)];
@@ -41,13 +41,11 @@ index 2d0a33b..ada823a 100644
  #ifdef CONFIG_PARAVIRT
  #include <asm/paravirt.h>
  #else  /* !CONFIG_PARAVIRT */
-diff --git a/arch/x86/mm/fault.c b/arch/x86/mm/fault.c
-index caec229..6c27c39 100644
 --- a/arch/x86/mm/fault.c
 +++ b/arch/x86/mm/fault.c
 @@ -229,7 +229,16 @@ void vmalloc_sync_all(void)
  
- 		spin_lock_irqsave(&pgd_lock, flags);
+ 		spin_lock(&pgd_lock);
  		list_for_each_entry(page, &pgd_list, lru) {
 -			if (!vmalloc_sync_one(page_address(page), address))
 +			spinlock_t *pgt_lock;
@@ -62,9 +60,9 @@ index caec229..6c27c39 100644
 +			if (!ret)
  				break;
  		}
- 		spin_unlock_irqrestore(&pgd_lock, flags);
+ 		spin_unlock(&pgd_lock);
 @@ -349,11 +349,19 @@
- 		spin_lock_irqsave(&pgd_lock, flags);
+ 		spin_lock(&pgd_lock);
  		list_for_each_entry(page, &pgd_list, lru) {
  			pgd_t *pgd;
 +			spinlock_t *pgt_lock;
@@ -81,10 +79,8 @@ index caec229..6c27c39 100644
 +
 +			spin_unlock(pgt_lock);
  		}
- 		spin_unlock_irqrestore(&pgd_lock, flags);
+ 		spin_unlock(&pgd_lock);
  	}
-diff --git a/arch/x86/mm/pgtable.c b/arch/x86/mm/pgtable.c
-index 5c4ee42..c70e57d 100644
 --- a/arch/x86/mm/pgtable.c
 +++ b/arch/x86/mm/pgtable.c
 @@ -87,7 +87,19 @@ static inline void pgd_list_del(pgd_t *pgd)
@@ -122,13 +118,10 @@ index 5c4ee42..c70e57d 100644
  static void pgd_dtor(pgd_t *pgd)
 @@ -272,7 +286,7 @@ pgd_t *pgd_alloc(struct mm_struct *mm)
  	 */
- 	spin_lock_irqsave(&pgd_lock, flags);
+ 	spin_lock(&pgd_lock);
  
 -	pgd_ctor(pgd);
 +	pgd_ctor(mm, pgd);
  	pgd_prepopulate_pmd(mm, pgd, pmds);
  
- 	spin_unlock_irqrestore(&pgd_lock, flags);
--- 
-1.7.4.1
-
+ 	spin_unlock(&pgd_lock);
