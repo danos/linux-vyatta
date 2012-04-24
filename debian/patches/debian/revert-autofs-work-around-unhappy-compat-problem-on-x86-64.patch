@@ -1,0 +1,93 @@
+diff -urpN a/fs/autofs4/autofs_i.h b/fs/autofs4/autofs_i.h
+--- a/fs/autofs4/autofs_i.h	2012-04-24 15:43:30.548405656 -0600
++++ b/fs/autofs4/autofs_i.h	2012-04-24 16:16:43.437403189 -0600
+@@ -125,7 +125,6 @@ struct autofs_sb_info {
+ 	int sub_version;
+ 	int min_proto;
+ 	int max_proto;
+-	int compat_daemon;
+ 	unsigned long exp_timeout;
+ 	unsigned int type;
+ 	int reghost_enabled;
+diff -urpN a/fs/autofs4/dev-ioctl.c b/fs/autofs4/dev-ioctl.c
+--- a/fs/autofs4/dev-ioctl.c	2012-04-24 15:43:30.552405699 -0600
++++ b/fs/autofs4/dev-ioctl.c	2012-04-24 16:16:43.441403233 -0600
+@@ -389,7 +389,6 @@ static int autofs_dev_ioctl_setpipefd(st
+ 		sbi->pipefd = pipefd;
+ 		sbi->pipe = pipe;
+ 		sbi->catatonic = 0;
+-		sbi->compat_daemon = is_compat_task();
+ 	}
+ out:
+ 	mutex_unlock(&sbi->wq_mutex);
+diff -urpN a/fs/autofs4/inode.c b/fs/autofs4/inode.c
+--- a/fs/autofs4/inode.c	2012-04-24 15:43:30.556405743 -0600
++++ b/fs/autofs4/inode.c	2012-04-24 16:16:43.445403275 -0600
+@@ -19,7 +19,6 @@
+ #include <linux/parser.h>
+ #include <linux/bitops.h>
+ #include <linux/magic.h>
+-#include <linux/compat.h>
+ #include "autofs_i.h"
+ #include <linux/module.h>
+ 
+@@ -342,7 +341,6 @@ int autofs4_fill_super(struct super_bloc
+ 	set_autofs_type_indirect(&sbi->type);
+ 	sbi->min_proto = 0;
+ 	sbi->max_proto = 0;
+-	sbi->compat_daemon = is_compat_task();
+ 	mutex_init(&sbi->wq_mutex);
+ 	spin_lock_init(&sbi->fs_lock);
+ 	sbi->queues = NULL;
+diff -urpN a/fs/autofs4/waitq.c b/fs/autofs4/waitq.c
+--- a/fs/autofs4/waitq.c	2012-04-24 15:43:30.564405828 -0600
++++ b/fs/autofs4/waitq.c	2012-04-24 16:16:43.445403275 -0600
+@@ -90,24 +90,7 @@ static int autofs4_write(struct file *fi
+ 
+ 	return (bytes > 0);
+ }
+-
+-/*
+- * The autofs_v5 packet was misdesigned.
+- *
+- * The packets are identical on x86-32 and x86-64, but have different
+- * alignment. Which means that 'sizeof()' will give different results.
+- * Fix it up for the case of running 32-bit user mode on a 64-bit kernel.
+- */
+-static noinline size_t autofs_v5_packet_size(struct autofs_sb_info *sbi)
+-{
+-	size_t pktsz = sizeof(struct autofs_v5_packet);
+-#if defined(CONFIG_X86_64) && defined(CONFIG_COMPAT)
+-	if (sbi->compat_daemon > 0)
+-		pktsz -= 4;
+-#endif
+-	return pktsz;
+-}
+-
++	
+ static void autofs4_notify_daemon(struct autofs_sb_info *sbi,
+ 				 struct autofs_wait_queue *wq,
+ 				 int type)
+@@ -164,7 +147,8 @@ static void autofs4_notify_daemon(struct
+ 	{
+ 		struct autofs_v5_packet *packet = &pkt.v5_pkt.v5_packet;
+ 
+-		pktsz = autofs_v5_packet_size(sbi);
++		pktsz = sizeof(*packet);
++
+ 		packet->wait_queue_token = wq->wait_queue_token;
+ 		packet->len = wq->name.len;
+ 		memcpy(packet->name, wq->name.name, wq->name.len);
+diff -urpN a/include/linux/compat.h b/include/linux/compat.h
+--- a/include/linux/compat.h	2012-04-24 15:43:30.584406041 -0600
++++ b/include/linux/compat.h	2012-04-24 16:16:43.445403275 -0600
+@@ -311,9 +311,5 @@ asmlinkage long compat_sys_openat(unsign
+ 
+ extern void __user *compat_alloc_user_space(unsigned long len);
+ 
+-#else
+-
+-#define is_compat_task() (0)
+-
+ #endif /* CONFIG_COMPAT */
+ #endif /* _LINUX_COMPAT_H */
