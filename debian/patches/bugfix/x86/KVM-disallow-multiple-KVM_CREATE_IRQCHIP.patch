@@ -1,0 +1,81 @@
+commit 3ddea128ad75bd33e88780fe44f44c3717369b98
+Author: Marcelo Tosatti <mtosatti@redhat.com>
+Date:   Thu Oct 29 13:44:15 2009 -0200
+
+    KVM: x86: disallow multiple KVM_CREATE_IRQCHIP
+    
+    Otherwise kvm will leak memory on multiple KVM_CREATE_IRQCHIP.
+    Also serialize multiple accesses with kvm->lock.
+    
+    Signed-off-by: Marcelo Tosatti <mtosatti@redhat.com>
+    Signed-off-by: Avi Kivity <avi@redhat.com>
+
+diff --git a/arch/x86/kvm/irq.h b/arch/x86/kvm/irq.h
+index c025a23..be399e2 100644
+--- a/arch/x86/kvm/irq.h
++++ b/arch/x86/kvm/irq.h
+@@ -86,7 +86,11 @@ static inline struct kvm_pic *pic_irqchip(struct kvm *kvm)
+ 
+ static inline int irqchip_in_kernel(struct kvm *kvm)
+ {
+-	return pic_irqchip(kvm) != NULL;
++	int ret;
++
++	ret = (pic_irqchip(kvm) != NULL);
++	smp_rmb();
++	return ret;
+ }
+ 
+ void kvm_pic_reset(struct kvm_kpic_state *s);
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index 719f31e..97f6f95 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -2362,25 +2362,39 @@ long kvm_arch_vm_ioctl(struct file *filp,
+ 		if (r)
+ 			goto out;
+ 		break;
+-	case KVM_CREATE_IRQCHIP:
++	case KVM_CREATE_IRQCHIP: {
++		struct kvm_pic *vpic;
++
++		mutex_lock(&kvm->lock);
++		r = -EEXIST;
++		if (kvm->arch.vpic)
++			goto create_irqchip_unlock;
+ 		r = -ENOMEM;
+-		kvm->arch.vpic = kvm_create_pic(kvm);
+-		if (kvm->arch.vpic) {
++		vpic = kvm_create_pic(kvm);
++		if (vpic) {
+ 			r = kvm_ioapic_init(kvm);
+ 			if (r) {
+-				kfree(kvm->arch.vpic);
+-				kvm->arch.vpic = NULL;
+-				goto out;
++				kfree(vpic);
++				goto create_irqchip_unlock;
+ 			}
+ 		} else
+-			goto out;
++			goto create_irqchip_unlock;
++		smp_wmb();
++		kvm->arch.vpic = vpic;
++		smp_wmb();
+ 		r = kvm_setup_default_irq_routing(kvm);
+ 		if (r) {
++			mutex_lock(&kvm->irq_lock);
+ 			kfree(kvm->arch.vpic);
+ 			kfree(kvm->arch.vioapic);
+-			goto out;
++			kvm->arch.vpic = NULL;
++			kvm->arch.vioapic = NULL;
++			mutex_unlock(&kvm->irq_lock);
+ 		}
++	create_irqchip_unlock:
++		mutex_unlock(&kvm->lock);
+ 		break;
++	}
+ 	case KVM_CREATE_PIT:
+ 		u.pit_config.flags = KVM_PIT_SPEAKER_DUMMY;
+ 		goto create_pit;
