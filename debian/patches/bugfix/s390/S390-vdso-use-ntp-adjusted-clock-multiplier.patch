@@ -1,0 +1,165 @@
+From: Hendrik Brueckner <brueckner@linux.vnet.ibm.com>
+Date: Thu, 22 Apr 2010 17:17:06 +0200
+Subject: [PATCH] [S390] vdso: use ntp adjusted clock multiplier
+
+commit 157a1a27d5921fc94db8c14e0d01363d13de99b5 upstream.
+
+Commit "timekeeping: Fix clock_gettime vsyscall time warp" (0696b711e)
+introduced the new parameter "mult" to update_vsyscall(). This parameter
+contains the internal NTP adjusted clock multiplier.
+
+The s390x vdso did not use this adjusted multiplier.  Instead, it used
+the constant clock multiplier for gettimeofday() and clock_gettime()
+variants.  This may result in observable time warps as explained in
+commit 0696b711e.
+
+Make the NTP adjusted clock multiplier available to the s390x vdso
+implementation and use it for time calculations.
+
+Signed-off-by: Hendrik Brueckner <brueckner@linux.vnet.ibm.com>
+Signed-off-by: Martin Schwidefsky <schwidefsky@de.ibm.com>
+[Backported to 2.6.32 by Philipp Kern <pkern@debian.org>: adjust context]
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+ arch/s390/include/asm/vdso.h            |    1 +
+ arch/s390/kernel/asm-offsets.c          |    1 +
+ arch/s390/kernel/time.c                 |    1 +
+ arch/s390/kernel/vdso32/clock_gettime.S |   12 ++++++------
+ arch/s390/kernel/vdso32/gettimeofday.S  |    6 +++---
+ arch/s390/kernel/vdso64/clock_gettime.S |    4 ++--
+ arch/s390/kernel/vdso64/gettimeofday.S  |    2 +-
+ 7 files changed, 15 insertions(+), 12 deletions(-)
+
+diff --git a/arch/s390/include/asm/vdso.h b/arch/s390/include/asm/vdso.h
+index 4a76d94..533f357 100644
+--- a/arch/s390/include/asm/vdso.h
++++ b/arch/s390/include/asm/vdso.h
+@@ -29,6 +29,7 @@ struct vdso_data {
+ 	__u32 tz_minuteswest;		/* Minutes west of Greenwich	0x30 */
+ 	__u32 tz_dsttime;		/* Type of dst correction	0x34 */
+ 	__u32 ectg_available;
++	__u32 ntp_mult;			/* NTP adjusted multiplier	0x3C */
+ };
+ 
+ struct vdso_per_cpu_data {
+diff --git a/arch/s390/kernel/asm-offsets.c b/arch/s390/kernel/asm-offsets.c
+index 63e4643..7ffc4c0 100644
+--- a/arch/s390/kernel/asm-offsets.c
++++ b/arch/s390/kernel/asm-offsets.c
+@@ -52,6 +52,7 @@ int main(void)
+ 	DEFINE(__VDSO_WTOM_NSEC, offsetof(struct vdso_data, wtom_clock_nsec));
+ 	DEFINE(__VDSO_TIMEZONE, offsetof(struct vdso_data, tz_minuteswest));
+ 	DEFINE(__VDSO_ECTG_OK, offsetof(struct vdso_data, ectg_available));
++	DEFINE(__VDSO_NTP_MULT, offsetof(struct vdso_data, ntp_mult));
+ 	DEFINE(__VDSO_ECTG_BASE,
+ 	       offsetof(struct vdso_per_cpu_data, ectg_timer_base));
+ 	DEFINE(__VDSO_ECTG_USER,
+diff --git a/arch/s390/kernel/time.c b/arch/s390/kernel/time.c
+index 68e1ecf..7ad595a 100644
+--- a/arch/s390/kernel/time.c
++++ b/arch/s390/kernel/time.c
+@@ -228,6 +228,7 @@ void update_vsyscall(struct timespec *wall_time, struct clocksource *clock,
+ 	vdso_data->xtime_clock_nsec = xtime.tv_nsec;
+ 	vdso_data->wtom_clock_sec = wall_to_monotonic.tv_sec;
+ 	vdso_data->wtom_clock_nsec = wall_to_monotonic.tv_nsec;
++	vdso_data->ntp_mult = mult;
+ 	smp_wmb();
+ 	++vdso_data->tb_update_count;
+ }
+diff --git a/arch/s390/kernel/vdso32/clock_gettime.S b/arch/s390/kernel/vdso32/clock_gettime.S
+index 4a98909..9696439 100644
+--- a/arch/s390/kernel/vdso32/clock_gettime.S
++++ b/arch/s390/kernel/vdso32/clock_gettime.S
+@@ -38,13 +38,13 @@ __kernel_clock_gettime:
+ 	sl	%r1,__VDSO_XTIME_STAMP+4(%r5)
+ 	brc	3,2f
+ 	ahi	%r0,-1
+-2:	mhi	%r0,1000			/* cyc2ns(clock,cycle_delta) */
++2:	ms	%r0,__VDSO_NTP_MULT(%r5)	/* cyc2ns(clock,cycle_delta) */
+ 	lr	%r2,%r0
+-	lhi	%r0,1000
++	l	%r0,__VDSO_NTP_MULT(%r5)
+ 	ltr	%r1,%r1
+ 	mr	%r0,%r0
+ 	jnm	3f
+-	ahi	%r0,1000
++	a	%r0,__VDSO_NTP_MULT(%r5)
+ 3:	alr	%r0,%r2
+ 	srdl	%r0,12
+ 	al	%r0,__VDSO_XTIME_NSEC(%r5)	/*  + xtime */
+@@ -86,13 +86,13 @@ __kernel_clock_gettime:
+ 	sl	%r1,__VDSO_XTIME_STAMP+4(%r5)
+ 	brc	3,12f
+ 	ahi	%r0,-1
+-12:	mhi	%r0,1000			/* cyc2ns(clock,cycle_delta) */
++12:	ms	%r0,__VDSO_NTP_MULT(%r5)	/* cyc2ns(clock,cycle_delta) */
+ 	lr	%r2,%r0
+-	lhi	%r0,1000
++	l	%r0,__VDSO_NTP_MULT(%r5)
+ 	ltr	%r1,%r1
+ 	mr	%r0,%r0
+ 	jnm	13f
+-	ahi	%r0,1000
++	a	%r0,__VDSO_NTP_MULT(%r5)
+ 13:	alr	%r0,%r2
+ 	srdl	%r0,12
+ 	al	%r0,__VDSO_XTIME_NSEC(%r5)	/*  + xtime */
+diff --git a/arch/s390/kernel/vdso32/gettimeofday.S b/arch/s390/kernel/vdso32/gettimeofday.S
+index ad8acfc..2d36331 100644
+--- a/arch/s390/kernel/vdso32/gettimeofday.S
++++ b/arch/s390/kernel/vdso32/gettimeofday.S
+@@ -35,13 +35,13 @@ __kernel_gettimeofday:
+ 	sl	%r1,__VDSO_XTIME_STAMP+4(%r5)
+ 	brc	3,3f
+ 	ahi	%r0,-1
+-3:	mhi	%r0,1000			/* cyc2ns(clock,cycle_delta) */
++3:	ms	%r0,__VDSO_NTP_MULT(%r5)	/* cyc2ns(clock,cycle_delta) */
+ 	st	%r0,24(%r15)
+-	lhi	%r0,1000
++	l	%r0,__VDSO_NTP_MULT(%r5)
+ 	ltr	%r1,%r1
+ 	mr	%r0,%r0
+ 	jnm	4f
+-	ahi	%r0,1000
++	a	%r0,__VDSO_NTP_MULT(%r5)
+ 4:	al	%r0,24(%r15)
+ 	srdl	%r0,12
+ 	al	%r0,__VDSO_XTIME_NSEC(%r5)	/*  + xtime */
+diff --git a/arch/s390/kernel/vdso64/clock_gettime.S b/arch/s390/kernel/vdso64/clock_gettime.S
+index 49106c6..f404678 100644
+--- a/arch/s390/kernel/vdso64/clock_gettime.S
++++ b/arch/s390/kernel/vdso64/clock_gettime.S
+@@ -36,7 +36,7 @@ __kernel_clock_gettime:
+ 	stck	48(%r15)			/* Store TOD clock */
+ 	lg	%r1,48(%r15)
+ 	sg	%r1,__VDSO_XTIME_STAMP(%r5)	/* TOD - cycle_last */
+-	mghi	%r1,1000
++	msgf	%r1,__VDSO_NTP_MULT(%r5)	/*  * NTP adjustment */
+ 	srlg	%r1,%r1,12			/* cyc2ns(clock,cycle_delta) */
+ 	alg	%r1,__VDSO_XTIME_NSEC(%r5)	/*  + xtime */
+ 	lg	%r0,__VDSO_XTIME_SEC(%r5)
+@@ -64,7 +64,7 @@ __kernel_clock_gettime:
+ 	stck	48(%r15)			/* Store TOD clock */
+ 	lg	%r1,48(%r15)
+ 	sg	%r1,__VDSO_XTIME_STAMP(%r5)	/* TOD - cycle_last */
+-	mghi	%r1,1000
++	msgf	%r1,__VDSO_NTP_MULT(%r5)	/*  * NTP adjustment */
+ 	srlg	%r1,%r1,12			/* cyc2ns(clock,cycle_delta) */
+ 	alg	%r1,__VDSO_XTIME_NSEC(%r5)	/*  + xtime */
+ 	lg	%r0,__VDSO_XTIME_SEC(%r5)
+diff --git a/arch/s390/kernel/vdso64/gettimeofday.S b/arch/s390/kernel/vdso64/gettimeofday.S
+index f873e75..36ee674 100644
+--- a/arch/s390/kernel/vdso64/gettimeofday.S
++++ b/arch/s390/kernel/vdso64/gettimeofday.S
+@@ -31,7 +31,7 @@ __kernel_gettimeofday:
+ 	stck	48(%r15)			/* Store TOD clock */
+ 	lg	%r1,48(%r15)
+ 	sg	%r1,__VDSO_XTIME_STAMP(%r5)	/* TOD - cycle_last */
+-	mghi	%r1,1000
++	msgf	%r1,__VDSO_NTP_MULT(%r5)	/*  * NTP adjustment */
+ 	srlg	%r1,%r1,12			/* cyc2ns(clock,cycle_delta) */
+ 	alg	%r1,__VDSO_XTIME_NSEC(%r5)	/*  + xtime.tv_nsec */
+ 	lg	%r0,__VDSO_XTIME_SEC(%r5)	/* xtime.tv_sec */
+-- 
+1.7.9.5
+
