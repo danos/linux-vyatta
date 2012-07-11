@@ -1,0 +1,36 @@
+Subject: proc: Fix extreme memory use for /proc/self/mountinfo in container
+Bug: http://bugzilla.openvz.org/show_bug.cgi?id=2142
+Bug-Debian: http://bugs.debian.org/655385
+
+Extracted from OpenVZ RHEL 6 package by Andrew Vagin in
+http://forum.openvz.org/index.php?t=msg&th=10493#msg_45496
+
+Explanation by Ben Hutchings <ben@decadent.org.uk>:
+
+seq_file output functions generally call seq_commit() with their
+return value.  If this is negative, usually because there is
+insufficient space in the output buffer, it causes the buffer to be
+marked as full.  If the seq_file show() operation then goes on to
+return 0, the seq_file read loop (traverse() in seq_file.c) will
+detect the full buffer and retry with a larger buffer.
+
+Under OpenVZ, seq_path_root() may also fail because __d_path()
+determines that the mountpoint is not visible in the current
+container, and show_mountinfo() will still return 0.  The read loop
+will repeatedly increase the buffer size until allocation fails.
+Instead, show_mountinfo() should hide the mountpoint by returning
+SEQ_SKIP.
+
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -873,8 +873,8 @@
+ 		   MAJOR(sb->s_dev), MINOR(sb->s_dev));
+ 	seq_dentry(m, mnt->mnt_root, " \t\n\\");
+ 	seq_putc(m, ' ');
+-	seq_path_root(m, &mnt_path, &root, " \t\n\\");
+-	if (root.mnt != p->root.mnt || root.dentry != p->root.dentry) {
++	err = seq_path_root(m, &mnt_path, &root, " \t\n\\");
++	if (root.mnt != p->root.mnt || root.dentry != p->root.dentry || err == -EINVAL) {
+ 		/*
+ 		 * Mountpoint is outside root, discard that one.  Ugly,
+ 		 * but less so than trying to do that in iterator in a
