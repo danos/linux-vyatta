@@ -1,0 +1,107 @@
+usb: Fix deadlock in hid_reset when Dell iDRAC is reset
+Bug-Debian: http://bugs.debian.org/670398
+
+Description:
+When Dell iDRAC is reset, the iDRAC's USB keyboard/mouse device stops responding but
+is not actually disconnected.  This causes usbhid to hid hid_io_error(), and
+you get a chain of calls like...
+
+hid_reset()
+ usb_reset_device()
+  usb_reset_and_verify_device()
+   usb_ep0_reinit()
+    usb_disble_endpoint()
+     usb_hcd_disable_endpoint()
+      ehci_endpoint_disable()
+
+Along the way, as a result of an error/timeout with a USB transaction,
+ehci_clear_tt_buffer() calls usb_hub_clear_tt_buffer() (to clear a failed
+transaction out of the transaction translator in the hub), which schedules
+hub_tt_work() to be run (using keventd), and then sets qh->clearing_tt=1 so
+that nobody will mess with that qh until the TT is cleared.
+
+But run_workqueue() never happens for the keventd workqueue on that CPU, so
+hub_tt_work() never gets run.  And qh->clearing_tt never gets changed back to
+0.
+
+This causes ehci_endpoint_disable() to get stuck in a loop waiting for
+qh->clearing_tt to go to 0.
+
+Part of the problem is hid_reset() is itself running on keventd.  So when that thread gets a timeout trying to talk to the
+HID device, it schedules clear_work (to run hub_tt_work) to run, and then gets stuck in ehci_endpoint_disable waiting for it to run.
+
+However, clear_work never gets run because the workqueue for that CPU is still waiting for hid_reset to finish.  The workqueue code underwent a major update in 2.6.36 (See upstream section for more info!)
+
+A much less invasive patch for earlier kernels is to just schedule clear_work on khubd if the usb code needs to clear the TT and it sees that it is already running on keventd.  Khubd isn't used by default because it can get blocked by device enumeration sometimes, but I think it should be ok for a backup for unusual cases like this just to prevent deadlock.
+
+
+Signed-off-by: Stuart Hayes <stuart_hayes@dell.com>
+Signed-off-by: Shyam Iyer <shyam_iyer@dell.com>
+
+---
+ drivers/usb/core/hub.c |   31 +++++++++++++++++++++++++++----
+ 1 files changed, 27 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/usb/core/hub.c b/drivers/usb/core/hub.c
+index 9efa9ba..82b5ac3 100644
+--- a/drivers/usb/core/hub.c
++++ b/drivers/usb/core/hub.c
+@@ -469,10 +469,8 @@ hub_clear_tt_buffer (struct usb_device *hdev, u16 devinfo, u16 tt)
+  * talking to TTs must queue control transfers (not just bulk and iso), so
+  * both can talk to the same hub concurrently.
+  */
+-static void hub_tt_work(struct work_struct *work)
++void _hub_tt_work(struct usb_hub *hub)
+ {
+-	struct usb_hub		*hub =
+-		container_of(work, struct usb_hub, tt.clear_work);
+ 	unsigned long		flags;
+ 	int			limit = 100;
+ 
+@@ -507,6 +505,14 @@ static void hub_tt_work(struct work_struct *work)
+ 	spin_unlock_irqrestore (&hub->tt.lock, flags);
+ }
+ 
++void hub_tt_work(struct work_struct *work)
++{
++	struct usb_hub		*hub =
++		container_of(work, struct usb_hub, tt.clear_work);
++
++	_hub_tt_work(hub);
++}
++
+ /**
+  * usb_hub_clear_tt_buffer - clear control/bulk TT state in high speed hub
+  * @urb: an URB associated with the failed or incomplete split transaction
+@@ -554,7 +560,20 @@ int usb_hub_clear_tt_buffer(struct urb *urb)
+ 	/* tell keventd to clear state for this TT */
+ 	spin_lock_irqsave (&tt->lock, flags);
+ 	list_add_tail (&clear->clear_list, &tt->clear_list);
+-	schedule_work(&tt->clear_work);
++	/* don't schedule on kevent if we're running on keventd (e.g.,
++	 * in hid_reset we can get here on kevent) unless on >=2.6.36
++	 */
++	if (!(current->flags & PF_KTHREAD) || !strstr(current->comm, "events"))
++		/* put it on keventd */
++		schedule_work(&tt->clear_work);
++	else {
++		/* let khubd do it */
++		struct usb_hub		*hub =
++			container_of(&tt->clear_work, struct usb_hub,
++					tt.clear_work);
++		kick_khubd(hub);
++	}
++
+ 	spin_unlock_irqrestore (&tt->lock, flags);
+ 	return 0;
+ }
+@@ -3421,6 +3440,10 @@ static void hub_events(void)
+ 		if (hub->quiescing)
+ 			goto loop_autopm;
+ 
++		/* _hub_tt_work usually run on keventd */
++		if (!list_empty(&hub->tt.clear_list))
++			_hub_tt_work(hub);
++
+ 		if (hub->error) {
+ 			dev_dbg (hub_dev, "resetting for error 
