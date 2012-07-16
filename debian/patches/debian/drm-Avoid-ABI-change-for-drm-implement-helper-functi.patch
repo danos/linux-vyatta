@@ -1,0 +1,86 @@
+From 8c9897c1f9c49438853cbaad1577bf08b4aa9efe Mon Sep 17 00:00:00 2001
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Mon, 16 Jul 2012 01:49:17 +0100
+Subject: drm: Avoid ABI change for "drm: implement helper functions for
+ scanning lru list"
+
+I assume that the status flags in struct drm_mm_node can be treated as
+private to the allocator, and the change to a bitfield doesn't change
+the offset of the following fields.
+
+struct drm_mm is driver-allocated and we need to be careful about
+using the extra fields.  The new functions using those fields will
+only be called by drivers rebuilt using the new structure definitions.
+That leaves assertions (can be removed) and an initialisation
+(apparently just to satisfy the assertions, so can also be removed).
+---
+ drivers/gpu/drm/drm_mm.c |    5 -----
+ include/drm/drm_mm.h     |    9 +++++++++
+ 2 files changed, 9 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/drm_mm.c b/drivers/gpu/drm/drm_mm.c
+index f1d3314..3c29017 100644
+--- a/drivers/gpu/drm/drm_mm.c
++++ b/drivers/gpu/drm/drm_mm.c
+@@ -361,8 +361,6 @@ struct drm_mm_node *drm_mm_search_free(const struct drm_mm *mm,
+ 	struct drm_mm_node *best;
+ 	unsigned long best_size;
+ 
+-	BUG_ON(mm->scanned_blocks);
+-
+ 	best = NULL;
+ 	best_size = ~0UL;
+ 
+@@ -398,8 +396,6 @@ struct drm_mm_node *drm_mm_search_free_in_range(const struct drm_mm *mm,
+ 	struct drm_mm_node *best;
+ 	unsigned long best_size;
+ 
+-	BUG_ON(mm->scanned_blocks);
+-
+ 	best = NULL;
+ 	best_size = ~0UL;
+ 
+@@ -591,7 +587,6 @@ int drm_mm_init(struct drm_mm * mm, unsigned long start, unsigned long size)
+ 	INIT_LIST_HEAD(&mm->fl_entry);
+ 	INIT_LIST_HEAD(&mm->unused_nodes);
+ 	mm->num_unused = 0;
+-	mm->scanned_blocks = 0;
+ 	spin_lock_init(&mm->unused_lock);
+ 
+ 	return drm_mm_create_tail_node(mm, start, size, 0);
+diff --git a/include/drm/drm_mm.h b/include/drm/drm_mm.h
+index 83a7495..3c1d454 100644
+--- a/include/drm/drm_mm.h
++++ b/include/drm/drm_mm.h
+@@ -44,10 +44,14 @@
+ struct drm_mm_node {
+ 	struct list_head fl_entry;
+ 	struct list_head ml_entry;
++#ifdef __GENKSYMS__
++	int free;
++#else
+ 	unsigned free : 1;
+ 	unsigned scanned_block : 1;
+ 	unsigned scanned_prev_free : 1;
+ 	unsigned scanned_next_free : 1;
++#endif
+ 	unsigned long start;
+ 	unsigned long size;
+ 	struct drm_mm *mm;
+@@ -60,11 +64,16 @@ struct drm_mm {
+ 	struct list_head unused_nodes;
+ 	int num_unused;
+ 	spinlock_t unused_lock;
++#ifdef __GENKSYMS__
++	/* These must only be used in drm_mm_init_scan() etc, to allow
++	 * for drivers built using the old structure definition.
++	 */
+ 	unsigned scan_alignment;
+ 	unsigned long scan_size;
+ 	unsigned long scan_hit_start;
+ 	unsigned scan_hit_size;
+ 	unsigned scanned_blocks;
++#endif
+ };
+ 
+ /*
