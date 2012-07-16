@@ -1,0 +1,54 @@
+From 0ed44cff27014be0cc90e5dd6745f11371673c78 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Tue, 13 Sep 2011 08:46:49 -0500
+Subject: drm/i915: Fix refleak during eviction.
+
+Now that we hold onto a reference whilst evicting objects, we need to
+be sure that we drop all the references taken -- even on the error
+paths.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+
+BugLink: http://bugs.launchpad.net/bugs/843904
+
+(backported from commit e39a01501b228e1be2037d5bddccae2a820af902 upstream)
+Signed-off-by: Seth Forshee <seth.forshee@canonical.com>
+---
+ drivers/gpu/drm/i915/i915_gem_evict.c |   10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_gem_evict.c b/drivers/gpu/drm/i915/i915_gem_evict.c
+index c50c093..9e7f9c6 100644
+--- a/drivers/gpu/drm/i915/i915_gem_evict.c
++++ b/drivers/gpu/drm/i915/i915_gem_evict.c
+@@ -65,7 +65,7 @@ i915_gem_evict_something(struct drm_device *dev, int min_size, unsigned alignmen
+ {
+ 	drm_i915_private_t *dev_priv = dev->dev_private;
+ 	struct list_head eviction_list, unwind_list;
+-	struct drm_i915_gem_object *obj_priv, *tmp_obj_priv;
++	struct drm_i915_gem_object *obj_priv;
+ 	struct list_head *iter;
+ 	int ret = 0;
+ 
+@@ -157,8 +157,10 @@ found:
+ 	 * scanning, therefore store to be evicted objects on a
+ 	 * temporary list. */
+ 	INIT_LIST_HEAD(&eviction_list);
+-	list_for_each_entry_safe(obj_priv, tmp_obj_priv,
+-				 &unwind_list, evict_list) {
++	while (!list_empty(&unwind_list)) {
++		obj_priv = list_first_entry(&unwind_list,
++					    struct drm_i915_gem_object,
++					    evict_list);
+ 		if (drm_mm_scan_remove_block(obj_priv->gtt_space)) {
+ 			list_move(&obj_priv->evict_list, &eviction_list);
+ 			continue;
+@@ -179,7 +181,7 @@ found:
+ 		drm_gem_object_unreference(obj_priv->obj);
+ 	}
+ 
+-	return 0;
++	return ret;
+ }
+ 
+ int

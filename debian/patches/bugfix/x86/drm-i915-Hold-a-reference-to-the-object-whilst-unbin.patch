@@ -1,0 +1,75 @@
+From 95a87afbd3b7521b75c7659d62ece3fdcf91181e Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Tue, 13 Sep 2011 08:46:48 -0500
+Subject: drm/i915: Hold a reference to the object whilst unbinding the
+ eviction list
+
+During heavy aperture thrashing we may be forced to wait upon several active
+objects during eviction. The active list may be the last reference to
+these objects and so the action of waiting upon one of them may cause
+another to be freed (and itself unbound). To prevent the object
+disappearing underneath us, we need to acquire and hold a reference
+whilst unbinding.
+
+This should fix the reported page refcount OOPS:
+
+kernel BUG at drivers/gpu/drm/i915/i915_gem.c:1444!
+...
+RIP: 0010:[<ffffffffa0093026>]  [<ffffffffa0093026>] i915_gem_object_put_pages+0x25/0xf5 [i915]
+Call Trace:
+ [<ffffffffa009481d>] i915_gem_object_unbind+0xc5/0x1a7 [i915]
+ [<ffffffffa0098ab2>] i915_gem_evict_something+0x3bd/0x409 [i915]
+ [<ffffffffa0027923>] ? drm_gem_object_lookup+0x27/0x57 [drm]
+ [<ffffffffa0093bc3>] i915_gem_object_bind_to_gtt+0x1d3/0x279 [i915]
+ [<ffffffffa0095b30>] i915_gem_object_pin+0xa3/0x146 [i915]
+ [<ffffffffa0027948>] ? drm_gem_object_lookup+0x4c/0x57 [drm]
+ [<ffffffffa00961bc>] i915_gem_do_execbuffer+0x50d/0xe32 [i915]
+
+Reported-by: Shawn Starr <shawn.starr@rogers.com>
+Bugzilla: https://bugzilla.kernel.org/show_bug.cgi?id=18902
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+
+BugLink: http://bugs.launchpad.net/bugs/843904
+
+(backported from commit af6261031317f646d22f994c0b467521e47aa49f upstream)
+Signed-off-by: Seth Forshee <seth.forshee@canonical.com>
+---
+ drivers/gpu/drm/i915/i915_gem_evict.c |    4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/drivers/gpu/drm/i915/i915_gem_evict.c b/drivers/gpu/drm/i915/i915_gem_evict.c
+index c4c6b6f..c50c093 100644
+--- a/drivers/gpu/drm/i915/i915_gem_evict.c
++++ b/drivers/gpu/drm/i915/i915_gem_evict.c
+@@ -52,6 +52,7 @@ mark_free(struct drm_i915_gem_object *obj_priv,
+ 	   struct list_head *unwind)
+ {
+ 	list_add(&obj_priv->evict_list, unwind);
++	drm_gem_object_reference(obj_priv->obj);
+ 	return drm_mm_scan_add_block(obj_priv->gtt_space);
+ }
+ 
+@@ -143,6 +144,7 @@ i915_gem_evict_something(struct drm_device *dev, int min_size, unsigned alignmen
+ 		BUG_ON(ret);
+ 
+ 		list_del_init(&obj_priv->evict_list);
++		drm_gem_object_unreference(obj_priv->obj);
+ 	}
+ 
+ 	/* We expect the caller to unpin, evict all and try again, or give up.
+@@ -162,6 +164,7 @@ found:
+ 			continue;
+ 		}
+ 		list_del_init(&obj_priv->evict_list);
++		drm_gem_object_unreference(obj_priv->obj);
+ 	}
+ 
+ 	/* Unbinding will emit any required flushes */
+@@ -173,6 +176,7 @@ found:
+ 			ret = i915_gem_object_unbind(obj_priv->obj);
+ 
+ 		list_del_init(&obj_priv->evict_list);
++		drm_gem_object_unreference(obj_priv->obj);
+ 	}
+ 
+ 	return 0;

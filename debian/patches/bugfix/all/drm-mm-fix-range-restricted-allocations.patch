@@ -1,0 +1,113 @@
+From 4a7ec2a70d1d11922991ff34e6f68ff2282e8a23 Mon Sep 17 00:00:00 2001
+From: Daniel Vetter <daniel.vetter@ffwll.ch>
+Date: Fri, 14 Oct 2011 10:05:50 -0500
+Subject: drm: mm: fix range restricted allocations
+
+With the code cleanup in
+
+7a6b2896f261894dde287d3faefa4b432cddca53 is the first bad commit
+commit 7a6b2896f261894dde287d3faefa4b432cddca53
+Author: Daniel Vetter <daniel.vetter@ffwll.ch>
+Date:   Fri Jul 2 15:02:15 2010 +0100
+
+    drm_mm: extract check_free_mm_node
+
+I've botched up the range-restriction checks. The result is usually
+an X server dying with SIGBUS in libpixman (software fallback rendering).
+Change the code to adjust the start and end for range restricted
+allocations. IMHO this even makes the code a bit clearer.
+
+Fixes regression bug: https://bugs.freedesktop.org/show_bug.cgi?id=29738
+
+Reported-by-Tested-by: Till MAtthiesen <entropy@everymail.net>
+Acked-by: Alex Deucher <alexdeucher@gmail.com>
+Signed-off-by: Daniel Vetter <daniel.vetter@ffwll.ch>
+Signed-off-by: Dave Airlie <airlied@redhat.com>
+(backported from commit 7521473305f1379403b893a30ac09a2132dc1e25 upstream)
+
+BugLink: http://bugs.launchpad.net/bugs/873130
+Signed-off-by: Seth Forshee <seth.forshee@canonical.com>
+Signed-off-by: Stefan Bader <stefan.bader@canonical.com>
+---
+ drivers/gpu/drm/drm_mm.c |   29 +++++++++++++++--------------
+ 1 file changed, 15 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/gpu/drm/drm_mm.c b/drivers/gpu/drm/drm_mm.c
+index f1d3314..5a23a9b 100644
+--- a/drivers/gpu/drm/drm_mm.c
++++ b/drivers/gpu/drm/drm_mm.c
+@@ -330,21 +330,21 @@ void drm_mm_put_block(struct drm_mm_node *cur)
+ 
+ EXPORT_SYMBOL(drm_mm_put_block);
+ 
+-static int check_free_mm_node(struct drm_mm_node *entry, unsigned long size,
+-			      unsigned alignment)
++static int check_free_hole(unsigned long start, unsigned long end,
++			   unsigned long size, unsigned alignment)
+ {
+ 	unsigned wasted = 0;
+ 
+-	if (entry->size < size)
++	if (end - start < size)
+ 		return 0;
+ 
+ 	if (alignment) {
+-		register unsigned tmp = entry->start % alignment;
++		unsigned tmp = start % alignment;
+ 		if (tmp)
+ 			wasted = alignment - tmp;
+ 	}
+ 
+-	if (entry->size >= size + wasted) {
++	if (end >= start + size + wasted) {
+ 		return 1;
+ 	}
+ 
+@@ -369,7 +369,8 @@ struct drm_mm_node *drm_mm_search_free(const struct drm_mm *mm,
+ 	list_for_each(list, free_stack) {
+ 		entry = list_entry(list, struct drm_mm_node, fl_entry);
+ 
+-		if (!check_free_mm_node(entry, size, alignment))
++		if (!check_free_hole(entry->start, entry->start + entry->size,
++				     size, alignment))
+ 			continue;
+ 
+ 		if (!best_match)
+@@ -392,7 +393,6 @@ struct drm_mm_node *drm_mm_search_free_in_range(const struct drm_mm *mm,
+ 						unsigned long end,
+ 						int best_match)
+ {
+-	struct list_head *list;
+ 	const struct list_head *free_stack = &mm->fl_entry;
+ 	struct drm_mm_node *entry;
+ 	struct drm_mm_node *best;
+@@ -403,13 +403,13 @@ struct drm_mm_node *drm_mm_search_free_in_range(const struct drm_mm *mm,
+ 	best = NULL;
+ 	best_size = ~0UL;
+ 
+-	list_for_each(list, free_stack) {
+-		entry = list_entry(list, struct drm_mm_node, fl_entry);
+-
+-		if (entry->start > end || (entry->start+entry->size) < start)
+-			continue;
++	list_for_each_entry(entry, free_stack, fl_entry) {
++		unsigned long adj_start = entry->start < start ?
++			start : entry->start;
++		unsigned long adj_end = entry->start + entry->size > end ?
++			end : entry->start + entry->size;
+ 
+-		if (!check_free_mm_node(entry, size, alignment))
++		if (!check_free_hole(adj_start, adj_end, size, alignment))
+ 			continue;
+ 
+ 		if (!best_match)
+@@ -502,7 +502,8 @@ int drm_mm_scan_add_block(struct drm_mm_node *node)
+ 	node->fl_entry.prev = prev_free;
+ 	node->fl_entry.next = next_free;
+ 
+-	if (check_free_mm_node(node, mm->scan_size, mm->scan_alignment)) {
++	if (check_free_hole(node->start, node->start + node->size,
++			    mm->scan_size, mm->scan_alignment)) {
+ 		mm->scan_hit_start = node->start;
+ 		mm->scan_hit_size = node->size;
+ 
