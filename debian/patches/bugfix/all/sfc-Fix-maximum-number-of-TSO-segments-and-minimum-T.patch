@@ -1,0 +1,68 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Subject: sfc: Fix maximum number of TSO segments and minimum TX queue size
+
+This is related to commit 7e6d06f0de3f74ca929441add094518ae332257c
+upstream, but looks very different because:
+
+- TX queue size was constant before 2.6.37, so we don't need to check it
+- The upstream fix relies on changes to the TCP stack and networking
+  core, which are not appropriate for stable updates.  Instead we limit
+  number of segments in efx_enqueue_skb_tso().  This effectively drops
+  all the extra packets and seriously hurts TCP throughput if the limit
+  is ever hit, but this shouldn't affect any legitimate traffic.
+
+The original commit message is:
+
+Currently an skb requiring TSO may not fit within a minimum-size TX
+queue.  The TX queue selected for the skb may stall and trigger the TX
+watchdog repeatedly (since the problem skb will be retried after the
+TX reset).  This issue is designated as CVE-2012-3412.
+
+Set the maximum number of TSO segments for our devices to 100.  This
+should make no difference to behaviour unless the actual MSS is less
+than about 700.  Increase the minimum TX queue size accordingly to
+allow for 2 worst-case skbs, so that there will definitely be space
+to add an skb after we wake a queue.
+
+To avoid invalidating existing configurations, change
+efx_ethtool_set_ringparam() to fix up values that are too small rather
+than returning -EINVAL.
+
+Signed-off-by: Ben Hutchings <bhutchings@solarflare.com>
+---
+--- a/drivers/net/sfc/efx.h
++++ b/drivers/net/sfc/efx.h
+@@ -39,6 +39,9 @@ extern void efx_release_tx_buffers(struc
+ extern void efx_wake_queue(struct efx_nic *efx);
+ #define EFX_TXQ_SIZE 1024
+ #define EFX_TXQ_MASK (EFX_TXQ_SIZE - 1)
++
++/* Maximum number of TCP segments we support for soft-TSO */
++#define EFX_TSO_MAX_SEGS	100
+ 
+ /* RX */
+ extern int efx_probe_rx_queue(struct efx_rx_queue *rx_queue);
+--- a/drivers/net/sfc/tx.c
++++ b/drivers/net/sfc/tx.c
+@@ -1053,6 +1053,21 @@ static int efx_enqueue_skb_tso(struct ef
+ 	int frag_i, rc, rc2 = NETDEV_TX_OK;
+ 	struct tso_state state;
+ 
++	/* Since the stack does not limit the number of segments per
++	 * skb, we must do so.  Otherwise an attacker may be able to
++	 * make the TCP produce skbs that will never fit in our TX
++	 * queue, causing repeated resets.
++	 */
++	if (unlikely(skb_shinfo(skb)->gso_segs > EFX_TSO_MAX_SEGS)) {
++		unsigned int excess =
++			(skb_shinfo(skb)->gso_segs - EFX_TSO_MAX_SEGS) *
++			skb_shinfo(skb)->gso_size;
++		if (__pskb_trim(skb, skb->len - excess)) {
++			dev_kfree_skb_any(skb);
++			return NETDEV_TX_OK;
++		}
++	}
++
+ 	/* Find the packet protocol and sanity-check it */
+ 	state.protocol = efx_tso_check_protocol(skb);
+ 
