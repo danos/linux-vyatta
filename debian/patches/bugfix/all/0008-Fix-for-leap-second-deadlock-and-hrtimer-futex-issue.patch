@@ -1,0 +1,66 @@
+From: Thomas Gleixner <tglx@linutronix.de>
+
+This is a backport of 196951e91262fccda81147d2bcf7fdab08668b40
+
+We need to update the base offsets from this code and we need to do
+that under base->lock. Move the lock held region around the
+ktime_get() calls. The ktime_get() calls are going to be replaced with
+a function which gets the time and the offsets atomically.
+
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Reviewed-by: Ingo Molnar <mingo@kernel.org>
+Acked-by: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Acked-by: Prarit Bhargava <prarit@redhat.com>
+Cc: stable@vger.kernel.org
+Signed-off-by: John Stultz <johnstul@us.ibm.com>
+Link: http://lkml.kernel.org/r/1341960205-56738-6-git-send-email-johnstul@us.ibm.com
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: Prarit Bhargava <prarit@redhat.com>
+Cc: Thomas Gleixner <tglx@linutronix.de>
+Cc: Linux Kernel <linux-kernel@vger.kernel.org>
+Signed-off-by: John Stultz <johnstul@us.ibm.com>
+---
+ kernel/hrtimer.c |    5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/kernel/hrtimer.c b/kernel/hrtimer.c
+index c4acec7..8ba6d31 100644
+--- a/kernel/hrtimer.c
++++ b/kernel/hrtimer.c
+@@ -1263,11 +1263,10 @@ void hrtimer_interrupt(struct clock_event_device *dev)
+ 	cpu_base->nr_events++;
+ 	dev->next_event.tv64 = KTIME_MAX;
+ 
++	spin_lock(&cpu_base->lock);
+ 	entry_time = now = ktime_get();
+ retry:
+ 	expires_next.tv64 = KTIME_MAX;
+-
+-	spin_lock(&cpu_base->lock);
+ 	/*
+ 	 * We set expires_next to KTIME_MAX here with cpu_base->lock
+ 	 * held to prevent that a timer is enqueued in our queue via
+@@ -1342,6 +1341,7 @@ retry:
+ 	 * interrupt routine. We give it 3 attempts to avoid
+ 	 * overreacting on some spurious event.
+ 	 */
++	spin_lock(&cpu_base->lock);
+ 	now = ktime_get();
+ 	cpu_base->nr_retries++;
+ 	if (++retries < 3)
+@@ -1354,6 +1354,7 @@ retry:
+ 	 */
+ 	cpu_base->nr_hangs++;
+ 	cpu_base->hang_detected = 1;
++	spin_unlock(&cpu_base->lock);
+ 	delta = ktime_sub(now, entry_time);
+ 	if (delta.tv64 > cpu_base->max_hang_time.tv64)
+ 		cpu_base->max_hang_time = delta;
+-- 
+1.7.9.5
+
+--
+To unsubscribe from this list: send the line "unsubscribe stable" in
+the body of a message to majordomo@vger.kernel.org
+More majordomo info at  http://vger.kernel.org/majordomo-info.html
+

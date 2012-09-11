@@ -1,0 +1,56 @@
+This is a backport of 4873fa070ae84a4115f0b3c9dfabc224f1bc7c51
+
+The timekeeping code misses an update of the hrtimer subsystem after a
+leap second happened. Due to that timers based on CLOCK_REALTIME are
+either expiring a second early or late depending on whether a leap
+second has been inserted or deleted until an operation is initiated
+which causes that update. Unless the update happens by some other
+means this discrepancy between the timekeeping and the hrtimer data
+stays forever and timers are expired either early or late.
+
+The reported immediate workaround - $ data -s "`date`" - is causing a
+call to clock_was_set() which updates the hrtimer data structures.
+See: http://www.sheeri.com/content/mysql-and-leap-second-high-cpu-and-fix
+
+Add the missing clock_was_set() call to update_wall_time() in case of
+a leap second event. The actual update is deferred to softirq context
+as the necessary smp function call cannot be invoked from hard
+interrupt context.
+
+Signed-off-by: John Stultz <johnstul@us.ibm.com>
+Reported-by: Jan Engelhardt <jengelh@inai.de>
+Reviewed-by: Ingo Molnar <mingo@kernel.org>
+Acked-by: Peter Zijlstra <a.p.zijlstra@chello.nl>
+Acked-by: Prarit Bhargava <prarit@redhat.com>
+Cc: stable@vger.kernel.org
+Link: http://lkml.kernel.org/r/1341960205-56738-3-git-send-email-johnstul@us.ibm.com
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: Prarit Bhargava <prarit@redhat.com>
+Cc: Thomas Gleixner <tglx@linutronix.de>
+Cc: Linux Kernel <linux-kernel@vger.kernel.org>
+Signed-off-by: John Stultz <johnstul@us.ibm.com>
+---
+ kernel/time/timekeeping.c |    2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/kernel/time/timekeeping.c b/kernel/time/timekeeping.c
+index a969adf..1e9808d 100644
+--- a/kernel/time/timekeeping.c
++++ b/kernel/time/timekeeping.c
+@@ -790,6 +790,8 @@ void update_wall_time(void)
+ 			leap = second_overflow(xtime.tv_sec);
+ 			xtime.tv_sec += leap;
+ 			wall_to_monotonic.tv_sec -= leap;
++			if (leap)
++				clock_was_set_delayed();
+ 		}
+ 
+ 		raw_time.tv_nsec += timekeeper.raw_interval;
+-- 
+1.7.9.5
+
+--
+To unsubscribe from this list: send the line "unsubscribe stable" in
+the body of a message to majordomo@vger.kernel.org
+More majordomo info at  http://vger.kernel.org/majordomo-info.html
+
