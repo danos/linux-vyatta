@@ -1,0 +1,64 @@
+commit 3e63a93b987685f02421e18b2aa452d20553a88b
+Author: Oleg Nesterov <oleg@redhat.com>
+Date:   Fri Mar 23 15:02:49 2012 -0700
+
+    kmod: introduce call_modprobe() helper
+    
+    No functional changes.  Move the call_usermodehelper code from
+    __request_module() into the new simple helper, call_modprobe().
+    
+    Signed-off-by: Oleg Nesterov <oleg@redhat.com>
+    Cc: Tetsuo Handa <penguin-kernel@I-love.SAKURA.ne.jp>
+    Cc: Rusty Russell <rusty@rustcorp.com.au>
+    Cc: Tejun Heo <tj@kernel.org>
+    Cc: David Rientjes <rientjes@google.com>
+    Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+    [dannf: backported to Debian's 2.6.32]
+
+diff --git a/kernel/kmod.c b/kernel/kmod.c
+index 8ed592b..09e10c3 100644
+--- a/kernel/kmod.c
++++ b/kernel/kmod.c
+@@ -50,6 +50,18 @@ static struct workqueue_struct *khelper_wq;
+ */
+ char modprobe_path[KMOD_PATH_LEN] = "/sbin/modprobe";
+ 
++static int call_modprobe(char *module_name, int wait)
++{
++	static char *envp[] = { "HOME=/",
++				"TERM=linux",
++				"PATH=/sbin:/usr/sbin:/bin:/usr/bin",
++				NULL };
++
++	char *argv[] = { modprobe_path, "-q", "--", module_name, NULL };
++
++	return call_usermodehelper(modprobe_path, argv, envp, wait);
++}
++
+ /**
+  * __request_module - try to load a kernel module
+  * @wait: wait (or not) for the operation to complete
+@@ -71,11 +83,6 @@ int __request_module(bool wait, const char *fmt, ...)
+ 	char module_name[MODULE_NAME_LEN];
+ 	unsigned int max_modprobes;
+ 	int ret;
+-	char *argv[] = { modprobe_path, "-q", "--", module_name, NULL };
+-	static char *envp[] = { "HOME=/",
+-				"TERM=linux",
+-				"PATH=/sbin:/usr/sbin:/bin:/usr/bin",
+-				NULL };
+ 	static atomic_t kmod_concurrent = ATOMIC_INIT(0);
+ #define MAX_KMOD_CONCURRENT 50	/* Completely arbitrary value - KAO */
+ 	static int kmod_loop_msg;
+@@ -118,8 +125,8 @@ int __request_module(bool wait, const char *fmt, ...)
+ 
+ 	trace_module_request(module_name, wait, _RET_IP_);
+ 
+-	ret = call_usermodehelper(modprobe_path, argv, envp,
+-			wait ? UMH_WAIT_PROC : UMH_WAIT_EXEC);
++	ret = call_modprobe(module_name, wait ? UMH_WAIT_PROC : UMH_WAIT_EXEC);
++
+ 	atomic_dec(&kmod_concurrent);
+ 	return ret;
+ }
