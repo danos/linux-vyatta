@@ -1,0 +1,86 @@
+From 0a50715a36817e49dcd0d25364aeccad5010d441 Mon Sep 17 00:00:00 2001
+From: adam radford <aradford@gmail.com>
+Date: Thu, 24 Feb 2011 20:56:12 -0800
+Subject: [PATCH 32/53] [SCSI] megaraid_sas: Enable MSI-X before calling  megasas_init_fw
+
+commit 0a77066acc78b4048b0afc9d70b7e91c06e63356 upstream.
+
+Signed-off-by: Adam Radford <aradford@gmail.com>
+Signed-off-by: James Bottomley <James.Bottomley@suse.de>
+Signed-off-by: Jonathan Nieder <jrnieder@gmail.com>
+---
+ drivers/scsi/megaraid/megaraid_sas_base.c | 24 ++++++++++++------------
+ 1 file changed, 12 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/scsi/megaraid/megaraid_sas_base.c b/drivers/scsi/megaraid/megaraid_sas_base.c
+index a630915f69f8..c78bff2f29e7 100644
+--- a/drivers/scsi/megaraid/megaraid_sas_base.c
++++ b/drivers/scsi/megaraid/megaraid_sas_base.c
+@@ -4036,12 +4036,6 @@ megasas_probe_one(struct pci_dev *pdev, const struct pci_device_id *id)
+ 	else
+ 		INIT_WORK(&instance->work_init, process_fw_state_change_wq);
+ 
+-	/*
+-	 * Initialize MFI Firmware
+-	 */
+-	if (megasas_init_fw(instance))
+-		goto fail_init_mfi;
+-
+ 	/* Try to enable MSI-X */
+ 	if ((instance->pdev->device != PCI_DEVICE_ID_LSI_SAS1078R) &&
+ 	    (instance->pdev->device != PCI_DEVICE_ID_LSI_SAS1078DE) &&
+@@ -4051,6 +4045,12 @@ megasas_probe_one(struct pci_dev *pdev, const struct pci_device_id *id)
+ 		instance->msi_flag = 1;
+ 
+ 	/*
++	 * Initialize MFI Firmware
++	 */
++	if (megasas_init_fw(instance))
++		goto fail_init_mfi;
++
++	/*
+ 	 * Register IRQ
+ 	 */
+ 	if (request_irq(instance->msi_flag ? instance->msixentry.vector :
+@@ -4103,13 +4103,13 @@ megasas_probe_one(struct pci_dev *pdev, const struct pci_device_id *id)
+ 	free_irq(instance->msi_flag ? instance->msixentry.vector :
+ 		 instance->pdev->irq, instance);
+ fail_irq:
+-	if (instance->msi_flag)
+-		pci_disable_msix(instance->pdev);
+ 	if (instance->pdev->device == PCI_DEVICE_ID_LSI_FUSION)
+ 		megasas_release_fusion(instance);
+ 	else
+ 		megasas_release_mfi(instance);
+       fail_init_mfi:
++	if (instance->msi_flag)
++		pci_disable_msix(instance->pdev);
+       fail_alloc_dma_buf:
+ 	if (instance->evt_detail)
+ 		pci_free_consistent(pdev, sizeof(struct megasas_evt_detail),
+@@ -4293,6 +4293,10 @@ megasas_resume(struct pci_dev *pdev)
+ 	if (megasas_set_dma_mask(pdev))
+ 		goto fail_set_dma_mask;
+ 
++	/* Now re-enable MSI-X */
++	if (instance->msi_flag)
++		pci_enable_msix(instance->pdev, &instance->msixentry, 1);
++
+ 	/*
+ 	 * Initialize MFI Firmware
+ 	 */
+@@ -4329,10 +4333,6 @@ megasas_resume(struct pci_dev *pdev)
+ 	tasklet_init(&instance->isr_tasklet, instance->instancet->tasklet,
+ 		     (unsigned long)instance);
+ 
+-	/* Now re-enable MSI-X */
+-	if (instance->msi_flag)
+-		pci_enable_msix(instance->pdev, &instance->msixentry, 1);
+-
+ 	/*
+ 	 * Register IRQ
+ 	 */
+-- 
+1.8.0
+
+
