@@ -1,0 +1,49 @@
+From 5c17c7e0af831bdb5d5b2e27909f697d3bd898b6 Mon Sep 17 00:00:00 2001
+From: "Stephen M. Cameron" <StephenM.Cameron>
+Date: Thu, 6 Jan 2011 14:47:53 -0600
+Subject: [PATCH 081/136] hpsa: fixup DMA address before freeing.
+
+commit d896f3f3d129f1e2fbb4e3824242bc0dc2fb1a07 upstream.
+
+Some low bits might have been set by the driver, causing
+a message like this to come out:
+
+ [   13.288062] ------------[ cut here ]------------
+ [   13.293211] WARNING: at lib/dma-debug.c:803 check_unmap+0x1a1/0x654()
+ [   13.300387] Hardware name: ProLiant DL180 G6
+ [   13.305335] hpsa 0000:06:00.0: DMA-API: device driver tries to free
+ DMA memory it has not allocated [device address=0x000000007f81e001]
+ [size=640 bytes]
+
+Signed-off-by: Stephen M. Cameron <scameron@beardog.cce.hp.com>
+Signed-off-by: James Bottomley <James.Bottomley@suse.de>
+---
+ drivers/scsi/hpsa.c     |    2 +-
+ drivers/scsi/hpsa_cmd.h |    1 +
+ 2 files changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/scsi/hpsa.c b/drivers/scsi/hpsa.c
+index eb7ace9..f6f53e5 100644
+--- a/drivers/scsi/hpsa.c
++++ b/drivers/scsi/hpsa.c
+@@ -2239,7 +2239,7 @@ static void cmd_special_free(struct ctlr_info *h, struct CommandList *c)
+ 	pci_free_consistent(h->pdev, sizeof(*c->err_info),
+ 			    c->err_info, (dma_addr_t) temp64.val);
+ 	pci_free_consistent(h->pdev, sizeof(*c),
+-			    c, (dma_addr_t) c->busaddr);
++			    c, (dma_addr_t) (c->busaddr & DIRECT_LOOKUP_MASK));
+ }
+ 
+ #ifdef CONFIG_COMPAT
+diff --git a/drivers/scsi/hpsa_cmd.h b/drivers/scsi/hpsa_cmd.h
+index f5c4c3c..7910c14 100644
+--- a/drivers/scsi/hpsa_cmd.h
++++ b/drivers/scsi/hpsa_cmd.h
+@@ -265,6 +265,7 @@ struct ErrorInfo {
+ 
+ #define DIRECT_LOOKUP_SHIFT 5
+ #define DIRECT_LOOKUP_BIT 0x10
++#define DIRECT_LOOKUP_MASK (~((1 << DIRECT_LOOKUP_SHIFT) - 1))
+ 
+ #define HPSA_ERROR_BIT          0x02
+ struct ctlr_info; /* defined in hpsa.h */
