@@ -1,0 +1,83 @@
+From e2adcc06886a309a9b7072f74476a66d8c44ed30 Mon Sep 17 00:00:00 2001
+From: "Yang, Bo" <Bo.Yang@lsi.com>
+Date: Tue, 12 Oct 2010 07:18:50 -0600
+Subject: [PATCH 26/53] [SCSI] megaraid_sas: Add input parameter for  max_sectors
+
+commit 1fd106851698e9a858d20ab0e0f0afd5e9ec9332 upstream.
+
+Driver add the input parameters support for max_sectors for megaraid
+sas gen2 chip.  Customer can set the max_sectors support to 1MB for
+gen2 chip during the driver load.
+
+Signed-off-by: Bo Yang <bo.yang@lsi.com>
+Signed-off-by: James Bottomley <James.Bottomley@suse.de>
+Signed-off-by: Jonathan Nieder <jrnieder@gmail.com>
+---
+ drivers/scsi/megaraid/megaraid_sas.h      |  1 +
+ drivers/scsi/megaraid/megaraid_sas_base.c | 30 ++++++++++++++++++++++++++++++
+ 2 files changed, 31 insertions(+)
+
+diff --git a/drivers/scsi/megaraid/megaraid_sas.h b/drivers/scsi/megaraid/megaraid_sas.h
+index 8f03bcfd66ad..a029a6cd1341 100644
+--- a/drivers/scsi/megaraid/megaraid_sas.h
++++ b/drivers/scsi/megaraid/megaraid_sas.h
+@@ -707,6 +707,7 @@ struct megasas_ctrl_info {
+ #define MEGASAS_MAX_LD_IDS			(MEGASAS_MAX_LD_CHANNELS * \
+ 						MEGASAS_MAX_DEV_PER_CHANNEL)
+ 
++#define MEGASAS_MAX_SECTORS                    (2*1024)
+ #define MEGASAS_DBG_LVL				1
+ 
+ #define MEGASAS_FW_BUSY				1
+diff --git a/drivers/scsi/megaraid/megaraid_sas_base.c b/drivers/scsi/megaraid/megaraid_sas_base.c
+index 2a5e542e718e..ec17c0a1b127 100644
+--- a/drivers/scsi/megaraid/megaraid_sas_base.c
++++ b/drivers/scsi/megaraid/megaraid_sas_base.c
+@@ -61,6 +61,15 @@ static int msix_disable;
+ module_param(msix_disable, int, S_IRUGO);
+ MODULE_PARM_DESC(msix_disable, "Disable MSI-X interrupt handling. Default: 0");
+ 
++/*
++ * Number of sectors per IO command
++ * Will be set in megasas_init_mfi if user does not provide
++ */
++static unsigned int max_sectors;
++module_param_named(max_sectors, max_sectors, int, 0);
++MODULE_PARM_DESC(max_sectors,
++	"Maximum number of sectors per IO command");
++
+ MODULE_LICENSE("GPL");
+ MODULE_VERSION(MEGASAS_VERSION);
+ MODULE_AUTHOR("megaraidlinux@lsi.com");
+@@ -3733,6 +3742,27 @@ static int megasas_io_attach(struct megasas_instance *instance)
+ 			instance->max_fw_cmds - MEGASAS_INT_CMDS;
+ 	host->this_id = instance->init_id;
+ 	host->sg_tablesize = instance->max_num_sge;
++	/*
++	 * Check if the module parameter value for max_sectors can be used
++	 */
++	if (max_sectors && max_sectors < instance->max_sectors_per_req)
++		instance->max_sectors_per_req = max_sectors;
++	else {
++		if (max_sectors) {
++			if (((instance->pdev->device ==
++				PCI_DEVICE_ID_LSI_SAS1078GEN2) ||
++				(instance->pdev->device ==
++				PCI_DEVICE_ID_LSI_SAS0079GEN2)) &&
++				(max_sectors <= MEGASAS_MAX_SECTORS)) {
++				instance->max_sectors_per_req = max_sectors;
++			} else {
++			printk(KERN_INFO "megasas: max_sectors should be > 0"
++				"and <= %d (or < 1MB for GEN2 controller)\n",
++				instance->max_sectors_per_req);
++			}
++		}
++	}
++
+ 	host->max_sectors = instance->max_sectors_per_req;
+ 	host->cmd_per_lun = MEGASAS_DEFAULT_CMD_PER_LUN;
+ 	host->max_channel = MEGASAS_MAX_CHANNELS - 1;
+-- 
+1.8.0
+
+
