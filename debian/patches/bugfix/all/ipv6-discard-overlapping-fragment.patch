@@ -1,4 +1,4 @@
-commit 70789d7052239992824628db8133de08dc78e593
+ 70789d7052239992824628db8133de08dc78e593
 Author: Nicolas Dichtel <nicolas.dichtel@6wind.com>
 Date:   Fri Sep 3 05:13:05 2010 +0000
 
@@ -12,17 +12,19 @@ Date:   Fri Sep 3 05:13:05 2010 +0000
     Signed-off-by: David S. Miller <davem@davemloft.net>
     [dannf: backported to Debian's 2.6.32]
 
-diff --git a/net/ipv6/reassembly.c b/net/ipv6/reassembly.c
-index 545c414..64cfef1 100644
---- a/net/ipv6/reassembly.c
-+++ b/net/ipv6/reassembly.c
-@@ -149,13 +149,6 @@ int ip6_frag_match(struct inet_frag_queue *q, void *a)
+diff -urpN a/net/ipv6/reassembly.c b/net/ipv6/reassembly.c
+--- a/net/ipv6/reassembly.c	2013-02-13 22:04:16.582911820 -0800
++++ b/net/ipv6/reassembly.c	2013-02-13 22:15:23.714382174 -0800
+@@ -148,16 +148,6 @@ int ip6_frag_match(struct inet_frag_queu
  }
  EXPORT_SYMBOL(ip6_frag_match);
  
 -/* Memory Tracking Functions. */
--static void frag_kfree_skb(struct netns_frags *nf, struct sk_buff *skb)
+-static inline void frag_kfree_skb(struct netns_frags *nf,
+-		struct sk_buff *skb, int *work)
 -{
+-	if (work)
+-		*work -= skb->truesize;
 -	atomic_sub(skb->truesize, &nf->mem);
 -	kfree_skb(skb);
 -}
@@ -30,10 +32,10 @@ index 545c414..64cfef1 100644
  void ip6_frag_init(struct inet_frag_queue *q, void *a)
  {
  	struct frag_queue *fq = container_of(q, struct frag_queue, q);
-@@ -346,58 +339,22 @@ static int ip6_frag_queue(struct frag_queue *fq, struct sk_buff *skb,
+@@ -348,58 +338,22 @@ static int ip6_frag_queue(struct frag_qu
+ 		prev = next;
  	}
  
- found:
 -	/* We found where to put this one.  Check for overlap with
 -	 * preceding fragment, and, if needed, align things so that
 -	 * any overlaps are eliminated.
@@ -46,7 +48,7 @@ index 545c414..64cfef1 100644
  	 */
 -	if (prev) {
 -		int i = (FRAG6_CB(prev)->offset + prev->len) - offset;
- 
+-
 -		if (i > 0) {
 -			offset += i;
 -			if (end <= offset)
@@ -57,10 +59,6 @@ index 545c414..64cfef1 100644
 -				skb->ip_summed = CHECKSUM_NONE;
 -		}
 -	}
-+	/* Check for overlap with preceding fragment. */
-+	if (prev &&
-+	    (FRAG6_CB(prev)->offset + prev->len) - offset > 0)
-+		goto discard_fq;
  
 -	/* Look for overlap with succeeding segments.
 -	 * If we can merge fragments, do it.
@@ -93,16 +91,21 @@ index 545c414..64cfef1 100644
 -				fq->q.fragments = next;
 -
 -			fq->q.meat -= free_it->len;
--			frag_kfree_skb(fq->q.net, free_it);
+-			frag_kfree_skb(fq->q.net, free_it, NULL);
 -		}
 -	}
++	/* Check for overlap with preceding fragment. */
++	if (prev &&
++	    (FRAG6_CB(prev)->offset + prev->len) - offset > 0)
++		goto discard_fq;
++
 +	/* Look for overlap with succeeding segment. */
 +	if (next && FRAG6_CB(next)->offset < end)
 +		goto discard_fq;
  
  	FRAG6_CB(skb)->offset = offset;
  
-@@ -436,6 +393,8 @@ found:
+@@ -436,6 +390,8 @@ static int ip6_frag_queue(struct frag_qu
  	write_unlock(&ip6_frags.lock);
  	return -1;
  
