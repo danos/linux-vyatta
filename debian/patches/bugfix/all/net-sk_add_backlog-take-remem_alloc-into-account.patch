@@ -1,0 +1,136 @@
+commit c377411f2494a931ff7facdbb3a6839b1266bcf6
+Author: Eric Dumazet <eric.dumazet@gmail.com>
+Date:   Tue Apr 27 15:13:20 2010 -0700
+
+    net: sk_add_backlog() take rmem_alloc into account
+    
+    Current socket backlog limit is not enough to really stop DDOS attacks,
+    because user thread spend many time to process a full backlog each
+    round, and user might crazy spin on socket lock.
+    
+    We should add backlog size and receive_queue size (aka rmem_alloc) to
+    pace writers, and let user run without being slow down too much.
+    
+    Introduce a sk_rcvqueues_full() helper, to avoid taking socket lock in
+    stress situations.
+    
+    Under huge stress from a multiqueue/RPS enabled NIC, a single flow udp
+    receiver can now process ~200.000 pps (instead of ~100 pps before the
+    patch) on a 8 core machine.
+    
+    Signed-off-by: Eric Dumazet <eric.dumazet@gmail.com>
+    Signed-off-by: David S. Miller <davem@davemloft.net>
+    [dannf: backported to Debian's 2.6.32]
+
+diff --git a/include/net/sock.h b/include/net/sock.h
+index d04a1ab..1f6d6aa 100644
+--- a/include/net/sock.h
++++ b/include/net/sock.h
+@@ -243,7 +243,6 @@ struct sock {
+ 		struct sk_buff *head;
+ 		struct sk_buff *tail;
+ 		int len;
+-		int limit;
+ 	} sk_backlog;
+ 	wait_queue_head_t	*sk_sleep;
+ 	struct dst_entry	*sk_dst_cache;
+@@ -575,10 +574,20 @@ static inline void sk_add_backlog(struct sock *sk, struct sk_buff *skb)
+ 	skb->next = NULL;
+ }
+ 
++/*
++ * Take into account size of receive queue and backlog queue
++ */
++static inline bool sk_rcvqueues_full(const struct sock *sk, const struct sk_buff *skb)
++{
++	unsigned int qsize = sk->sk_backlog.len + atomic_read(&sk->sk_rmem_alloc);
++
++	return qsize + skb->truesize > sk->sk_rcvbuf;
++}
++
+ /* The per-socket spinlock must be held here. */
+ static inline int sk_add_backlog_limited(struct sock *sk, struct sk_buff *skb)
+ {
+-	if (sk->sk_backlog.len >= max(sk->sk_backlog.limit, sk->sk_rcvbuf << 1))
++	if (sk_rcvqueues_full(sk, skb))
+ 		return -ENOBUFS;
+ 
+ 	sk_add_backlog(sk, skb);
+diff --git a/net/core/sock.c b/net/core/sock.c
+index 273e1e9..755a614 100644
+--- a/net/core/sock.c
++++ b/net/core/sock.c
+@@ -323,6 +323,10 @@ int sk_receive_skb(struct sock *sk, struct sk_buff *skb, const int nested)
+ 
+ 	skb->dev = NULL;
+ 
++	if (sk_rcvqueues_full(sk, skb)) {
++		atomic_inc(&sk->sk_drops);
++		goto discard_and_relse;
++	}
+ 	if (nested)
+ 		bh_lock_sock_nested(sk);
+ 	else
+@@ -1863,7 +1867,6 @@ void sock_init_data(struct socket *sock, struct sock *sk)
+ 	sk->sk_allocation	=	GFP_KERNEL;
+ 	sk->sk_rcvbuf		=	sysctl_rmem_default;
+ 	sk->sk_sndbuf		=	sysctl_wmem_default;
+-	sk->sk_backlog.limit	=	sk->sk_rcvbuf << 1;
+ 	sk->sk_state		=	TCP_CLOSE;
+ 	sk_set_socket(sk, sock);
+ 
+diff --git a/net/ipv4/udp.c b/net/ipv4/udp.c
+index f66a23b..571da81 100644
+--- a/net/ipv4/udp.c
++++ b/net/ipv4/udp.c
+@@ -1183,6 +1183,10 @@ int udp_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
+ 			goto drop;
+ 	}
+ 
++
++	if (sk_rcvqueues_full(sk, skb))
++		goto drop;
++
+ 	rc = 0;
+ 
+ 	bh_lock_sock(sk);
+diff --git a/net/ipv6/udp.c b/net/ipv6/udp.c
+index 4ae5ee3..7d2e94e 100644
+--- a/net/ipv6/udp.c
++++ b/net/ipv6/udp.c
+@@ -480,6 +480,10 @@ static int __udp6_lib_mcast_deliver(struct net *net, struct sk_buff *skb,
+ 			bh_unlock_sock(sk2);
+ 		}
+ 	}
++	if (sk_rcvqueues_full(sk, skb)) {
++		kfree_skb(skb);
++		goto out;
++	}
+ 	bh_lock_sock(sk);
+ 	if (!sock_owned_by_user(sk))
+ 		udpv6_queue_rcv_skb(sk, skb);
+@@ -602,6 +606,10 @@ int __udp6_lib_rcv(struct sk_buff *skb, struct udp_table *udptable,
+ 
+ 	/* deliver */
+ 
++	if (sk_rcvqueues_full(sk, skb)) {
++		sock_put(sk);
++		goto discard;
++	}
+ 	bh_lock_sock(sk);
+ 	if (!sock_owned_by_user(sk))
+ 		udpv6_queue_rcv_skb(sk, skb);
+diff --git a/net/sctp/socket.c b/net/sctp/socket.c
+index 374dfe5..3a95fcb 100644
+--- a/net/sctp/socket.c
++++ b/net/sctp/socket.c
+@@ -3719,9 +3719,6 @@ SCTP_STATIC int sctp_init_sock(struct sock *sk)
+ 	SCTP_DBG_OBJCNT_INC(sock);
+ 	percpu_counter_inc(&sctp_sockets_allocated);
+ 
+-	/* Set socket backlog limit. */
+-	sk->sk_backlog.limit = sysctl_sctp_rmem[1];
+-
+ 	local_bh_disable();
+ 	sock_prot_inuse_add(sock_net(sk), sk->sk_prot, 1);
+ 	local_bh_enable();
