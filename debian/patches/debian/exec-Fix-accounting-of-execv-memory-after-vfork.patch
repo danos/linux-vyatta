@@ -1,0 +1,119 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Wed, 13 Feb 2013 13:06:38 +0000
+Subject: exec: Fix accounting of execv*() memory after vfork()
+Bug-Debian: http://bugs.debian.org/700486
+
+The patch 'exec: Get rid of linux_binprm::vma_pages' made the incorrect
+assumption that:
+
+> - The calls to acct_arg_size(bprm, 0) are redundant, since
+>   neither the cache nor the dead mm need to be updated
+
+This is not true in case execve() was called after vfork(); in that
+case the mm is borrowed from the parent process and will continue
+to exist.
+
+All calls to acct_arg_size(bprm, 0) (in the upstream version) come
+before current->mm is changed and before the vma holding argv/envp has
+been expanded to become a stack.  So vma_pages() will tell us exactly
+how many pages to un-account.  (This also means that there is a brief
+window between flush_old_exec() and setup_arg_pages() where the vma is
+again not accounted anywhere...!)
+
+Also change get_arg_page() to use vma_pages() rather than effectively
+open-coding it, to make what we're doing (relatively) clear and
+consistent.
+
+Finally, account for the first page allocated in __bprm_mm_init() by
+calling acct_arg_size() there too.
+
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+--- a/fs/compat.c
++++ b/fs/compat.c
+@@ -1549,6 +1549,7 @@ int compat_do_execve(char * filename,
+ 
+ out:
+ 	if (bprm->mm) {
++		acct_arg_size(bprm, 0, vma_pages(bprm->vma));
+ 		mmput(bprm->mm);
+ 	}
+ 
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -159,8 +159,8 @@ out:
+ 
+ #ifdef CONFIG_MMU
+ 
+-static void acct_arg_size(struct linux_binprm *bprm, unsigned long pages,
+-			  unsigned long old_pages)
++void acct_arg_size(struct linux_binprm *bprm, unsigned long pages,
++		   unsigned long old_pages)
+ {
+ 	struct mm_struct *mm = current->mm;
+ 	long diff = (long)(pages - old_pages);
+@@ -176,8 +176,7 @@ void acct_arg_size(struct linux_binprm *bprm, unsigned long pages)
+ struct page *get_arg_page(struct linux_binprm *bprm, unsigned long pos,
+ 		int write)
+ {
+-	unsigned long old_vma_pages =
+-		(bprm->vma->vm_end - bprm->vma->vm_start) / PAGE_SIZE;
++	unsigned long old_vma_pages = vma_pages(bprm->vma);
+ 	struct page *page;
+ 	int ret;
+ 
+@@ -197,7 +198,7 @@
+ 		unsigned long size = bprm->vma->vm_end - bprm->vma->vm_start;
+ 		struct rlimit *rlim;
+ 
+-		acct_arg_size(bprm, size / PAGE_SIZE, old_vma_pages);
++		acct_arg_size(bprm, vma_pages(bprm->vma), old_vma_pages);
+ 
+ 		/*
+ 		 * We've historically supported up to 32 pages (ARG_MAX)
+@@ -276,6 +277,7 @@
+ 
+ 	mm->stack_vm = mm->total_vm = 1;
+ 	up_write(&mm->mmap_sem);
++	acct_arg_size(bprm, 1, 0);
+ 	bprm->p = vma->vm_end - sizeof(void *);
+ 	return 0;
+ err:
+@@ -290,8 +292,8 @@ static bool valid_arg_len(struct linux_binprm *bprm, long len)
+ 
+ #else
+ 
+-static void acct_arg_size(struct linux_binprm *bprm, unsigned long pages,
+-			  unsigned long old_pages)
++void acct_arg_size(struct linux_binprm *bprm, unsigned long pages,
++		   unsigned long old_pages)
+ {
+ }
+ 
+@@ -1004,6 +1006,7 @@ int flush_old_exec(struct linux_binprm * bprm)
+ 	/*
+ 	 * Release all of the old mmap stuff
+ 	 */
++	acct_arg_size(bprm, 0, vma_pages(bprm->vma));
+ 	retval = exec_mmap(bprm->mm);
+ 	if (retval)
+ 		goto out;
+@@ -1429,6 +1431,7 @@ int do_execve(char * filename,
+ 
+ out:
+ 	if (bprm->mm) {
++		acct_arg_size(bprm, 0, vma_pages(bprm->vma));
+ 		mmput(bprm->mm);
+ 	}
+ 
+--- a/include/linux/binfmts.h
++++ b/include/linux/binfmts.h
+@@ -59,6 +59,8 @@ struct linux_binprm{
+ 	unsigned long loader, exec;
+ };
+ 
++extern void acct_arg_size(struct linux_binprm *bprm, unsigned long pages,
++			  unsigned long old_pages);
+ extern struct page *get_arg_page(struct linux_binprm *bprm, unsigned long pos,
+ 					int write);
+ 
