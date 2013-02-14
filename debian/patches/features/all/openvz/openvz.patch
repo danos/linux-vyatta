@@ -6541,12 +6541,6 @@ Date:   Mon Feb 15 15:17:35 2010 +0300
 [bwh: Fix context for changes to lease_alloc() after commit
  79549c6dfda0603dba9a70a53467ce62d9335c33 ('cred: copy_process() should
  clear child->replacement_session_keyring')]
-[bwh: Update definition of struct eventpoll that this moves, to include
- additions in 2.6.32.60]
-[bwh: Fix context for changes to fs/signalfd.c, include/linux/signalfd.h
- and kernel/fork.c following addition of signalfd_cleanup() in 2.6.32.60]
-[bwh: Fix content for changes to do_tcp_sendpages() after 2.6.32.60]
-[bwh: Fix context for changes to struct file after 2.6.32.60]
 
 diff --git a/COPYING.Parallels b/COPYING.Parallels
 new file mode 100644
@@ -16581,7 +16575,7 @@ index 085c5c0..8f10643 100644
  /*
   * Structure used to track possible nested calls, for too deep recursions
   * and loop cycles.
-@@ -110,88 +106,6 @@ struct nested_calls {
+@@ -110,82 +106,6 @@ struct nested_calls {
  	spinlock_t lock;
  };
  
@@ -16659,12 +16653,6 @@ index 085c5c0..8f10643 100644
 -
 -	/* The user that created the eventpoll descriptor */
 -	struct user_struct *user;
--
--	struct file *file;
--
--	/* used to optimize loop detection check */
--	int visited;
--	struct list_head visited_list_link;
 -};
 -
  /* Wait structure used by the poll hooks */
@@ -16680,15 +16668,6 @@ index 085c5c0..8f10643 100644
  
  /* Used to check for epoll file descriptor inclusion loops */
  static struct nested_calls poll_loop_ncalls;
-@@ -286,7 +207,7 @@
- };
- #endif /* CONFIG_SYSCTL */
- 
--static const struct file_operations eventpoll_fops;
-+const struct file_operations eventpoll_fops;
- 
- static inline int is_file_epoll(struct file *f)
- {
 @@ -672,10 +593,11 @@ static unsigned int ep_eventpoll_poll(struct file *file, poll_table *wait)
  }
  
@@ -16700,8 +16679,8 @@ index 085c5c0..8f10643 100644
  };
 +EXPORT_SYMBOL(eventpoll_fops);
  
- /*
-  * This is called from eventpoll_release() to unlink files from the eventpoll
+ /* Fast test to see if the file is an evenpoll file */
+ static inline int is_file_epoll(struct file *f)
 @@ -757,7 +679,7 @@ free_uid:
   * are protected by the "mtx" mutex, and ep_find() must be called with
   * "mtx" held.
@@ -27743,25 +27722,18 @@ diff --git a/fs/signalfd.c b/fs/signalfd.c
 index d98bea8..d0c9670 100644
 --- a/fs/signalfd.c
 +++ b/fs/signalfd.c
-@@ -28,6 +28,7 @@
+@@ -28,10 +28,7 @@
  #include <linux/anon_inodes.h>
  #include <linux/signalfd.h>
  #include <linux/syscalls.h>
-+#include <linux/module.h>
- 
- void signalfd_cleanup(struct sighand_struct *sighand)
- {
-@@ -44,10 +44,6 @@
- 	wake_up_poll(wqh, POLLHUP | POLLFREE);
- }
- 
+-
 -struct signalfd_ctx {
 -	sigset_t sigmask;
 -};
--
++#include <linux/module.h>
+ 
  static int signalfd_release(struct inode *inode, struct file *file)
  {
- 	kfree(file->private_data);
 @@ -201,17 +198,17 @@ static ssize_t signalfd_read(struct file *file, char __user *buf, size_t count,
  	return total ? total: ret;
  }
@@ -33109,7 +33081,7 @@ index f6856a5..a7f552f 100644
  
  /* Flags for epoll_create1.  */
  #define EPOLL_CLOEXEC O_CLOEXEC
-@@ -63,6 +64,106 @@ static inline void eventpoll_init_file(struct file *file)
+@@ -63,6 +64,94 @@ static inline void eventpoll_init_file(struct file *file)
  	INIT_LIST_HEAD(&file->f_ep_links);
  }
  
@@ -33156,12 +33128,6 @@ index f6856a5..a7f552f 100644
 +
 +	/* The user that created the eventpoll descriptor */
 +	struct user_struct *user;
-+
-+	struct file *file;
-+
-+	/* used to optimize loop detection check */
-+	int visited;
-+	struct list_head visited_list_link;
 +};
 +
 +/*
@@ -33201,12 +33167,6 @@ index f6856a5..a7f552f 100644
 +
 +	/* The user that created the eventpoll descriptor */
 +	struct user_struct *user;
-+
-+	struct file *file;
-+
-+	/* used to optimize loop detection check */
-+	int visited;
-+	struct list_head visited_list_link;
 +};
 +
 +extern struct semaphore epsem;
@@ -33502,9 +33462,9 @@ index 1ff0962..6c4a03b 100644
  	unsigned long f_mnt_write_state;
  #endif
 +	struct ve_struct	*owner_env;
- #ifndef __GENKSYMS__
- #ifdef CONFIG_EPOLL
- 	struct list_head	f_tfile_llink;
+ };
+ extern spinlock_t files_lock;
+ #define file_list_lock() spin_lock(&files_lock);
 @@ -1063,6 +1083,9 @@ struct file_lock {
  	fl_owner_t fl_owner;
  	unsigned char fl_flags;
@@ -35632,8 +35592,8 @@ index b363b91..d04dcb5 100644
 --- a/include/linux/signalfd.h
 +++ b/include/linux/signalfd.h
 @@ -60,6 +60,12 @@ static inline void signalfd_notify(struct task_struct *tsk, int sig)
- 
- extern void signalfd_cleanup(struct sighand_struct *sighand);
+ 		wake_up(&tsk->sighand->signalfd_wqh);
+ }
  
 +struct signalfd_ctx {
 +	sigset_t sigmask;
@@ -69777,9 +69737,9 @@ index 4bde56f..b091ef4 100644
 --- a/kernel/fork.c
 +++ b/kernel/fork.c
 @@ -64,6 +64,8 @@
+ #include <linux/magic.h>
  #include <linux/perf_event.h>
  #include <linux/posix-timers.h>
- #include <linux/signalfd.h>
 +#include <linux/virtinfo.h>
 +#include <linux/ve.h>
  
@@ -85456,7 +85416,7 @@ index 734fe94..5c60596 100644
  			goto wait_for_memory;
  
  		if (can_coalesce) {
-@@ -838,9 +866,14 @@ new_segment:
+@@ -838,10 +866,15 @@ new_segment:
  wait_for_sndbuf:
  		set_bit(SOCK_NOSPACE, &sk->sk_socket->flags);
  wait_for_memory:
@@ -85464,7 +85424,8 @@ index 734fe94..5c60596 100644
 +			skb_charge_size(MAX_TCP_HEADER + tp->mss_cache));
 +		chargesize = 0;
 +wait_for_ubspace:
- 		tcp_push(sk, flags & ~MSG_MORE, mss_now, TCP_NAGLE_PUSH);
+ 		if (copied)
+ 			tcp_push(sk, flags & ~MSG_MORE, mss_now, TCP_NAGLE_PUSH);
  
 -		if ((err = sk_stream_wait_memory(sk, &timeo)) != 0)
 +		err = __sk_stream_wait_memory(sk, &timeo, chargesize);
