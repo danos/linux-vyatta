@@ -1,0 +1,309 @@
+commit d79fdd6d96f46fabb779d86332e3677c6f5c2a4f
+Author: Tejun Heo <tj@kernel.org>
+Date:   Wed Mar 23 10:37:00 2011 +0100
+
+    ptrace: Clean transitions between TASK_STOPPED and TRACED
+    
+    Currently, if the task is STOPPED on ptrace attach, it's left alone
+    and the state is silently changed to TRACED on the next ptrace call.
+    The behavior breaks the assumption that arch_ptrace_stop() is called
+    before any task is poked by ptrace and is ugly in that a task
+    manipulates the state of another task directly.
+    
+    With GROUP_STOP_PENDING, the transitions between TASK_STOPPED and
+    TRACED can be made clean.  The tracer can use the flag to tell the
+    tracee to retry stop on attach and detach.  On retry, the tracee will
+    enter the desired state in the correct way.  The lower 16bits of
+    task->group_stop is used to remember the signal number which caused
+    the last group stop.  This is used while retrying for ptrace attach as
+    the original group_exit_code could have been consumed with wait(2) by
+    then.
+    
+    As the real parent may wait(2) and consume the group_exit_code
+    anytime, the group_exit_code needs to be saved separately so that it
+    can be used when switching from regular sleep to ptrace_stop().  This
+    is recorded in the lower 16bits of task->group_stop.
+    
+    If a task is already stopped and there's no intervening SIGCONT, a
+    ptrace request immediately following a successful PTRACE_ATTACH should
+    always succeed even if the tracer doesn't wait(2) for attach
+    completion; however, with this change, the tracee might still be
+    TASK_RUNNING trying to enter TASK_TRACED which would cause the
+    following request to fail with -ESRCH.
+    
+    This intermediate state is hidden from the ptracer by setting
+    GROUP_STOP_TRAPPING on attach and making ptrace_check_attach() wait
+    for it to clear on its signal->wait_chldexit.  Completing the
+    transition or getting killed clears TRAPPING and wakes up the tracer.
+    
+    Note that the STOPPED -> RUNNING -> TRACED transition is still visible
+    to other threads which are in the same group as the ptracer and the
+    reverse transition is visible to all.  Please read the comments for
+    details.
+    
+    Oleg:
+    
+    * Spotted a race condition where a task may retry group stop without
+      proper bookkeeping.  Fixed by redoing bookkeeping on retry.
+    
+    * Spotted that the transition is visible to userland in several
+      different ways.  Most are fixed with GROUP_STOP_TRAPPING.  Unhandled
+      corner case is documented.
+    
+    * Pointed out not setting GROUP_STOP_SIGMASK on an already stopped
+      task would result in more consistent behavior.
+    
+    * Pointed out that calling ptrace_stop() from do_signal_stop() in
+      TASK_STOPPED can race with group stop start logic and then confuse
+      the TRAPPING wait in ptrace_check_attach().  ptrace_stop() is now
+      called with TASK_RUNNING.
+    
+    * Suggested using signal->wait_chldexit instead of bit wait.
+    
+    * Spotted a race condition between TRACED transition and clearing of
+      TRAPPING.
+    
+    Signed-off-by: Tejun Heo <tj@kernel.org>
+    Acked-by: Oleg Nesterov <oleg@redhat.com>
+    Cc: Roland McGrath <roland@redhat.com>
+    Cc: Jan Kratochvil <jan.kratochvil@redhat.com>
+    [dannf: backported to Debian's 2.6.32]
+
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index 7539fbe..0ed8f30 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -1845,8 +1845,10 @@ extern void thread_group_times(struct task_struct *p, cputime_t *ut, cputime_t *
+ /*
+  * task->group_stop flags
+  */
++#define GROUP_STOP_SIGMASK	0xffff    /* signr of the last group stop */
+ #define GROUP_STOP_PENDING	(1 << 16) /* task should stop for group stop */
+ #define GROUP_STOP_CONSUME	(1 << 17) /* consume group stop count */
++#define GROUP_STOP_TRAPPING	(1 << 18) /* switching from STOPPED to TRACED */
+ 
+ extern void task_clear_group_stop_pending(struct task_struct *task);
+ 
+diff --git a/kernel/ptrace.c b/kernel/ptrace.c
+index b24ccb3..3a1b800 100644
+--- a/kernel/ptrace.c
++++ b/kernel/ptrace.c
+@@ -58,14 +58,22 @@ void __ptrace_unlink(struct task_struct *child)
+ 	arch_ptrace_untrace(child);
+ 	if (task_is_traced(child)) {
+ 		/*
+-		 * If the group stop is completed or in progress,
+-		 * this thread was already counted as stopped.
++		 * If group stop is completed or in progress, it should
++		 * participate in the group stop.  Set GROUP_STOP_PENDING
++		 * before kicking it.
++		 *
++		 * This involves TRACED -> RUNNING -> STOPPED transition
++		 * which is similar to but in the opposite direction of
++		 * what happens while attaching to a stopped task.
++		 * However, in this direction, the intermediate RUNNING
++		 * state is not hidden even from the current ptracer and if
++		 * it immediately re-attaches and performs a WNOHANG
++		 * wait(2), it may fail.
+ 		 */
+ 		if (child->signal->flags & SIGNAL_STOP_STOPPED ||
+ 		    child->signal->group_stop_count)
+-			__set_task_state(child, TASK_STOPPED);
+-		else
+-			signal_wake_up(child, 1);
++			child->group_stop |= GROUP_STOP_PENDING;
++		signal_wake_up(child, 1);
+ 	}
+ 	spin_unlock(&child->sighand->siglock);
+ }
+@@ -156,6 +164,7 @@ bool ptrace_may_access(struct task_struct *task, unsigned int mode)
+ 
+ int ptrace_attach(struct task_struct *task)
+ {
++	bool wait_trap = false;
+ 	int retval;
+ 
+ 	audit_ptrace(task);
+@@ -195,12 +204,42 @@ int ptrace_attach(struct task_struct *task)
+ 	__ptrace_link(task, current);
+ 	send_sig_info(SIGSTOP, SEND_SIG_FORCED, task);
+ 
++	spin_lock(&task->sighand->siglock);
++
++	/*
++	 * If the task is already STOPPED, set GROUP_STOP_PENDING and
++	 * TRAPPING, and kick it so that it transits to TRACED.  TRAPPING
++	 * will be cleared if the child completes the transition or any
++	 * event which clears the group stop states happens.  We'll wait
++	 * for the transition to complete before returning from this
++	 * function.
++	 *
++	 * This hides STOPPED -> RUNNING -> TRACED transition from the
++	 * attaching thread but a different thread in the same group can
++	 * still observe the transient RUNNING state.  IOW, if another
++	 * thread's WNOHANG wait(2) on the stopped tracee races against
++	 * ATTACH, the wait(2) may fail due to the transient RUNNING.
++	 *
++	 * The following task_is_stopped() test is safe as both transitions
++	 * in and out of STOPPED are protected by siglock.
++	 */
++	if (task_is_stopped(task)) {
++		task->group_stop |= GROUP_STOP_PENDING | GROUP_STOP_TRAPPING;
++		signal_wake_up(task, 1);
++		wait_trap = true;
++	}
++
++	spin_unlock(&task->sighand->siglock);
++
+ 	retval = 0;
+ unlock_tasklist:
+ 	write_unlock_irq(&tasklist_lock);
+ unlock_creds:
+ 	mutex_unlock(&task->cred_guard_mutex);
+ out:
++	if (wait_trap)
++		wait_event(current->signal->wait_chldexit,
++			   !(task->group_stop & GROUP_STOP_TRAPPING));
+ 	return retval;
+ }
+ 
+diff --git a/kernel/signal.c b/kernel/signal.c
+index 7cc7efe..ea848c4 100644
+--- a/kernel/signal.c
++++ b/kernel/signal.c
+@@ -189,6 +189,26 @@ int next_signal(struct sigpending *pending, sigset_t *mask)
+ }
+ 
+ /**
++ * task_clear_group_stop_trapping - clear group stop trapping bit
++ * @task: target task
++ *
++ * If GROUP_STOP_TRAPPING is set, a ptracer is waiting for us.  Clear it
++ * and wake up the ptracer.  Note that we don't need any further locking.
++ * @task->siglock guarantees that @task->parent points to the ptracer.
++ *
++ * CONTEXT:
++ * Must be called with @task->sighand->siglock held.
++ */
++static void task_clear_group_stop_trapping(struct task_struct *task)
++{
++	if (unlikely(task->group_stop & GROUP_STOP_TRAPPING)) {
++		task->group_stop &= ~GROUP_STOP_TRAPPING;
++		__wake_up_sync(&task->parent->signal->wait_chldexit,
++			       TASK_UNINTERRUPTIBLE, 1);
++	}
++}
++
++/**
+  * task_clear_group_stop_pending - clear pending group stop
+  * @task: target task
+  *
+@@ -1643,8 +1663,20 @@ static void ptrace_stop(int exit_code, int why, int clear_code, siginfo_t *info)
+ 	current->last_siginfo = info;
+ 	current->exit_code = exit_code;
+ 
+-	/* Let the debugger run.  */
+-	__set_current_state(TASK_TRACED);
++	/*
++	 * TRACED should be visible before TRAPPING is cleared; otherwise,
++	 * the tracer might fail do_wait().
++	 */
++	set_current_state(TASK_TRACED);
++
++	/*
++	 * We're committing to trapping.  Clearing GROUP_STOP_TRAPPING and
++	 * transition to TASK_TRACED should be atomic with respect to
++	 * siglock.  This hsould be done after the arch hook as siglock is
++	 * released and regrabbed across it.
++	 */
++	task_clear_group_stop_trapping(current);
++
+ 	spin_unlock_irq(&current->sighand->siglock);
+ 	read_lock(&tasklist_lock);
+ 	if (may_ptrace_stop()) {
+@@ -1725,6 +1757,9 @@ static int do_signal_stop(int signr)
+ 		unsigned int gstop = GROUP_STOP_PENDING | GROUP_STOP_CONSUME;
+ 		struct task_struct *t;
+ 
++		/* signr will be recorded in task->group_stop for retries */
++		WARN_ON_ONCE(signr & ~GROUP_STOP_SIGMASK);
++
+ 		if (!likely(sig->flags & SIGNAL_STOP_DEQUEUED) ||
+ 		    unlikely(signal_group_exit(sig)))
+ 			return 0;
+@@ -1734,25 +1769,27 @@ static int do_signal_stop(int signr)
+ 		 */
+ 		sig->group_exit_code = signr;
+ 
+-		current->group_stop = gstop;
++		current->group_stop &= ~GROUP_STOP_SIGMASK;
++		current->group_stop |= signr | gstop;
+ 		sig->group_stop_count = 1;
+-		for (t = next_thread(current); t != current; t = next_thread(t))
++		for (t = next_thread(current); t != current;
++		     t = next_thread(t)) {
++			t->group_stop &= ~GROUP_STOP_SIGMASK;
+ 			/*
+ 			 * Setting state to TASK_STOPPED for a group
+ 			 * stop is always done with the siglock held,
+ 			 * so this check has no races.
+ 			 */
+ 			if (!(t->flags & PF_EXITING) && !task_is_stopped(t)) {
+-				t->group_stop = gstop;
++				t->group_stop |= signr | gstop;
+ 				sig->group_stop_count++;
+ 				signal_wake_up(t, 0);
+-			} else
++			} else {
+ 				task_clear_group_stop_pending(t);
++			}
++		}
+ 	}
+-
+-	current->exit_code = sig->group_exit_code;
+-	__set_current_state(TASK_STOPPED);
+-
++retry:
+ 	if (likely(!task_ptrace(current))) {
+ 		int notify = 0;
+ 
+@@ -1764,6 +1801,7 @@ static int do_signal_stop(int signr)
+ 		if (task_participate_group_stop(current))
+ 			notify = CLD_STOPPED;
+ 
++		__set_current_state(TASK_STOPPED);
+ 		spin_unlock_irq(&current->sighand->siglock);
+ 
+ 		if (notify) {
+@@ -1776,13 +1814,28 @@ static int do_signal_stop(int signr)
+ 		schedule();
+ 
+ 		spin_lock_irq(&current->sighand->siglock);
+-	} else
+-		ptrace_stop(current->exit_code, CLD_STOPPED, 0, NULL);
++	} else {
++		ptrace_stop(current->group_stop & GROUP_STOP_SIGMASK,
++			    CLD_STOPPED, 0, NULL);
++		current->exit_code = 0;
++	}
++
++	/*
++	 * GROUP_STOP_PENDING could be set if another group stop has
++	 * started since being woken up or ptrace wants us to transit
++	 * between TASK_STOPPED and TRACED.  Retry group stop.
++	 */
++	if (current->group_stop & GROUP_STOP_PENDING) {
++		WARN_ON_ONCE(!(current->group_stop & GROUP_STOP_SIGMASK));
++		goto retry;
++	}
++
++	/* PTRACE_ATTACH might have raced with task killing, clear trapping */
++	task_clear_group_stop_trapping(current);
+ 
+ 	spin_unlock_irq(&current->sighand->siglock);
+ 
+ 	tracehook_finish_jctl();
+-	current->exit_code = 0;
+ 
+ 	return 1;
+ }

@@ -1,0 +1,54 @@
+commit fe1bc6a0954611b806f9e158eb0817cf8ba21660
+Author: Tejun Heo <tj@kernel.org>
+Date:   Wed Mar 23 10:37:00 2011 +0100
+
+    ptrace: Add @why to ptrace_stop()
+    
+    To prepare for cleanup of the interaction between group stop and
+    ptrace, add @why to ptrace_stop().  Existing users are updated such
+    that there is no behavior change.
+    
+    Signed-off-by: Tejun Heo <tj@kernel.org>
+    Acked-by: Roland McGrath <roland@redhat.com>
+    [dannf: backported to Debian's 2.6.32]
+
+diff --git a/kernel/signal.c b/kernel/signal.c
+index a04db3b..4a238e1 100644
+--- a/kernel/signal.c
++++ b/kernel/signal.c
+@@ -1612,7 +1612,7 @@ static int sigkill_pending(struct task_struct *tsk)
+  * If we actually decide not to stop at all because the tracer
+  * is gone, we keep current->exit_code unless clear_code.
+  */
+-static void ptrace_stop(int exit_code, int clear_code, siginfo_t *info)
++static void ptrace_stop(int exit_code, int why, int clear_code, siginfo_t *info)
+ {
+ 	if (arch_ptrace_stop_needed(exit_code, info)) {
+ 		/*
+@@ -1648,7 +1648,7 @@ static void ptrace_stop(int exit_code, int clear_code, siginfo_t *info)
+ 	spin_unlock_irq(&current->sighand->siglock);
+ 	read_lock(&tasklist_lock);
+ 	if (may_ptrace_stop()) {
+-		do_notify_parent_cldstop(current, CLD_TRAPPED);
++		do_notify_parent_cldstop(current, why);
+ 		/*
+ 		 * Don't want to allow preemption here, because
+ 		 * sys_ptrace() needs this task to be inactive.
+@@ -1707,7 +1707,7 @@ void ptrace_notify(int exit_code)
+ 
+ 	/* Let the debugger run.  */
+ 	spin_lock_irq(&current->sighand->siglock);
+-	ptrace_stop(exit_code, 1, &info);
++	ptrace_stop(exit_code, CLD_TRAPPED, 1, &info);
+ 	spin_unlock_irq(&current->sighand->siglock);
+ }
+ 
+@@ -1791,7 +1791,7 @@ static int ptrace_signal(int signr, siginfo_t *info,
+ 	ptrace_signal_deliver(regs, cookie);
+ 
+ 	/* Let the debugger run.  */
+-	ptrace_stop(signr, 0, info);
++	ptrace_stop(signr, CLD_TRAPPED, 0, info);
+ 
+ 	/* We're back.  Did the debugger cancel the sig?  */
+ 	signr = current->exit_code;

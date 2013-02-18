@@ -1,0 +1,42 @@
+commit 321fb561971ba0f10ce18c0f8a4b9fbfc7cef4b9
+Author: Oleg Nesterov <oleg@redhat.com>
+Date:   Fri Apr 1 20:13:01 2011 +0200
+
+    ptrace: ptrace_check_attach() should not do s/STOPPED/TRACED/
+    
+    After "ptrace: Clean transitions between TASK_STOPPED and TRACED"
+    d79fdd6d96f46fabb779d86332e3677c6f5c2a4f, ptrace_check_attach()
+    should never see a TASK_STOPPED tracee and s/STOPPED/TRACED/ is
+    no longer legal. Add the warning.
+    
+    Note: ptrace_check_attach() can be greatly simplified, in particular
+    it doesn't need tasklist. But I'd prefer another patch for that.
+    
+    Signed-off-by: Oleg Nesterov <oleg@redhat.com>
+    Signed-off-by: Tejun Heo <tj@kernel.org>
+    [dannf: backported to Debian's 2.6.32]
+
+diff --git a/kernel/ptrace.c b/kernel/ptrace.c
+index daada48..d8bfe12 100644
+--- a/kernel/ptrace.c
++++ b/kernel/ptrace.c
+@@ -113,16 +113,14 @@ int ptrace_check_attach(struct task_struct *child, int kill)
+ 	 */
+ 	read_lock(&tasklist_lock);
+ 	if ((child->ptrace & PT_PTRACED) && child->parent == current) {
+-		ret = 0;
+ 		/*
+ 		 * child->sighand can't be NULL, release_task()
+ 		 * does ptrace_unlink() before __exit_signal().
+ 		 */
+ 		spin_lock_irq(&child->sighand->siglock);
+-		if (task_is_stopped(child))
+-			child->state = TASK_TRACED;
+-		else if (!task_is_traced(child) && !kill)
+-			ret = -ESRCH;
++		WARN_ON_ONCE(task_is_stopped(child));
++		if (task_is_traced(child) || kill)
++			ret = 0;
+ 		spin_unlock_irq(&child->sighand->siglock);
+ 	}
+ 	read_unlock(&tasklist_lock);

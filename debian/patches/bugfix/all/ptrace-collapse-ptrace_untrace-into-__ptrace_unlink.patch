@@ -1,0 +1,83 @@
+commit e3bd058f62896ec7a2c605ed62a0a811e9147947
+Author: Tejun Heo <tj@kernel.org>
+Date:   Wed Mar 23 10:37:01 2011 +0100
+
+    ptrace: Collapse ptrace_untrace() into __ptrace_unlink()
+    
+    Remove the extra task_is_traced() check in __ptrace_unlink() and
+    collapse ptrace_untrace() into __ptrace_unlink().  This is to prepare
+    for further changes.
+    
+    While at it, drop the comment on top of ptrace_untrace() and convert
+    __ptrace_unlink() comment to docbook format.  Detailed comment will be
+    added by the next patch.
+    
+    This patch doesn't cause any visible behavior changes.
+    
+    Signed-off-by: Tejun Heo <tj@kernel.org>
+    Acked-by: Oleg Nesterov <oleg@redhat.com>
+    [dannf: backported to Debian's 2.6.32]
+
+diff --git a/kernel/ptrace.c b/kernel/ptrace.c
+index 05625f6..b24ccb3 100644
+--- a/kernel/ptrace.c
++++ b/kernel/ptrace.c
+@@ -37,16 +37,25 @@ void __ptrace_link(struct task_struct *child, struct task_struct *new_parent)
+ 	child->parent = new_parent;
+ }
+ 
+-/*
+- * Turn a tracing stop into a normal stop now, since with no tracer there
+- * would be no way to wake it up with SIGCONT or SIGKILL.  If there was a
+- * signal sent that would resume the child, but didn't because it was in
+- * TASK_TRACED, resume it now.
+- * Requires that irqs be disabled.
++/**
++ * __ptrace_unlink - unlink ptracee and restore its execution state
++ * @child: ptracee to be unlinked
++ *
++ * Remove @child from the ptrace list, move it back to the original parent.
++ *
++ * CONTEXT:
++ * write_lock_irq(tasklist_lock)
+  */
+-static void ptrace_untrace(struct task_struct *child)
++void __ptrace_unlink(struct task_struct *child)
+ {
++	BUG_ON(!child->ptrace);
++
++	child->ptrace = 0;
++	child->parent = child->real_parent;
++	list_del_init(&child->ptrace_entry);
++
+ 	spin_lock(&child->sighand->siglock);
++	arch_ptrace_untrace(child);
+ 	if (task_is_traced(child)) {
+ 		/*
+ 		 * If the group stop is completed or in progress,
+@@ -62,25 +71,6 @@ static void ptrace_untrace(struct task_struct *child)
+ }
+ 
+ /*
+- * unptrace a task: move it back to its original parent and
+- * remove it from the ptrace list.
+- *
+- * Must be called with the tasklist lock write-held.
+- */
+-void __ptrace_unlink(struct task_struct *child)
+-{
+-	BUG_ON(!child->ptrace);
+-
+-	child->ptrace = 0;
+-	child->parent = child->real_parent;
+-	list_del_init(&child->ptrace_entry);
+-
+-	arch_ptrace_untrace(child);
+-	if (task_is_traced(child))
+-		ptrace_untrace(child);
+-}
+-
+-/*
+  * Check that we have indeed attached to the thing..
+  */
+ int ptrace_check_attach(struct task_struct *child, int kill)
