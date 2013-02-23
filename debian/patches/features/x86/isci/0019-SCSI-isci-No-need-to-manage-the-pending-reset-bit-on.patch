@@ -1,0 +1,90 @@
+From: Jeff Skirvin <jeffrey.d.skirvin@intel.com>
+Date: Thu, 27 Oct 2011 15:05:27 -0700
+Subject: [19/25] [SCSI] isci: No need to manage the pending reset bit on
+ pending requests.
+
+commit 5412e25c55fc0b08041a451d8bee6f2b291099c2 upstream.
+
+The lldd does not need to look at or manage the pending device
+reset bit in pending sas_tasks.
+
+Signed-off-by: Jeff Skirvin <jeffrey.d.skirvin@intel.com>
+Signed-off-by: Dan Williams <dan.j.williams@intel.com>
+Signed-off-by: James Bottomley <JBottomley@Parallels.com>
+---
+ drivers/scsi/isci/remote_device.c |   35 -----------------------------------
+ drivers/scsi/isci/remote_device.h |    3 +--
+ drivers/scsi/isci/task.c          |    3 ---
+ 3 files changed, 1 insertion(+), 40 deletions(-)
+
+diff --git a/drivers/scsi/isci/remote_device.c b/drivers/scsi/isci/remote_device.c
+index 9d9e33d..b207cd3 100644
+--- a/drivers/scsi/isci/remote_device.c
++++ b/drivers/scsi/isci/remote_device.c
+@@ -1438,38 +1438,3 @@ int isci_remote_device_found(struct domain_device *domain_dev)
+ 
+ 	return status == SCI_SUCCESS ? 0 : -ENODEV;
+ }
+-
+-/**
+- * isci_device_clear_reset_pending() - This function will clear if any pending
+- *    reset condition flags on the device.
+- * @request: This parameter is the isci_device object.
+- *
+- * true if there is a reset pending for the device.
+- */
+-void isci_device_clear_reset_pending(struct isci_host *ihost, struct isci_remote_device *idev)
+-{
+-	struct isci_request *isci_request;
+-	struct isci_request *tmp_req;
+-	unsigned long flags = 0;
+-
+-	dev_dbg(&ihost->pdev->dev, "%s: idev=%p, ihost=%p\n",
+-		 __func__, idev, ihost);
+-
+-	spin_lock_irqsave(&ihost->scic_lock, flags);
+-
+-	/* Clear reset pending on all pending requests. */
+-	list_for_each_entry_safe(isci_request, tmp_req,
+-				 &idev->reqs_in_process, dev_node) {
+-		dev_dbg(&ihost->pdev->dev, "%s: idev = %p request = %p\n",
+-			 __func__, idev, isci_request);
+-
+-		if (!test_bit(IREQ_TMF, &isci_request->flags)) {
+-			struct sas_task *task = isci_request_access_task(isci_request);
+-
+-			spin_lock(&task->task_state_lock);
+-			task->task_state_flags &= ~SAS_TASK_NEED_DEV_RESET;
+-			spin_unlock(&task->task_state_lock);
+-		}
+-	}
+-	spin_unlock_irqrestore(&ihost->scic_lock, flags);
+-}
+diff --git a/drivers/scsi/isci/remote_device.h b/drivers/scsi/isci/remote_device.h
+index bee6dd2..483ee50 100644
+--- a/drivers/scsi/isci/remote_device.h
++++ b/drivers/scsi/isci/remote_device.h
+@@ -132,8 +132,7 @@ void isci_remote_device_nuke_requests(struct isci_host *ihost,
+ 				      struct isci_remote_device *idev);
+ void isci_remote_device_gone(struct domain_device *domain_dev);
+ int isci_remote_device_found(struct domain_device *domain_dev);
+-void isci_device_clear_reset_pending(struct isci_host *ihost,
+-				     struct isci_remote_device *idev);
++
+ /**
+  * sci_remote_device_stop() - This method will stop both transmission and
+  *    reception of link activity for the supplied remote device.  This method
+diff --git a/drivers/scsi/isci/task.c b/drivers/scsi/isci/task.c
+index 80e1a69..6d8ff15 100644
+--- a/drivers/scsi/isci/task.c
++++ b/drivers/scsi/isci/task.c
+@@ -1570,9 +1570,6 @@ static int isci_reset_device(struct isci_host *ihost,
+ 	}
+ 	spin_unlock_irqrestore(&ihost->scic_lock, flags);
+ 
+-	/* Make sure all pending requests are able to be fully terminated. */
+-	isci_device_clear_reset_pending(ihost, idev);
+-
+ 	/* If this is a device on an expander, disable BCN processing. */
+ 	if (!scsi_is_sas_phy_local(phy))
+ 		set_bit(IPORT_BCN_BLOCKED, &iport->flags);

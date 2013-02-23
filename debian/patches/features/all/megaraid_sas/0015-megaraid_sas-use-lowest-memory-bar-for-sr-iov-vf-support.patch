@@ -1,0 +1,88 @@
+From a80b25ee54c8660c6e2486d34726a721c32be57c Mon Sep 17 00:00:00 2001
+From: adam radford <aradford@gmail.com>
+Date: Tue, 14 Dec 2010 18:56:07 -0800
+Subject: [PATCH 15/53] [SCSI] megaraid_sas: Use lowest memory bar for SR-IOV  VF support
+
+commit b6d5d8808b4c563a56414a4c4c6d652b5f87c088 upstream.
+
+The following patch modifies the megaraid_sas driver to select the
+lowest memory bar available so the driver will work in SR-IOV VF
+environments where the memory bar mapping changes.
+
+Signed-off-by: Adam Radford <aradford@gmail.com>
+Signed-off-by: James Bottomley <James.Bottomley@suse.de>
+Signed-off-by: Jonathan Nieder <jrnieder@gmail.com>
+---
+ drivers/scsi/megaraid/megaraid_sas.h      |  1 +
+ drivers/scsi/megaraid/megaraid_sas_base.c | 27 +++++++++------------------
+ 2 files changed, 10 insertions(+), 18 deletions(-)
+
+diff --git a/drivers/scsi/megaraid/megaraid_sas.h b/drivers/scsi/megaraid/megaraid_sas.h
+index 4a6253d92b7e..83c6e3aa6f43 100644
+--- a/drivers/scsi/megaraid/megaraid_sas.h
++++ b/drivers/scsi/megaraid/megaraid_sas.h
+@@ -1322,6 +1322,7 @@ struct megasas_instance {
+ 
+ 	u8	msi_flag;
+ 	struct msix_entry msixentry;
++	unsigned long bar;
+ };
+ 
+ enum {
+diff --git a/drivers/scsi/megaraid/megaraid_sas_base.c b/drivers/scsi/megaraid/megaraid_sas_base.c
+index 58442f4b3ae1..e019480cd64b 100644
+--- a/drivers/scsi/megaraid/megaraid_sas_base.c
++++ b/drivers/scsi/megaraid/megaraid_sas_base.c
+@@ -3076,21 +3076,14 @@ static int megasas_init_mfi(struct megasas_instance *instance)
+ 	u32 tmp_sectors;
+ 	struct megasas_register_set __iomem *reg_set;
+ 	struct megasas_ctrl_info *ctrl_info;
+-	/*
+-	 * Map the message registers
+-	 */
+-	if ((instance->pdev->device == PCI_DEVICE_ID_LSI_SAS1078GEN2) ||
+-		(instance->pdev->device == PCI_DEVICE_ID_LSI_SAS0071SKINNY) ||
+-		(instance->pdev->device == PCI_DEVICE_ID_LSI_SAS0073SKINNY) ||
+-		(instance->pdev->device == PCI_DEVICE_ID_LSI_SAS0079GEN2)) {
+-		instance->base_addr = pci_resource_start(instance->pdev, 1);
+-	} else {
+-		instance->base_addr = pci_resource_start(instance->pdev, 0);
+-	}
++	unsigned long bar_list;
+ 
+-	if (pci_request_selected_regions(instance->pdev,
+-		pci_select_bars(instance->pdev, IORESOURCE_MEM),
+-		"megasas: LSI")) {
++	/* Find first memory bar */
++	bar_list = pci_select_bars(instance->pdev, IORESOURCE_MEM);
++	instance->bar = find_first_bit(&bar_list, sizeof(unsigned long));
++	instance->base_addr = pci_resource_start(instance->pdev, instance->bar);
++	if (pci_request_selected_regions(instance->pdev, instance->bar,
++					 "megasas: LSI")) {
+ 		printk(KERN_DEBUG "megasas: IO memory region busy!\n");
+ 		return -EBUSY;
+ 	}
+@@ -3251,8 +3244,7 @@ static int megasas_init_mfi(struct megasas_instance *instance)
+ 	iounmap(instance->reg_set);
+ 
+       fail_ioremap:
+-	pci_release_selected_regions(instance->pdev,
+-		pci_select_bars(instance->pdev, IORESOURCE_MEM));
++	pci_release_selected_regions(instance->pdev, instance->bar);
+ 
+ 	return -EINVAL;
+ }
+@@ -3272,8 +3264,7 @@ static void megasas_release_mfi(struct megasas_instance *instance)
+ 
+ 	iounmap(instance->reg_set);
+ 
+-	pci_release_selected_regions(instance->pdev,
+-		pci_select_bars(instance->pdev, IORESOURCE_MEM));
++	pci_release_selected_regions(instance->pdev, instance->bar);
+ }
+ 
+ /**
+-- 
+1.8.0
+
+

@@ -1,0 +1,99 @@
+From 10d448eedfaf5e81e3298e2804449932f1dabb8f Mon Sep 17 00:00:00 2001
+From: "Stephen M. Cameron" <scameron@beardog.cce.hp.com>
+Date: Tue, 3 May 2011 14:59:46 -0500
+Subject: [PATCH 113/136] hpsa: use new doorbell-bit-5 reset method
+
+commit cf0b08d0cd87ada9d284925834d08fb8026da888 upstream.
+
+The bit-2-doorbell reset method seemed to cause (survivable) NMIs
+on some systems and (unsurvivable) IOCK NMIs on some G7 servers.
+Firmware guys implemented a new doorbell method to alleviate these
+problems triggered by bit 5 of the doorbell register.  We want to
+use it if it's available.
+
+Signed-off-by: Stephen M. Cameron <scameron@beardog.cce.hp.com>
+Signed-off-by: James Bottomley <jbottomley@parallels.com>
+Signed-off-by: James Bottomley <James.Bottomley@suse.de>
+---
+ drivers/scsi/hpsa.c     |   25 ++++++++++++++++++++-----
+ drivers/scsi/hpsa_cmd.h |    2 ++
+ 2 files changed, 22 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/scsi/hpsa.c b/drivers/scsi/hpsa.c
+index dd30bfd..eece647 100644
+--- a/drivers/scsi/hpsa.c
++++ b/drivers/scsi/hpsa.c
+@@ -3100,7 +3100,7 @@ static __devinit int hpsa_message(struct pci_dev *pdev, unsigned char opcode,
+ #define hpsa_noop(p) hpsa_message(p, 3, 0)
+ 
+ static int hpsa_controller_hard_reset(struct pci_dev *pdev,
+-	void * __iomem vaddr, bool use_doorbell)
++	void * __iomem vaddr, u32 use_doorbell)
+ {
+ 	u16 pmcsr;
+ 	int pos;
+@@ -3111,7 +3111,7 @@ static int hpsa_controller_hard_reset(struct pci_dev *pdev,
+ 		 * other way using the doorbell register.
+ 		 */
+ 		dev_info(&pdev->dev, "using doorbell to reset controller\n");
+-		writel(DOORBELL_CTLR_RESET, vaddr + SA5_DOORBELL);
++		writel(use_doorbell, vaddr + SA5_DOORBELL);
+ 		msleep(1000);
+ 	} else { /* Try to do it the PCI power state way */
+ 
+@@ -3215,7 +3215,7 @@ static __devinit int hpsa_kdump_hard_reset_controller(struct pci_dev *pdev)
+ 	u32 misc_fw_support;
+ 	int rc;
+ 	struct CfgTable __iomem *cfgtable;
+-	bool use_doorbell;
++	u32 use_doorbell;
+ 	u32 board_id;
+ 	u16 command_register;
+ 
+@@ -3278,9 +3278,24 @@ static __devinit int hpsa_kdump_hard_reset_controller(struct pci_dev *pdev)
+ 	if (rc)
+ 		goto unmap_vaddr;
+ 
+-	/* If reset via doorbell register is supported, use that. */
++	/* If reset via doorbell register is supported, use that.
++	 * There are two such methods.  Favor the newest method.
++	 */
+ 	misc_fw_support = readl(&cfgtable->misc_fw_support);
+-	use_doorbell = misc_fw_support & MISC_FW_DOORBELL_RESET;
++	use_doorbell = misc_fw_support & MISC_FW_DOORBELL_RESET2;
++	if (use_doorbell) {
++		use_doorbell = DOORBELL_CTLR_RESET2;
++	} else {
++		use_doorbell = misc_fw_support & MISC_FW_DOORBELL_RESET;
++		if (use_doorbell) {
++			dev_warn(&pdev->dev, "Controller claims that "
++				"'Bit 2 doorbell reset' is "
++				"supported, but not 'bit 5 doorbell reset'.  "
++				"Firmware update is recommended.\n");
++			rc = -ENODEV;
++			goto unmap_cfgtable;
++		}
++	}
+ 
+ 	rc = hpsa_controller_hard_reset(pdev, vaddr, use_doorbell);
+ 	if (rc)
+diff --git a/drivers/scsi/hpsa_cmd.h b/drivers/scsi/hpsa_cmd.h
+index 8fd35a7..55d741b 100644
+--- a/drivers/scsi/hpsa_cmd.h
++++ b/drivers/scsi/hpsa_cmd.h
+@@ -101,6 +101,7 @@
+ #define CFGTBL_ChangeReq        0x00000001l
+ #define CFGTBL_AccCmds          0x00000001l
+ #define DOORBELL_CTLR_RESET	0x00000004l
++#define DOORBELL_CTLR_RESET2	0x00000020l
+ 
+ #define CFGTBL_Trans_Simple     0x00000002l
+ #define CFGTBL_Trans_Performant 0x00000004l
+@@ -337,6 +338,7 @@ struct CfgTable {
+ 	u8		reserved[0x78 - 0x58];
+ 	u32		misc_fw_support; /* offset 0x78 */
+ #define			MISC_FW_DOORBELL_RESET (0x02)
++#define			MISC_FW_DOORBELL_RESET2 (0x010)
+ 	u8		driver_version[32];
+ };
+ 

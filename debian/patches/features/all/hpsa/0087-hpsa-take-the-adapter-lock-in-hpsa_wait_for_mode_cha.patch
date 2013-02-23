@@ -1,0 +1,59 @@
+From 4fd0ada1b0a83466ba65155431dba7ec4ae301b1 Mon Sep 17 00:00:00 2001
+From: "Stephen M. Cameron" <scameron@beardog.cce.hp.com>
+Date: Thu, 6 Jan 2011 14:48:24 -0600
+Subject: [PATCH 087/136] hpsa: take the adapter lock in
+ hpsa_wait_for_mode_change_ack
+
+commit 6eaf46fdc719991a3ccda1e14b274e9adb515978 upstream.
+
+Need to take the lock while accessing the register to check to
+see if config table changes have taken effect.
+
+Signed-off-by: Stephen M. Cameron <scameron@beardog.cce.hp.com>
+Signed-off-by: James Bottomley <James.Bottomley@suse.de>
+---
+ drivers/scsi/hpsa.c |   11 ++++++++---
+ 1 file changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/scsi/hpsa.c b/drivers/scsi/hpsa.c
+index be9540a..76f34d9 100644
+--- a/drivers/scsi/hpsa.c
++++ b/drivers/scsi/hpsa.c
+@@ -3525,13 +3525,18 @@ static inline void hpsa_p600_dma_prefetch_quirk(struct ctlr_info *h)
+ static void __devinit hpsa_wait_for_mode_change_ack(struct ctlr_info *h)
+ {
+ 	int i;
++	u32 doorbell_value;
++	unsigned long flags;
+ 
+ 	/* under certain very rare conditions, this can take awhile.
+ 	 * (e.g.: hot replace a failed 144GB drive in a RAID 5 set right
+ 	 * as we enter this code.)
+ 	 */
+ 	for (i = 0; i < MAX_CONFIG_WAIT; i++) {
+-		if (!(readl(h->vaddr + SA5_DOORBELL) & CFGTBL_ChangeReq))
++		spin_lock_irqsave(&h->lock, flags);
++		doorbell_value = readl(h->vaddr + SA5_DOORBELL);
++		spin_unlock_irqrestore(&h->lock, flags);
++		if (!doorbell_value & CFGTBL_ChangeReq)
+ 			break;
+ 		/* delay and try again */
+ 		msleep(10);
+@@ -3703,6 +3708,8 @@ static int __devinit hpsa_init_one(struct pci_dev *pdev,
+ 	h->busy_initializing = 1;
+ 	INIT_HLIST_HEAD(&h->cmpQ);
+ 	INIT_HLIST_HEAD(&h->reqQ);
++	spin_lock_init(&h->lock);
++	spin_lock_init(&h->scan_lock);
+ 	rc = hpsa_pci_init(h);
+ 	if (rc != 0)
+ 		goto clean1;
+@@ -3762,8 +3769,6 @@ static int __devinit hpsa_init_one(struct pci_dev *pdev,
+ 	}
+ 	if (hpsa_allocate_sg_chain_blocks(h))
+ 		goto clean4;
+-	spin_lock_init(&h->lock);
+-	spin_lock_init(&h->scan_lock);
+ 	init_waitqueue_head(&h->scan_wait_queue);
+ 	h->scan_finished = 1; /* no scan currently in progress */
+ 
