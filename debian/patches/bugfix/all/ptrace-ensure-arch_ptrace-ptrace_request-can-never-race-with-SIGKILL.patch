@@ -1,55 +1,66 @@
-commit 9899d11f654474d2d54ea52ceaa2a1f4db3abd68
-Author: Oleg Nesterov <oleg@redhat.com>
-Date:   Mon Jan 21 20:48:00 2013 +0100
+From: Oleg Nesterov <oleg@redhat.com>
+Date: Tue, 19 Feb 2013 17:31:09 +0000 (+0000)
+Subject: ptrace: ensure arch_ptrace/ptrace_request can never race with SIGKILL
+X-Git-Tag: Ubuntu-2.6.32-45.104~2
+X-Git-Url: http://kernel.ubuntu.com/git?p=ubuntu%2Fubuntu-lucid.git;a=commitdiff_plain;h=9e74eb39ea55e31e7d54df94b4d3194053f8d0ed
 
-    ptrace: ensure arch_ptrace/ptrace_request can never race with SIGKILL
-    
-    putreg() assumes that the tracee is not running and pt_regs_access() can
-    safely play with its stack.  However a killed tracee can return from
-    ptrace_stop() to the low-level asm code and do RESTORE_REST, this means
-    that debugger can actually read/modify the kernel stack until the tracee
-    does SAVE_REST again.
-    
-    set_task_blockstep() can race with SIGKILL too and in some sense this
-    race is even worse, the very fact the tracee can be woken up breaks the
-    logic.
-    
-    As Linus suggested we can clear TASK_WAKEKILL around the arch_ptrace()
-    call, this ensures that nobody can ever wakeup the tracee while the
-    debugger looks at it.  Not only this fixes the mentioned problems, we
-    can do some cleanups/simplifications in arch_ptrace() paths.
-    
-    Probably ptrace_unfreeze_traced() needs more callers, for example it
-    makes sense to make the tracee killable for oom-killer before
-    access_process_vm().
-    
-    While at it, add the comment into may_ptrace_stop() to explain why
-    ptrace_stop() still can't rely on SIGKILL and signal_pending_state().
-    
-    Reported-by: Salman Qazi <sqazi@google.com>
-    Reported-by: Suleiman Souhlal <suleiman@google.com>
-    Suggested-by: Linus Torvalds <torvalds@linux-foundation.org>
-    Signed-off-by: Oleg Nesterov <oleg@redhat.com>
-    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
-    [dannf: backported to Debian's 2.6.32]
+ptrace: ensure arch_ptrace/ptrace_request can never race with SIGKILL
+
+CVE-2013-0871
+
+BugLink: http://bugs.launchpad.net/bugs/1129192
+
+putreg() assumes that the tracee is not running and pt_regs_access() can
+safely play with its stack.  However a killed tracee can return from
+ptrace_stop() to the low-level asm code and do RESTORE_REST, this means
+that debugger can actually read/modify the kernel stack until the tracee
+does SAVE_REST again.
+
+set_task_blockstep() can race with SIGKILL too and in some sense this
+race is even worse, the very fact the tracee can be woken up breaks the
+logic.
+
+As Linus suggested we can clear TASK_WAKEKILL around the arch_ptrace()
+call, this ensures that nobody can ever wakeup the tracee while the
+debugger looks at it.  Not only this fixes the mentioned problems, we
+can do some cleanups/simplifications in arch_ptrace() paths.
+
+Probably ptrace_unfreeze_traced() needs more callers, for example it
+makes sense to make the tracee killable for oom-killer before
+access_process_vm().
+
+While at it, add the comment into may_ptrace_stop() to explain why
+ptrace_stop() still can't rely on SIGKILL and signal_pending_state().
+
+Reported-by: Salman Qazi <sqazi@google.com>
+Reported-by: Suleiman Souhlal <suleiman@google.com>
+Suggested-by: Linus Torvalds <torvalds@linux-foundation.org>
+Signed-off-by: Oleg Nesterov <oleg@redhat.com>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+(backported from commit 9899d11f654474d2d54ea52ceaa2a1f4db3abd68)
+
+Conflicts:
+	arch/x86/kernel/step.c
+	kernel/ptrace.c
+	kernel/signal.c
+
+Signed-off-by: Luis Henriques <luis.henriques@canonical.com>
+Acked-by: Colin King <colin.king@canonical.com>
+Signed-off-by: Tim Gardner <tim.gardner@canonical.com>
+---
 
 diff --git a/kernel/ptrace.c b/kernel/ptrace.c
-index d8bfe12..4873dce 100644
+index 37850f9..d0036f0 100644
 --- a/kernel/ptrace.c
 +++ b/kernel/ptrace.c
-@@ -97,6 +97,41 @@ void __ptrace_unlink(struct task_struct *child)
- 	spin_unlock(&child->sighand->siglock);
+@@ -80,6 +80,36 @@ void __ptrace_unlink(struct task_struct *child)
+ 		ptrace_untrace(child);
  }
  
 +/* Ensure that nothing can wake it up, even SIGKILL */
 +static bool ptrace_freeze_traced(struct task_struct *task)
 +{
 +	bool ret = false;
-+
-+	/* Lockless, nobody but us can set this flag */
-+	/* JOBCTL_LISTENING not implemented in 2.6.32 -dannf */
-+	/* if (task->jobctl & JOBCTL_LISTENING)
-+	   return ret; */
 +
 +	spin_lock_irq(&task->sighand->siglock);
 +	if (task_is_traced(task) && !__fatal_signal_pending(task)) {
@@ -79,11 +90,12 @@ index d8bfe12..4873dce 100644
  /*
   * Check that we have indeed attached to the thing..
   */
-@@ -112,23 +147,29 @@ int ptrace_check_attach(struct task_struct *child, int kill)
+@@ -95,25 +125,29 @@ int ptrace_check_attach(struct task_struct *child, int kill)
  	 * be changed by us so it's not changing right after this.
  	 */
  	read_lock(&tasklist_lock);
 -	if ((child->ptrace & PT_PTRACED) && child->parent == current) {
+-		ret = 0;
 +	if (child->ptrace && child->parent == current) {
 +		WARN_ON(child->state == __TASK_TRACED);
  		/*
@@ -91,11 +103,13 @@ index d8bfe12..4873dce 100644
  		 * does ptrace_unlink() before __exit_signal().
  		 */
 -		spin_lock_irq(&child->sighand->siglock);
--		WARN_ON_ONCE(task_is_stopped(child));
--		if (task_is_traced(child) || kill)
-+		if (kill || ptrace_freeze_traced(child))
- 			ret = 0;
+-		if (task_is_stopped(child))
+-			child->state = TASK_TRACED;
+-		else if (!task_is_traced(child) && !kill)
+-			ret = -ESRCH;
 -		spin_unlock_irq(&child->sighand->siglock);
++		if (kill || ptrace_freeze_traced(child))
++			ret = 0;
  	}
  	read_unlock(&tasklist_lock);
  
@@ -117,7 +131,7 @@ index d8bfe12..4873dce 100644
  	return ret;
  }
  
-@@ -681,6 +722,8 @@ SYSCALL_DEFINE4(ptrace, long, request, long, pid, long, addr, long, data)
+@@ -637,6 +671,8 @@ SYSCALL_DEFINE4(ptrace, long, request, long, pid, long, addr, long, data)
  		goto out_put_task_struct;
  
  	ret = arch_ptrace(child, request, addr, data);
@@ -126,7 +140,7 @@ index d8bfe12..4873dce 100644
  
   out_put_task_struct:
  	put_task_struct(child);
-@@ -796,8 +839,11 @@ asmlinkage long compat_sys_ptrace(compat_long_t request, compat_long_t pid,
+@@ -752,8 +788,11 @@ asmlinkage long compat_sys_ptrace(compat_long_t request, compat_long_t pid,
  	}
  
  	ret = ptrace_check_attach(child, request == PTRACE_KILL);
@@ -139,3 +153,18 @@ index d8bfe12..4873dce 100644
  
   out_put_task_struct:
  	put_task_struct(child);
+diff --git a/kernel/signal.c b/kernel/signal.c
+index c982975..2bd8fab 100644
+--- a/kernel/signal.c
++++ b/kernel/signal.c
+@@ -1524,6 +1524,10 @@ static inline int may_ptrace_stop(void)
+ 	 * If SIGKILL was already sent before the caller unlocked
+ 	 * ->siglock we must see ->core_state != NULL. Otherwise it
+ 	 * is safe to enter schedule().
++	 *
++	 * This is almost outdated, a task with the pending SIGKILL can't
++	 * block in TASK_TRACED. But PTRACE_EVENT_EXIT can be reported
++	 * after SIGKILL was already dequeued.
+ 	 */
+ 	if (unlikely(current->mm->core_state) &&
+ 	    unlikely(current->mm == current->parent->mm))

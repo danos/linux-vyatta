@@ -1,0 +1,82 @@
+From: Oleg Nesterov <oleg@redhat.com>
+Date: Tue, 19 Feb 2013 17:31:07 +0000 (+0000)
+Subject: ptrace: ptrace_resume() shouldn't wake up !TASK_TRACED thread
+X-Git-Tag: Ubuntu-2.6.32-45.104~4
+X-Git-Url: http://kernel.ubuntu.com/git?p=ubuntu%2Fubuntu-lucid.git;a=commitdiff_plain;h=e8f03a3cf583ab623e0414dee2b3e63aef77fe8d
+
+ptrace: ptrace_resume() shouldn't wake up !TASK_TRACED thread
+
+CVE-2013-0871
+
+BugLink: http://bugs.launchpad.net/bugs/1129192
+
+It is not clear why ptrace_resume() does wake_up_process(). Unless the
+caller is PTRACE_KILL the tracee should be TASK_TRACED so we can use
+wake_up_state(__TASK_TRACED). If sys_ptrace() races with SIGKILL we do
+not need the extra and potentionally spurious wakeup.
+
+If the caller is PTRACE_KILL, wake_up_process() is even more wrong.
+The tracee can sleep in any state in any place, and if we have a buggy
+code which doesn't handle a spurious wakeup correctly PTRACE_KILL can
+be used to exploit it. For example:
+
+	int main(void)
+	{
+		int child, status;
+
+		child = fork();
+		if (!child) {
+			int ret;
+
+			assert(ptrace(PTRACE_TRACEME, 0,0,0) == 0);
+
+			ret = pause();
+			printf("pause: %d %m\n", ret);
+
+			return 0x23;
+		}
+
+		sleep(1);
+		assert(ptrace(PTRACE_KILL, child, 0,0) == 0);
+
+		assert(child == wait(&status));
+		printf("wait: %x\n", status);
+
+		return 0;
+	}
+
+prints "pause: -1 Unknown error 514", -ERESTARTNOHAND leaks to the
+userland. In this case sys_pause() is buggy as well and should be
+fixed.
+
+I do not know what was the original rationality behind PTRACE_KILL.
+The man page is simply wrong and afaics it was always wrong. Imho
+it should be deprecated, or may be it should do send_sig(SIGKILL)
+as Denys suggests, but in any case I do not think that the current
+behaviour was intentional.
+
+Note: there is another problem, ptrace_resume() changes ->exit_code
+and this can race with SIGKILL too. Eventually we should change ptrace
+to not use ->exit_code.
+
+Signed-off-by: Oleg Nesterov <oleg@redhat.com>
+(cherry picked from commit 0666fb51b1483f27506e212cc7f7b2645b5c7acc)
+
+Signed-off-by: Luis Henriques <luis.henriques@canonical.com>
+Acked-by: Colin King <colin.king@canonical.com>
+Signed-off-by: Tim Gardner <tim.gardner@canonical.com>
+---
+
+diff --git a/kernel/ptrace.c b/kernel/ptrace.c
+index 05625f6..d8184b5 100644
+--- a/kernel/ptrace.c
++++ b/kernel/ptrace.c
+@@ -506,7 +506,7 @@ static int ptrace_resume(struct task_struct *child, long request, long data)
+ 	}
+ 
+ 	child->exit_code = data;
+-	wake_up_process(child);
++	wake_up_state(child, __TASK_TRACED);
+ 
+ 	return 0;
+ }

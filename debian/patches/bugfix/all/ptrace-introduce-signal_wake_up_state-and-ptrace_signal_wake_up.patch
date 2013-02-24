@@ -1,31 +1,46 @@
-commit 910ffdb18a6408e14febbb6e4b6840fd2c928c82
-Author: Oleg Nesterov <oleg@redhat.com>
-Date:   Mon Jan 21 20:47:41 2013 +0100
+From: Oleg Nesterov <oleg@redhat.com>
+Date: Tue, 19 Feb 2013 17:31:08 +0000 (+0000)
+Subject: ptrace: introduce signal_wake_up_state() and ptrace_signal_wake_up()
+X-Git-Tag: Ubuntu-2.6.32-45.104~3
+X-Git-Url: http://kernel.ubuntu.com/git?p=ubuntu%2Fubuntu-lucid.git;a=commitdiff_plain;h=2f7ba4b65a6aba4e4b2ee86c1e00767436433787
 
-    ptrace: introduce signal_wake_up_state() and ptrace_signal_wake_up()
-    
-    Cleanup and preparation for the next change.
-    
-    signal_wake_up(resume => true) is overused. None of ptrace/jctl callers
-    actually want to wakeup a TASK_WAKEKILL task, but they can't specify the
-    necessary mask.
-    
-    Turn signal_wake_up() into signal_wake_up_state(state), reintroduce
-    signal_wake_up() as a trivial helper, and add ptrace_signal_wake_up()
-    which adds __TASK_TRACED.
-    
-    This way ptrace_signal_wake_up() can work "inside" ptrace_request()
-    even if the tracee doesn't have the TASK_WAKEKILL bit set.
-    
-    Signed-off-by: Oleg Nesterov <oleg@redhat.com>
-    Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
-    [dannf: backported to Debian's 2.6.32]
+ptrace: introduce signal_wake_up_state() and ptrace_signal_wake_up()
+
+CVE-2013-0871
+
+BugLink: http://bugs.launchpad.net/bugs/1129192
+
+Cleanup and preparation for the next change.
+
+signal_wake_up(resume => true) is overused. None of ptrace/jctl callers
+actually want to wakeup a TASK_WAKEKILL task, but they can't specify the
+necessary mask.
+
+Turn signal_wake_up() into signal_wake_up_state(state), reintroduce
+signal_wake_up() as a trivial helper, and add ptrace_signal_wake_up()
+which adds __TASK_TRACED.
+
+This way ptrace_signal_wake_up() can work "inside" ptrace_request()
+even if the tracee doesn't have the TASK_WAKEKILL bit set.
+
+Signed-off-by: Oleg Nesterov <oleg@redhat.com>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+(backported from commit 910ffdb18a6408e14febbb6e4b6840fd2c928c82)
+
+Conflicts:
+	kernel/ptrace.c
+	kernel/signal.c
+
+Signed-off-by: Luis Henriques <luis.henriques@canonical.com>
+Acked-by: Colin King <colin.king@canonical.com>
+Signed-off-by: Tim Gardner <tim.gardner@canonical.com>
+---
 
 diff --git a/include/linux/sched.h b/include/linux/sched.h
-index 0ed8f30..fdcafcc 100644
+index 297952b..2c3432c 100644
 --- a/include/linux/sched.h
 +++ b/include/linux/sched.h
-@@ -2525,7 +2525,16 @@ static inline void thread_group_cputime_free(struct signal_struct *sig)
+@@ -2462,7 +2462,16 @@ static inline void thread_group_cputime_free(struct signal_struct *sig)
  extern void recalc_sigpending_and_wake(struct task_struct *t);
  extern void recalc_sigpending(void);
  
@@ -44,32 +59,23 @@ index 0ed8f30..fdcafcc 100644
  /*
   * Wrappers for p->thread_info->cpu access. No-op on UP.
 diff --git a/kernel/ptrace.c b/kernel/ptrace.c
-index 319dd93..daada48 100644
+index d8184b5..37850f9 100644
 --- a/kernel/ptrace.c
 +++ b/kernel/ptrace.c
-@@ -92,7 +92,7 @@ void __ptrace_unlink(struct task_struct *child)
- 	 * TASK_KILLABLE sleeps.
- 	 */
- 	if (child->group_stop & GROUP_STOP_PENDING || task_is_traced(child))
--		signal_wake_up(child, task_is_traced(child));
-+		ptrace_signal_wake_up(child, true);
- 
+@@ -56,7 +56,7 @@ static void ptrace_untrace(struct task_struct *child)
+ 		    child->signal->group_stop_count)
+ 			__set_task_state(child, TASK_STOPPED);
+ 		else
+-			signal_wake_up(child, 1);
++			ptrace_signal_wake_up(child, true);
+ 	}
  	spin_unlock(&child->sighand->siglock);
  }
-@@ -243,7 +243,7 @@ int ptrace_attach(struct task_struct *task)
- 	 */
- 	if (task_is_stopped(task)) {
- 		task->group_stop |= GROUP_STOP_PENDING | GROUP_STOP_TRAPPING;
--		signal_wake_up(task, 1);
-+		signal_wake_up_state(task, __TASK_STOPPED);
- 	}
- 
- 	spin_unlock(&task->sighand->siglock);
 diff --git a/kernel/signal.c b/kernel/signal.c
-index ea848c4..15da80d 100644
+index 2494827..c982975 100644
 --- a/kernel/signal.c
 +++ b/kernel/signal.c
-@@ -581,23 +581,17 @@ int dequeue_signal(struct task_struct *tsk, sigset_t *mask, siginfo_t *info)
+@@ -513,23 +513,17 @@ int dequeue_signal(struct task_struct *tsk, sigset_t *mask, siginfo_t *info)
   * No need to set need_resched since signal event passing
   * goes through ->blocked
   */

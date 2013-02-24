@@ -6547,8 +6547,8 @@ Date:   Mon Feb 15 15:17:35 2010 +0300
  and kernel/fork.c following addition of signalfd_cleanup() in 2.6.32.60]
 [bwh: Fix content for changes to do_tcp_sendpages() after 2.6.32.60]
 [bwh: Fix context for changes to struct file after 2.6.32.60]
-[dannf: Fix context for kernel/signal.c changes following backports to fix
- CVE-2013-0871)]
+[dannf: export signal_wake_up_state instead of signal_wake_up to deal with
+ wrapper introduction in 910ffdb18a6408e14febbb6e4b6840fd2c928c82]
 
 diff --git a/COPYING.Parallels b/COPYING.Parallels
 new file mode 100644
@@ -72479,14 +72479,14 @@ index 423655a..07e7db6 100644
  
  static void __user *sig_handler(struct task_struct *t, int sig)
  {
-@@ -118,7 +137,7 @@ static inline int has_pending_signals(si
+@@ -118,7 +137,7 @@ static inline int has_pending_signals(sigset_t *signal, sigset_t *blocked)
  
  #define PENDING(p,b) has_pending_signals(&(p)->signal, (b))
  
 -static int recalc_sigpending_tsk(struct task_struct *t)
 +int recalc_sigpending_tsk(struct task_struct *t)
  {
- 	if ((t->group_stop & GROUP_STOP_PENDING) ||
+ 	if (t->signal->group_stop_count > 0 ||
  	    PENDING(&t->pending, &t->blocked) ||
 @@ -143,6 +162,7 @@ void recalc_sigpending_and_wake(struct task_struct *t)
  	if (recalc_sigpending_tsk(t))
@@ -72539,11 +72539,11 @@ index 423655a..07e7db6 100644
  
  	if (sig) {
  		if (current->notifier) {
-@@ -532,6 +569,7 @@ void signal_wake_up(struct task_struct *t, int resume)
+@@ -532,6 +569,7 @@ void signal_wake_up_state(struct task_struct *t, int resume)
  	if (!wake_up_state(t, mask))
  		kick_process(t);
  }
-+EXPORT_SYMBOL_GPL(signal_wake_up);
++EXPORT_SYMBOL_GPL(signal_wake_up_state);
  
  /*
   * Remove signals in mask from the pending set and queue.
@@ -72608,16 +72608,16 @@ index 423655a..07e7db6 100644
  	info.si_signo = sig;
  	info.si_errno = 0;
  	/*
-@@ -1805,7 +1852,9 @@ retry:
- 		}
+@@ -1722,7 +1769,9 @@ static int do_signal_stop(int signr)
  
- 		/* Now we don't run again until woken by SIGCONT or SIGKILL */
+ 	/* Now we don't run again until woken by SIGCONT or SIGKILL */
+ 	do {
 +		set_stop_state(current);
  		schedule();
 +		clear_stop_state(current);
+ 	} while (try_to_freeze());
  
- 		spin_lock_irq(&current->sighand->siglock);
- 	} else {
+ 	tracehook_finish_jctl();
 @@ -1784,8 +1833,6 @@ relock:
  	 * Now that we woke up, it's crucial if we're supposed to be
  	 * frozen that we freeze now before running anything substantial.
