@@ -1,0 +1,35 @@
+pciback: rate limit error message from pciback_enable_msi()
+
+... as being guest triggerable (e.g. by invoking XEN_PCI_OP_enable_msi
+on a device not being MSI capable).
+
+This is CVE-2013-0231 / XSA-43.
+
+Signed-off-by: Jan Beulich <jbeulich@suse.com>
+[dannf: backported to Debian's 2.6.32]
+
+diff -urpN a/drivers/xen/pciback/conf_space_capability_msi.c b/drivers/xen/pciback/conf_space_capability_msi.c
+--- a/drivers/xen/pciback/conf_space_capability_msi.c	2013-02-24 13:43:07.628230496 -0500
++++ b/drivers/xen/pciback/conf_space_capability_msi.c	2013-02-24 14:35:30.470438381 -0500
+@@ -13,8 +13,7 @@ int pciback_enable_msi(struct pciback_de
+ 		struct pci_dev *dev, struct xen_pci_op *op)
+ {
+ 	struct pciback_dev_data *dev_data;
+-	int otherend = pdev->xdev->otherend_id;
+-	int status;
++	int status = pci_enable_msi(dev);
+ 
+  	if (unlikely(verbose_request))
+ 		printk(KERN_DEBUG "pciback: %s: enable MSI\n", pci_name(dev));
+@@ -22,8 +21,9 @@ int pciback_enable_msi(struct pciback_de
+ 	status = pci_enable_msi(dev);
+ 
+ 	if (status) {
+-		printk(KERN_ERR "error enable msi for guest %x status %x\n",
+-			otherend, status);
++		if (printk_ratelimit())
++			printk("error enabling MSI for guest %u status %d\n",
++			       pdev->xdev->otherend_id, status);
+ 		op->value = 0;
+ 		return XEN_PCI_ERR_op_failed;
+ 	}
