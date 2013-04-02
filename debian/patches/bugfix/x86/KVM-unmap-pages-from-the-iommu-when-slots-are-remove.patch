@@ -1,0 +1,99 @@
+From: Alex Williamson <alex.williamson@redhat.com>
+Date: Wed, 11 Apr 2012 09:51:49 -0600
+Subject: KVM: unmap pages from the iommu when slots are removed
+
+commit 32f6daad4651a748a58a3ab6da0611862175722f upstream.
+
+We've been adding new mappings, but not destroying old mappings.
+This can lead to a page leak as pages are pinned using
+get_user_pages, but only unpinned with put_page if they still
+exist in the memslots list on vm shutdown.  A memslot that is
+destroyed while an iommu domain is enabled for the guest will
+therefore result in an elevated page reference count that is
+never cleared.
+
+Additionally, without this fix, the iommu is only programmed
+with the first translation for a gpa.  This can result in
+peer-to-peer errors if a mapping is destroyed and replaced by a
+new mapping at the same gpa as the iommu will still be pointing
+to the original, pinned memory address.
+
+Signed-off-by: Alex Williamson <alex.williamson@redhat.com>
+Signed-off-by: Marcelo Tosatti <mtosatti@redhat.com>
+[bwh: Backported to 2.6.32:
+ - Adjust context
+ - In __kvm_set_memory_region(), call kvm_iommu_unmap_pages()
+   immediately before kvm_free_physmem_slot() which cleans up the old
+   memory slot.  Make this dependent on CONFIG_DMAR, consistent with
+   the use of kvm_iommu_map_pages().]
+---
+ include/linux/kvm_host.h |    6 ++++++
+ virt/kvm/iommu.c         |    8 ++++++--
+ virt/kvm/kvm_main.c      |    6 ++++++
+ 3 files changed, 18 insertions(+), 2 deletions(-)
+
+diff --git a/include/linux/kvm_host.h b/include/linux/kvm_host.h
+index 8bfed57..7dbe682 100644
+--- a/include/linux/kvm_host.h
++++ b/include/linux/kvm_host.h
+@@ -410,6 +410,7 @@ void kvm_free_irq_source_id(struct kvm *kvm, int irq_source_id);
+ #ifdef CONFIG_IOMMU_API
+ int kvm_iommu_map_pages(struct kvm *kvm, gfn_t base_gfn,
+ 			unsigned long npages);
++void kvm_iommu_unmap_pages(struct kvm *kvm, struct kvm_memory_slot *slot);
+ int kvm_iommu_map_guest(struct kvm *kvm);
+ int kvm_iommu_unmap_guest(struct kvm *kvm);
+ int kvm_assign_device(struct kvm *kvm,
+@@ -424,6 +425,11 @@ static inline int kvm_iommu_map_pages(struct kvm *kvm,
+ 	return 0;
+ }
+ 
++static inline void kvm_iommu_unmap_pages(struct kvm *kvm,
++					 struct kvm_memory_slot *slot)
++{
++}
++
+ static inline int kvm_iommu_map_guest(struct kvm *kvm)
+ {
+ 	return -ENODEV;
+diff --git a/virt/kvm/iommu.c b/virt/kvm/iommu.c
+index 1514758..3738b5f 100644
+--- a/virt/kvm/iommu.c
++++ b/virt/kvm/iommu.c
+@@ -207,13 +207,17 @@ static void kvm_iommu_put_pages(struct kvm *kvm,
+ 	iommu_unmap_range(domain, gfn_to_gpa(base_gfn), PAGE_SIZE * npages);
+ }
+ 
++void kvm_iommu_unmap_pages(struct kvm *kvm, struct kvm_memory_slot *slot)
++{
++	kvm_iommu_put_pages(kvm, slot->base_gfn, slot->npages);
++}
++
+ static int kvm_iommu_unmap_memslots(struct kvm *kvm)
+ {
+ 	int i;
+ 
+ 	for (i = 0; i < kvm->nmemslots; i++) {
+-		kvm_iommu_put_pages(kvm, kvm->memslots[i].base_gfn,
+-				    kvm->memslots[i].npages);
++		kvm_iommu_unmap_pages(kvm, &kvm->memslots[i]);
+ 	}
+ 
+ 	return 0;
+diff --git a/virt/kvm/kvm_main.c b/virt/kvm/kvm_main.c
+index 82b6fdc..a510abe 100644
+--- a/virt/kvm/kvm_main.c
++++ b/virt/kvm/kvm_main.c
+@@ -1334,6 +1334,12 @@ skip_lpage:
+ 		goto out_free;
+ 	}
+ 
++#ifdef CONFIG_DMAR
++	/* unmap the pages in iommu page table */
++	if (!npages)
++		kvm_iommu_unmap_pages(kvm, &old);
++#endif
++
+ 	kvm_free_physmem_slot(&old, npages ? &new : NULL);
+ 	/* Slot deletion case: we have to update the current slot */
+ 	spin_lock(&kvm->mmu_lock);

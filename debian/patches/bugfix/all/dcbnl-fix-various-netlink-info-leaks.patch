@@ -1,0 +1,38 @@
+From: Mathias Krause <minipli@googlemail.com>
+Date: Sat, 9 Mar 2013 05:52:21 +0000
+Subject: dcbnl: fix various netlink info leaks
+
+commit 29cd8ae0e1a39e239a3a7b67da1986add1199fc0 upstream.
+
+The dcb netlink interface leaks stack memory in various places:
+* perm_addr[] buffer is only filled at max with 12 of the 32 bytes but
+  copied completely,
+* no in-kernel driver fills all fields of an IEEE 802.1Qaz subcommand,
+  so we're leaking up to 58 bytes for ieee_ets structs, up to 136 bytes
+  for ieee_pfc structs, etc.,
+* the same is true for CEE -- no in-kernel driver fills the whole
+  struct,
+
+Prevent all of the above stack info leaks by properly initializing the
+buffers/structures involved.
+
+Signed-off-by: Mathias Krause <minipli@googlemail.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+[bwh: Backported to 2.6.32: no support for IEEE or CEE commands, so only
+ deal with perm_addr]
+---
+ net/dcb/dcbnl.c |    1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/net/dcb/dcbnl.c b/net/dcb/dcbnl.c
+index ac1205d..813fe4b 100644
+--- a/net/dcb/dcbnl.c
++++ b/net/dcb/dcbnl.c
+@@ -307,6 +307,7 @@ static int dcbnl_getperm_hwaddr(struct net_device *netdev, struct nlattr **tb,
+ 	dcb->dcb_family = AF_UNSPEC;
+ 	dcb->cmd = DCB_CMD_GPERM_HWADDR;
+ 
++	memset(perm_addr, 0, sizeof(perm_addr));
+ 	netdev->dcbnl_ops->getpermhwaddr(netdev, perm_addr);
+ 
+ 	ret = nla_put(dcbnl_skb, DCB_ATTR_PERM_HWADDR, sizeof(perm_addr),
