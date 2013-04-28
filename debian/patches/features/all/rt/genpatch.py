@@ -31,6 +31,8 @@ def main(repo, version):
     for name in old_series:
         print 'Obsoleted patch', os.path.join(patch_dir, name)
 
+    subprocess.check_call([os.path.join(patch_dir, 'convert-series')])
+
 if __name__ == '__main__':
     if len(sys.argv) != 3:
         print >>sys.stderr, "Usage: %s REPO RT-VERSION" % sys.argv[0]
