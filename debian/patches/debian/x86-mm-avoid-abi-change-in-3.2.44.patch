@@ -1,0 +1,115 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Subject: x86, mm: Avoid ABI change in 3.2.44
+Date: Mon, 29 Apr 2013 03:51:58 +0100
+
+Commit 511ba86e1d38 'x86, mm: Patch out arch_flush_lazy_mmu_mode()
+when running on bare metal', backported into 3.2.44, added a new
+member to struct pv_mmu_ops.  The working instance of struct
+pv_mmu_ops is exported to modules.  The structure is also embedded in
+struct paravirt_patch_template, and offsets within this structure are
+used to identify operations to be patched in at runtime
+(pv-alternatives).
+
+We therefore need to place the new function pointer at the end of
+struct paravirt_patch_template and outside of struct pv_mmu_ops
+altogether.
+
+The new function pointer will be called by arch_flush_lazy_mmu_mode(),
+which did not use to be exported and therefore should not be used by
+modules.  Hopefully no-one wants to implement this OOT because they'll
+be out of luck.
+
+---
+--- a/arch/x86/include/asm/paravirt.h
++++ b/arch/x86/include/asm/paravirt.h
+@@ -742,7 +742,7 @@ static inline void arch_leave_lazy_mmu_m
+ 
+ static inline void arch_flush_lazy_mmu_mode(void)
+ {
+-	PVOP_VCALL0(pv_mmu_ops.lazy_mode.flush);
++	PVOP_VCALL0(pv_mmu_lazy_mode_flush);
+ }
+ 
+ static inline void __set_fixmap(unsigned /* enum fixed_addresses */ idx,
+--- a/arch/x86/include/asm/paravirt_types.h
++++ b/arch/x86/include/asm/paravirt_types.h
+@@ -91,7 +91,6 @@ struct pv_lazy_ops {
+ 	/* Set deferred update mode, used for batching operations. */
+ 	void (*enter)(void);
+ 	void (*leave)(void);
+-	void (*flush)(void);
+ };
+ 
+ struct pv_time_ops {
+@@ -348,6 +347,9 @@ struct paravirt_patch_template {
+ 	struct pv_apic_ops pv_apic_ops;
+ 	struct pv_mmu_ops pv_mmu_ops;
+ 	struct pv_lock_ops pv_lock_ops;
++#ifndef __GENKSYMS__
++	void (*pv_mmu_lazy_mode_flush)(void);
++#endif
+ };
+ 
+ extern struct pv_info pv_info;
+@@ -358,6 +360,7 @@ extern struct pv_irq_ops pv_irq_ops;
+ extern struct pv_apic_ops pv_apic_ops;
+ extern struct pv_mmu_ops pv_mmu_ops;
+ extern struct pv_lock_ops pv_lock_ops;
++extern void (*pv_mmu_lazy_mode_flush)(void);
+ 
+ #define PARAVIRT_PATCH(x)					\
+ 	(offsetof(struct paravirt_patch_template, x) / sizeof(void *))
+--- a/arch/x86/kernel/paravirt.c
++++ b/arch/x86/kernel/paravirt.c
+@@ -132,6 +132,7 @@ static void *get_call_destination(u8 typ
+ #ifdef CONFIG_PARAVIRT_SPINLOCKS
+ 		.pv_lock_ops = pv_lock_ops,
+ #endif
++		.pv_mmu_lazy_mode_flush = pv_mmu_lazy_mode_flush,
+ 	};
+ 	return *((void **)&tmpl + type);
+ }
+@@ -475,12 +476,13 @@ struct pv_mmu_ops pv_mmu_ops = {
+ 	.lazy_mode = {
+ 		.enter = paravirt_nop,
+ 		.leave = paravirt_nop,
+-		.flush = paravirt_nop,
+ 	},
+ 
+ 	.set_fixmap = native_set_fixmap,
+ };
+ 
++void (*pv_mmu_lazy_mode_flush)(void) = paravirt_nop;
++
+ EXPORT_SYMBOL_GPL(pv_time_ops);
+ EXPORT_SYMBOL    (pv_cpu_ops);
+ EXPORT_SYMBOL    (pv_mmu_ops);
+--- a/arch/x86/lguest/boot.c
++++ b/arch/x86/lguest/boot.c
+@@ -1328,7 +1328,7 @@ __init void lguest_init(void)
+ 	pv_mmu_ops.read_cr3 = lguest_read_cr3;
+ 	pv_mmu_ops.lazy_mode.enter = paravirt_enter_lazy_mmu;
+ 	pv_mmu_ops.lazy_mode.leave = lguest_leave_lazy_mmu_mode;
+-	pv_mmu_ops.lazy_mode.flush = paravirt_flush_lazy_mmu;
++	pv_mmu_lazy_mode_flush = paravirt_flush_lazy_mmu;
+ 	pv_mmu_ops.pte_update = lguest_pte_update;
+ 	pv_mmu_ops.pte_update_defer = lguest_pte_update;
+ 
+--- a/arch/x86/xen/mmu.c
++++ b/arch/x86/xen/mmu.c
+@@ -2079,7 +2079,6 @@ static const struct pv_mmu_ops xen_mmu_o
+ 	.lazy_mode = {
+ 		.enter = paravirt_enter_lazy_mmu,
+ 		.leave = xen_leave_lazy_mmu,
+-		.flush = paravirt_flush_lazy_mmu,
+ 	},
+ 
+ 	.set_fixmap = xen_set_fixmap,
+@@ -2091,6 +2090,7 @@ void __init xen_init_mmu_ops(void)
+ 	x86_init.paging.pagetable_setup_start = xen_pagetable_setup_start;
+ 	x86_init.paging.pagetable_setup_done = xen_pagetable_setup_done;
+ 	pv_mmu_ops = xen_mmu_ops;
++	pv_mmu_lazy_mode_flush = paravirt_flush_lazy_mmu,
+ 
+ 	memset(dummy_mapping, 0xff, PAGE_SIZE);
+ }
