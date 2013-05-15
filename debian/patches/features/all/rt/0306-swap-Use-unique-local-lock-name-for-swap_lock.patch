@@ -1,0 +1,110 @@
+From a59c91b5ae0f519e6d67910df103ea31c9463de0 Mon Sep 17 00:00:00 2001
+From: Steven Rostedt <rostedt@goodmis.org>
+Date: Tue, 23 Apr 2013 16:10:00 -0400
+Subject: [PATCH 306/308] swap: Use unique local lock name for swap_lock
+
+From lib/Kconfig.debug on CONFIG_FORCE_WEAK_PER_CPU:
+
+----
+s390 and alpha require percpu variables in modules to be
+defined weak to work around addressing range issue which
+puts the following two restrictions on percpu variable
+definitions.
+
+1. percpu symbols must be unique whether static or not
+2. percpu variables can't be defined inside a function
+
+To ensure that generic code follows the above rules, this
+option forces all percpu variables to be defined as weak.
+----
+
+The addition of the local IRQ swap_lock in mm/swap.c broke this config
+as the name "swap_lock" is used through out the kernel. Just do a "git
+grep swap_lock" to see, and the new swap_lock is a local lock which
+defines the swap_lock for per_cpu.
+
+The fix was to rename swap_lock to swapvec_lock which keeps it unique.
+
+Reported-by: Mike Galbraith <bitbucket@online.de>
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ mm/swap.c |   20 ++++++++++----------
+ 1 file changed, 10 insertions(+), 10 deletions(-)
+
+diff --git a/mm/swap.c b/mm/swap.c
+index c428897..c77da7a 100644
+--- a/mm/swap.c
++++ b/mm/swap.c
+@@ -43,7 +43,7 @@ static DEFINE_PER_CPU(struct pagevec, lru_rotate_pvecs);
+ static DEFINE_PER_CPU(struct pagevec, lru_deactivate_pvecs);
+ 
+ static DEFINE_LOCAL_IRQ_LOCK(rotate_lock);
+-static DEFINE_LOCAL_IRQ_LOCK(swap_lock);
++static DEFINE_LOCAL_IRQ_LOCK(swapvec_lock);
+ 
+ /*
+  * This path almost never happens for VM activity - pages are normally
+@@ -331,13 +331,13 @@ static void activate_page_drain(int cpu)
+ void activate_page(struct page *page)
+ {
+ 	if (PageLRU(page) && !PageActive(page) && !PageUnevictable(page)) {
+-		struct pagevec *pvec = &get_locked_var(swap_lock,
++		struct pagevec *pvec = &get_locked_var(swapvec_lock,
+ 						       activate_page_pvecs);
+ 
+ 		page_cache_get(page);
+ 		if (!pagevec_add(pvec, page))
+ 			pagevec_lru_move_fn(pvec, __activate_page, NULL);
+-		put_locked_var(swap_lock, activate_page_pvecs);
++		put_locked_var(swapvec_lock, activate_page_pvecs);
+ 	}
+ }
+ 
+@@ -378,12 +378,12 @@ EXPORT_SYMBOL(mark_page_accessed);
+ 
+ void __lru_cache_add(struct page *page, enum lru_list lru)
+ {
+-	struct pagevec *pvec = &get_locked_var(swap_lock, lru_add_pvecs)[lru];
++	struct pagevec *pvec = &get_locked_var(swapvec_lock, lru_add_pvecs)[lru];
+ 
+ 	page_cache_get(page);
+ 	if (!pagevec_add(pvec, page))
+ 		____pagevec_lru_add(pvec, lru);
+-	put_locked_var(swap_lock, lru_add_pvecs);
++	put_locked_var(swapvec_lock, lru_add_pvecs);
+ }
+ EXPORT_SYMBOL(__lru_cache_add);
+ 
+@@ -547,19 +547,19 @@ void deactivate_page(struct page *page)
+ 		return;
+ 
+ 	if (likely(get_page_unless_zero(page))) {
+-		struct pagevec *pvec = &get_locked_var(swap_lock,
++		struct pagevec *pvec = &get_locked_var(swapvec_lock,
+ 						       lru_deactivate_pvecs);
+ 
+ 		if (!pagevec_add(pvec, page))
+ 			pagevec_lru_move_fn(pvec, lru_deactivate_fn, NULL);
+-		put_locked_var(swap_lock, lru_deactivate_pvecs);
++		put_locked_var(swapvec_lock, lru_deactivate_pvecs);
+ 	}
+ }
+ 
+ void lru_add_drain(void)
+ {
+-	drain_cpu_pagevecs(local_lock_cpu(swap_lock));
+-	local_unlock_cpu(swap_lock);
++	drain_cpu_pagevecs(local_lock_cpu(swapvec_lock));
++	local_unlock_cpu(swapvec_lock);
+ }
+ 
+ static void lru_add_drain_per_cpu(struct work_struct *dummy)
+@@ -776,7 +776,7 @@ EXPORT_SYMBOL(pagevec_lookup);
+ static int __init swap_init_locks(void)
+ {
+ 	local_irq_lock_init(rotate_lock);
+-	local_irq_lock_init(swap_lock);
++	local_irq_lock_init(swapvec_lock);
+ 	return 1;
+ }
+ early_initcall(swap_init_locks);

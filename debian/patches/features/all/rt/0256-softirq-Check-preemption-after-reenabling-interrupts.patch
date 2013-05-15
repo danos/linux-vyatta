@@ -1,7 +1,7 @@
-From 952dd91547c5aba16baeaab5da10ece9e0d2392d Mon Sep 17 00:00:00 2001
+From cc89d81632911e0a0afb27e28fa1bf5c7c76657b Mon Sep 17 00:00:00 2001
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Sun, 13 Nov 2011 17:17:09 +0100
-Subject: [PATCH 256/303] softirq: Check preemption after reenabling
+Subject: [PATCH 256/308] softirq: Check preemption after reenabling
  interrupts
 
 raise_softirq_irqoff() disables interrupts and wakes the softirq
@@ -15,8 +15,6 @@ ones which show this behaviour.
 Reported-by: Carsten Emde <cbe@osadl.org>
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 Cc: stable-rt@vger.kernel.org
-[bwh: Adjust to apply after commit 386afc91144b 'spinlocks and preemption
- points need to be at least compiler barriers']
 ---
  block/blk-iopoll.c      |    3 +++
  block/blk-softirq.c     |    3 +++
@@ -24,9 +22,11 @@ Cc: stable-rt@vger.kernel.org
  net/core/dev.c          |    6 ++++++
  4 files changed, 15 insertions(+)
 
+diff --git a/block/blk-iopoll.c b/block/blk-iopoll.c
+index 58916af..f7ca9b4 100644
 --- a/block/blk-iopoll.c
 +++ b/block/blk-iopoll.c
-@@ -38,6 +38,7 @@ void blk_iopoll_sched(struct blk_iopoll
+@@ -38,6 +38,7 @@ void blk_iopoll_sched(struct blk_iopoll *iop)
  	list_add_tail(&iop->list, &__get_cpu_var(blk_cpu_iopoll));
  	__raise_softirq_irqoff(BLOCK_IOPOLL_SOFTIRQ);
  	local_irq_restore(flags);
@@ -34,7 +34,7 @@ Cc: stable-rt@vger.kernel.org
  }
  EXPORT_SYMBOL(blk_iopoll_sched);
  
-@@ -135,6 +136,7 @@ static void blk_iopoll_softirq(struct so
+@@ -135,6 +136,7 @@ static void blk_iopoll_softirq(struct softirq_action *h)
  		__raise_softirq_irqoff(BLOCK_IOPOLL_SOFTIRQ);
  
  	local_irq_enable();
@@ -42,7 +42,7 @@ Cc: stable-rt@vger.kernel.org
  }
  
  /**
-@@ -204,6 +206,7 @@ static int __cpuinit blk_iopoll_cpu_noti
+@@ -204,6 +206,7 @@ static int __cpuinit blk_iopoll_cpu_notify(struct notifier_block *self,
  				 &__get_cpu_var(blk_cpu_iopoll));
  		__raise_softirq_irqoff(BLOCK_IOPOLL_SOFTIRQ);
  		local_irq_enable();
@@ -50,6 +50,8 @@ Cc: stable-rt@vger.kernel.org
  	}
  
  	return NOTIFY_OK;
+diff --git a/block/blk-softirq.c b/block/blk-softirq.c
+index 1366a89..60a88ab 100644
 --- a/block/blk-softirq.c
 +++ b/block/blk-softirq.c
 @@ -50,6 +50,7 @@ static void trigger_softirq(void *data)
@@ -60,7 +62,7 @@ Cc: stable-rt@vger.kernel.org
  }
  
  /*
-@@ -92,6 +93,7 @@ static int __cpuinit blk_cpu_notify(stru
+@@ -92,6 +93,7 @@ static int __cpuinit blk_cpu_notify(struct notifier_block *self,
  				 &__get_cpu_var(blk_cpu_done));
  		raise_softirq_irqoff(BLOCK_SOFTIRQ);
  		local_irq_enable();
@@ -76,13 +78,15 @@ Cc: stable-rt@vger.kernel.org
  }
  
  /**
+diff --git a/include/linux/preempt.h b/include/linux/preempt.h
+index 49bd6c7..53c9382 100644
 --- a/include/linux/preempt.h
 +++ b/include/linux/preempt.h
 @@ -56,8 +56,10 @@ do { \
  
  #ifndef CONFIG_PREEMPT_RT_BASE
  # define preempt_enable_no_resched()	__preempt_enable_no_resched()
-+# define preempt_check_resched_rt()	barrier()
++# define preempt_check_resched_rt()	do { } while (0)
  #else
  # define preempt_enable_no_resched()	preempt_enable()
 +# define preempt_check_resched_rt()	preempt_check_resched()
@@ -93,13 +97,15 @@ Cc: stable-rt@vger.kernel.org
  #define preempt_disable_notrace()		barrier()
  #define preempt_enable_no_resched_notrace()	barrier()
  #define preempt_enable_notrace()		barrier()
-+#define preempt_check_resched_rt()	barrier()
++#define preempt_check_resched_rt()	do { } while (0)
  
  #endif /* CONFIG_PREEMPT_COUNT */
  
+diff --git a/net/core/dev.c b/net/core/dev.c
+index e1753dd..d9cf162 100644
 --- a/net/core/dev.c
 +++ b/net/core/dev.c
-@@ -1819,6 +1819,7 @@ static inline void __netif_reschedule(st
+@@ -1819,6 +1819,7 @@ static inline void __netif_reschedule(struct Qdisc *q)
  	sd->output_queue_tailp = &q->next_sched;
  	raise_softirq_irqoff(NET_TX_SOFTIRQ);
  	local_irq_restore(flags);
@@ -107,7 +113,7 @@ Cc: stable-rt@vger.kernel.org
  }
  
  void __netif_schedule(struct Qdisc *q)
-@@ -1840,6 +1841,7 @@ void dev_kfree_skb_irq(struct sk_buff *s
+@@ -1840,6 +1841,7 @@ void dev_kfree_skb_irq(struct sk_buff *skb)
  		sd->completion_queue = skb;
  		raise_softirq_irqoff(NET_TX_SOFTIRQ);
  		local_irq_restore(flags);
@@ -123,7 +129,7 @@ Cc: stable-rt@vger.kernel.org
  
  	atomic_long_inc(&skb->dev->rx_dropped);
  	kfree_skb(skb);
-@@ -3796,6 +3799,7 @@ static void net_rps_action_and_irq_enabl
+@@ -3796,6 +3799,7 @@ static void net_rps_action_and_irq_enable(struct softnet_data *sd)
  	} else
  #endif
  		local_irq_enable();
@@ -131,7 +137,7 @@ Cc: stable-rt@vger.kernel.org
  }
  
  static int process_backlog(struct napi_struct *napi, int quota)
-@@ -3868,6 +3872,7 @@ void __napi_schedule(struct napi_struct
+@@ -3868,6 +3872,7 @@ void __napi_schedule(struct napi_struct *n)
  	local_irq_save(flags);
  	____napi_schedule(&__get_cpu_var(softnet_data), n);
  	local_irq_restore(flags);
@@ -139,7 +145,7 @@ Cc: stable-rt@vger.kernel.org
  }
  EXPORT_SYMBOL(__napi_schedule);
  
-@@ -6382,6 +6387,7 @@ static int dev_cpu_callback(struct notif
+@@ -6379,6 +6384,7 @@ static int dev_cpu_callback(struct notifier_block *nfb,
  
  	raise_softirq_irqoff(NET_TX_SOFTIRQ);
  	local_irq_enable();

@@ -1,7 +1,7 @@
-From 891c1c1650fb53a76a130365e9e04ea7603e616c Mon Sep 17 00:00:00 2001
+From d2e4face58cc8a2f4019a76736fbdfab1a48581b Mon Sep 17 00:00:00 2001
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Wed, 22 Jun 2011 19:47:03 +0200
-Subject: [PATCH 007/303] sched: Distangle worker accounting from rq-%3Elock
+Subject: [PATCH 007/308] sched: Distangle worker accounting from rq-%3Elock
 
 The worker accounting for cpu bound workers is plugged into the core
 scheduler code and the wakeup code. This is not a hard requirement and
@@ -23,17 +23,17 @@ Cc: Jens Axboe <axboe@kernel.dk>
 Cc: Linus Torvalds <torvalds@linux-foundation.org>
 Link: http://lkml.kernel.org/r/20110622174919.135236139@linutronix.de
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
-[bwh: Adjust context to apply after commit 383efcd00053 'sched: Convert
- BUG_ON()s in try_to_wake_up_local() to WARN_ON_ONCE()s']
 ---
- kernel/sched.c           |   66 +++++++++++----------------------------------
- kernel/workqueue.c       |   67 +++++++++++++++++++++-------------------------
+ kernel/sched.c           |   68 ++++++++++------------------------------------
+ kernel/workqueue.c       |   67 ++++++++++++++++++++-------------------------
  kernel/workqueue_sched.h |    5 ++--
- 3 files changed, 47 insertions(+), 91 deletions(-)
+ 3 files changed, 47 insertions(+), 93 deletions(-)
 
+diff --git a/kernel/sched.c b/kernel/sched.c
+index d08c9f4..561aa10 100644
 --- a/kernel/sched.c
 +++ b/kernel/sched.c
-@@ -2640,10 +2640,6 @@ static void ttwu_activate(struct rq *rq,
+@@ -2640,10 +2640,6 @@ static void ttwu_activate(struct rq *rq, struct task_struct *p, int en_flags)
  {
  	activate_task(rq, p, en_flags);
  	p->on_rq = 1;
@@ -107,7 +107,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  		}
  		switch_count = &prev->nvcsw;
  	}
-@@ -4670,6 +4617,14 @@ static inline void sched_submit_work(str
+@@ -4670,6 +4617,14 @@ static inline void sched_submit_work(struct task_struct *tsk)
  {
  	if (!tsk->state)
  		return;
@@ -122,7 +122,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	/*
  	 * If we are going to sleep and we have plugged IO queued,
  	 * make sure to submit it to avoid deadlocks.
-@@ -4678,12 +4633,19 @@ static inline void sched_submit_work(str
+@@ -4678,12 +4633,19 @@ static inline void sched_submit_work(struct task_struct *tsk)
  		blk_schedule_flush_plug(tsk);
  }
  
@@ -142,6 +142,8 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  }
  EXPORT_SYMBOL(schedule);
  
+diff --git a/kernel/workqueue.c b/kernel/workqueue.c
+index d2fce7c..205bdb0 100644
 --- a/kernel/workqueue.c
 +++ b/kernel/workqueue.c
 @@ -138,6 +138,7 @@ struct worker {
@@ -152,7 +154,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  };
  
  /*
-@@ -661,66 +662,58 @@ static void wake_up_worker(struct global
+@@ -661,66 +662,58 @@ static void wake_up_worker(struct global_cwq *gcwq)
  }
  
  /**
@@ -213,14 +215,14 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	if (worker->flags & WORKER_NOT_RUNNING)
 -		return NULL;
 +		return;
- 
--	/* this can only happen on the local cpu */
--	BUG_ON(cpu != raw_smp_processor_id());
++
 +	if (WARN_ON_ONCE(worker->sleeping))
 +		return;
  
+-	/* this can only happen on the local cpu */
+-	BUG_ON(cpu != raw_smp_processor_id());
 +	worker->sleeping = 1;
-+
+ 
 +	cpu = smp_processor_id();
 +	gcwq = get_gcwq(cpu);
 +	spin_lock_irq(&gcwq->lock);
@@ -248,6 +250,8 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  }
  
  /**
+diff --git a/kernel/workqueue_sched.h b/kernel/workqueue_sched.h
+index 2d10fc9..3bf73e2 100644
 --- a/kernel/workqueue_sched.h
 +++ b/kernel/workqueue_sched.h
 @@ -4,6 +4,5 @@
