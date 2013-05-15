@@ -1,0 +1,86 @@
+From ee3c9aabb636fcfc21d53c506362620b55fdd8c6 Mon Sep 17 00:00:00 2001
+From: Namhyung Kim <namhyung.kim@lge.com>
+Date: Thu, 11 Apr 2013 15:55:01 +0900
+Subject: [PATCH] tracing: Fix possible NULL pointer dereferences
+
+commit 6a76f8c0ab19f215af2a3442870eeb5f0e81998d upstream.
+
+Currently set_ftrace_pid and set_graph_function files use seq_lseek
+for their fops.  However seq_open() is called only for FMODE_READ in
+the fops->open() so that if an user tries to seek one of those file
+when she open it for writing, it sees NULL seq_file and then panic.
+
+It can be easily reproduced with following command:
+
+  $ cd /sys/kernel/debug/tracing
+  $ echo 1234 | sudo tee -a set_ftrace_pid
+
+In this example, GNU coreutils' tee opens the file with fopen(, "a")
+and then the fopen() internally calls lseek().
+
+Link: http://lkml.kernel.org/r/1365663302-2170-1-git-send-email-namhyung@kernel.org
+
+Cc: Frederic Weisbecker <fweisbec@gmail.com>
+Cc: Ingo Molnar <mingo@kernel.org>
+Cc: Namhyung Kim <namhyung.kim@lge.com>
+Signed-off-by: Namhyung Kim <namhyung@kernel.org>
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+[bwh: Backported to 3.2: ftrace_regex_lseek() is static]
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+ kernel/trace/ftrace.c |   10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/kernel/trace/ftrace.c b/kernel/trace/ftrace.c
+index bed7991..5527211 100644
+--- a/kernel/trace/ftrace.c
++++ b/kernel/trace/ftrace.c
+@@ -2316,7 +2316,7 @@ ftrace_notrace_open(struct inode *inode, struct file *file)
+ }
+ 
+ static loff_t
+-ftrace_regex_lseek(struct file *file, loff_t offset, int origin)
++ftrace_filter_lseek(struct file *file, loff_t offset, int origin)
+ {
+ 	loff_t ret;
+ 
+@@ -3134,7 +3134,7 @@ static const struct file_operations ftrace_filter_fops = {
+ 	.open = ftrace_filter_open,
+ 	.read = seq_read,
+ 	.write = ftrace_filter_write,
+-	.llseek = ftrace_regex_lseek,
++	.llseek = ftrace_filter_lseek,
+ 	.release = ftrace_regex_release,
+ };
+ 
+@@ -3142,7 +3142,7 @@ static const struct file_operations ftrace_notrace_fops = {
+ 	.open = ftrace_notrace_open,
+ 	.read = seq_read,
+ 	.write = ftrace_notrace_write,
+-	.llseek = ftrace_regex_lseek,
++	.llseek = ftrace_filter_lseek,
+ 	.release = ftrace_regex_release,
+ };
+ 
+@@ -3350,8 +3350,8 @@ static const struct file_operations ftrace_graph_fops = {
+ 	.open		= ftrace_graph_open,
+ 	.read		= seq_read,
+ 	.write		= ftrace_graph_write,
++	.llseek		= ftrace_filter_lseek,
+ 	.release	= ftrace_graph_release,
+-	.llseek		= seq_lseek,
+ };
+ #endif /* CONFIG_FUNCTION_GRAPH_TRACER */
+ 
+@@ -3843,7 +3843,7 @@ static const struct file_operations ftrace_pid_fops = {
+ 	.open		= ftrace_pid_open,
+ 	.write		= ftrace_pid_write,
+ 	.read		= seq_read,
+-	.llseek		= seq_lseek,
++	.llseek		= ftrace_filter_lseek,
+ 	.release	= ftrace_pid_release,
+ };
+ 
+-- 
+1.7.10.4
+
