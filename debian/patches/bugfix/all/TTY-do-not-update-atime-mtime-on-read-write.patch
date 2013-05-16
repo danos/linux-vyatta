@@ -1,0 +1,57 @@
+From c29ad805df8c54a9f5d74c66bf5d4a2d449bd99a Mon Sep 17 00:00:00 2001
+From: Jiri Slaby <jslaby@suse.cz>
+Date: Fri, 15 Feb 2013 15:25:05 +0100
+Subject: [PATCH] TTY: do not update atime/mtime on read/write
+
+commit b0de59b5733d18b0d1974a060860a8b5c1b36a2e upstream.
+
+On http://vladz.devzero.fr/013_ptmx-timing.php, we can see how to find
+out length of a password using timestamps of /dev/ptmx. It is
+documented in "Timing Analysis of Keystrokes and Timing Attacks on
+SSH". To avoid that problem, do not update time when reading
+from/writing to a TTY.
+
+I am afraid of regressions as this is a behavior we have since 0.97
+and apps may expect the time to be current, e.g. for monitoring
+whether there was a change on the TTY. Now, there is no change. So
+this would better have a lot of testing before it goes upstream.
+
+References: CVE-2013-0160
+
+Signed-off-by: Jiri Slaby <jslaby@suse.cz>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+ drivers/tty/tty_io.c |    8 ++------
+ 1 file changed, 2 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/tty/tty_io.c b/drivers/tty/tty_io.c
+index 05085be..f3ad3ec 100644
+--- a/drivers/tty/tty_io.c
++++ b/drivers/tty/tty_io.c
+@@ -976,8 +976,7 @@ static ssize_t tty_read(struct file *file, char __user *buf, size_t count,
+ 	else
+ 		i = -EIO;
+ 	tty_ldisc_deref(ld);
+-	if (i > 0)
+-		inode->i_atime = current_fs_time(inode->i_sb);
++
+ 	return i;
+ }
+ 
+@@ -1078,11 +1077,8 @@ static inline ssize_t do_tty_write(
+ 			break;
+ 		cond_resched();
+ 	}
+-	if (written) {
+-		struct inode *inode = file->f_path.dentry->d_inode;
+-		inode->i_mtime = current_fs_time(inode->i_sb);
++	if (written)
+ 		ret = written;
+-	}
+ out:
+ 	tty_write_unlock(tty);
+ 	return ret;
+-- 
+1.7.10.4
+

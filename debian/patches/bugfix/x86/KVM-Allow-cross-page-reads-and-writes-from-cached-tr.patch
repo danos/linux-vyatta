@@ -1,0 +1,177 @@
+From c471da1e3f5c6e43397dccf47cefd8edc86aa9f0 Mon Sep 17 00:00:00 2001
+From: Andrew Honig <ahonig@google.com>
+Date: Fri, 29 Mar 2013 09:35:21 -0700
+Subject: [PATCH] KVM: Allow cross page reads and writes from cached
+ translations.
+
+commit 8f964525a121f2ff2df948dac908dcc65be21b5b upstream.
+
+This patch adds support for kvm_gfn_to_hva_cache_init functions for
+reads and writes that will cross a page.  If the range falls within
+the same memslot, then this will be a fast operation.  If the range
+is split between two memslots, then the slower kvm_read_guest and
+kvm_write_guest are used.
+
+Tested: Test against kvm_clock unit tests.
+
+Signed-off-by: Andrew Honig <ahonig@google.com>
+Signed-off-by: Gleb Natapov <gleb@redhat.com>
+[bwh: Backported to 3.2:
+ - Drop change in lapic.c
+ - Keep using __gfn_to_memslot() in kvm_gfn_to_hva_cache_init()]
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+ arch/x86/kvm/x86.c        |   13 ++++++-------
+ include/linux/kvm_host.h  |    2 +-
+ include/linux/kvm_types.h |    1 +
+ virt/kvm/kvm_main.c       |   47 +++++++++++++++++++++++++++++++++++----------
+ 4 files changed, 45 insertions(+), 18 deletions(-)
+
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index 2dd2e4e..e82a53a 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -1480,7 +1480,8 @@ static int kvm_pv_enable_async_pf(struct kvm_vcpu *vcpu, u64 data)
+ 		return 0;
+ 	}
+ 
+-	if (kvm_gfn_to_hva_cache_init(vcpu->kvm, &vcpu->arch.apf.data, gpa))
++	if (kvm_gfn_to_hva_cache_init(vcpu->kvm, &vcpu->arch.apf.data, gpa,
++					sizeof(u32)))
+ 		return 1;
+ 
+ 	vcpu->arch.apf.send_user_only = !(data & KVM_ASYNC_PF_SEND_ALWAYS);
+@@ -1594,12 +1595,9 @@ int kvm_set_msr_common(struct kvm_vcpu *vcpu, u32 msr, u64 data)
+ 
+ 		gpa_offset = data & ~(PAGE_MASK | 1);
+ 
+-		/* Check that the address is 32-byte aligned. */
+-		if (gpa_offset & (sizeof(struct pvclock_vcpu_time_info) - 1))
+-			break;
+-
+ 		if (kvm_gfn_to_hva_cache_init(vcpu->kvm,
+-		     &vcpu->arch.pv_time, data & ~1ULL))
++		     &vcpu->arch.pv_time, data & ~1ULL,
++		     sizeof(struct pvclock_vcpu_time_info)))
+ 			vcpu->arch.pv_time_enabled = false;
+ 		else
+ 			vcpu->arch.pv_time_enabled = true;
+@@ -1618,7 +1616,8 @@ int kvm_set_msr_common(struct kvm_vcpu *vcpu, u32 msr, u64 data)
+ 			return 1;
+ 
+ 		if (kvm_gfn_to_hva_cache_init(vcpu->kvm, &vcpu->arch.st.stime,
+-							data & KVM_STEAL_VALID_BITS))
++						data & KVM_STEAL_VALID_BITS,
++						sizeof(struct kvm_steal_time)))
+ 			return 1;
+ 
+ 		vcpu->arch.st.msr_val = data;
+diff --git a/include/linux/kvm_host.h b/include/linux/kvm_host.h
+index 6136821..e6796c1 100644
+--- a/include/linux/kvm_host.h
++++ b/include/linux/kvm_host.h
+@@ -396,7 +396,7 @@ int kvm_write_guest(struct kvm *kvm, gpa_t gpa, const void *data,
+ int kvm_write_guest_cached(struct kvm *kvm, struct gfn_to_hva_cache *ghc,
+ 			   void *data, unsigned long len);
+ int kvm_gfn_to_hva_cache_init(struct kvm *kvm, struct gfn_to_hva_cache *ghc,
+-			      gpa_t gpa);
++			      gpa_t gpa, unsigned long len);
+ int kvm_clear_guest_page(struct kvm *kvm, gfn_t gfn, int offset, int len);
+ int kvm_clear_guest(struct kvm *kvm, gpa_t gpa, unsigned long len);
+ struct kvm_memory_slot *gfn_to_memslot(struct kvm *kvm, gfn_t gfn);
+diff --git a/include/linux/kvm_types.h b/include/linux/kvm_types.h
+index fa7cc72..b0bcce0 100644
+--- a/include/linux/kvm_types.h
++++ b/include/linux/kvm_types.h
+@@ -71,6 +71,7 @@ struct gfn_to_hva_cache {
+ 	u64 generation;
+ 	gpa_t gpa;
+ 	unsigned long hva;
++	unsigned long len;
+ 	struct kvm_memory_slot *memslot;
+ };
+ 
+diff --git a/virt/kvm/kvm_main.c b/virt/kvm/kvm_main.c
+index ec747dc..8bf05f0 100644
+--- a/virt/kvm/kvm_main.c
++++ b/virt/kvm/kvm_main.c
+@@ -1401,21 +1401,38 @@ int kvm_write_guest(struct kvm *kvm, gpa_t gpa, const void *data,
+ }
+ 
+ int kvm_gfn_to_hva_cache_init(struct kvm *kvm, struct gfn_to_hva_cache *ghc,
+-			      gpa_t gpa)
++			      gpa_t gpa, unsigned long len)
+ {
+ 	struct kvm_memslots *slots = kvm_memslots(kvm);
+ 	int offset = offset_in_page(gpa);
+-	gfn_t gfn = gpa >> PAGE_SHIFT;
++	gfn_t start_gfn = gpa >> PAGE_SHIFT;
++	gfn_t end_gfn = (gpa + len - 1) >> PAGE_SHIFT;
++	gfn_t nr_pages_needed = end_gfn - start_gfn + 1;
++	gfn_t nr_pages_avail;
+ 
+ 	ghc->gpa = gpa;
+ 	ghc->generation = slots->generation;
+-	ghc->memslot = __gfn_to_memslot(slots, gfn);
+-	ghc->hva = gfn_to_hva_many(ghc->memslot, gfn, NULL);
+-	if (!kvm_is_error_hva(ghc->hva))
++	ghc->len = len;
++	ghc->memslot = __gfn_to_memslot(slots, start_gfn);
++	ghc->hva = gfn_to_hva_many(ghc->memslot, start_gfn, &nr_pages_avail);
++	if (!kvm_is_error_hva(ghc->hva) && nr_pages_avail >= nr_pages_needed) {
+ 		ghc->hva += offset;
+-	else
+-		return -EFAULT;
+-
++	} else {
++		/*
++		 * If the requested region crosses two memslots, we still
++		 * verify that the entire region is valid here.
++		 */
++		while (start_gfn <= end_gfn) {
++			ghc->memslot = __gfn_to_memslot(slots, start_gfn);
++			ghc->hva = gfn_to_hva_many(ghc->memslot, start_gfn,
++						   &nr_pages_avail);
++			if (kvm_is_error_hva(ghc->hva))
++				return -EFAULT;
++			start_gfn += nr_pages_avail;
++		}
++		/* Use the slow path for cross page reads and writes. */
++		ghc->memslot = NULL;
++	}
+ 	return 0;
+ }
+ EXPORT_SYMBOL_GPL(kvm_gfn_to_hva_cache_init);
+@@ -1426,8 +1443,13 @@ int kvm_write_guest_cached(struct kvm *kvm, struct gfn_to_hva_cache *ghc,
+ 	struct kvm_memslots *slots = kvm_memslots(kvm);
+ 	int r;
+ 
++	BUG_ON(len > ghc->len);
++
+ 	if (slots->generation != ghc->generation)
+-		kvm_gfn_to_hva_cache_init(kvm, ghc, ghc->gpa);
++		kvm_gfn_to_hva_cache_init(kvm, ghc, ghc->gpa, ghc->len);
++
++	if (unlikely(!ghc->memslot))
++		return kvm_write_guest(kvm, ghc->gpa, data, len);
+ 
+ 	if (kvm_is_error_hva(ghc->hva))
+ 		return -EFAULT;
+@@ -1447,8 +1469,13 @@ int kvm_read_guest_cached(struct kvm *kvm, struct gfn_to_hva_cache *ghc,
+ 	struct kvm_memslots *slots = kvm_memslots(kvm);
+ 	int r;
+ 
++	BUG_ON(len > ghc->len);
++
+ 	if (slots->generation != ghc->generation)
+-		kvm_gfn_to_hva_cache_init(kvm, ghc, ghc->gpa);
++		kvm_gfn_to_hva_cache_init(kvm, ghc, ghc->gpa, ghc->len);
++
++	if (unlikely(!ghc->memslot))
++		return kvm_read_guest(kvm, ghc->gpa, data, len);
+ 
+ 	if (kvm_is_error_hva(ghc->hva))
+ 		return -EFAULT;
+-- 
+1.7.10.4
+
