@@ -3440,6 +3440,62 @@ index c8b6b66..c86a0f1 100644
  #if __OS_HAS_AGP
  static void *agp_remap(unsigned long offset, unsigned long size,
  		       struct drm_device * dev)
+diff --git a/drivers/gpu/drm/drm_mm.c b/drivers/gpu/drm/drm_mm.c
+index 961fb54..7f88de6 100644
+--- a/drivers/gpu/drm/drm_mm.c
++++ b/drivers/gpu/drm/drm_mm.c
+@@ -680,33 +680,35 @@ void drm_mm_debug_table(struct drm_mm *mm, const char *prefix)
+ EXPORT_SYMBOL(drm_mm_debug_table);
+ 
+ #if defined(CONFIG_DEBUG_FS)
+-int drm_mm_dump_table(struct seq_file *m, struct drm_mm *mm)
++static unsigned long drm_mm_dump_hole(struct seq_file *m, struct drm_mm_node *entry)
+ {
+-	struct drm_mm_node *entry;
+-	unsigned long total_used = 0, total_free = 0, total = 0;
+ 	unsigned long hole_start, hole_end, hole_size;
+ 
+-	hole_start = drm_mm_hole_node_start(&mm->head_node);
+-	hole_end = drm_mm_hole_node_end(&mm->head_node);
+-	hole_size = hole_end - hole_start;
+-	if (hole_size)
++	if (entry->hole_follows) {
++		hole_start = drm_mm_hole_node_start(entry);
++		hole_end = drm_mm_hole_node_end(entry);
++		hole_size = hole_end - hole_start;
+ 		seq_printf(m, "0x%08lx-0x%08lx: 0x%08lx: free\n",
+ 				hole_start, hole_end, hole_size);
+-	total_free += hole_size;
++		return hole_size;
++	}
++
++	return 0;
++}
++
++int drm_mm_dump_table(struct seq_file *m, struct drm_mm *mm)
++{
++	struct drm_mm_node *entry;
++	unsigned long total_used = 0, total_free = 0, total = 0;
++
++	total_free += drm_mm_dump_hole(m, &mm->head_node);
+ 
+ 	drm_mm_for_each_node(entry, mm) {
+ 		seq_printf(m, "0x%08lx-0x%08lx: 0x%08lx: used\n",
+ 				entry->start, entry->start + entry->size,
+ 				entry->size);
+ 		total_used += entry->size;
+-		if (entry->hole_follows) {
+-			hole_start = drm_mm_hole_node_start(entry);
+-			hole_end = drm_mm_hole_node_end(entry);
+-			hole_size = hole_end - hole_start;
+-			seq_printf(m, "0x%08lx-0x%08lx: 0x%08lx: free\n",
+-					hole_start, hole_end, hole_size);
+-			total_free += hole_size;
+-		}
++		total_free += drm_mm_dump_hole(m, entry);
+ 	}
+ 	total = total_free + total_used;
+ 
 diff --git a/drivers/gpu/drm/drm_modes.c b/drivers/gpu/drm/drm_modes.c
 index fb8e46b..b7adb4a 100644
 --- a/drivers/gpu/drm/drm_modes.c
@@ -43542,7 +43598,7 @@ index 9b4e5c6..34791fb 100644
  		return ret;
  
 diff --git a/drivers/gpu/drm/i915/i915_dma.c b/drivers/gpu/drm/i915/i915_dma.c
-index c77fc67..ba60f3c 100644
+index ca67338..ba60f3c 100644
 --- a/drivers/gpu/drm/i915/i915_dma.c
 +++ b/drivers/gpu/drm/i915/i915_dma.c
 @@ -781,6 +781,12 @@ static int i915_getparam(struct drm_device *dev, void *data,
@@ -43558,122 +43614,7 @@ index c77fc67..ba60f3c 100644
  	default:
  		DRM_DEBUG_DRIVER("Unknown parameter %d\n",
  				 param->param);
-@@ -1007,50 +1013,56 @@ intel_teardown_mchbar(struct drm_device *dev)
- 		release_resource(&dev_priv->mch_res);
- }
- 
--static unsigned long i915_stolen_to_physical(struct drm_device *dev)
-+#define PTE_ADDRESS_MASK		0xfffff000
-+#define PTE_ADDRESS_MASK_HIGH		0x000000f0 /* i915+ */
-+#define PTE_MAPPING_TYPE_UNCACHED	(0 << 1)
-+#define PTE_MAPPING_TYPE_DCACHE		(1 << 1) /* i830 only */
-+#define PTE_MAPPING_TYPE_CACHED		(3 << 1)
-+#define PTE_MAPPING_TYPE_MASK		(3 << 1)
-+#define PTE_VALID			(1 << 0)
-+
-+/**
-+ * i915_stolen_to_phys - take an offset into stolen memory and turn it into
-+ *                       a physical one
-+ * @dev: drm device
-+ * @offset: address to translate
-+ *
-+ * Some chip functions require allocations from stolen space and need the
-+ * physical address of the memory in question.
-+ */
-+static unsigned long i915_stolen_to_phys(struct drm_device *dev, u32 offset)
- {
- 	struct drm_i915_private *dev_priv = dev->dev_private;
- 	struct pci_dev *pdev = dev_priv->bridge_dev;
- 	u32 base;
- 
-+#if 0
- 	/* On the machines I have tested the Graphics Base of Stolen Memory
--	 * is unreliable, so on those compute the base by subtracting the
--	 * stolen memory from the Top of Low Usable DRAM which is where the
--	 * BIOS places the graphics stolen memory.
--	 *
--	 * On gen2, the layout is slightly different with the Graphics Segment
--	 * immediately following Top of Memory (or Top of Usable DRAM). Note
--	 * it appears that TOUD is only reported by 865g, so we just use the
--	 * top of memory as determined by the e820 probe.
--	 *
--	 * XXX gen2 requires an unavailable symbol and 945gm fails with
--	 * its value of TOLUD.
-+	 * is unreliable, so compute the base by subtracting the stolen memory
-+	 * from the Top of Low Usable DRAM which is where the BIOS places
-+	 * the graphics stolen memory.
- 	 */
--	base = 0;
--	if (INTEL_INFO(dev)->gen >= 6) {
--		/* Read Base Data of Stolen Memory Register (BDSM) directly.
--		 * Note that there is also a MCHBAR miror at 0x1080c0 or
--		 * we could use device 2:0x5c instead.
--		*/
--		pci_read_config_dword(pdev, 0xB0, &base);
--		base &= ~4095; /* lower bits used for locking register */
--	} else if (INTEL_INFO(dev)->gen > 3 || IS_G33(dev)) {
--		/* Read Graphics Base of Stolen Memory directly */
-+	if (INTEL_INFO(dev)->gen > 3 || IS_G33(dev)) {
-+		/* top 32bits are reserved = 0 */
- 		pci_read_config_dword(pdev, 0xA4, &base);
--#if 0
--	} else if (IS_GEN3(dev)) {
-+	} else {
-+		/* XXX presume 8xx is the same as i915 */
-+		pci_bus_read_config_dword(pdev->bus, 2, 0x5C, &base);
-+	}
-+#else
-+	if (INTEL_INFO(dev)->gen > 3 || IS_G33(dev)) {
-+		u16 val;
-+		pci_read_config_word(pdev, 0xb0, &val);
-+		base = val >> 4 << 20;
-+	} else {
- 		u8 val;
--		/* Stolen is immediately below Top of Low Usable DRAM */
- 		pci_read_config_byte(pdev, 0x9c, &val);
- 		base = val >> 3 << 27;
--		base -= dev_priv->mm.gtt->stolen_size;
--	} else {
--		/* Stolen is immediately above Top of Memory */
--		base = max_low_pfn_mapped << PAGE_SHIFT;
--#endif
- 	}
-+	base -= dev_priv->mm.gtt->stolen_size;
-+#endif
- 
--	return base;
-+	return base + offset;
- }
- 
- static void i915_warn_stolen(struct drm_device *dev)
-@@ -1075,7 +1087,7 @@ static void i915_setup_compression(struct drm_device *dev, int size)
- 	if (!compressed_fb)
- 		goto err;
- 
--	cfb_base = dev_priv->mm.stolen_base + compressed_fb->start;
-+	cfb_base = i915_stolen_to_phys(dev, compressed_fb->start);
- 	if (!cfb_base)
- 		goto err_fb;
- 
-@@ -1088,7 +1100,7 @@ static void i915_setup_compression(struct drm_device *dev, int size)
- 		if (!compressed_llb)
- 			goto err_fb;
- 
--		ll_base = dev_priv->mm.stolen_base + compressed_llb->start;
-+		ll_base = i915_stolen_to_phys(dev, compressed_llb->start);
- 		if (!ll_base)
- 			goto err_llb;
- 	}
-@@ -1107,7 +1119,7 @@ static void i915_setup_compression(struct drm_device *dev, int size)
- 	}
- 
- 	DRM_DEBUG_KMS("FBC base 0x%08lx, ll base 0x%08lx, size %dM\n",
--		      (long)cfb_base, (long)ll_base, size >> 20);
-+		      cfb_base, ll_base, size >> 20);
- 	return;
- 
- err_llb:
-@@ -1171,6 +1183,21 @@ static bool i915_switcheroo_can_switch(struct pci_dev *pdev)
+@@ -1177,6 +1183,21 @@ static bool i915_switcheroo_can_switch(struct pci_dev *pdev)
  	return can_switch;
  }
  
@@ -43695,17 +43636,7 @@ index c77fc67..ba60f3c 100644
  static int i915_load_gem_init(struct drm_device *dev)
  {
  	struct drm_i915_private *dev_priv = dev->dev_private;
-@@ -1181,32 +1208,44 @@ static int i915_load_gem_init(struct drm_device *dev)
- 	gtt_size = dev_priv->mm.gtt->gtt_total_entries << PAGE_SHIFT;
- 	mappable_size = dev_priv->mm.gtt->gtt_mappable_entries << PAGE_SHIFT;
- 
--	dev_priv->mm.stolen_base = i915_stolen_to_physical(dev);
--	if (dev_priv->mm.stolen_base == 0)
--		return 0;
--
--	DRM_DEBUG_KMS("found %d bytes of stolen memory at %08lx\n",
--		      dev_priv->mm.gtt->stolen_size, dev_priv->mm.stolen_base);
--
+@@ -1190,22 +1211,41 @@ static int i915_load_gem_init(struct drm_device *dev)
  	/* Basic memrange allocator for stolen space */
  	drm_mm_init(&dev_priv->mm.stolen, 0, prealloc_size);
  
@@ -43760,7 +43691,7 @@ index c77fc67..ba60f3c 100644
  
  	/* Try to set up FBC with a reasonable compressed buffer size */
  	if (I915_HAS_FBC(dev) && i915_powersave) {
-@@ -1293,6 +1332,7 @@ cleanup_gem:
+@@ -1292,6 +1332,7 @@ cleanup_gem:
  	mutex_lock(&dev->struct_mutex);
  	i915_gem_cleanup_ringbuffer(dev);
  	mutex_unlock(&dev->struct_mutex);
@@ -43768,7 +43699,7 @@ index c77fc67..ba60f3c 100644
  cleanup_vga_switcheroo:
  	vga_switcheroo_unregister_client(dev->pdev);
  cleanup_vga_client:
-@@ -1661,6 +1701,9 @@ void i915_update_gfx_val(struct drm_i915_private *dev_priv)
+@@ -1660,6 +1701,9 @@ void i915_update_gfx_val(struct drm_i915_private *dev_priv)
  	unsigned long diffms;
  	u32 count;
  
@@ -43778,7 +43709,7 @@ index c77fc67..ba60f3c 100644
  	getrawmonotonic(&now);
  	diff1 = timespec_sub(now, dev_priv->last_time2);
  
-@@ -1891,27 +1934,6 @@ ips_ping_for_i915_load(void)
+@@ -1890,27 +1934,6 @@ ips_ping_for_i915_load(void)
  	}
  }
  
@@ -43806,7 +43737,7 @@ index c77fc67..ba60f3c 100644
  /**
   * i915_driver_load - setup chip and create an initial config
   * @dev: DRM device
-@@ -1949,14 +1971,7 @@ int i915_driver_load(struct drm_device *dev, unsigned long flags)
+@@ -1948,14 +1971,7 @@ int i915_driver_load(struct drm_device *dev, unsigned long flags)
  		goto free_priv;
  	}
  
@@ -43822,7 +43753,7 @@ index c77fc67..ba60f3c 100644
  
  	/* overlay on gen2 is broken and can't address above 1G */
  	if (IS_GEN2(dev))
-@@ -1981,6 +1996,13 @@ int i915_driver_load(struct drm_device *dev, unsigned long flags)
+@@ -1980,6 +1996,13 @@ int i915_driver_load(struct drm_device *dev, unsigned long flags)
  		goto put_bridge;
  	}
  
@@ -43836,7 +43767,7 @@ index c77fc67..ba60f3c 100644
  	agp_size = dev_priv->mm.gtt->gtt_mappable_entries << PAGE_SHIFT;
  
  	dev_priv->mm.gtt_mapping =
-@@ -2102,12 +2124,14 @@ int i915_driver_load(struct drm_device *dev, unsigned long flags)
+@@ -2101,12 +2124,14 @@ int i915_driver_load(struct drm_device *dev, unsigned long flags)
  	setup_timer(&dev_priv->hangcheck_timer, i915_hangcheck_elapsed,
  		    (unsigned long) dev);
  
@@ -43856,7 +43787,7 @@ index c77fc67..ba60f3c 100644
  
  	return 0;
  
-@@ -2150,7 +2174,7 @@ int i915_driver_unload(struct drm_device *dev)
+@@ -2149,7 +2174,7 @@ int i915_driver_unload(struct drm_device *dev)
  		unregister_shrinker(&dev_priv->mm.inactive_shrinker);
  
  	mutex_lock(&dev->struct_mutex);
@@ -43865,7 +43796,7 @@ index c77fc67..ba60f3c 100644
  	if (ret)
  		DRM_ERROR("failed to idle hardware: %d\n", ret);
  	mutex_unlock(&dev->struct_mutex);
-@@ -2203,6 +2227,7 @@ int i915_driver_unload(struct drm_device *dev)
+@@ -2202,6 +2227,7 @@ int i915_driver_unload(struct drm_device *dev)
  		i915_gem_free_all_phys_object(dev);
  		i915_gem_cleanup_ringbuffer(dev);
  		mutex_unlock(&dev->struct_mutex);
@@ -43873,7 +43804,7 @@ index c77fc67..ba60f3c 100644
  		if (I915_HAS_FBC(dev) && i915_powersave)
  			i915_cleanup_compression(dev);
  		drm_mm_takedown(&dev_priv->mm.stolen);
-@@ -2268,18 +2293,12 @@ void i915_driver_lastclose(struct drm_device * dev)
+@@ -2267,18 +2293,12 @@ void i915_driver_lastclose(struct drm_device * dev)
  
  	i915_gem_lastclose(dev);
  
@@ -43892,7 +43823,7 @@ index c77fc67..ba60f3c 100644
  }
  
  void i915_driver_postclose(struct drm_device *dev, struct drm_file *file)
-@@ -2298,11 +2317,11 @@ struct drm_ioctl_desc i915_ioctls[] = {
+@@ -2297,11 +2317,11 @@ struct drm_ioctl_desc i915_ioctls[] = {
  	DRM_IOCTL_DEF_DRV(I915_IRQ_WAIT, i915_irq_wait, DRM_AUTH),
  	DRM_IOCTL_DEF_DRV(I915_GETPARAM, i915_getparam, DRM_AUTH),
  	DRM_IOCTL_DEF_DRV(I915_SETPARAM, i915_setparam, DRM_AUTH|DRM_MASTER|DRM_ROOT_ONLY),
@@ -43908,7 +43839,7 @@ index c77fc67..ba60f3c 100644
  	DRM_IOCTL_DEF_DRV(I915_SET_VBLANK_PIPE,  i915_vblank_pipe_set, DRM_AUTH|DRM_MASTER|DRM_ROOT_ONLY),
  	DRM_IOCTL_DEF_DRV(I915_GET_VBLANK_PIPE,  i915_vblank_pipe_get, DRM_AUTH),
  	DRM_IOCTL_DEF_DRV(I915_VBLANK_SWAP, i915_vblank_swap, DRM_AUTH),
-@@ -2330,6 +2349,8 @@ struct drm_ioctl_desc i915_ioctls[] = {
+@@ -2329,6 +2349,8 @@ struct drm_ioctl_desc i915_ioctls[] = {
  	DRM_IOCTL_DEF_DRV(I915_GEM_MADVISE, i915_gem_madvise_ioctl, DRM_UNLOCKED),
  	DRM_IOCTL_DEF_DRV(I915_OVERLAY_PUT_IMAGE, intel_overlay_put_image, DRM_MASTER|DRM_CONTROL_ALLOW|DRM_UNLOCKED),
  	DRM_IOCTL_DEF_DRV(I915_OVERLAY_ATTRS, intel_overlay_attrs, DRM_MASTER|DRM_CONTROL_ALLOW|DRM_UNLOCKED),
@@ -44224,7 +44155,7 @@ index 452bc51..89f3d4a 100644
  __i915_write(8, b)
  __i915_write(16, w)
 diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
-index 20cd295..45c5cf8 100644
+index 144d37c..45c5cf8 100644
 --- a/drivers/gpu/drm/i915/i915_drv.h
 +++ b/drivers/gpu/drm/i915/i915_drv.h
 @@ -35,6 +35,7 @@
@@ -44397,12 +44328,7 @@ index 20cd295..45c5cf8 100644
  
  	/* LVDS info */
  	int backlight_level;  /* restore backlight to this value */
-@@ -581,11 +612,13 @@ typedef struct drm_i915_private {
- 		unsigned long gtt_start;
- 		unsigned long gtt_mappable_end;
- 		unsigned long gtt_end;
--		unsigned long stolen_base; /* limited to low memory (32-bit) */
- 
+@@ -585,6 +616,9 @@ typedef struct drm_i915_private {
  		struct io_mapping *gtt_mapping;
  		int gtt_mtrr;
  
@@ -44412,7 +44338,7 @@ index 20cd295..45c5cf8 100644
  		struct shrinker inactive_shrinker;
  
  		/**
-@@ -751,6 +784,13 @@ typedef struct drm_i915_private {
+@@ -750,6 +784,13 @@ typedef struct drm_i915_private {
  	struct drm_property *force_audio_property;
  } drm_i915_private_t;
  
@@ -44426,7 +44352,7 @@ index 20cd295..45c5cf8 100644
  enum i915_cache_level {
  	I915_CACHE_NONE,
  	I915_CACHE_LLC,
-@@ -843,6 +883,8 @@ struct drm_i915_gem_object {
+@@ -842,6 +883,8 @@ struct drm_i915_gem_object {
  
  	unsigned int cache_level:2;
  
@@ -44435,7 +44361,7 @@ index 20cd295..45c5cf8 100644
  	struct page **pages;
  
  	/**
-@@ -920,6 +962,9 @@ struct drm_i915_gem_request {
+@@ -919,6 +962,9 @@ struct drm_i915_gem_request {
  	/** GEM sequence number associated with this request. */
  	uint32_t seqno;
  
@@ -44445,7 +44371,7 @@ index 20cd295..45c5cf8 100644
  	/** Time at which this request was emitted, in jiffies. */
  	unsigned long emitted_jiffies;
  
-@@ -976,8 +1021,11 @@ struct drm_i915_file_private {
+@@ -975,8 +1021,11 @@ struct drm_i915_file_private {
  
  #define HAS_BSD(dev)            (INTEL_INFO(dev)->has_bsd_ring)
  #define HAS_BLT(dev)            (INTEL_INFO(dev)->has_blt_ring)
@@ -44457,7 +44383,7 @@ index 20cd295..45c5cf8 100644
  #define HAS_OVERLAY(dev)		(INTEL_INFO(dev)->has_overlay)
  #define OVERLAY_NEEDS_PHYSICAL(dev)	(INTEL_INFO(dev)->overlay_needs_physical)
  
-@@ -1010,6 +1058,27 @@ struct drm_i915_file_private {
+@@ -1009,6 +1058,27 @@ struct drm_i915_file_private {
  
  #include "i915_trace.h"
  
@@ -44485,7 +44411,7 @@ index 20cd295..45c5cf8 100644
  extern struct drm_ioctl_desc i915_ioctls[];
  extern int i915_max_ioctl;
  extern unsigned int i915_fbpercrtc __always_unused;
-@@ -1022,6 +1091,7 @@ extern int i915_vbt_sdvo_panel_type __read_mostly;
+@@ -1021,6 +1091,7 @@ extern int i915_vbt_sdvo_panel_type __read_mostly;
  extern int i915_enable_rc6 __read_mostly;
  extern int i915_enable_fbc __read_mostly;
  extern bool i915_enable_hangcheck __read_mostly;
@@ -44493,7 +44419,7 @@ index 20cd295..45c5cf8 100644
  
  extern int i915_suspend(struct drm_device *dev, pm_message_t state);
  extern int i915_resume(struct drm_device *dev);
-@@ -1083,18 +1153,6 @@ extern void i915_destroy_error_state(struct drm_device *dev);
+@@ -1082,18 +1153,6 @@ extern void i915_destroy_error_state(struct drm_device *dev);
  #endif
  
  
@@ -44512,7 +44438,7 @@ index 20cd295..45c5cf8 100644
  /* i915_gem.c */
  int i915_gem_init_ioctl(struct drm_device *dev, void *data,
  			struct drm_file *file_priv);
-@@ -1180,26 +1238,49 @@ int __must_check i915_gem_object_get_fence(struct drm_i915_gem_object *obj,
+@@ -1179,26 +1238,49 @@ int __must_check i915_gem_object_get_fence(struct drm_i915_gem_object *obj,
  					   struct intel_ring_buffer *pipelined);
  int __must_check i915_gem_object_put_fence(struct drm_i915_gem_object *obj);
  
@@ -44565,7 +44491,7 @@ index 20cd295..45c5cf8 100644
  int i915_gem_fault(struct vm_area_struct *vma, struct vm_fault *vmf);
  int __must_check
  i915_gem_object_set_to_gtt_domain(struct drm_i915_gem_object *obj,
-@@ -1226,6 +1307,14 @@ int i915_gem_object_set_cache_level(struct drm_i915_gem_object *obj,
+@@ -1225,6 +1307,14 @@ int i915_gem_object_set_cache_level(struct drm_i915_gem_object *obj,
  				    enum i915_cache_level cache_level);
  
  /* i915_gem_gtt.c */
@@ -44580,7 +44506,7 @@ index 20cd295..45c5cf8 100644
  void i915_gem_restore_gtt_mappings(struct drm_device *dev);
  int __must_check i915_gem_gtt_bind_object(struct drm_i915_gem_object *obj);
  void i915_gem_gtt_rebind_object(struct drm_i915_gem_object *obj,
-@@ -1307,7 +1396,6 @@ static inline void intel_unregister_dsm_handler(void) { return; }
+@@ -1306,7 +1396,6 @@ static inline void intel_unregister_dsm_handler(void) { return; }
  #endif /* CONFIG_ACPI */
  
  /* modesetting */
@@ -44588,7 +44514,7 @@ index 20cd295..45c5cf8 100644
  extern void intel_modeset_init(struct drm_device *dev);
  extern void intel_modeset_gem_init(struct drm_device *dev);
  extern void intel_modeset_cleanup(struct drm_device *dev);
-@@ -1365,14 +1453,7 @@ extern void intel_display_print_error_state(struct seq_file *m,
+@@ -1364,14 +1453,7 @@ extern void intel_display_print_error_state(struct seq_file *m,
   */
  void gen6_gt_force_wake_get(struct drm_i915_private *dev_priv);
  void gen6_gt_force_wake_put(struct drm_i915_private *dev_priv);
@@ -73294,7 +73220,7 @@ index 7b4eeb7..19a0114 100644
  #include <linux/kernel.h>
  
 diff --git a/drivers/gpu/drm/radeon/evergreen.c b/drivers/gpu/drm/radeon/evergreen.c
-index 0495a50..e458acb 100644
+index 0495a50..6a8776e 100644
 --- a/drivers/gpu/drm/radeon/evergreen.c
 +++ b/drivers/gpu/drm/radeon/evergreen.c
 @@ -50,6 +50,39 @@ static const u32 crtc_offsets[6] =
@@ -73714,7 +73640,7 @@ index 0495a50..e458acb 100644
  		tmp = RREG32(FUS_MC_ARB_RAMCFG);
  	else
  		tmp = RREG32(MC_ARB_RAMCFG);
-@@ -2316,12 +2435,14 @@ int evergreen_mc_init(struct radeon_device *rdev)
+@@ -2316,14 +2435,16 @@ int evergreen_mc_init(struct radeon_device *rdev)
  	rdev->mc.aper_base = pci_resource_start(rdev->pdev, 0);
  	rdev->mc.aper_size = pci_resource_len(rdev->pdev, 0);
  	/* Setup GPU memory space */
@@ -73727,10 +73653,14 @@ index 0495a50..e458acb 100644
  		rdev->mc.real_vram_size = RREG32(CONFIG_MEMSIZE);
  	} else {
 -		/* size in MB on evergreen */
+-		rdev->mc.mc_vram_size = RREG32(CONFIG_MEMSIZE) * 1024 * 1024;
+-		rdev->mc.real_vram_size = RREG32(CONFIG_MEMSIZE) * 1024 * 1024;
 +		/* size in MB on evergreen/cayman/tn */
- 		rdev->mc.mc_vram_size = RREG32(CONFIG_MEMSIZE) * 1024 * 1024;
- 		rdev->mc.real_vram_size = RREG32(CONFIG_MEMSIZE) * 1024 * 1024;
++		rdev->mc.mc_vram_size = RREG32(CONFIG_MEMSIZE) * 1024ULL * 1024ULL;
++		rdev->mc.real_vram_size = RREG32(CONFIG_MEMSIZE) * 1024ULL * 1024ULL;
  	}
+ 	rdev->mc.visible_vram_size = rdev->mc.aper_size;
+ 	r700_vram_gtt_location(rdev, &rdev->mc);
 @@ -2332,7 +2453,7 @@ int evergreen_mc_init(struct radeon_device *rdev)
  	return 0;
  }
@@ -91230,7 +91160,7 @@ index 602fa35..dc5dcf4 100644
 +	}
 +}
 diff --git a/drivers/gpu/drm/radeon/radeon_ttm.c b/drivers/gpu/drm/radeon/radeon_ttm.c
-index 0b5468b..f493c64 100644
+index 0b5468b..49b55ed 100644
 --- a/drivers/gpu/drm/radeon/radeon_ttm.c
 +++ b/drivers/gpu/drm/radeon/radeon_ttm.c
 @@ -114,24 +114,6 @@ static void radeon_ttm_global_fini(struct radeon_device *rdev)
@@ -91504,6 +91434,15 @@ index 0b5468b..f493c64 100644
  	.invalidate_caches = &radeon_invalidate_caches,
  	.init_mem_type = &radeon_init_mem_type,
  	.evict_flags = &radeon_evict_flags,
+@@ -573,7 +744,7 @@ int radeon_ttm_init(struct radeon_device *rdev)
+ 		return r;
+ 	}
+ 	DRM_INFO("radeon: %uM of VRAM memory ready\n",
+-		 (unsigned)rdev->mc.real_vram_size / (1024 * 1024));
++		 (unsigned) (rdev->mc.real_vram_size / (1024 * 1024)));
+ 	r = ttm_bo_init_mm(&rdev->mman.bdev, TTM_PL_TT,
+ 				rdev->mc.gtt_size >> PAGE_SHIFT);
+ 	if (r) {
 @@ -680,124 +851,6 @@ int radeon_mmap(struct file *filp, struct vm_area_struct *vma)
  }
  
@@ -92592,7 +92531,7 @@ index cc79449..591040b 100644
  	radeon_bo_fini(rdev);
 diff --git a/drivers/gpu/drm/radeon/si.c b/drivers/gpu/drm/radeon/si.c
 new file mode 100644
-index 0000000..5508ad7
+index 0000000..2dbd585
 --- /dev/null
 +++ b/drivers/gpu/drm/radeon/si.c
 @@ -0,0 +1,4129 @@
@@ -95062,8 +95001,8 @@ index 0000000..5508ad7
 +	rdev->mc.aper_base = pci_resource_start(rdev->pdev, 0);
 +	rdev->mc.aper_size = pci_resource_len(rdev->pdev, 0);
 +	/* size in MB on si */
-+	rdev->mc.mc_vram_size = RREG32(CONFIG_MEMSIZE) * 1024 * 1024;
-+	rdev->mc.real_vram_size = RREG32(CONFIG_MEMSIZE) * 1024 * 1024;
++	rdev->mc.mc_vram_size = RREG32(CONFIG_MEMSIZE) * 1024ULL * 1024ULL;
++	rdev->mc.real_vram_size = RREG32(CONFIG_MEMSIZE) * 1024ULL * 1024ULL;
 +	rdev->mc.visible_vram_size = rdev->mc.aper_size;
 +	si_vram_gtt_location(rdev, &rdev->mc);
 +	radeon_update_bandwidth_info(rdev);
