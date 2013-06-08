@@ -1,0 +1,123 @@
+From: Stanislav Yakovlev <stas.yakovlev@gmail.com>
+Date: Mon, 14 May 2012 19:06:19 -0400
+Subject: net/wireless: ipw2100: Fix WARN_ON occurring in wiphy_register
+ called by ipw2100_pci_init_one
+
+commit aac495a8002bbf20e879572c6cf0789ab2ffb32b upstream.
+
+The problem was found by Larry Finger:
+http://marc.info/?l=linux-wireless&m=133702401700614&w=2
+
+The problem is identical to the one for ipw2200 which is already fixed:
+http://marc.info/?l=linux-wireless&m=133457257407196&w=2
+
+[   17.766431] ------------[ cut here ]------------
+[   17.766467] WARNING: at net/wireless/core.c:562 wiphy_register+0x34c/0x3c0 [cfg80211]()
+[   17.766471] Hardware name: Latitude D600
+[   17.766474] Modules linked in: ipw2100(+) libipw pcmcia cfg80211 ppdev parport_pc yenta_socket sr_mod pcmcia_rsrc parport iTCO_wdt cdrom sg rfkill pcmcia_
+core lib80211 tg3 video button battery ac iTCO_vendor_support joydev shpchp pcspkr pciehp pci_hotplug autofs4 radeon ttm drm_kms_helper uhci_hcd ehci_hcd rtc
+_cmos thermal drm hwmon i2c_algo_bit i2c_core processor usbcore usb_common ata_generic ata_piix ahci libahci libata
+[   17.766525] Pid: 474, comm: modprobe Not tainted 3.4.0-rc7-wl+ #6
+[   17.766528] Call Trace:
+[   17.766541]  [<c066ad08>] ? printk+0x28/0x2a
+[   17.766552]  [<c0230edd>] warn_slowpath_common+0x6d/0xa0
+[   17.766563]  [<e0b253bc>] ? wiphy_register+0x34c/0x3c0 [cfg80211]
+[   17.766573]  [<e0b253bc>] ? wiphy_register+0x34c/0x3c0 [cfg80211]
+[   17.766578]  [<c0230f2d>] warn_slowpath_null+0x1d/0x20
+[   17.766588]  [<e0b253bc>] wiphy_register+0x34c/0x3c0 [cfg80211]
+[   17.766605]  [<e0b5b0d6>] ipw2100_wdev_init+0x196/0x1c0 [ipw2100]
+[   17.766616]  [<e0b5d962>] ipw2100_pci_init_one+0x2b2/0x694 [ipw2100]
+[   17.766632]  [<c047ce52>] local_pci_probe+0x42/0xb0
+[   17.766637]  [<c047e2b0>] pci_device_probe+0x60/0x90
+[   17.766645]  [<c0376de2>] ? sysfs_create_link+0x12/0x20
+[   17.766654]  [<c050f1f6>] really_probe+0x56/0x2e0
+[   17.766659]  [<c037636d>] ? create_dir+0x5d/0xa0
+[   17.766667]  [<c0518c6b>] ? pm_runtime_barrier+0x3b/0xa0
+[   17.766672]  [<c050f5e4>] driver_probe_device+0x44/0xa0
+[   17.766677]  [<c047e227>] ? pci_match_device+0x97/0xa0
+[   17.766681]  [<c050f6c9>] __driver_attach+0x89/0x90
+[   17.766686]  [<c050f640>] ? driver_probe_device+0xa0/0xa0
+[   17.766691]  [<c050da2a>] bus_for_each_dev+0x3a/0x70
+[   17.766695]  [<c050ee6c>] driver_attach+0x1c/0x30
+[   17.766699]  [<c050f640>] ? driver_probe_device+0xa0/0xa0
+[   17.766704]  [<c050ea77>] bus_add_driver+0x187/0x280
+[   17.766710]  [<c045b9cd>] ? kset_find_obj+0x2d/0x60
+[   17.766715]  [<c047e2e0>] ? pci_device_probe+0x90/0x90
+[   17.766719]  [<c047e2e0>] ? pci_device_probe+0x90/0x90
+[   17.766724]  [<c050fb85>] driver_register+0x65/0x110
+[   17.766729]  [<c047e09d>] __pci_register_driver+0x3d/0xa0
+[   17.766738]  [<e09f705c>] ipw2100_init+0x5c/0x1000 [ipw2100]
+[   17.766743]  [<c020110f>] do_one_initcall+0x2f/0x170
+[   17.766749]  [<e09f7000>] ? 0xe09f6fff
+[   17.766757]  [<c0287ce8>] sys_init_module+0xa8/0x210
+[   17.766766]  [<c067a075>] syscall_call+0x7/0xb
+[   17.766769] ---[ end trace 559898c6bb0d1c75 ]---
+[   17.767093] ipw2100: probe of 0000:02:03.0 failed with error -5
+
+This warning appears only if we apply Ben Hutchings' fix
+http://marc.info/?l=linux-wireless&m=132720204412667&w=2
+for the bug reported by Cesare Leonardi
+http://bugs.debian.org/cgi-bin/bugreport.cgi?bug=656813
+with cfg80211 warning during device registration
+("cfg80211: failed to add phy80211 symlink to netdev!").
+
+We separate device bring up and registration with network stack
+to avoid the problem.
+
+Signed-off-by: Stanislav Yakovlev <stas.yakovlev@gmail.com>
+Tested-by: Larry Finger <Larry.Finger@lwfinger.net>
+Signed-off-by: John W. Linville <linville@tuxdriver.com>
+---
+ drivers/net/wireless/ipw2x00/ipw2100.c |   20 +++++---------------
+ 1 file changed, 5 insertions(+), 15 deletions(-)
+
+--- a/drivers/net/wireless/ipw2x00/ipw2100.c
++++ b/drivers/net/wireless/ipw2x00/ipw2100.c
+@@ -1900,14 +1900,6 @@ static void ipw2100_down(struct ipw2100_
+ 	netif_stop_queue(priv->net_dev);
+ }
+ 
+-/* Called by register_netdev() */
+-static int ipw2100_net_init(struct net_device *dev)
+-{
+-	struct ipw2100_priv *priv = libipw_priv(dev);
+-
+-	return ipw2100_up(priv, 1);
+-}
+-
+ static int ipw2100_wdev_init(struct net_device *dev)
+ {
+ 	struct ipw2100_priv *priv = libipw_priv(dev);
+@@ -6086,7 +6078,6 @@ static const struct net_device_ops ipw21
+ 	.ndo_stop		= ipw2100_close,
+ 	.ndo_start_xmit		= libipw_xmit,
+ 	.ndo_change_mtu		= libipw_change_mtu,
+-	.ndo_init		= ipw2100_net_init,
+ 	.ndo_tx_timeout		= ipw2100_tx_timeout,
+ 	.ndo_set_mac_address	= ipw2100_set_address,
+ 	.ndo_validate_addr	= eth_validate_addr,
+@@ -6338,6 +6329,10 @@ static int ipw2100_pci_init_one(struct p
+ 	printk(KERN_INFO DRV_NAME
+ 	       ": Detected Intel PRO/Wireless 2100 Network Connection\n");
+ 
++	err = ipw2100_up(priv, 1);
++	if (err)
++		goto fail;
++
+ 	err = ipw2100_wdev_init(dev);
+ 	if (err)
+ 		goto fail;
+@@ -6347,12 +6342,7 @@ static int ipw2100_pci_init_one(struct p
+ 	 * network device we would call ipw2100_up.  This introduced a race
+ 	 * condition with newer hotplug configurations (network was coming
+ 	 * up and making calls before the device was initialized).
+-	 *
+-	 * If we called ipw2100_up before we registered the device, then the
+-	 * device name wasn't registered.  So, we instead use the net_dev->init
+-	 * member to call a function that then just turns and calls ipw2100_up.
+-	 * net_dev->init is called after name allocation but before the
+-	 * notifier chain is called */
++	 */
+ 	err = register_netdev(dev);
+ 	if (err) {
+ 		printk(KERN_WARNING DRV_NAME
