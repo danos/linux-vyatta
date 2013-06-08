@@ -1,0 +1,92 @@
+From: Benjamin Poirier <bpoirier@suse.de>
+Date: Thu, 8 Mar 2012 05:55:58 +0000
+Subject: sctp: Export sctp_do_peeloff
+
+commit 0343c5543b1d3ffa08e6716d82afb62648b80eba upstream.
+
+lookup sctp_association within sctp_do_peeloff() to enable its use outside of
+the sctp code with minimal knowledge of the former.
+
+Signed-off-by: Benjamin Poirier <bpoirier@suse.de>
+Acked-by: Vlad Yasevich <vladislav.yasevich@hp.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ include/net/sctp/sctp.h |    1 +
+ net/sctp/socket.c       |   24 +++++++++---------------
+ 2 files changed, 10 insertions(+), 15 deletions(-)
+
+--- a/include/net/sctp/sctp.h
++++ b/include/net/sctp/sctp.h
+@@ -413,6 +413,7 @@ static inline sctp_assoc_t sctp_assoc2id
+ /* Look up the association by its id.  */
+ struct sctp_association *sctp_id2assoc(struct sock *sk, sctp_assoc_t id);
+ 
++int sctp_do_peeloff(struct sock *sk, sctp_assoc_t id, struct socket **sockp);
+ 
+ /* A macro to walk a list of skbs.  */
+ #define sctp_skb_for_each(pos, head, tmp) \
+--- a/net/sctp/socket.c
++++ b/net/sctp/socket.c
+@@ -4179,14 +4179,16 @@ static int sctp_getsockopt_autoclose(str
+ }
+ 
+ /* Helper routine to branch off an association to a new socket.  */
+-SCTP_STATIC int sctp_do_peeloff(struct sctp_association *asoc,
+-				struct socket **sockp)
++int sctp_do_peeloff(struct sock *sk, sctp_assoc_t id, struct socket **sockp)
+ {
+-	struct sock *sk = asoc->base.sk;
++	struct sctp_association *asoc = sctp_id2assoc(sk, id);
+ 	struct socket *sock;
+ 	struct sctp_af *af;
+ 	int err = 0;
+ 
++	if (!asoc)
++		return -EINVAL;
++
+ 	/* An association cannot be branched off from an already peeled-off
+ 	 * socket, nor is this supported for tcp style sockets.
+ 	 */
+@@ -4215,13 +4217,13 @@ SCTP_STATIC int sctp_do_peeloff(struct s
+ 
+ 	return err;
+ }
++EXPORT_SYMBOL(sctp_do_peeloff);
+ 
+ static int sctp_getsockopt_peeloff(struct sock *sk, int len, char __user *optval, int __user *optlen)
+ {
+ 	sctp_peeloff_arg_t peeloff;
+ 	struct socket *newsock;
+ 	int retval = 0;
+-	struct sctp_association *asoc;
+ 
+ 	if (len < sizeof(sctp_peeloff_arg_t))
+ 		return -EINVAL;
+@@ -4229,15 +4231,7 @@ static int sctp_getsockopt_peeloff(struc
+ 	if (copy_from_user(&peeloff, optval, len))
+ 		return -EFAULT;
+ 
+-	asoc = sctp_id2assoc(sk, peeloff.associd);
+-	if (!asoc) {
+-		retval = -EINVAL;
+-		goto out;
+-	}
+-
+-	SCTP_DEBUG_PRINTK("%s: sk: %p asoc: %p\n", __func__, sk, asoc);
+-
+-	retval = sctp_do_peeloff(asoc, &newsock);
++	retval = sctp_do_peeloff(sk, peeloff.associd, &newsock);
+ 	if (retval < 0)
+ 		goto out;
+ 
+@@ -4248,8 +4242,8 @@ static int sctp_getsockopt_peeloff(struc
+ 		goto out;
+ 	}
+ 
+-	SCTP_DEBUG_PRINTK("%s: sk: %p asoc: %p newsk: %p sd: %d\n",
+-			  __func__, sk, asoc, newsock->sk, retval);
++	SCTP_DEBUG_PRINTK("%s: sk: %p newsk: %p sd: %d\n",
++			  __func__, sk, newsock->sk, retval);
+ 
+ 	/* Return the fd mapped to the new socket.  */
+ 	peeloff.sd = retval;
