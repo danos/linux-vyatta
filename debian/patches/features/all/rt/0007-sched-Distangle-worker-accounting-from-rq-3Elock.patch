@@ -1,7 +1,7 @@
-From 3b9d4f10b3587307854796928088b43dab6664da Mon Sep 17 00:00:00 2001
+From f75d3a520087311fc9a4887fc5aa8cfe031d05b3 Mon Sep 17 00:00:00 2001
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Wed, 22 Jun 2011 19:47:03 +0200
-Subject: [PATCH 007/303] sched: Distangle worker accounting from rq-%3Elock
+Subject: [PATCH 007/307] sched: Distangle worker accounting from rq-%3Elock
 
 The worker accounting for cpu bound workers is plugged into the core
 scheduler code and the wakeup code. This is not a hard requirement and
@@ -24,13 +24,13 @@ Cc: Linus Torvalds <torvalds@linux-foundation.org>
 Link: http://lkml.kernel.org/r/20110622174919.135236139@linutronix.de
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 ---
- kernel/sched.c           |   66 +++++++++++----------------------------------
- kernel/workqueue.c       |   67 +++++++++++++++++++++-------------------------
+ kernel/sched.c           |   68 ++++++++++------------------------------------
+ kernel/workqueue.c       |   67 ++++++++++++++++++++-------------------------
  kernel/workqueue_sched.h |    5 ++--
- 3 files changed, 47 insertions(+), 91 deletions(-)
+ 3 files changed, 47 insertions(+), 93 deletions(-)
 
 diff --git a/kernel/sched.c b/kernel/sched.c
-index eeeec4e..561aa10 100644
+index d93369a..78a8143 100644
 --- a/kernel/sched.c
 +++ b/kernel/sched.c
 @@ -2640,10 +2640,6 @@ static void ttwu_activate(struct rq *rq, struct task_struct *p, int en_flags)
@@ -44,7 +44,7 @@ index eeeec4e..561aa10 100644
  }
  
  /*
-@@ -2878,40 +2874,6 @@ out:
+@@ -2878,42 +2874,6 @@ out:
  }
  
  /**
@@ -59,8 +59,10 @@ index eeeec4e..561aa10 100644
 -{
 -	struct rq *rq = task_rq(p);
 -
--	BUG_ON(rq != this_rq());
--	BUG_ON(p == current);
+-	if (WARN_ON_ONCE(rq != this_rq()) ||
+-	    WARN_ON_ONCE(p == current))
+-		return;
+-
 -	lockdep_assert_held(&rq->lock);
 -
 -	if (!raw_spin_trylock(&p->pi_lock)) {
@@ -85,7 +87,7 @@ index eeeec4e..561aa10 100644
   * wake_up_process - Wake up a specific process
   * @p: The process to be woken up.
   *
-@@ -4613,19 +4575,6 @@ need_resched:
+@@ -4615,19 +4575,6 @@ need_resched:
  		} else {
  			deactivate_task(rq, prev, DEQUEUE_SLEEP);
  			prev->on_rq = 0;
@@ -105,7 +107,7 @@ index eeeec4e..561aa10 100644
  		}
  		switch_count = &prev->nvcsw;
  	}
-@@ -4668,6 +4617,14 @@ static inline void sched_submit_work(struct task_struct *tsk)
+@@ -4670,6 +4617,14 @@ static inline void sched_submit_work(struct task_struct *tsk)
  {
  	if (!tsk->state)
  		return;
@@ -120,7 +122,7 @@ index eeeec4e..561aa10 100644
  	/*
  	 * If we are going to sleep and we have plugged IO queued,
  	 * make sure to submit it to avoid deadlocks.
-@@ -4676,12 +4633,19 @@ static inline void sched_submit_work(struct task_struct *tsk)
+@@ -4678,12 +4633,19 @@ static inline void sched_submit_work(struct task_struct *tsk)
  		blk_schedule_flush_plug(tsk);
  }
  
