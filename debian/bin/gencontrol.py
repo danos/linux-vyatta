@@ -409,11 +409,16 @@ class Gencontrol(Base):
         distribution = self.changelog[0].distribution
         if distribution in ('unstable', ):
             if (version.linux_revision_experimental or
-                    version.linux_revision_other):
+                version.linux_revision_backports or
+                version.linux_revision_other):
                 raise RuntimeError("Can't upload to %s with a version of %s" %
                         (distribution, version))
         if distribution in ('experimental', ):
             if not version.linux_revision_experimental:
+                raise RuntimeError("Can't upload to %s with a version of %s" %
+                        (distribution, version))
+        if distribution.endswith('-backports'):
+            if not version.linux_revision_backports:
                 raise RuntimeError("Can't upload to %s with a version of %s" %
                         (distribution, version))
 
