@@ -1,4 +1,4 @@
-From fda0037600d7ed56739b41f3606953d72a53c1db Mon Sep 17 00:00:00 2001
+From 7728c8dee8e704dd47bfe136f0b5662016243ecb Mon Sep 17 00:00:00 2001
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Wed, 15 Jun 2011 12:36:06 +0200
 Subject: [PATCH 158/307] hotplug: Lightweight get online cpus
@@ -13,12 +13,12 @@ tasks on the cpu which should be brought down.
 
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 ---
- include/linux/cpu.h |    4 ++
- kernel/cpu.c        |  127 +++++++++++++++++++++++++++++++++++++++++++++++++--
+ include/linux/cpu.h |   4 ++
+ kernel/cpu.c        | 127 ++++++++++++++++++++++++++++++++++++++++++++++++++--
  2 files changed, 128 insertions(+), 3 deletions(-)
 
 diff --git a/include/linux/cpu.h b/include/linux/cpu.h
-index c692acc..59d28d1 100644
+index 9c3e071..ff0a0ec 100644
 --- a/include/linux/cpu.h
 +++ b/include/linux/cpu.h
 @@ -168,6 +168,8 @@ extern struct sysdev_class cpu_sysdev_class;
@@ -27,20 +27,20 @@ index c692acc..59d28d1 100644
  extern void put_online_cpus(void);
 +extern void pin_current_cpu(void);
 +extern void unpin_current_cpu(void);
+ extern void cpu_hotplug_disable(void);
+ extern void cpu_hotplug_enable(void);
  #define hotcpu_notifier(fn, pri)	cpu_notifier(fn, pri)
- #define register_hotcpu_notifier(nb)	register_cpu_notifier(nb)
- #define unregister_hotcpu_notifier(nb)	unregister_cpu_notifier(nb)
-@@ -190,6 +192,8 @@ static inline void cpu_hotplug_driver_unlock(void)
+@@ -192,6 +194,8 @@ static inline void cpu_hotplug_driver_unlock(void)
  
  #define get_online_cpus()	do { } while (0)
  #define put_online_cpus()	do { } while (0)
 +static inline void pin_current_cpu(void) { }
 +static inline void unpin_current_cpu(void) { }
+ #define cpu_hotplug_disable()	do { } while (0)
+ #define cpu_hotplug_enable()	do { } while (0)
  #define hotcpu_notifier(fn, pri)	do { (void)(fn); } while (0)
- /* These aren't inline functions due to a GCC bug. */
- #define register_hotcpu_notifier(nb)	({ (void)(nb); 0; })
 diff --git a/kernel/cpu.c b/kernel/cpu.c
-index 563f136..df0a2fc 100644
+index 82c91f1..c9230dd 100644
 --- a/kernel/cpu.c
 +++ b/kernel/cpu.c
 @@ -58,6 +58,102 @@ static struct {
@@ -146,7 +146,7 @@ index 563f136..df0a2fc 100644
  void get_online_cpus(void)
  {
  	might_sleep();
-@@ -211,13 +307,14 @@ static int __ref take_cpu_down(void *_param)
+@@ -232,13 +328,14 @@ static int __ref take_cpu_down(void *_param)
  /* Requires cpu_add_remove_lock to be held */
  static int __ref _cpu_down(unsigned int cpu, int tasks_frozen)
  {
@@ -162,7 +162,7 @@ index 563f136..df0a2fc 100644
  
  	if (num_online_cpus() == 1)
  		return -EBUSY;
-@@ -225,7 +322,20 @@ static int __ref _cpu_down(unsigned int cpu, int tasks_frozen)
+@@ -246,7 +343,20 @@ static int __ref _cpu_down(unsigned int cpu, int tasks_frozen)
  	if (!cpu_online(cpu))
  		return -EINVAL;
  
@@ -184,7 +184,7 @@ index 563f136..df0a2fc 100644
  
  	err = __cpu_notify(CPU_DOWN_PREPARE | mod, hcpu, -1, &nr_calls);
  	if (err) {
-@@ -233,7 +343,16 @@ static int __ref _cpu_down(unsigned int cpu, int tasks_frozen)
+@@ -254,7 +364,16 @@ static int __ref _cpu_down(unsigned int cpu, int tasks_frozen)
  		__cpu_notify(CPU_DOWN_FAILED | mod, hcpu, nr_calls, NULL);
  		printk("%s: attempt to take down CPU %u failed\n",
  				__func__, cpu);
@@ -202,7 +202,7 @@ index 563f136..df0a2fc 100644
  	}
  
  	err = __stop_machine(take_cpu_down, &tcd_param, cpumask_of(cpu));
-@@ -264,6 +383,8 @@ static int __ref _cpu_down(unsigned int cpu, int tasks_frozen)
+@@ -285,6 +404,8 @@ static int __ref _cpu_down(unsigned int cpu, int tasks_frozen)
  	check_for_tasks(cpu);
  
  out_release:
