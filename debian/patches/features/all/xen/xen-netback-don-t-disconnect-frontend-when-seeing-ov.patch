@@ -1,0 +1,75 @@
+# HG changeset patch
+# User David Vrabel <david.vrabel@citrix.com>
+# Date 1367332231 -7200
+# Node ID 03152e80954136f7eb4ea37c7dc358024a45888f
+# Parent  874725c5afa10717a5307f5f1c6bdc4baa655c9d
+netback: don't disconnect frontend when seeing oversize packet
+
+Some frontend drivers are sending packets > 64 KiB in length. This length
+overflows the length field in the first slot making the following slots have
+an invalid length.
+
+Turn this error back into a non-fatal error by dropping the packet. To avoid
+having the following slots having fatal errors, consume all slots in the
+packet.
+
+This does not reopen the security hole in XSA-39 as if the packet as an
+invalid number of slots it will still hit fatal error case.
+
+Signed-off-by: David Vrabel <david.vrabel@citrix.com>
+Signed-off-by: Wei Liu <wei.liu2@citrix.com>
+Acked-by: Ian Campbell <ian.campbell@citrix.com>
+Committed-by: Jan Beulich <jbeulich@suse.com>
+
+diff -r 874725c5afa1 -r 03152e809541 drivers/xen/netback/netback.c
+--- a/drivers/xen/netback/netback.c	Mon Apr 15 10:37:23 2013 +0200
++++ b/drivers/xen/netback/netback.c	Tue Apr 30 16:30:31 2013 +0200
+@@ -1034,7 +1034,7 @@ static int netbk_count_requests(netif_t 
+ 				netif_tx_request_t *txp, int work_to_do)
+ {
+ 	RING_IDX cons = netif->tx.req_cons;
+-	int frags = 0;
++	int frags = 0, drop_err = 0;
+ 
+ 	if (!(first->flags & NETTXF_more_data))
+ 		return 0;
+@@ -1056,11 +1056,22 @@ static int netbk_count_requests(netif_t 
+ 
+ 		memcpy(txp, RING_GET_REQUEST(&netif->tx, cons + frags),
+ 		       sizeof(*txp));
+-		if (txp->size > first->size) {
+-			printk(KERN_ERR "%s: Frag is bigger than frame.\n",
+-			       netif->dev->name);
+-			netbk_fatal_tx_err(netif);
+-			return -EIO;
++
++		/*
++		 * If the guest submitted a frame >= 64 KiB then first->size
++		 * overflowed and following slots will appear to be larger
++		 * than the frame. This cannot be fatal error as there are
++		 * buggy frontends that do this.
++		 *
++		 * Consume all slots and drop the packet.
++		 */
++		if (!drop_err && txp->size > first->size) {
++			if (net_ratelimit())
++				DPRINTK("%s: Invalid tx request"
++					" (slot size %u > remaining size %u)\n",
++					netif->dev->name,
++					txp->size, first->size);
++			drop_err = -EIO;
+ 		}
+ 
+ 		first->size -= txp->size;
+@@ -1074,6 +1085,11 @@ static int netbk_count_requests(netif_t 
+ 		}
+ 	} while ((txp++)->flags & NETTXF_more_data);
+ 
++	if (drop_err) {
++		netbk_tx_err(netif, first, cons + frags);
++		return drop_err;
++	}
++
+ 	return frags;
+ }
+ 
