@@ -1,6 +1,7 @@
 Subject: sched: Consider pi boosting in setscheduler
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Thu, 20 Dec 2012 15:13:49 +0100
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.10/patches-3.10.4-rt1.tar.xz
 
 If a PI boosted task policy/priority is modified by a setscheduler()
 call we unconditionally dequeue and requeue the task if it is on the
@@ -18,14 +19,16 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 Cc: stable@vger.kernel.org
 Cc: stable-rt@vger.kernel.org
 ---
- include/linux/sched.h |    5 +++++
- kernel/rtmutex.c      |   12 ++++++++++++
- kernel/sched/core.c   |   40 +++++++++++++++++++++++++++++++---------
+ include/linux/sched/rt.h |    5 +++++
+ kernel/rtmutex.c         |   12 ++++++++++++
+ kernel/sched/core.c      |   40 +++++++++++++++++++++++++++++++---------
  3 files changed, 48 insertions(+), 9 deletions(-)
 
---- a/include/linux/sched.h
-+++ b/include/linux/sched.h
-@@ -2176,6 +2176,7 @@ extern unsigned int sysctl_sched_cfs_ban
+Index: linux-stable/include/linux/sched/rt.h
+===================================================================
+--- linux-stable.orig/include/linux/sched/rt.h
++++ linux-stable/include/linux/sched/rt.h
+@@ -35,6 +35,7 @@ static inline int rt_task(struct task_st
  #ifdef CONFIG_RT_MUTEXES
  extern int rt_mutex_getprio(struct task_struct *p);
  extern void rt_mutex_setprio(struct task_struct *p, int prio);
@@ -33,7 +36,7 @@ Cc: stable-rt@vger.kernel.org
  extern void rt_mutex_adjust_pi(struct task_struct *p);
  static inline bool tsk_is_pi_blocked(struct task_struct *tsk)
  {
-@@ -2186,6 +2187,10 @@ static inline int rt_mutex_getprio(struc
+@@ -45,6 +46,10 @@ static inline int rt_mutex_getprio(struc
  {
  	return p->normal_prio;
  }
@@ -44,9 +47,11 @@ Cc: stable-rt@vger.kernel.org
  # define rt_mutex_adjust_pi(p)		do { } while (0)
  static inline bool tsk_is_pi_blocked(struct task_struct *tsk)
  {
---- a/kernel/rtmutex.c
-+++ b/kernel/rtmutex.c
-@@ -124,6 +124,18 @@ int rt_mutex_getprio(struct task_struct
+Index: linux-stable/kernel/rtmutex.c
+===================================================================
+--- linux-stable.orig/kernel/rtmutex.c
++++ linux-stable/kernel/rtmutex.c
+@@ -125,6 +125,18 @@ int rt_mutex_getprio(struct task_struct
  }
  
  /*
@@ -65,9 +70,11 @@ Cc: stable-rt@vger.kernel.org
   * Adjust the priority of a task, after its pi_waiters got modified.
   *
   * This can be both boosting and unboosting. task->pi_lock must be held.
---- a/kernel/sched/core.c
-+++ b/kernel/sched/core.c
-@@ -3768,7 +3768,8 @@ EXPORT_SYMBOL(sleep_on_timeout);
+Index: linux-stable/kernel/sched/core.c
+===================================================================
+--- linux-stable.orig/kernel/sched/core.c
++++ linux-stable/kernel/sched/core.c
+@@ -3839,7 +3839,8 @@ EXPORT_SYMBOL(sleep_on_timeout);
   * This function changes the 'effective' priority of a task. It does
   * not touch ->normal_prio like __setscheduler().
   *
@@ -77,7 +84,7 @@ Cc: stable-rt@vger.kernel.org
   */
  void rt_mutex_setprio(struct task_struct *p, int prio)
  {
-@@ -3991,20 +3992,25 @@ static struct task_struct *find_process_
+@@ -4062,20 +4063,25 @@ static struct task_struct *find_process_
  	return pid ? find_task_by_vpid(pid) : current;
  }
  
@@ -107,7 +114,7 @@ Cc: stable-rt@vger.kernel.org
  }
  
  /*
-@@ -4026,6 +4032,7 @@ static bool check_same_owner(struct task
+@@ -4097,6 +4103,7 @@ static bool check_same_owner(struct task
  static int __sched_setscheduler(struct task_struct *p, int policy,
  				const struct sched_param *param, bool user)
  {
@@ -115,7 +122,7 @@ Cc: stable-rt@vger.kernel.org
  	int retval, oldprio, oldpolicy = -1, on_rq, running;
  	unsigned long flags;
  	const struct sched_class *prev_class;
-@@ -4153,6 +4160,25 @@ recheck:
+@@ -4224,6 +4231,25 @@ recheck:
  		task_rq_unlock(rq, p, &flags);
  		goto recheck;
  	}
@@ -141,7 +148,7 @@ Cc: stable-rt@vger.kernel.org
  	on_rq = p->on_rq;
  	running = task_current(rq, p);
  	if (on_rq)
-@@ -4160,9 +4186,6 @@ recheck:
+@@ -4231,9 +4257,6 @@ recheck:
  	if (running)
  		p->sched_class->put_prev_task(rq, p);
  
@@ -151,7 +158,7 @@ Cc: stable-rt@vger.kernel.org
  	prev_class = p->sched_class;
  	__setscheduler(rq, p, policy, param->sched_priority);
  
-@@ -4175,7 +4198,6 @@ recheck:
+@@ -4246,7 +4269,6 @@ recheck:
  		 */
  		enqueue_task(rq, p, oldprio <= p->prio ? ENQUEUE_HEAD : 0);
  	}

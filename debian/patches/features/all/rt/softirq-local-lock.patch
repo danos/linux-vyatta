@@ -1,6 +1,7 @@
 Subject: softirq-local-lock.patch
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Tue, 28 Jun 2011 15:57:18 +0200
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.10/patches-3.10.4-rt1.tar.xz
 
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 ---
@@ -11,8 +12,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  kernel/softirq.c          |  166 +++++++++++++++++++++++++++++++++++++++++++++-
  5 files changed, 191 insertions(+), 5 deletions(-)
 
---- a/include/linux/hardirq.h
-+++ b/include/linux/hardirq.h
+Index: linux-stable/include/linux/hardirq.h
+===================================================================
+--- linux-stable.orig/include/linux/hardirq.h
++++ linux-stable/include/linux/hardirq.h
 @@ -61,7 +61,11 @@
  #define HARDIRQ_OFFSET	(1UL << HARDIRQ_SHIFT)
  #define NMI_OFFSET	(1UL << NMI_SHIFT)
@@ -53,8 +56,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  /*
   * Are we in NMI context?
---- a/include/linux/interrupt.h
-+++ b/include/linux/interrupt.h
+Index: linux-stable/include/linux/interrupt.h
+===================================================================
+--- linux-stable.orig/include/linux/interrupt.h
++++ linux-stable/include/linux/interrupt.h
 @@ -447,7 +447,13 @@ struct softirq_action
  
  asmlinkage void do_softirq(void);
@@ -82,9 +87,11 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  /*
   * Autoprobing for irqs:
   *
---- a/include/linux/sched.h
-+++ b/include/linux/sched.h
-@@ -1634,6 +1634,7 @@ struct task_struct {
+Index: linux-stable/include/linux/sched.h
+===================================================================
+--- linux-stable.orig/include/linux/sched.h
++++ linux-stable/include/linux/sched.h
+@@ -1444,6 +1444,7 @@ struct task_struct {
  #endif
  #ifdef CONFIG_PREEMPT_RT_BASE
  	struct rcu_head put_rcu;
@@ -92,18 +99,22 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  #endif
  };
  
---- a/init/main.c
-+++ b/init/main.c
-@@ -493,6 +493,7 @@ asmlinkage void __init start_kernel(void
+Index: linux-stable/init/main.c
+===================================================================
+--- linux-stable.orig/init/main.c
++++ linux-stable/init/main.c
+@@ -496,6 +496,7 @@ asmlinkage void __init start_kernel(void
   * Interrupts are still disabled. Do necessary setups, then
   * enable them
   */
 +	softirq_early_init();
- 	tick_init();
  	boot_cpu_init();
  	page_address_init();
---- a/kernel/softirq.c
-+++ b/kernel/softirq.c
+ 	pr_notice("%s", linux_banner);
+Index: linux-stable/kernel/softirq.c
+===================================================================
+--- linux-stable.orig/kernel/softirq.c
++++ linux-stable/kernel/softirq.c
 @@ -25,6 +25,7 @@
  #include <linux/smp.h>
  #include <linux/smpboot.h>
@@ -120,7 +131,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  /*
   * preempt_count and SOFTIRQ_OFFSET usage:
   * - preempt_count is changed by SOFTIRQ_OFFSET on entering or leaving
-@@ -360,6 +362,162 @@ asmlinkage void do_softirq(void)
+@@ -368,6 +370,162 @@ asmlinkage void do_softirq(void)
  
  #endif
  
@@ -283,7 +294,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  /*
   * Enter an interrupt context.
   */
-@@ -373,9 +531,9 @@ void irq_enter(void)
+@@ -381,9 +539,9 @@ void irq_enter(void)
  		 * Prevent raise_softirq from needlessly waking up ksoftirqd
  		 * here, as softirq will be serviced on return from interrupt.
  		 */
@@ -295,21 +306,18 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	}
  
  	__irq_enter();
-@@ -383,6 +541,7 @@ void irq_enter(void)
+@@ -391,10 +549,14 @@ void irq_enter(void)
  
  static inline void invoke_softirq(void)
  {
 +#ifndef CONFIG_PREEMPT_RT_FULL
- 	if (!force_irqthreads) {
- #ifdef __ARCH_IRQ_EXIT_IRQS_DISABLED
+ 	if (!force_irqthreads)
  		__do_softirq();
-@@ -395,6 +554,9 @@ static inline void invoke_softirq(void)
+ 	else
  		wakeup_softirqd();
- 		__local_bh_enable(SOFTIRQ_OFFSET);
- 	}
 +#else
 +		wakeup_softirqd();
 +#endif
  }
  
- /*
+ static inline void tick_irq_exit(void)

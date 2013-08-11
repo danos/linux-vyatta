@@ -1,14 +1,17 @@
 Subject: stomp-machine-raw-lock.patch
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Wed, 29 Jun 2011 11:01:51 +0200
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.10/patches-3.10.4-rt1.tar.xz
 
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 ---
- kernel/stop_machine.c |   58 +++++++++++++++++++++++++++++++++++---------------
- 1 file changed, 41 insertions(+), 17 deletions(-)
+ kernel/stop_machine.c |   62 ++++++++++++++++++++++++++++++++++----------------
+ 1 file changed, 43 insertions(+), 19 deletions(-)
 
---- a/kernel/stop_machine.c
-+++ b/kernel/stop_machine.c
+Index: linux-stable/kernel/stop_machine.c
+===================================================================
+--- linux-stable.orig/kernel/stop_machine.c
++++ linux-stable/kernel/stop_machine.c
 @@ -29,12 +29,12 @@ struct cpu_stop_done {
  	atomic_t		nr_todo;	/* nr left to execute */
  	bool			executed;	/* actually executed? */
@@ -23,7 +26,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +	raw_spinlock_t		lock;
  	bool			enabled;	/* is this stopper enabled? */
  	struct list_head	works;		/* list of pending works */
- 	struct task_struct	*thread;	/* stopper thread */
+ };
 @@ -47,7 +47,7 @@ static void cpu_stop_init_done(struct cp
  {
  	memset(done, 0, sizeof(*done));
@@ -46,8 +49,8 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	}
  }
  
-@@ -67,7 +69,7 @@ static void cpu_stop_queue_work(struct c
- {
+@@ -69,7 +71,7 @@ static void cpu_stop_queue_work(unsigned
+ 
  	unsigned long flags;
  
 -	spin_lock_irqsave(&stopper->lock, flags);
@@ -55,7 +58,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	if (stopper->enabled) {
  		list_add_tail(&work->list, &stopper->works);
-@@ -75,7 +77,23 @@ static void cpu_stop_queue_work(struct c
+@@ -77,7 +79,23 @@ static void cpu_stop_queue_work(unsigned
  	} else
  		cpu_stop_signal_done(work->done, false);
  
@@ -80,16 +83,16 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  }
  
  /**
-@@ -109,7 +127,7 @@ int stop_one_cpu(unsigned int cpu, cpu_s
+@@ -111,7 +129,7 @@ int stop_one_cpu(unsigned int cpu, cpu_s
  
  	cpu_stop_init_done(&done, 1);
- 	cpu_stop_queue_work(&per_cpu(cpu_stopper, cpu), &work);
+ 	cpu_stop_queue_work(cpu, &work);
 -	wait_for_completion(&done.completion);
 +	wait_for_stop_done(&done);
  	return done.executed ? done.ret : -ENOENT;
  }
  
-@@ -171,7 +189,7 @@ static int __stop_cpus(const struct cpum
+@@ -172,7 +190,7 @@ static int __stop_cpus(const struct cpum
  
  	cpu_stop_init_done(&done, cpumask_weight(cpumask));
  	queue_stop_cpus_work(cpumask, fn, arg, &done);
@@ -98,9 +101,21 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	return done.executed ? done.ret : -ENOENT;
  }
  
-@@ -259,13 +277,13 @@ repeat:
- 	}
+@@ -251,9 +269,9 @@ static int cpu_stop_should_run(unsigned
+ 	unsigned long flags;
+ 	int run;
  
+-	spin_lock_irqsave(&stopper->lock, flags);
++	raw_spin_lock_irqsave(&stopper->lock, flags);
+ 	run = !list_empty(&stopper->works);
+-	spin_unlock_irqrestore(&stopper->lock, flags);
++	raw_spin_unlock_irqrestore(&stopper->lock, flags);
+ 	return run;
+ }
+ 
+@@ -265,13 +283,13 @@ static void cpu_stopper_thread(unsigned
+ 
+ repeat:
  	work = NULL;
 -	spin_lock_irq(&stopper->lock);
 +	raw_spin_lock_irq(&stopper->lock);
@@ -114,7 +129,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	if (work) {
  		cpu_stop_fn_t fn = work->fn;
-@@ -299,7 +317,13 @@ repeat:
+@@ -303,7 +321,13 @@ repeat:
  			  kallsyms_lookup((unsigned long)fn, NULL, NULL, NULL,
  					  ksym_buf), arg);
  
@@ -125,36 +140,35 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +		local_irq_disable();
  		cpu_stop_signal_done(done, true);
 +		local_irq_enable();
- 	} else
- 		schedule();
+ 		goto repeat;
+ 	}
+ }
+@@ -322,20 +346,20 @@ static void cpu_stop_park(unsigned int c
+ 	unsigned long flags;
  
-@@ -337,9 +361,9 @@ static int __cpuinit cpu_stop_cpu_callba
- 		/* strictly unnecessary, as first user will wake it */
- 		wake_up_process(stopper->thread);
- 		/* mark enabled */
--		spin_lock_irq(&stopper->lock);
-+		raw_spin_lock_irq(&stopper->lock);
- 		stopper->enabled = true;
--		spin_unlock_irq(&stopper->lock);
-+		raw_spin_unlock_irq(&stopper->lock);
- 		break;
+ 	/* drain remaining works */
+-	spin_lock_irqsave(&stopper->lock, flags);
++	raw_spin_lock_irqsave(&stopper->lock, flags);
+ 	list_for_each_entry(work, &stopper->works, list)
+ 		cpu_stop_signal_done(work->done, false);
+ 	stopper->enabled = false;
+-	spin_unlock_irqrestore(&stopper->lock, flags);
++	raw_spin_unlock_irqrestore(&stopper->lock, flags);
+ }
  
- #ifdef CONFIG_HOTPLUG_CPU
-@@ -352,11 +376,11 @@ static int __cpuinit cpu_stop_cpu_callba
- 		/* kill the stopper */
- 		kthread_stop(stopper->thread);
- 		/* drain remaining works */
--		spin_lock_irq(&stopper->lock);
-+		raw_spin_lock_irq(&stopper->lock);
- 		list_for_each_entry(work, &stopper->works, list)
- 			cpu_stop_signal_done(work->done, false);
- 		stopper->enabled = false;
--		spin_unlock_irq(&stopper->lock);
-+		raw_spin_unlock_irq(&stopper->lock);
- 		/* release the stopper */
- 		put_task_struct(stopper->thread);
- 		stopper->thread = NULL;
-@@ -387,7 +411,7 @@ static int __init cpu_stop_init(void)
+ static void cpu_stop_unpark(unsigned int cpu)
+ {
+ 	struct cpu_stopper *stopper = &per_cpu(cpu_stopper, cpu);
+ 
+-	spin_lock_irq(&stopper->lock);
++	raw_spin_lock_irq(&stopper->lock);
+ 	stopper->enabled = true;
+-	spin_unlock_irq(&stopper->lock);
++	raw_spin_unlock_irq(&stopper->lock);
+ }
+ 
+ static struct smp_hotplug_thread cpu_stop_threads = {
+@@ -357,7 +381,7 @@ static int __init cpu_stop_init(void)
  	for_each_possible_cpu(cpu) {
  		struct cpu_stopper *stopper = &per_cpu(cpu_stopper, cpu);
  
@@ -163,7 +177,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  		INIT_LIST_HEAD(&stopper->works);
  	}
  
-@@ -581,7 +605,7 @@ int stop_machine_from_inactive_cpu(int (
+@@ -544,7 +568,7 @@ int stop_machine_from_inactive_cpu(int (
  	ret = stop_machine_cpu_stop(&smdata);
  
  	/* Busy wait for completion. */

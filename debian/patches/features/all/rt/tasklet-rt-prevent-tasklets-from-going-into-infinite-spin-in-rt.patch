@@ -1,6 +1,7 @@
 Subject: tasklet: Prevent tasklets from going into infinite spin in RT
 From: Ingo Molnar <mingo@elte.hu>
 Date: Tue Nov 29 20:18:22 2011 -0500
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.10/patches-3.10.4-rt1.tar.xz
 
 When CONFIG_PREEMPT_RT_FULL is enabled, tasklets run as threads,
 and spinlocks turn are mutexes. But this can cause issues with
@@ -41,8 +42,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  kernel/softirq.c          |  208 +++++++++++++++++++++++++++++++++-------------
  2 files changed, 170 insertions(+), 77 deletions(-)
 
---- a/include/linux/interrupt.h
-+++ b/include/linux/interrupt.h
+Index: linux-stable/include/linux/interrupt.h
+===================================================================
+--- linux-stable.orig/include/linux/interrupt.h
++++ linux-stable/include/linux/interrupt.h
 @@ -502,8 +502,9 @@ extern void __send_remote_softirq(struct
       to be executed on some cpu at least once after this.
     * If the tasklet is already scheduled, but its execution is still not
@@ -118,8 +121,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  extern void tasklet_kill(struct tasklet_struct *t);
  extern void tasklet_kill_immediate(struct tasklet_struct *t, unsigned int cpu);
---- a/kernel/softirq.c
-+++ b/kernel/softirq.c
+Index: linux-stable/kernel/softirq.c
+===================================================================
+--- linux-stable.orig/kernel/softirq.c
++++ linux-stable/kernel/softirq.c
 @@ -21,6 +21,7 @@
  #include <linux/freezer.h>
  #include <linux/kthread.h>
@@ -128,7 +133,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  #include <linux/ftrace.h>
  #include <linux/smp.h>
  #include <linux/smpboot.h>
-@@ -648,15 +649,45 @@ struct tasklet_head
+@@ -662,15 +663,45 @@ struct tasklet_head
  static DEFINE_PER_CPU(struct tasklet_head, tasklet_vec);
  static DEFINE_PER_CPU(struct tasklet_head, tasklet_hi_vec);
  
@@ -178,7 +183,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	local_irq_restore(flags);
  }
  
-@@ -667,10 +698,7 @@ void __tasklet_hi_schedule(struct taskle
+@@ -681,10 +712,7 @@ void __tasklet_hi_schedule(struct taskle
  	unsigned long flags;
  
  	local_irq_save(flags);
@@ -190,7 +195,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	local_irq_restore(flags);
  }
  
-@@ -678,50 +706,119 @@ EXPORT_SYMBOL(__tasklet_hi_schedule);
+@@ -692,50 +720,119 @@ EXPORT_SYMBOL(__tasklet_hi_schedule);
  
  void __tasklet_hi_schedule_first(struct tasklet_struct *t)
  {
@@ -336,7 +341,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  static void tasklet_hi_action(struct softirq_action *a)
  {
  	struct tasklet_struct *list;
-@@ -732,29 +829,7 @@ static void tasklet_hi_action(struct sof
+@@ -746,29 +843,7 @@ static void tasklet_hi_action(struct sof
  	__this_cpu_write(tasklet_hi_vec.tail, &__get_cpu_var(tasklet_hi_vec).head);
  	local_irq_enable();
  
@@ -367,7 +372,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  }
  
  
-@@ -777,7 +852,7 @@ void tasklet_kill(struct tasklet_struct
+@@ -791,7 +866,7 @@ void tasklet_kill(struct tasklet_struct
  
  	while (test_and_set_bit(TASKLET_STATE_SCHED, &t->state)) {
  		do {
@@ -376,7 +381,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  		} while (test_bit(TASKLET_STATE_SCHED, &t->state));
  	}
  	tasklet_unlock_wait(t);
-@@ -983,6 +1058,23 @@ void __init softirq_init(void)
+@@ -995,6 +1070,23 @@ void __init softirq_init(void)
  	open_softirq(HI_SOFTIRQ, tasklet_hi_action);
  }
  

@@ -1,18 +1,22 @@
 Subject: rt-local-irq-lock.patch
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Mon, 20 Jun 2011 09:03:47 +0200
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.10/patches-3.10.4-rt1.tar.xz
 
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 ---
- include/linux/locallock.h |  238 ++++++++++++++++++++++++++++++++++++++++++++++
- 1 file changed, 238 insertions(+)
+ include/linux/locallock.h |  254 ++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 254 insertions(+)
 
+Index: linux-stable/include/linux/locallock.h
+===================================================================
 --- /dev/null
-+++ b/include/linux/locallock.h
-@@ -0,0 +1,238 @@
++++ linux-stable/include/linux/locallock.h
+@@ -0,0 +1,254 @@
 +#ifndef _LINUX_LOCALLOCK_H
 +#define _LINUX_LOCALLOCK_H
 +
++#include <linux/percpu.h>
 +#include <linux/spinlock.h>
 +
 +#ifdef CONFIG_PREEMPT_RT_BASE
@@ -36,6 +40,9 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +#define DEFINE_LOCAL_IRQ_LOCK(lvar)					\
 +	DEFINE_PER_CPU(struct local_irq_lock, lvar) = {			\
 +		.lock = __SPIN_LOCK_UNLOCKED((lvar).lock) }
++
++#define DECLARE_LOCAL_IRQ_LOCK(lvar)					\
++	DECLARE_PER_CPU(struct local_irq_lock, lvar)
 +
 +#define local_irq_lock_init(lvar)					\
 +	do {								\
@@ -149,6 +156,12 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +		_flags = __get_cpu_var(lvar).flags;			\
 +	} while (0)
 +
++#define local_lock_irqsave_on(lvar, _flags, cpu)			\
++	do {								\
++		__local_lock_irqsave(&per_cpu(lvar, cpu));		\
++		_flags = per_cpu(lvar, cpu).flags;			\
++	} while (0)
++
 +static inline int __local_unlock_irqrestore(struct local_irq_lock *lv,
 +					    unsigned long flags)
 +{
@@ -166,6 +179,11 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +	do {								\
 +		if (__local_unlock_irqrestore(&__get_cpu_var(lvar), flags)) \
 +			put_local_var(lvar);				\
++	} while (0)
++
++#define local_unlock_irqrestore_on(lvar, flags, cpu)			\
++	do {								\
++		__local_unlock_irqrestore(&per_cpu(lvar, cpu), flags);	\
 +	} while (0)
 +
 +#define local_spin_trylock_irq(lvar, lock)				\
@@ -221,6 +239,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +#else /* PREEMPT_RT_BASE */
 +
 +#define DEFINE_LOCAL_IRQ_LOCK(lvar)		__typeof__(const int) lvar
++#define DECLARE_LOCAL_IRQ_LOCK(lvar)		extern __typeof__(const int) lvar
 +
 +static inline void local_irq_lock_init(int lvar) { }
 +

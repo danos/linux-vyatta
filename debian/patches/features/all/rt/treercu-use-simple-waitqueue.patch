@@ -2,6 +2,7 @@ From db7ae440c333156392bc56badc610469a4d522ae Mon Sep 17 00:00:00 2001
 From: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
 Date: Mon, 8 Apr 2013 16:09:57 +0200
 Subject: [PATCH] kernel/treercu: use a simple waitqueue
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.10/patches-3.10.4-rt1.tar.xz
 
 Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
 ---
@@ -9,9 +10,11 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  kernel/rcutree.h |    2 +-
  2 files changed, 8 insertions(+), 7 deletions(-)
 
---- a/kernel/rcutree.c
-+++ b/kernel/rcutree.c
-@@ -1319,7 +1319,7 @@ static int __noreturn rcu_gp_kthread(voi
+Index: linux-stable/kernel/rcutree.c
+===================================================================
+--- linux-stable.orig/kernel/rcutree.c
++++ linux-stable/kernel/rcutree.c
+@@ -1572,7 +1572,7 @@ static int __noreturn rcu_gp_kthread(voi
  
  		/* Handle grace-period start. */
  		for (;;) {
@@ -20,7 +23,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  						 rsp->gp_flags &
  						 RCU_GP_FLAG_INIT);
  			if ((rsp->gp_flags & RCU_GP_FLAG_INIT) &&
-@@ -1338,7 +1338,7 @@ static int __noreturn rcu_gp_kthread(voi
+@@ -1591,7 +1591,7 @@ static int __noreturn rcu_gp_kthread(voi
  		}
  		for (;;) {
  			rsp->jiffies_force_qs = jiffies + j;
@@ -29,8 +32,8 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  					(rsp->gp_flags & RCU_GP_FLAG_FQS) ||
  					(!ACCESS_ONCE(rnp->qsmask) &&
  					 !rcu_preempt_blocked_readers_cgp(rnp)),
-@@ -1423,7 +1423,7 @@ rcu_start_gp(struct rcu_state *rsp, unsi
- 	local_irq_restore(flags);
+@@ -1629,7 +1629,7 @@ static void rsp_wakeup(struct irq_work *
+ 	struct rcu_state *rsp = container_of(work, struct rcu_state, wakeup_work);
  
  	/* Wake up rcu_gp_kthread() to start the grace period. */
 -	wake_up(&rsp->gp_wq);
@@ -38,7 +41,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  }
  
  /*
-@@ -1438,7 +1438,7 @@ static void rcu_report_qs_rsp(struct rcu
+@@ -1701,7 +1701,7 @@ static void rcu_report_qs_rsp(struct rcu
  {
  	WARN_ON_ONCE(!rcu_gp_in_progress(rsp));
  	raw_spin_unlock_irqrestore(&rcu_get_root(rsp)->lock, flags);
@@ -47,7 +50,7 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  }
  
  /*
-@@ -2003,7 +2003,8 @@ static void force_quiescent_state(struct
+@@ -2266,7 +2266,8 @@ static void force_quiescent_state(struct
  	}
  	rsp->gp_flags |= RCU_GP_FLAG_FQS;
  	raw_spin_unlock_irqrestore(&rnp_old->lock, flags);
@@ -57,18 +60,20 @@ Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  }
  
  /*
-@@ -2999,7 +3000,7 @@ static void __init rcu_init_one(struct r
+@@ -3263,7 +3264,7 @@ static void __init rcu_init_one(struct r
  	}
  
  	rsp->rda = rda;
 -	init_waitqueue_head(&rsp->gp_wq);
 +	init_swait_head(&rsp->gp_wq);
+ 	init_irq_work(&rsp->wakeup_work, rsp_wakeup);
  	rnp = rsp->level[rcu_num_lvls - 1];
  	for_each_possible_cpu(i) {
- 		while (i > rnp->grphi)
---- a/kernel/rcutree.h
-+++ b/kernel/rcutree.h
-@@ -397,7 +397,7 @@ struct rcu_state {
+Index: linux-stable/kernel/rcutree.h
+===================================================================
+--- linux-stable.orig/kernel/rcutree.h
++++ linux-stable/kernel/rcutree.h
+@@ -388,7 +388,7 @@ struct rcu_state {
  	unsigned long gpnum;			/* Current gp number. */
  	unsigned long completed;		/* # of last completed gp. */
  	struct task_struct *gp_kthread;		/* Task for grace periods. */

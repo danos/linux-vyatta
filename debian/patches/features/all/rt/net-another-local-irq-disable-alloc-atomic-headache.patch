@@ -1,6 +1,7 @@
 Subject: net: Another local_irq_disable/kmalloc headache
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Wed, 26 Sep 2012 16:21:08 +0200
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.10/patches-3.10.4-rt1.tar.xz
 
 Replace it by a local lock. Though that's pretty inefficient :(
 
@@ -9,8 +10,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  net/core/skbuff.c |    6 ++++--
  1 file changed, 4 insertions(+), 2 deletions(-)
 
---- a/net/core/skbuff.c
-+++ b/net/core/skbuff.c
+Index: linux-stable/net/core/skbuff.c
+===================================================================
+--- linux-stable.orig/net/core/skbuff.c
++++ linux-stable/net/core/skbuff.c
 @@ -60,6 +60,7 @@
  #include <linux/scatterlist.h>
  #include <linux/errqueue.h>
@@ -19,15 +22,15 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  #include <net/protocol.h>
  #include <net/dst.h>
-@@ -347,6 +348,7 @@ struct netdev_alloc_cache {
+@@ -367,6 +368,7 @@ struct netdev_alloc_cache {
  	unsigned int		pagecnt_bias;
  };
  static DEFINE_PER_CPU(struct netdev_alloc_cache, netdev_alloc_cache);
 +static DEFINE_LOCAL_IRQ_LOCK(netdev_alloc_lock);
  
- #define NETDEV_FRAG_PAGE_MAX_ORDER get_order(32768)
- #define NETDEV_FRAG_PAGE_MAX_SIZE  (PAGE_SIZE << NETDEV_FRAG_PAGE_MAX_ORDER)
-@@ -359,7 +361,7 @@ static void *__netdev_alloc_frag(unsigne
+ static void *__netdev_alloc_frag(unsigned int fragsz, gfp_t gfp_mask)
+ {
+@@ -375,7 +377,7 @@ static void *__netdev_alloc_frag(unsigne
  	int order;
  	unsigned long flags;
  
@@ -36,7 +39,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	nc = &__get_cpu_var(netdev_alloc_cache);
  	if (unlikely(!nc->frag.page)) {
  refill:
-@@ -393,7 +395,7 @@ recycle:
+@@ -409,7 +411,7 @@ recycle:
  	nc->frag.offset += fragsz;
  	nc->pagecnt_bias--;
  end:

@@ -1,17 +1,20 @@
 Subject: printk-kill.patch
 From: Ingo Molnar <mingo@elte.hu>
 Date: Fri, 22 Jul 2011 17:58:40 +0200
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.10/patches-3.10.4-rt1.tar.xz
 
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 ---
- include/linux/printk.h |    3 ++-
- kernel/printk.c        |   33 +++++++++++++++++++++++++++++++++
- kernel/watchdog.c      |   15 +++++++++++++--
- 3 files changed, 48 insertions(+), 3 deletions(-)
+ include/linux/printk.h |    3 +
+ kernel/printk.c        |   79 ++++++++++++++++++++++++++++++++++---------------
+ kernel/watchdog.c      |   15 ++++++++-
+ 3 files changed, 71 insertions(+), 26 deletions(-)
 
---- a/include/linux/printk.h
-+++ b/include/linux/printk.h
-@@ -99,9 +99,11 @@ int no_printk(const char *fmt, ...)
+Index: linux-stable/include/linux/printk.h
+===================================================================
+--- linux-stable.orig/include/linux/printk.h
++++ linux-stable/include/linux/printk.h
+@@ -101,9 +101,11 @@ int no_printk(const char *fmt, ...)
  extern asmlinkage __printf(1, 2)
  void early_printk(const char *fmt, ...);
  void early_vprintk(const char *fmt, va_list ap);
@@ -22,8 +25,8 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +static inline void printk_kill(void) { }
  #endif
  
- extern int printk_needs_cpu(int cpu);
-@@ -138,7 +140,6 @@ extern int __printk_ratelimit(const char
+ #ifdef CONFIG_PRINTK
+@@ -137,7 +139,6 @@ extern int __printk_ratelimit(const char
  #define printk_ratelimit() __printk_ratelimit(__func__)
  extern bool printk_timed_ratelimit(unsigned long *caller_jiffies,
  				   unsigned int interval_msec);
@@ -31,12 +34,35 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  extern int printk_delay_msec;
  extern int dmesg_restrict;
  extern int kptr_restrict;
---- a/kernel/printk.c
-+++ b/kernel/printk.c
-@@ -770,6 +770,32 @@ asmlinkage void early_printk(const char
- 	early_vprintk(fmt, ap);
- 	va_end(ap);
+Index: linux-stable/kernel/printk.c
+===================================================================
+--- linux-stable.orig/kernel/printk.c
++++ linux-stable/kernel/printk.c
+@@ -1493,6 +1493,55 @@ static size_t cont_print_text(char *text
+ 	return textlen;
  }
+ 
++#ifdef CONFIG_EARLY_PRINTK
++struct console *early_console;
++
++void early_vprintk(const char *fmt, va_list ap)
++{
++	if (early_console) {
++		char buf[512];
++		int n = vscnprintf(buf, sizeof(buf), fmt, ap);
++
++		early_console->write(early_console, buf, n);
++	}
++}
++
++asmlinkage void early_printk(const char *fmt, ...)
++{
++	va_list ap;
++
++	va_start(ap, fmt);
++	early_vprintk(fmt, ap);
++	va_end(ap);
++}
 +
 +/*
 + * This is independent of any log levels - a global
@@ -63,10 +89,12 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +{
 +	return 0;
 +}
- #endif
- 
- #ifdef CONFIG_BOOT_PRINTK_DELAY
-@@ -1511,6 +1537,13 @@ asmlinkage int vprintk_emit(int facility
++#endif
++
+ asmlinkage int vprintk_emit(int facility, int level,
+ 			    const char *dict, size_t dictlen,
+ 			    const char *fmt, va_list args)
+@@ -1506,6 +1555,13 @@ asmlinkage int vprintk_emit(int facility
  	int this_cpu;
  	int printed_len = 0;
  
@@ -80,9 +108,41 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	boot_delay_msec(level);
  	printk_delay();
  
---- a/kernel/watchdog.c
-+++ b/kernel/watchdog.c
-@@ -206,6 +206,8 @@ static int is_softlockup(unsigned long t
+@@ -1728,29 +1784,6 @@ static size_t cont_print_text(char *text
+ 
+ #endif /* CONFIG_PRINTK */
+ 
+-#ifdef CONFIG_EARLY_PRINTK
+-struct console *early_console;
+-
+-void early_vprintk(const char *fmt, va_list ap)
+-{
+-	if (early_console) {
+-		char buf[512];
+-		int n = vscnprintf(buf, sizeof(buf), fmt, ap);
+-
+-		early_console->write(early_console, buf, n);
+-	}
+-}
+-
+-asmlinkage void early_printk(const char *fmt, ...)
+-{
+-	va_list ap;
+-
+-	va_start(ap, fmt);
+-	early_vprintk(fmt, ap);
+-	va_end(ap);
+-}
+-#endif
+-
+ static int __add_preferred_console(char *name, int idx, char *options,
+ 				   char *brl_options)
+ {
+Index: linux-stable/kernel/watchdog.c
+===================================================================
+--- linux-stable.orig/kernel/watchdog.c
++++ linux-stable/kernel/watchdog.c
+@@ -205,6 +205,8 @@ static int is_softlockup(unsigned long t
  
  #ifdef CONFIG_HARDLOCKUP_DETECTOR
  
@@ -91,7 +151,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  static struct perf_event_attr wd_hw_attr = {
  	.type		= PERF_TYPE_HARDWARE,
  	.config		= PERF_COUNT_HW_CPU_CYCLES,
-@@ -240,10 +242,19 @@ static void watchdog_overflow_callback(s
+@@ -239,10 +241,19 @@ static void watchdog_overflow_callback(s
  		if (__this_cpu_read(hard_watchdog_warn) == true)
  			return;
  

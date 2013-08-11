@@ -1,6 +1,7 @@
 Subject: latency-hist.patch
 From: Carsten Emde <C.Emde@osadl.org>
 Date: Tue, 19 Jul 2011 14:03:41 +0100
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.10/patches-3.10.4-rt1.tar.xz
 
 This patch provides a recording mechanism to store data of potential
 sources of system latencies. The recordings separately determine the
@@ -21,12 +22,14 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  kernel/hrtimer.c                    |   23 
  kernel/trace/Kconfig                |  104 +++
  kernel/trace/Makefile               |    4 
- kernel/trace/latency_hist.c         | 1176 ++++++++++++++++++++++++++++++++++++
+ kernel/trace/latency_hist.c         | 1177 ++++++++++++++++++++++++++++++++++++
  kernel/trace/trace_irqsoff.c        |   11 
- 10 files changed, 1611 insertions(+)
+ 10 files changed, 1612 insertions(+)
 
+Index: linux-stable/Documentation/trace/histograms.txt
+===================================================================
 --- /dev/null
-+++ b/Documentation/trace/histograms.txt
++++ linux-stable/Documentation/trace/histograms.txt
 @@ -0,0 +1,186 @@
 +		Using the Linux Kernel Latency Histograms
 +
@@ -214,8 +217,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +is provided.
 +
 +These data are also reset when the wakeup histogram is reset.
---- a/include/linux/hrtimer.h
-+++ b/include/linux/hrtimer.h
+Index: linux-stable/include/linux/hrtimer.h
+===================================================================
+--- linux-stable.orig/include/linux/hrtimer.h
++++ linux-stable/include/linux/hrtimer.h
 @@ -111,6 +111,9 @@ struct hrtimer {
  	enum hrtimer_restart		(*function)(struct hrtimer *);
  	struct hrtimer_clock_base	*base;
@@ -226,9 +231,11 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  #ifdef CONFIG_TIMER_STATS
  	int				start_pid;
  	void				*start_site;
---- a/include/linux/sched.h
-+++ b/include/linux/sched.h
-@@ -1599,6 +1599,12 @@ struct task_struct {
+Index: linux-stable/include/linux/sched.h
+===================================================================
+--- linux-stable.orig/include/linux/sched.h
++++ linux-stable/include/linux/sched.h
+@@ -1406,6 +1406,12 @@ struct task_struct {
  	unsigned long trace;
  	/* bitmask and counter of trace recursion */
  	unsigned long trace_recursion;
@@ -241,8 +248,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  #endif /* CONFIG_TRACING */
  #ifdef CONFIG_MEMCG /* memcg uses this to do batch job */
  	struct memcg_batch_info {
+Index: linux-stable/include/trace/events/hist.h
+===================================================================
 --- /dev/null
-+++ b/include/trace/events/hist.h
++++ linux-stable/include/trace/events/hist.h
 @@ -0,0 +1,69 @@
 +#undef TRACE_SYSTEM
 +#define TRACE_SYSTEM hist
@@ -313,8 +322,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +
 +/* This part must be outside protection */
 +#include <trace/define_trace.h>
+Index: linux-stable/include/trace/events/latency_hist.h
+===================================================================
 --- /dev/null
-+++ b/include/trace/events/latency_hist.h
++++ linux-stable/include/trace/events/latency_hist.h
 @@ -0,0 +1,29 @@
 +#ifndef _LATENCY_HIST_H
 +#define _LATENCY_HIST_H
@@ -345,9 +356,11 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +}
 +
 +#endif /* _LATENCY_HIST_H */
---- a/kernel/hrtimer.c
-+++ b/kernel/hrtimer.c
-@@ -49,6 +49,7 @@
+Index: linux-stable/kernel/hrtimer.c
+===================================================================
+--- linux-stable.orig/kernel/hrtimer.c
++++ linux-stable/kernel/hrtimer.c
+@@ -51,6 +51,7 @@
  #include <asm/uaccess.h>
  
  #include <trace/events/timer.h>
@@ -355,7 +368,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  /*
   * The timer bases:
-@@ -971,6 +972,17 @@ int __hrtimer_start_range_ns(struct hrti
+@@ -989,6 +990,17 @@ int __hrtimer_start_range_ns(struct hrti
  #endif
  	}
  
@@ -373,7 +386,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	hrtimer_set_expires_range_ns(timer, tim, delta_ns);
  
  	timer_stats_hrtimer_set_start_info(timer);
-@@ -1247,6 +1259,8 @@ static void __run_hrtimer(struct hrtimer
+@@ -1267,6 +1279,8 @@ static void __run_hrtimer(struct hrtimer
  
  #ifdef CONFIG_HIGH_RES_TIMERS
  
@@ -382,7 +395,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  /*
   * High resolution timer interrupt
   * Called with interrupts disabled
-@@ -1290,6 +1304,15 @@ retry:
+@@ -1310,6 +1324,15 @@ retry:
  
  			timer = container_of(node, struct hrtimer, node);
  
@@ -398,9 +411,11 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  			/*
  			 * The immediate goal for using the softexpires is
  			 * minimizing wakeups, not running timers at the
---- a/kernel/trace/Kconfig
-+++ b/kernel/trace/Kconfig
-@@ -202,6 +202,24 @@ config IRQSOFF_TRACER
+Index: linux-stable/kernel/trace/Kconfig
+===================================================================
+--- linux-stable.orig/kernel/trace/Kconfig
++++ linux-stable/kernel/trace/Kconfig
+@@ -192,6 +192,24 @@ config IRQSOFF_TRACER
  	  enabled. This option and the preempt-off timing option can be
  	  used together or separately.)
  
@@ -425,7 +440,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  config PREEMPT_TRACER
  	bool "Preemption-off Latency Tracer"
  	default n
-@@ -224,6 +242,24 @@ config PREEMPT_TRACER
+@@ -216,6 +234,24 @@ config PREEMPT_TRACER
  	  enabled. This option and the irqs-off timing option can be
  	  used together or separately.)
  
@@ -450,7 +465,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  config SCHED_TRACER
  	bool "Scheduling Latency Tracer"
  	select GENERIC_TRACER
-@@ -233,6 +269,74 @@ config SCHED_TRACER
+@@ -226,6 +262,74 @@ config SCHED_TRACER
  	  This tracer tracks the latency of the highest priority task
  	  to be scheduled in, starting from the point it has woken up.
  
@@ -525,8 +540,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  config ENABLE_DEFAULT_TRACERS
  	bool "Trace process context switches and events"
  	depends on !GENERIC_TRACER
---- a/kernel/trace/Makefile
-+++ b/kernel/trace/Makefile
+Index: linux-stable/kernel/trace/Makefile
+===================================================================
+--- linux-stable.orig/kernel/trace/Makefile
++++ linux-stable/kernel/trace/Makefile
 @@ -34,6 +34,10 @@ obj-$(CONFIG_FUNCTION_TRACER) += trace_f
  obj-$(CONFIG_IRQSOFF_TRACER) += trace_irqsoff.o
  obj-$(CONFIG_PREEMPT_TRACER) += trace_irqsoff.o
@@ -538,9 +555,11 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  obj-$(CONFIG_NOP_TRACER) += trace_nop.o
  obj-$(CONFIG_STACK_TRACER) += trace_stack.o
  obj-$(CONFIG_MMIOTRACE) += trace_mmiotrace.o
+Index: linux-stable/kernel/trace/latency_hist.c
+===================================================================
 --- /dev/null
-+++ b/kernel/trace/latency_hist.c
-@@ -0,0 +1,1176 @@
++++ linux-stable/kernel/trace/latency_hist.c
+@@ -0,0 +1,1177 @@
 +/*
 + * kernel/trace/latency_hist.c
 + *
@@ -563,6 +582,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +#include <linux/kallsyms.h>
 +#include <linux/uaccess.h>
 +#include <linux/sched.h>
++#include <linux/sched/rt.h>
 +#include <linux/slab.h>
 +#include <asm/atomic.h>
 +#include <asm/div64.h>
@@ -1717,8 +1737,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +}
 +
 +__initcall(latency_hist_init);
---- a/kernel/trace/trace_irqsoff.c
-+++ b/kernel/trace/trace_irqsoff.c
+Index: linux-stable/kernel/trace/trace_irqsoff.c
+===================================================================
+--- linux-stable.orig/kernel/trace/trace_irqsoff.c
++++ linux-stable/kernel/trace/trace_irqsoff.c
 @@ -17,6 +17,7 @@
  #include <linux/fs.h>
  
@@ -1727,7 +1749,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  static struct trace_array		*irqsoff_trace __read_mostly;
  static int				tracer_enabled __read_mostly;
-@@ -438,11 +439,13 @@ void start_critical_timings(void)
+@@ -439,11 +440,13 @@ void start_critical_timings(void)
  {
  	if (preempt_trace() || irq_trace())
  		start_critical_timing(CALLER_ADDR0, CALLER_ADDR1);
@@ -1741,7 +1763,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	if (preempt_trace() || irq_trace())
  		stop_critical_timing(CALLER_ADDR0, CALLER_ADDR1);
  }
-@@ -452,6 +455,7 @@ EXPORT_SYMBOL_GPL(stop_critical_timings)
+@@ -453,6 +456,7 @@ EXPORT_SYMBOL_GPL(stop_critical_timings)
  #ifdef CONFIG_PROVE_LOCKING
  void time_hardirqs_on(unsigned long a0, unsigned long a1)
  {
@@ -1749,7 +1771,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	if (!preempt_trace() && irq_trace())
  		stop_critical_timing(a0, a1);
  }
-@@ -460,6 +464,7 @@ void time_hardirqs_off(unsigned long a0,
+@@ -461,6 +465,7 @@ void time_hardirqs_off(unsigned long a0,
  {
  	if (!preempt_trace() && irq_trace())
  		start_critical_timing(a0, a1);
@@ -1757,7 +1779,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  }
  
  #else /* !CONFIG_PROVE_LOCKING */
-@@ -485,6 +490,7 @@ inline void print_irqtrace_events(struct
+@@ -486,6 +491,7 @@ inline void print_irqtrace_events(struct
   */
  void trace_hardirqs_on(void)
  {
@@ -1765,7 +1787,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	if (!preempt_trace() && irq_trace())
  		stop_critical_timing(CALLER_ADDR0, CALLER_ADDR1);
  }
-@@ -494,11 +500,13 @@ void trace_hardirqs_off(void)
+@@ -495,11 +501,13 @@ void trace_hardirqs_off(void)
  {
  	if (!preempt_trace() && irq_trace())
  		start_critical_timing(CALLER_ADDR0, CALLER_ADDR1);
@@ -1779,7 +1801,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	if (!preempt_trace() && irq_trace())
  		stop_critical_timing(CALLER_ADDR0, caller_addr);
  }
-@@ -508,6 +516,7 @@ void trace_hardirqs_off_caller(unsigned
+@@ -509,6 +517,7 @@ void trace_hardirqs_off_caller(unsigned
  {
  	if (!preempt_trace() && irq_trace())
  		start_critical_timing(CALLER_ADDR0, caller_addr);
@@ -1787,7 +1809,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  }
  EXPORT_SYMBOL(trace_hardirqs_off_caller);
  
-@@ -517,12 +526,14 @@ EXPORT_SYMBOL(trace_hardirqs_off_caller)
+@@ -518,12 +527,14 @@ EXPORT_SYMBOL(trace_hardirqs_off_caller)
  #ifdef CONFIG_PREEMPT_TRACER
  void trace_preempt_on(unsigned long a0, unsigned long a1)
  {

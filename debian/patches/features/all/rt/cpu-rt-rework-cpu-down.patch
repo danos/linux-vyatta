@@ -1,6 +1,7 @@
 From: Steven Rostedt <srostedt@redhat.com>
 Date: Mon, 16 Jul 2012 08:07:43 +0000
 Subject: cpu/rt: Rework cpu down for PREEMPT_RT
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.10/patches-3.10.4-rt1.tar.xz
 
 Bringing a CPU down is a pain with the PREEMPT_RT kernel because
 tasks can be preempted in many more places than in non-RT. In
@@ -50,13 +51,15 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 
 ---
  include/linux/sched.h |    7 +
- kernel/cpu.c          |  241 +++++++++++++++++++++++++++++++++++++++++---------
+ kernel/cpu.c          |  240 +++++++++++++++++++++++++++++++++++++++++---------
  kernel/sched/core.c   |   82 ++++++++++++++++-
- 3 files changed, 285 insertions(+), 45 deletions(-)
+ 3 files changed, 284 insertions(+), 45 deletions(-)
 
---- a/include/linux/sched.h
-+++ b/include/linux/sched.h
-@@ -1978,6 +1978,10 @@ extern void do_set_cpus_allowed(struct t
+Index: linux-stable/include/linux/sched.h
+===================================================================
+--- linux-stable.orig/include/linux/sched.h
++++ linux-stable/include/linux/sched.h
+@@ -1808,6 +1808,10 @@ extern void do_set_cpus_allowed(struct t
  
  extern int set_cpus_allowed_ptr(struct task_struct *p,
  				const struct cpumask *new_mask);
@@ -67,7 +70,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  #else
  static inline void do_set_cpus_allowed(struct task_struct *p,
  				      const struct cpumask *new_mask)
-@@ -1990,6 +1994,9 @@ static inline int set_cpus_allowed_ptr(s
+@@ -1820,6 +1824,9 @@ static inline int set_cpus_allowed_ptr(s
  		return -EINVAL;
  	return 0;
  }
@@ -76,9 +79,11 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +static inline void tell_sched_cpu_down_done(int cpu) { }
  #endif
  
- #ifdef CONFIG_NO_HZ
---- a/kernel/cpu.c
-+++ b/kernel/cpu.c
+ #ifdef CONFIG_NO_HZ_COMMON
+Index: linux-stable/kernel/cpu.c
+===================================================================
+--- linux-stable.orig/kernel/cpu.c
++++ linux-stable/kernel/cpu.c
 @@ -51,12 +51,7 @@ static int cpu_hotplug_disabled;
  
  static struct {
@@ -151,7 +156,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  static DEFINE_PER_CPU(struct hotplug_pcp, hotplug_pcp);
  
  /**
-@@ -99,18 +112,40 @@ static DEFINE_PER_CPU(struct hotplug_pcp
+@@ -99,18 +112,39 @@ static DEFINE_PER_CPU(struct hotplug_pcp
  void pin_current_cpu(void)
  {
  	struct hotplug_pcp *hp;
@@ -162,14 +167,13 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
 -	if (!hp->unplug || hp->refcount || preempt_count() > 1 ||
 +	if (!hp->unplug || hp->refcount || force || preempt_count() > 1 ||
- 	    hp->unplug == current || (current->flags & PF_STOMPER)) {
+ 	    hp->unplug == current) {
  		hp->refcount++;
  		return;
  	}
 -	preempt_enable();
 -	hotplug_lock();
 -	hotplug_unlock();
-+
 +	if (hp->grab_lock) {
 +		preempt_enable();
 +		hotplug_lock(hp);
@@ -196,7 +200,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	preempt_disable();
  	goto retry;
  }
-@@ -132,26 +167,84 @@ void unpin_current_cpu(void)
+@@ -131,26 +165,84 @@ void unpin_current_cpu(void)
  		wake_up_process(hp->unplug);
  }
  
@@ -273,7 +277,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +	 * Force this thread off this CPU as it's going down and
 +	 * we don't want any more work on this CPU.
 +	 */
-+	current->flags &= ~PF_THREAD_BOUND;
++	current->flags &= ~PF_NO_SETAFFINITY;
 +	do_set_cpus_allowed(current, cpu_present_mask);
 +	migrate_me();
  	return 0;
@@ -288,7 +292,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  /*
   * Start the sync_unplug_thread on the target cpu and wait for it to
   * complete.
-@@ -159,23 +252,83 @@ static int sync_unplug_thread(void *data
+@@ -158,23 +250,83 @@ static int sync_unplug_thread(void *data
  static int cpu_unplug_begin(unsigned int cpu)
  {
  	struct hotplug_pcp *hp = &per_cpu(hotplug_pcp, cpu);
@@ -379,7 +383,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  }
  
  void get_online_cpus(void)
-@@ -183,9 +336,9 @@ void get_online_cpus(void)
+@@ -182,9 +334,9 @@ void get_online_cpus(void)
  	might_sleep();
  	if (cpu_hotplug.active_writer == current)
  		return;
@@ -391,7 +395,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  }
  EXPORT_SYMBOL_GPL(get_online_cpus);
-@@ -195,14 +348,13 @@ void put_online_cpus(void)
+@@ -194,14 +346,13 @@ void put_online_cpus(void)
  	if (cpu_hotplug.active_writer == current)
  		return;
  
@@ -408,7 +412,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  }
  EXPORT_SYMBOL_GPL(put_online_cpus);
  
-@@ -233,11 +385,11 @@ static void cpu_hotplug_begin(void)
+@@ -232,11 +383,11 @@ static void cpu_hotplug_begin(void)
  	cpu_hotplug.active_writer = current;
  
  	for (;;) {
@@ -422,7 +426,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  		schedule();
  	}
  }
-@@ -245,7 +397,7 @@ static void cpu_hotplug_begin(void)
+@@ -244,7 +395,7 @@ static void cpu_hotplug_begin(void)
  static void cpu_hotplug_done(void)
  {
  	cpu_hotplug.active_writer = NULL;
@@ -430,8 +434,8 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +	mutex_unlock(&cpu_hotplug.lock);
  }
  
- #else /* #if CONFIG_HOTPLUG_CPU */
-@@ -421,6 +573,9 @@ static int __ref _cpu_down(unsigned int
+ /*
+@@ -445,6 +596,9 @@ static int __ref _cpu_down(unsigned int
  	}
  	smpboot_park_threads(cpu);
  
@@ -441,27 +445,29 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	err = __stop_machine(take_cpu_down, &tcd_param, cpumask_of(cpu));
  	if (err) {
  		/* CPU didn't die: tell everyone.  Can't complain. */
---- a/kernel/sched/core.c
-+++ b/kernel/sched/core.c
-@@ -2898,7 +2898,7 @@ void migrate_disable(void)
+Index: linux-stable/kernel/sched/core.c
+===================================================================
+--- linux-stable.orig/kernel/sched/core.c
++++ linux-stable/kernel/sched/core.c
+@@ -2963,7 +2963,7 @@ void migrate_disable(void)
  {
  	struct task_struct *p = current;
  
--	if (in_atomic() || p->flags & PF_THREAD_BOUND) {
+-	if (in_atomic() || p->flags & PF_NO_SETAFFINITY) {
 +	if (in_atomic()) {
  #ifdef CONFIG_SCHED_DEBUG
  		p->migrate_disable_atomic++;
  #endif
-@@ -2929,7 +2929,7 @@ void migrate_enable(void)
+@@ -2994,7 +2994,7 @@ void migrate_enable(void)
  	unsigned long flags;
  	struct rq *rq;
  
--	if (in_atomic() || p->flags & PF_THREAD_BOUND) {
+-	if (in_atomic() || p->flags & PF_NO_SETAFFINITY) {
 +	if (in_atomic()) {
  #ifdef CONFIG_SCHED_DEBUG
  		p->migrate_disable_atomic--;
  #endif
-@@ -4876,6 +4876,84 @@ void do_set_cpus_allowed(struct task_str
+@@ -4966,6 +4966,84 @@ void do_set_cpus_allowed(struct task_str
  	cpumask_copy(&p->cpus_allowed, new_mask);
  }
  
@@ -489,7 +495,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 + * Used by the pin_current_cpu() code to try to get tasks
 + * to move off the current CPU as it is going down.
 + * It will only move the task if the task isn't pinned to
-+ * the CPU (with migrate_disable, affinity or THREAD_BOUND)
++ * the CPU (with migrate_disable, affinity or NO_SETAFFINITY)
 + * and the task has to be in a RUNNING state. Otherwise the
 + * movement of the task will wake it up (change its state
 + * to running) when the task did not expect it.
@@ -511,7 +517,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +	 * We can not migrate tasks bounded to a CPU or tasks not
 +	 * running. The movement of the task will wake it up.
 +	 */
-+	if (p->flags & PF_THREAD_BOUND || p->state)
++	if (p->flags & PF_NO_SETAFFINITY || p->state)
 +		return 0;
 +
 +	mutex_lock(&sched_down_mutex);

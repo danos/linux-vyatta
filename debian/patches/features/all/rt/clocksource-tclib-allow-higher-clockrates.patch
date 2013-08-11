@@ -1,6 +1,7 @@
 From: Benedikt Spranger <b.spranger@linutronix.de>
 Date: Mon, 8 Mar 2010 18:57:04 +0100
 Subject: clocksource: TCLIB: Allow higher clock rates for clock events
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.10/patches-3.10.4-rt1.tar.xz
 
 As default the TCLIB uses the 32KiHz base clock rate for clock events.
 Add a compile time selection to allow higher clock resulution.
@@ -9,12 +10,14 @@ Signed-off-by: Benedikt Spranger <b.spranger@linutronix.de>
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 
 ---
- drivers/clocksource/tcb_clksrc.c |   44 +++++++++++++++++++++++----------------
- drivers/misc/Kconfig             |   11 +++++++--
- 2 files changed, 35 insertions(+), 20 deletions(-)
+ drivers/clocksource/tcb_clksrc.c |   30 ++++++++++++++++--------------
+ drivers/misc/Kconfig             |   12 ++++++++++--
+ 2 files changed, 26 insertions(+), 16 deletions(-)
 
---- a/drivers/clocksource/tcb_clksrc.c
-+++ b/drivers/clocksource/tcb_clksrc.c
+Index: linux-stable/drivers/clocksource/tcb_clksrc.c
+===================================================================
+--- linux-stable.orig/drivers/clocksource/tcb_clksrc.c
++++ linux-stable/drivers/clocksource/tcb_clksrc.c
 @@ -23,8 +23,7 @@
   *     this 32 bit free-running counter. the second channel is not used.
   *
@@ -71,10 +74,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  		__raw_writel(timer_clock | ATMEL_TC_CPCSTOP
  				| ATMEL_TC_WAVE | ATMEL_TC_WAVESEL_UP_AUTO,
  				regs + ATMEL_TC_REG(2, CMR));
-@@ -158,8 +152,12 @@ static struct tc_clkevt_device clkevt =
+@@ -157,8 +151,12 @@ static struct tc_clkevt_device clkevt =
+ 		.name		= "tc_clkevt",
  		.features	= CLOCK_EVT_FEAT_PERIODIC
  					| CLOCK_EVT_FEAT_ONESHOT,
- 		.shift		= 32,
 +#ifdef CONFIG_ATMEL_TCB_CLKSRC_USE_SLOW_CLOCK
  		/* Should be lower than at91rm9200's system timer */
  		.rating		= 125,
@@ -84,7 +87,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  		.set_next_event	= tc_next_event,
  		.set_mode	= tc_mode,
  	},
-@@ -185,8 +183,9 @@ static struct irqaction tc_irqaction = {
+@@ -184,8 +182,9 @@ static struct irqaction tc_irqaction = {
  	.handler	= ch2_irq,
  };
  
@@ -95,29 +98,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	struct clk *t2_clk = tc->clk[2];
  	int irq = tc->irq[2];
  
-@@ -194,11 +193,17 @@ static void __init setup_clkevents(struc
- 	clkevt.clk = t2_clk;
- 	tc_irqaction.dev_id = &clkevt;
- 
--	timer_clock = clk32k_divisor_idx;
-+	timer_clock = divisor_idx;
- 
--	clkevt.clkevt.mult = div_sc(32768, NSEC_PER_SEC, clkevt.clkevt.shift);
--	clkevt.clkevt.max_delta_ns
--		= clockevent_delta2ns(0xffff, &clkevt.clkevt);
-+	if (!divisor)
-+		clkevt.freq = 32768;
-+	else
-+		clkevt.freq = clk_get_rate(t2_clk)/divisor;
-+
-+	clkevt.clkevt.mult = div_sc(clkevt.freq, NSEC_PER_SEC,
-+				    clkevt.clkevt.shift);
-+	clkevt.clkevt.max_delta_ns =
-+		clockevent_delta2ns(0xffff, &clkevt.clkevt);
- 	clkevt.clkevt.min_delta_ns = clockevent_delta2ns(1, &clkevt.clkevt) + 1;
- 	clkevt.clkevt.cpumask = cpumask_of(0);
- 
-@@ -327,8 +332,11 @@ static int __init tcb_clksrc_init(void)
+@@ -322,8 +321,11 @@ static int __init tcb_clksrc_init(void)
  	clocksource_register_hz(&clksrc, divided_rate);
  
  	/* channel 2:  periodic and oneshot timer support */
@@ -130,8 +111,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	return 0;
  }
  arch_initcall(tcb_clksrc_init);
---- a/drivers/misc/Kconfig
-+++ b/drivers/misc/Kconfig
+Index: linux-stable/drivers/misc/Kconfig
+===================================================================
+--- linux-stable.orig/drivers/misc/Kconfig
++++ linux-stable/drivers/misc/Kconfig
 @@ -78,8 +78,7 @@ config ATMEL_TCB_CLKSRC
  	  are combined to make a single 32-bit timer.
  
@@ -142,7 +125,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  config ATMEL_TCB_CLKSRC_BLOCK
  	int
-@@ -93,6 +92,14 @@ config ATMEL_TCB_CLKSRC_BLOCK
+@@ -93,6 +92,15 @@ config ATMEL_TCB_CLKSRC_BLOCK
  	  TC can be used for other purposes, such as PWM generation and
  	  interval timing.
  
@@ -154,6 +137,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +	  Select this to use 32 KiHz base clock rate as TC block clock
 +	  source for clock events.
 +
- config IBM_ASM
- 	tristate "Device driver for IBM RSA service processor"
- 	depends on X86 && PCI && INPUT
++
+ config DUMMY_IRQ
+ 	tristate "Dummy IRQ handler"
+ 	default n

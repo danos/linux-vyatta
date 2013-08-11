@@ -1,6 +1,7 @@
 Subject: completion: Use simple wait queues
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Fri, 11 Jan 2013 11:23:51 +0100
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.10/patches-3.10.4-rt1.tar.xz
 
 Completions have no long lasting callbacks and therefor do not need
 the complex waitqueue variant. Use simple waitqueues which reduces the
@@ -10,11 +11,13 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 ---
  include/linux/completion.h |    8 ++++----
  include/linux/uprobes.h    |    1 +
- kernel/sched/core.c        |   34 +++++++++++++++++-----------------
- 3 files changed, 22 insertions(+), 21 deletions(-)
+ kernel/sched/core.c        |   44 +++++++++++++++++++++++++-------------------
+ 3 files changed, 30 insertions(+), 23 deletions(-)
 
---- a/include/linux/completion.h
-+++ b/include/linux/completion.h
+Index: linux-stable/include/linux/completion.h
+===================================================================
+--- linux-stable.orig/include/linux/completion.h
++++ linux-stable/include/linux/completion.h
 @@ -8,7 +8,7 @@
   * See kernel/sched.c for details.
   */
@@ -47,8 +50,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  }
  
  extern void wait_for_completion(struct completion *);
---- a/include/linux/uprobes.h
-+++ b/include/linux/uprobes.h
+Index: linux-stable/include/linux/uprobes.h
+===================================================================
+--- linux-stable.orig/include/linux/uprobes.h
++++ linux-stable/include/linux/uprobes.h
 @@ -26,6 +26,7 @@
  
  #include <linux/errno.h>
@@ -57,9 +62,35 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  struct vm_area_struct;
  struct mm_struct;
---- a/kernel/sched/core.c
-+++ b/kernel/sched/core.c
-@@ -3491,10 +3491,10 @@ void complete(struct completion *x)
+Index: linux-stable/kernel/sched/core.c
+===================================================================
+--- linux-stable.orig/kernel/sched/core.c
++++ linux-stable/kernel/sched/core.c
+@@ -3028,7 +3028,10 @@ void migrate_disable(void)
+ 	}
+ 
+ #ifdef CONFIG_SCHED_DEBUG
+-	WARN_ON_ONCE(p->migrate_disable_atomic);
++	if (unlikely(p->migrate_disable_atomic)) {
++		tracing_off();
++		WARN_ON_ONCE(1);
++	}
+ #endif
+ 
+ 	preempt_disable();
+@@ -3060,7 +3063,10 @@ void migrate_enable(void)
+ 	}
+ 
+ #ifdef CONFIG_SCHED_DEBUG
+-	WARN_ON_ONCE(p->migrate_disable_atomic);
++	if (unlikely(p->migrate_disable_atomic)) {
++		tracing_off();
++		WARN_ON_ONCE(1);
++	}
+ #endif
+ 	WARN_ON_ONCE(p->migrate_disable <= 0);
+ 
+@@ -3515,10 +3521,10 @@ void complete(struct completion *x)
  {
  	unsigned long flags;
  
@@ -73,7 +104,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  }
  EXPORT_SYMBOL(complete);
  
-@@ -3511,10 +3511,10 @@ void complete_all(struct completion *x)
+@@ -3535,10 +3541,10 @@ void complete_all(struct completion *x)
  {
  	unsigned long flags;
  
@@ -87,8 +118,8 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  }
  EXPORT_SYMBOL(complete_all);
  
-@@ -3522,20 +3522,20 @@ static inline long __sched
- do_wait_for_common(struct completion *x, long timeout, int state)
+@@ -3547,20 +3553,20 @@ do_wait_for_common(struct completion *x,
+ 		   long (*action)(long), long timeout, int state)
  {
  	if (!x->done) {
 -		DECLARE_WAITQUEUE(wait, current);
@@ -104,7 +135,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  			__set_current_state(state);
 -			spin_unlock_irq(&x->wait.lock);
 +			raw_spin_unlock_irq(&x->wait.lock);
- 			timeout = schedule_timeout(timeout);
+ 			timeout = action(timeout);
 -			spin_lock_irq(&x->wait.lock);
 +			raw_spin_lock_irq(&x->wait.lock);
  		} while (!x->done && timeout);
@@ -113,19 +144,19 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  		if (!x->done)
  			return timeout;
  	}
-@@ -3548,9 +3548,9 @@ wait_for_common(struct completion *x, lo
+@@ -3574,9 +3580,9 @@ __wait_for_common(struct completion *x,
  {
  	might_sleep();
  
 -	spin_lock_irq(&x->wait.lock);
 +	raw_spin_lock_irq(&x->wait.lock);
- 	timeout = do_wait_for_common(x, timeout, state);
+ 	timeout = do_wait_for_common(x, action, timeout, state);
 -	spin_unlock_irq(&x->wait.lock);
 +	raw_spin_unlock_irq(&x->wait.lock);
  	return timeout;
  }
  
-@@ -3681,12 +3681,12 @@ bool try_wait_for_completion(struct comp
+@@ -3752,12 +3758,12 @@ bool try_wait_for_completion(struct comp
  	unsigned long flags;
  	int ret = 1;
  
@@ -140,7 +171,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	return ret;
  }
  EXPORT_SYMBOL(try_wait_for_completion);
-@@ -3704,10 +3704,10 @@ bool completion_done(struct completion *
+@@ -3775,10 +3781,10 @@ bool completion_done(struct completion *
  	unsigned long flags;
  	int ret = 1;
  

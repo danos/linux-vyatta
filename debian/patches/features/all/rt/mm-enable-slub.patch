@@ -1,30 +1,21 @@
 Subject: mm: Enable SLUB for RT
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Thu, 25 Oct 2012 10:32:35 +0100
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.10/patches-3.10.4-rt1.tar.xz
 
 Make SLUB RT aware and remove the restriction in Kconfig.
 
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 ---
- include/linux/slub_def.h |    2 
- init/Kconfig             |    1 
- mm/slub.c                |  119 +++++++++++++++++++++++++++++++++++------------
- 3 files changed, 92 insertions(+), 30 deletions(-)
+ init/Kconfig |    1 
+ mm/slub.c    |  119 +++++++++++++++++++++++++++++++++++++++++++++--------------
+ 2 files changed, 91 insertions(+), 29 deletions(-)
 
---- a/include/linux/slub_def.h
-+++ b/include/linux/slub_def.h
-@@ -54,7 +54,7 @@ struct kmem_cache_cpu {
- };
- 
- struct kmem_cache_node {
--	spinlock_t list_lock;	/* Protect partial list and nr_partial */
-+	raw_spinlock_t list_lock;	/* Protect partial list and nr_partial */
- 	unsigned long nr_partial;
- 	struct list_head partial;
- #ifdef CONFIG_SLUB_DEBUG
---- a/init/Kconfig
-+++ b/init/Kconfig
-@@ -1494,7 +1494,6 @@ config SLAB
+Index: linux-stable/init/Kconfig
+===================================================================
+--- linux-stable.orig/init/Kconfig
++++ linux-stable/init/Kconfig
+@@ -1542,7 +1542,6 @@ config SLAB
  
  config SLUB
  	bool "SLUB (Unqueued Allocator)"
@@ -32,9 +23,11 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	help
  	   SLUB is a slab allocator that minimizes cache line usage
  	   instead of managing queues of cached objects (SLAB approach).
---- a/mm/slub.c
-+++ b/mm/slub.c
-@@ -1070,7 +1070,7 @@ static noinline struct kmem_cache_node *
+Index: linux-stable/mm/slub.c
+===================================================================
+--- linux-stable.orig/mm/slub.c
++++ linux-stable/mm/slub.c
+@@ -1071,7 +1071,7 @@ static noinline struct kmem_cache_node *
  {
  	struct kmem_cache_node *n = get_node(s, page_to_nid(page));
  
@@ -43,7 +36,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	slab_lock(page);
  
  	if (!check_slab(s, page))
-@@ -1118,7 +1118,7 @@ out:
+@@ -1119,7 +1119,7 @@ out:
  
  fail:
  	slab_unlock(page);
@@ -52,7 +45,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	slab_fix(s, "Object at 0x%p not freed", object);
  	return NULL;
  }
-@@ -1253,6 +1253,12 @@ static inline void slab_free_hook(struct
+@@ -1254,6 +1254,12 @@ static inline void slab_free_hook(struct
  
  #endif /* CONFIG_SLUB_DEBUG */
  
@@ -65,7 +58,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  /*
   * Slab allocation and freeing
   */
-@@ -1277,7 +1283,11 @@ static struct page *allocate_slab(struct
+@@ -1278,7 +1284,11 @@ static struct page *allocate_slab(struct
  
  	flags &= gfp_allowed_mask;
  
@@ -77,7 +70,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  		local_irq_enable();
  
  	flags |= s->allocflags;
-@@ -1317,7 +1327,11 @@ static struct page *allocate_slab(struct
+@@ -1318,7 +1328,11 @@ static struct page *allocate_slab(struct
  			kmemcheck_mark_unallocated_pages(page, pages);
  	}
  
@@ -89,7 +82,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  		local_irq_disable();
  	if (!page)
  		return NULL;
-@@ -1414,6 +1428,16 @@ static void __free_slab(struct kmem_cach
+@@ -1415,6 +1429,16 @@ static void __free_slab(struct kmem_cach
  	__free_memcg_kmem_pages(page, order);
  }
  
@@ -106,7 +99,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  #define need_reserve_slab_rcu						\
  	(sizeof(((struct page *)NULL)->lru) < sizeof(struct rcu_head))
  
-@@ -1448,6 +1472,12 @@ static void free_slab(struct kmem_cache
+@@ -1449,6 +1473,12 @@ static void free_slab(struct kmem_cache
  		}
  
  		call_rcu(head, rcu_free_slab);
@@ -119,7 +112,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	} else
  		__free_slab(s, page);
  }
-@@ -1549,7 +1579,7 @@ static void *get_partial_node(struct kme
+@@ -1553,7 +1583,7 @@ static void *get_partial_node(struct kme
  	if (!n || !n->nr_partial)
  		return NULL;
  
@@ -127,8 +120,8 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +	raw_spin_lock(&n->list_lock);
  	list_for_each_entry_safe(page, page2, &n->partial, lru) {
  		void *t;
- 		int available;
-@@ -1574,7 +1604,7 @@ static void *get_partial_node(struct kme
+ 
+@@ -1577,7 +1607,7 @@ static void *get_partial_node(struct kme
  			break;
  
  	}
@@ -137,7 +130,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	return object;
  }
  
-@@ -1816,7 +1846,7 @@ redo:
+@@ -1819,7 +1849,7 @@ redo:
  			 * that acquire_slab() will see a slab page that
  			 * is frozen
  			 */
@@ -146,7 +139,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  		}
  	} else {
  		m = M_FULL;
-@@ -1827,7 +1857,7 @@ redo:
+@@ -1830,7 +1860,7 @@ redo:
  			 * slabs from diagnostic functions will not see
  			 * any frozen slabs.
  			 */
@@ -155,7 +148,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  		}
  	}
  
-@@ -1862,7 +1892,7 @@ redo:
+@@ -1865,7 +1895,7 @@ redo:
  		goto redo;
  
  	if (lock)
@@ -164,7 +157,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	if (m == M_FREE) {
  		stat(s, DEACTIVATE_EMPTY);
-@@ -1893,10 +1923,10 @@ static void unfreeze_partials(struct kme
+@@ -1896,10 +1926,10 @@ static void unfreeze_partials(struct kme
  		n2 = get_node(s, page_to_nid(page));
  		if (n != n2) {
  			if (n)
@@ -177,7 +170,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  		}
  
  		do {
-@@ -1925,7 +1955,7 @@ static void unfreeze_partials(struct kme
+@@ -1928,7 +1958,7 @@ static void unfreeze_partials(struct kme
  	}
  
  	if (n)
@@ -186,7 +179,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	while (discard_page) {
  		page = discard_page;
-@@ -1961,14 +1991,21 @@ static int put_cpu_partial(struct kmem_c
+@@ -1964,14 +1994,21 @@ static void put_cpu_partial(struct kmem_
  			pobjects = oldpage->pobjects;
  			pages = oldpage->pages;
  			if (drain && pobjects > s->cpu_partial) {
@@ -208,7 +201,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  				oldpage = NULL;
  				pobjects = 0;
  				pages = 0;
-@@ -2031,7 +2068,22 @@ static bool has_cpu_slab(int cpu, void *
+@@ -2033,7 +2070,22 @@ static bool has_cpu_slab(int cpu, void *
  
  static void flush_all(struct kmem_cache *s)
  {
@@ -231,7 +224,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  }
  
  /*
-@@ -2059,10 +2111,10 @@ static unsigned long count_partial(struc
+@@ -2061,10 +2113,10 @@ static unsigned long count_partial(struc
  	unsigned long x = 0;
  	struct page *page;
  
@@ -244,7 +237,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	return x;
  }
  
-@@ -2205,9 +2257,11 @@ static inline void *get_freelist(struct
+@@ -2207,9 +2259,11 @@ static inline void *get_freelist(struct
  static void *__slab_alloc(struct kmem_cache *s, gfp_t gfpflags, int node,
  			  unsigned long addr, struct kmem_cache_cpu *c)
  {
@@ -256,7 +249,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	local_irq_save(flags);
  #ifdef CONFIG_PREEMPT
-@@ -2270,7 +2324,13 @@ load_freelist:
+@@ -2272,7 +2326,13 @@ load_freelist:
  	VM_BUG_ON(!c->page->frozen);
  	c->freelist = get_freepointer(s, freelist);
  	c->tid = next_tid(c->tid);
@@ -270,7 +263,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	return freelist;
  
  new_slab:
-@@ -2288,9 +2348,7 @@ new_slab:
+@@ -2290,9 +2350,7 @@ new_slab:
  	if (unlikely(!freelist)) {
  		if (!(gfpflags & __GFP_NOWARN) && printk_ratelimit())
  			slab_out_of_memory(s, gfpflags, node);
@@ -281,7 +274,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	}
  
  	page = c->page;
-@@ -2304,8 +2362,7 @@ new_slab:
+@@ -2306,8 +2364,7 @@ new_slab:
  	deactivate_slab(s, page, get_freepointer(s, freelist));
  	c->page = NULL;
  	c->freelist = NULL;
@@ -291,7 +284,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  }
  
  /*
-@@ -2477,7 +2534,7 @@ static void __slab_free(struct kmem_cach
+@@ -2484,7 +2541,7 @@ static void __slab_free(struct kmem_cach
  
  	do {
  		if (unlikely(n)) {
@@ -300,7 +293,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  			n = NULL;
  		}
  		prior = page->freelist;
-@@ -2507,7 +2564,7 @@ static void __slab_free(struct kmem_cach
+@@ -2514,7 +2571,7 @@ static void __slab_free(struct kmem_cach
  				 * Otherwise the list_lock will synchronize with
  				 * other processors updating the list of slabs.
  				 */
@@ -309,7 +302,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  			}
  		}
-@@ -2548,7 +2605,7 @@ static void __slab_free(struct kmem_cach
+@@ -2555,7 +2612,7 @@ static void __slab_free(struct kmem_cach
  		add_partial(n, page, DEACTIVATE_TO_TAIL);
  		stat(s, FREE_ADD_PARTIAL);
  	}
@@ -318,7 +311,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	return;
  
  slab_empty:
-@@ -2562,7 +2619,7 @@ slab_empty:
+@@ -2569,7 +2626,7 @@ slab_empty:
  		/* Slab must be on the full list */
  		remove_full(s, page);
  
@@ -327,7 +320,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	stat(s, FREE_SLAB);
  	discard_slab(s, page);
  }
-@@ -2764,7 +2821,7 @@ static void
+@@ -2771,7 +2828,7 @@ static void
  init_kmem_cache_node(struct kmem_cache_node *n)
  {
  	n->nr_partial = 0;
@@ -336,7 +329,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	INIT_LIST_HEAD(&n->partial);
  #ifdef CONFIG_SLUB_DEBUG
  	atomic_long_set(&n->nr_slabs, 0);
-@@ -3451,7 +3508,7 @@ int kmem_cache_shrink(struct kmem_cache
+@@ -3393,7 +3450,7 @@ int kmem_cache_shrink(struct kmem_cache
  		for (i = 0; i < objects; i++)
  			INIT_LIST_HEAD(slabs_by_inuse + i);
  
@@ -345,7 +338,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  		/*
  		 * Build lists indexed by the items in use in each slab.
-@@ -3472,7 +3529,7 @@ int kmem_cache_shrink(struct kmem_cache
+@@ -3414,7 +3471,7 @@ int kmem_cache_shrink(struct kmem_cache
  		for (i = objects - 1; i > 0; i--)
  			list_splice(slabs_by_inuse + i, n->partial.prev);
  
@@ -354,10 +347,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  		/* Release empty slabs */
  		list_for_each_entry_safe(page, t, slabs_by_inuse, lru)
-@@ -3642,6 +3699,12 @@ void __init kmem_cache_init(void)
+@@ -3590,6 +3647,12 @@ void __init kmem_cache_init(void)
+ {
+ 	static __initdata struct kmem_cache boot_kmem_cache,
  		boot_kmem_cache_node;
- 	int i;
- 	int caches = 2;
 +	int cpu;
 +
 +	for_each_possible_cpu(cpu) {
@@ -367,7 +360,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	if (debug_guardpage_minorder())
  		slub_max_order = 0;
-@@ -4033,7 +4096,7 @@ static int validate_slab_node(struct kme
+@@ -3894,7 +3957,7 @@ static int validate_slab_node(struct kme
  	struct page *page;
  	unsigned long flags;
  
@@ -376,7 +369,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	list_for_each_entry(page, &n->partial, lru) {
  		validate_slab_slab(s, page, map);
-@@ -4056,7 +4119,7 @@ static int validate_slab_node(struct kme
+@@ -3917,7 +3980,7 @@ static int validate_slab_node(struct kme
  			atomic_long_read(&n->nr_slabs));
  
  out:
@@ -385,7 +378,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	return count;
  }
  
-@@ -4246,12 +4309,12 @@ static int list_locations(struct kmem_ca
+@@ -4107,12 +4170,12 @@ static int list_locations(struct kmem_ca
  		if (!atomic_long_read(&n->nr_slabs))
  			continue;
  

@@ -1,6 +1,7 @@
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Fri, 3 Jul 2009 08:44:56 -0500
 Subject: signals: Allow rt tasks to cache one sigqueue struct
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.10/patches-3.10.4-rt1.tar.xz
 
 To avoid allocation allow rt tasks to cache one sigqueue struct in
 task struct.
@@ -12,12 +13,14 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  include/linux/signal.h |    1 
  kernel/exit.c          |    2 -
  kernel/fork.c          |    1 
- kernel/signal.c        |   83 ++++++++++++++++++++++++++++++++++++++++++++++---
- 5 files changed, 83 insertions(+), 5 deletions(-)
+ kernel/signal.c        |   94 ++++++++++++++++++++++++++++++++++++++++++++-----
+ 5 files changed, 89 insertions(+), 10 deletions(-)
 
---- a/include/linux/sched.h
-+++ b/include/linux/sched.h
-@@ -1408,6 +1408,7 @@ struct task_struct {
+Index: linux-stable/include/linux/sched.h
+===================================================================
+--- linux-stable.orig/include/linux/sched.h
++++ linux-stable/include/linux/sched.h
+@@ -1215,6 +1215,7 @@ struct task_struct {
  /* signal handlers */
  	struct signal_struct *signal;
  	struct sighand_struct *sighand;
@@ -25,8 +28,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	sigset_t blocked, real_blocked;
  	sigset_t saved_sigmask;	/* restored if set_restore_sigmask() was used */
---- a/include/linux/signal.h
-+++ b/include/linux/signal.h
+Index: linux-stable/include/linux/signal.h
+===================================================================
+--- linux-stable.orig/include/linux/signal.h
++++ linux-stable/include/linux/signal.h
 @@ -226,6 +226,7 @@ static inline void init_sigpending(struc
  }
  
@@ -35,9 +40,11 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  /* Test if 'sig' is valid signal. Use this instead of testing _NSIG directly */
  static inline int valid_signal(unsigned long sig)
---- a/kernel/exit.c
-+++ b/kernel/exit.c
-@@ -143,7 +143,7 @@ static void __exit_signal(struct task_st
+Index: linux-stable/kernel/exit.c
+===================================================================
+--- linux-stable.orig/kernel/exit.c
++++ linux-stable/kernel/exit.c
+@@ -145,7 +145,7 @@ static void __exit_signal(struct task_st
  	 * Do this under ->siglock, we can race with another thread
  	 * doing sigqueue_free() if we have SIGQUEUE_PREALLOC signals.
  	 */
@@ -46,9 +53,11 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	tsk->sighand = NULL;
  	spin_unlock(&sighand->siglock);
  
---- a/kernel/fork.c
-+++ b/kernel/fork.c
-@@ -1230,6 +1230,7 @@ static struct task_struct *copy_process(
+Index: linux-stable/kernel/fork.c
+===================================================================
+--- linux-stable.orig/kernel/fork.c
++++ linux-stable/kernel/fork.c
+@@ -1231,6 +1231,7 @@ static struct task_struct *copy_process(
  	spin_lock_init(&p->alloc_lock);
  
  	init_sigpending(&p->pending);
@@ -56,9 +65,19 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	p->utime = p->stime = p->gtime = 0;
  	p->utimescaled = p->stimescaled = 0;
---- a/kernel/signal.c
-+++ b/kernel/signal.c
-@@ -348,13 +348,45 @@ static bool task_participate_group_stop(
+Index: linux-stable/kernel/signal.c
+===================================================================
+--- linux-stable.orig/kernel/signal.c
++++ linux-stable/kernel/signal.c
+@@ -14,6 +14,7 @@
+ #include <linux/export.h>
+ #include <linux/init.h>
+ #include <linux/sched.h>
++#include <linux/sched/rt.h>
+ #include <linux/fs.h>
+ #include <linux/tty.h>
+ #include <linux/binfmts.h>
+@@ -349,13 +350,45 @@ static bool task_participate_group_stop(
  	return false;
  }
  
@@ -105,7 +124,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  {
  	struct sigqueue *q = NULL;
  	struct user_struct *user;
-@@ -371,7 +403,10 @@ __sigqueue_alloc(int sig, struct task_st
+@@ -372,7 +405,10 @@ __sigqueue_alloc(int sig, struct task_st
  	if (override_rlimit ||
  	    atomic_read(&user->sigpending) <=
  			task_rlimit(t, RLIMIT_SIGPENDING)) {
@@ -117,7 +136,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	} else {
  		print_dropped_signal(sig);
  	}
-@@ -388,6 +423,13 @@ __sigqueue_alloc(int sig, struct task_st
+@@ -389,6 +425,13 @@ __sigqueue_alloc(int sig, struct task_st
  	return q;
  }
  
@@ -131,7 +150,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  static void __sigqueue_free(struct sigqueue *q)
  {
  	if (q->flags & SIGQUEUE_PREALLOC)
-@@ -397,6 +439,21 @@ static void __sigqueue_free(struct sigqu
+@@ -398,6 +441,21 @@ static void __sigqueue_free(struct sigqu
  	kmem_cache_free(sigqueue_cachep, q);
  }
  
@@ -153,7 +172,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  void flush_sigqueue(struct sigpending *queue)
  {
  	struct sigqueue *q;
-@@ -410,6 +467,21 @@ void flush_sigqueue(struct sigpending *q
+@@ -411,6 +469,21 @@ void flush_sigqueue(struct sigpending *q
  }
  
  /*
@@ -175,7 +194,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
   * Flush all pending signals for a task.
   */
  void __flush_signals(struct task_struct *t)
-@@ -561,7 +633,7 @@ static void collect_signal(int sig, stru
+@@ -562,7 +635,7 @@ static void collect_signal(int sig, stru
  still_pending:
  		list_del_init(&first->list);
  		copy_siginfo(info, &first->info);
@@ -184,7 +203,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	} else {
  		/*
  		 * Ok, it wasn't in the queue.  This must be
-@@ -607,6 +679,8 @@ int dequeue_signal(struct task_struct *t
+@@ -608,6 +681,8 @@ int dequeue_signal(struct task_struct *t
  {
  	int signr;
  
@@ -193,7 +212,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	/* We only dequeue private signals from ourselves, we don't let
  	 * signalfd steal them
  	 */
-@@ -1545,7 +1619,8 @@ EXPORT_SYMBOL(kill_pid);
+@@ -1547,7 +1622,8 @@ EXPORT_SYMBOL(kill_pid);
   */
  struct sigqueue *sigqueue_alloc(void)
  {
@@ -203,3 +222,48 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	if (q)
  		q->flags |= SIGQUEUE_PREALLOC;
+@@ -2367,7 +2443,7 @@ relock:
+ }
+ 
+ /**
+- * signal_delivered - 
++ * signal_delivered -
+  * @sig:		number of signal being delivered
+  * @info:		siginfo_t of signal being delivered
+  * @ka:			sigaction setting that chose the handler
+@@ -3126,7 +3202,7 @@ int do_sigaction(int sig, struct k_sigac
+ 	return 0;
+ }
+ 
+-static int 
++static int
+ do_sigaltstack (const stack_t __user *uss, stack_t __user *uoss, unsigned long sp)
+ {
+ 	stack_t oss;
+@@ -3270,7 +3346,7 @@ int __compat_save_altstack(compat_stack_
+  */
+ SYSCALL_DEFINE1(sigpending, old_sigset_t __user *, set)
+ {
+-	return sys_rt_sigpending((sigset_t __user *)set, sizeof(old_sigset_t)); 
++	return sys_rt_sigpending((sigset_t __user *)set, sizeof(old_sigset_t));
+ }
+ 
+ #endif
+@@ -3395,7 +3471,7 @@ COMPAT_SYSCALL_DEFINE4(rt_sigaction, int
+ 	ret = do_sigaction(sig, act ? &new_ka : NULL, oact ? &old_ka : NULL);
+ 	if (!ret && oact) {
+ 		sigset_to_compat(&mask, &old_ka.sa.sa_mask);
+-		ret = put_user(ptr_to_compat(old_ka.sa.sa_handler), 
++		ret = put_user(ptr_to_compat(old_ka.sa.sa_handler),
+ 			       &oact->sa_handler);
+ 		ret |= copy_to_user(&oact->sa_mask, &mask, sizeof(mask));
+ 		ret |= __put_user(old_ka.sa.sa_flags, &oact->sa_flags);
+@@ -3571,7 +3647,7 @@ SYSCALL_DEFINE2(rt_sigsuspend, sigset_t
+ 		return -EFAULT;
+ 	return sigsuspend(&newset);
+ }
+- 
++
+ #ifdef CONFIG_COMPAT
+ COMPAT_SYSCALL_DEFINE2(rt_sigsuspend, compat_sigset_t __user *, unewset, compat_size_t, sigsetsize)
+ {

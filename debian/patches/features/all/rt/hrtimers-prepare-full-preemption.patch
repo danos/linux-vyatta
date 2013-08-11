@@ -1,6 +1,7 @@
 From: Ingo Molnar <mingo@elte.hu>
 Date: Fri, 3 Jul 2009 08:29:34 -0500
 Subject: hrtimers: prepare full preemption
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.10/patches-3.10.4-rt1.tar.xz
 
 Make cancellation of a running callback in softirq context safe
 against preemption.
@@ -15,9 +16,11 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  kernel/posix-timers.c   |   33 +++++++++++++++++++++++++++++++++
  4 files changed, 76 insertions(+), 1 deletion(-)
 
---- a/include/linux/hrtimer.h
-+++ b/include/linux/hrtimer.h
-@@ -192,6 +192,9 @@ struct hrtimer_cpu_base {
+Index: linux-stable/include/linux/hrtimer.h
+===================================================================
+--- linux-stable.orig/include/linux/hrtimer.h
++++ linux-stable/include/linux/hrtimer.h
+@@ -193,6 +193,9 @@ struct hrtimer_cpu_base {
  	unsigned long			nr_hangs;
  	ktime_t				max_hang_time;
  #endif
@@ -27,7 +30,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	struct hrtimer_clock_base	clock_base[HRTIMER_MAX_CLOCK_BASES];
  };
  
-@@ -385,6 +388,13 @@ static inline int hrtimer_restart(struct
+@@ -388,6 +391,13 @@ static inline int hrtimer_restart(struct
  	return hrtimer_start_expires(timer, HRTIMER_MODE_ABS);
  }
  
@@ -41,9 +44,11 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  /* Query timers: */
  extern ktime_t hrtimer_get_remaining(const struct hrtimer *timer);
  extern int hrtimer_get_res(const clockid_t which_clock, struct timespec *tp);
---- a/kernel/hrtimer.c
-+++ b/kernel/hrtimer.c
-@@ -845,6 +845,32 @@ u64 hrtimer_forward(struct hrtimer *time
+Index: linux-stable/kernel/hrtimer.c
+===================================================================
+--- linux-stable.orig/kernel/hrtimer.c
++++ linux-stable/kernel/hrtimer.c
+@@ -863,6 +863,32 @@ u64 hrtimer_forward(struct hrtimer *time
  }
  EXPORT_SYMBOL_GPL(hrtimer_forward);
  
@@ -76,7 +81,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  /*
   * enqueue_hrtimer - internal function to (re)start a timer
   *
-@@ -1095,7 +1121,7 @@ int hrtimer_cancel(struct hrtimer *timer
+@@ -1115,7 +1141,7 @@ int hrtimer_cancel(struct hrtimer *timer
  
  		if (ret >= 0)
  			return ret;
@@ -85,7 +90,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	}
  }
  EXPORT_SYMBOL_GPL(hrtimer_cancel);
-@@ -1510,6 +1536,8 @@ void hrtimer_run_queues(void)
+@@ -1532,6 +1558,8 @@ void hrtimer_run_queues(void)
  		}
  		raw_spin_unlock(&cpu_base->lock);
  	}
@@ -94,7 +99,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  }
  
  /*
-@@ -1670,6 +1698,9 @@ static void __cpuinit init_hrtimers_cpu(
+@@ -1692,6 +1720,9 @@ static void __cpuinit init_hrtimers_cpu(
  	}
  
  	hrtimer_init_hres(cpu_base);
@@ -104,8 +109,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  }
  
  #ifdef CONFIG_HOTPLUG_CPU
---- a/kernel/itimer.c
-+++ b/kernel/itimer.c
+Index: linux-stable/kernel/itimer.c
+===================================================================
+--- linux-stable.orig/kernel/itimer.c
++++ linux-stable/kernel/itimer.c
 @@ -213,6 +213,7 @@ again:
  		/* We are sharing ->siglock with it_real_fn() */
  		if (hrtimer_try_to_cancel(timer) < 0) {
@@ -114,9 +121,11 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  			goto again;
  		}
  		expires = timeval_to_ktime(value->it_value);
---- a/kernel/posix-timers.c
-+++ b/kernel/posix-timers.c
-@@ -773,6 +773,20 @@ SYSCALL_DEFINE1(timer_getoverrun, timer_
+Index: linux-stable/kernel/posix-timers.c
+===================================================================
+--- linux-stable.orig/kernel/posix-timers.c
++++ linux-stable/kernel/posix-timers.c
+@@ -818,6 +818,20 @@ SYSCALL_DEFINE1(timer_getoverrun, timer_
  	return overrun;
  }
  
@@ -137,7 +146,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  /* Set a POSIX.1b interval timer. */
  /* timr->it_lock is taken. */
  static int
-@@ -850,6 +864,7 @@ retry:
+@@ -895,6 +909,7 @@ retry:
  	if (!timr)
  		return -EINVAL;
  
@@ -145,7 +154,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	kc = clockid_to_kclock(timr->it_clock);
  	if (WARN_ON_ONCE(!kc || !kc->timer_set))
  		error = -EINVAL;
-@@ -858,9 +873,12 @@ retry:
+@@ -903,9 +918,12 @@ retry:
  
  	unlock_timer(timr, flag);
  	if (error == TIMER_RETRY) {
@@ -158,7 +167,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	if (old_setting && !error &&
  	    copy_to_user(old_setting, &old_spec, sizeof (old_spec)))
-@@ -898,10 +916,15 @@ retry_delete:
+@@ -943,10 +961,15 @@ retry_delete:
  	if (!timer)
  		return -EINVAL;
  
@@ -174,7 +183,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	spin_lock(&current->sighand->siglock);
  	list_del(&timer->list);
-@@ -927,8 +950,18 @@ static void itimer_delete(struct k_itime
+@@ -972,8 +995,18 @@ static void itimer_delete(struct k_itime
  retry_delete:
  	spin_lock_irqsave(&timer->it_lock, flags);
  

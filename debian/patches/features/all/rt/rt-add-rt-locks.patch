@@ -1,6 +1,7 @@
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Sun, 26 Jul 2009 19:39:56 +0200
 Subject: rt: Add the preempt-rt lock replacement APIs
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.10/patches-3.10.4-rt1.tar.xz
 
 Map spinlocks, rwlocks, rw_semaphores and semaphores to the rt_mutex
 based locking functions for preempt-rt.
@@ -18,8 +19,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  lib/spinlock_debug.c             |    5 
  8 files changed, 756 insertions(+), 4 deletions(-)
 
+Index: linux-stable/include/linux/rwlock_rt.h
+===================================================================
 --- /dev/null
-+++ b/include/linux/rwlock_rt.h
++++ linux-stable/include/linux/rwlock_rt.h
 @@ -0,0 +1,123 @@
 +#ifndef __LINUX_RWLOCK_RT_H
 +#define __LINUX_RWLOCK_RT_H
@@ -144,8 +147,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +	} while (0)
 +
 +#endif
---- a/include/linux/spinlock.h
-+++ b/include/linux/spinlock.h
+Index: linux-stable/include/linux/spinlock.h
+===================================================================
+--- linux-stable.orig/include/linux/spinlock.h
++++ linux-stable/include/linux/spinlock.h
 @@ -254,7 +254,11 @@ static inline void do_raw_spin_unlock(ra
  #define raw_spin_can_lock(lock)	(!raw_spin_is_locked(lock))
  
@@ -177,8 +182,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +#endif /* !PREEMPT_RT_FULL */
 +
  #endif /* __LINUX_SPINLOCK_H */
---- a/include/linux/spinlock_api_smp.h
-+++ b/include/linux/spinlock_api_smp.h
+Index: linux-stable/include/linux/spinlock_api_smp.h
+===================================================================
+--- linux-stable.orig/include/linux/spinlock_api_smp.h
++++ linux-stable/include/linux/spinlock_api_smp.h
 @@ -191,6 +191,8 @@ static inline int __raw_spin_trylock_bh(
  	return 0;
  }
@@ -189,8 +196,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +#endif
  
  #endif /* __LINUX_SPINLOCK_API_SMP_H */
+Index: linux-stable/include/linux/spinlock_rt.h
+===================================================================
 --- /dev/null
-+++ b/include/linux/spinlock_rt.h
++++ linux-stable/include/linux/spinlock_rt.h
 @@ -0,0 +1,158 @@
 +#ifndef __LINUX_SPINLOCK_RT_H
 +#define __LINUX_SPINLOCK_RT_H
@@ -350,20 +359,22 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +	atomic_dec_and_spin_lock(atomic, lock)
 +
 +#endif
---- a/kernel/Makefile
-+++ b/kernel/Makefile
+Index: linux-stable/kernel/Makefile
+===================================================================
+--- linux-stable.orig/kernel/Makefile
++++ linux-stable/kernel/Makefile
 @@ -7,8 +7,8 @@ obj-y     = fork.o exec_domain.o panic.o
  	    sysctl.o sysctl_binary.o capability.o ptrace.o timer.o user.o \
  	    signal.o sys.o kmod.o workqueue.o pid.o task_work.o \
  	    rcupdate.o extable.o params.o posix-timers.o \
--	    kthread.o wait.o kfifo.o sys_ni.o posix-cpu-timers.o mutex.o \
+-	    kthread.o wait.o sys_ni.o posix-cpu-timers.o mutex.o \
 -	    hrtimer.o rwsem.o nsproxy.o srcu.o semaphore.o \
-+	    kthread.o wait.o kfifo.o sys_ni.o posix-cpu-timers.o \
++	    kthread.o wait.o sys_ni.o posix-cpu-timers.o \
 +	    hrtimer.o nsproxy.o srcu.o semaphore.o \
  	    notifier.o ksysfs.o cred.o \
  	    async.o range.o groups.o lglock.o smpboot.o
  
-@@ -32,7 +32,11 @@ obj-$(CONFIG_FREEZER) += freezer.o
+@@ -31,7 +31,11 @@ obj-$(CONFIG_FREEZER) += freezer.o
  obj-$(CONFIG_PROFILING) += profile.o
  obj-$(CONFIG_STACKTRACE) += stacktrace.o
  obj-y += time/
@@ -375,7 +386,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  obj-$(CONFIG_LOCKDEP) += lockdep.o
  ifeq ($(CONFIG_PROC_FS),y)
  obj-$(CONFIG_LOCKDEP) += lockdep_proc.o
-@@ -44,6 +48,7 @@ endif
+@@ -43,6 +47,7 @@ endif
  obj-$(CONFIG_RT_MUTEXES) += rtmutex.o
  obj-$(CONFIG_DEBUG_RT_MUTEXES) += rtmutex-debug.o
  obj-$(CONFIG_RT_MUTEX_TESTER) += rtmutex-tester.o
@@ -383,8 +394,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  obj-$(CONFIG_GENERIC_ISA_DMA) += dma.o
  obj-$(CONFIG_SMP) += smp.o
  ifneq ($(CONFIG_SMP),y)
+Index: linux-stable/kernel/rt.c
+===================================================================
 --- /dev/null
-+++ b/kernel/rt.c
++++ linux-stable/kernel/rt.c
 @@ -0,0 +1,442 @@
 +/*
 + * kernel/rt.c
@@ -828,8 +841,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +	return 1;
 +}
 +EXPORT_SYMBOL(atomic_dec_and_mutex_lock);
---- a/kernel/spinlock.c
-+++ b/kernel/spinlock.c
+Index: linux-stable/kernel/spinlock.c
+===================================================================
+--- linux-stable.orig/kernel/spinlock.c
++++ linux-stable/kernel/spinlock.c
 @@ -110,8 +110,11 @@ void __lockfunc __raw_##op##_lock_bh(loc
   *         __[spin|read|write]_lock_bh()
   */
@@ -860,8 +875,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  #ifdef CONFIG_DEBUG_LOCK_ALLOC
  
  void __lockfunc _raw_spin_lock_nested(raw_spinlock_t *lock, int subclass)
---- a/lib/spinlock_debug.c
-+++ b/lib/spinlock_debug.c
+Index: linux-stable/lib/spinlock_debug.c
+===================================================================
+--- linux-stable.orig/lib/spinlock_debug.c
++++ linux-stable/lib/spinlock_debug.c
 @@ -31,6 +31,7 @@ void __raw_spin_lock_init(raw_spinlock_t
  
  EXPORT_SYMBOL(__raw_spin_lock_init);
