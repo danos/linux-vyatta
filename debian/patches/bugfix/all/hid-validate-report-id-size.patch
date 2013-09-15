@@ -1,0 +1,71 @@
+From 43622021d2e2b82ea03d883926605bdd0525e1d1 Mon Sep 17 00:00:00 2001
+From: Kees Cook <keescook@chromium.org>
+Date: Wed, 28 Aug 2013 20:29:55 +0000
+Subject: HID: validate HID report id size
+
+The "Report ID" field of a HID report is used to build indexes of
+reports. The kernel's index of these is limited to 256 entries, so any
+malicious device that sets a Report ID greater than 255 will trigger
+memory corruption on the host:
+
+[ 1347.156239] BUG: unable to handle kernel paging request at ffff88094958a878
+[ 1347.156261] IP: [<ffffffff813e4da0>] hid_register_report+0x2a/0x8b
+
+CVE-2013-2888
+
+Signed-off-by: Kees Cook <keescook@chromium.org>
+Cc: stable@kernel.org
+Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+[jmm: backport to 2.6.32]
+
+diff -Naur source.orig/drivers/hid/hid-core.c source/drivers/hid/hid-core.c
+--- source.orig/drivers/hid/hid-core.c	2013-09-10 11:12:29.903304226 +0200
++++ source/drivers/hid/hid-core.c	2013-09-10 11:31:12.263504285 +0200
+@@ -58,6 +58,8 @@
+ 	struct hid_report_enum *report_enum = device->report_enum + type;
+ 	struct hid_report *report;
+ 
++	if (id >= HID_MAX_IDS)
++		return NULL;
+ 	if (report_enum->report_id_hash[id])
+ 		return report_enum->report_id_hash[id];
+ 
+@@ -368,8 +370,10 @@
+ 
+ 	case HID_GLOBAL_ITEM_TAG_REPORT_ID:
+ 		parser->global.report_id = item_udata(item);
+-		if (parser->global.report_id == 0) {
+-			dbg_hid("report_id 0 is invalid\n");
++		if (parser->global.report_id == 0 ||
++		    parser->global.report_id >= HID_MAX_IDS) {
++			hid_err(parser->device, "report_id %u is invalid\n",
++				parser->global.report_id);
+ 			return -1;
+ 		}
+ 		return 0;
+@@ -545,7 +549,7 @@
+ 	for (i = 0; i < HID_REPORT_TYPES; i++) {
+ 		struct hid_report_enum *report_enum = device->report_enum + i;
+ 
+-		for (j = 0; j < 256; j++) {
++		for (j = 0; j < HID_MAX_IDS; j++) {
+ 			struct hid_report *report = report_enum->report_id_hash[j];
+ 			if (report)
+ 				hid_free_report(report);
+diff -Naur source.orig/include/linux/hid.h source/include/linux/hid.h
+--- source.orig/include/linux/hid.h	2013-09-10 11:12:10.075088697 +0200
++++ source/include/linux/hid.h	2013-09-10 11:31:12.263504285 +0200
+@@ -410,10 +410,12 @@
+ 	struct hid_device *device;			/* associated device */
+ };
+ 
++#define HID_MAX_IDS 256
++
+ struct hid_report_enum {
+ 	unsigned numbered;
+ 	struct list_head report_list;
+-	struct hid_report *report_id_hash[256];
++	struct hid_report *report_id_hash[HID_MAX_IDS];
+ };
+ 
+ #define HID_REPORT_TYPES 3
