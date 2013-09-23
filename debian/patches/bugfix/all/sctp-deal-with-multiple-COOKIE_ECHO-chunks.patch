@@ -1,0 +1,63 @@
+From d5ccd496601b8776a516d167a6485754575dc38f Mon Sep 17 00:00:00 2001
+From: Max Matveev <makc@redhat.com>
+Date: Mon, 29 Aug 2011 21:02:24 +0000
+Subject: [PATCH] sctp: deal with multiple COOKIE_ECHO chunks
+
+Attempt to reduce the number of IP packets emitted in response to single
+SCTP packet (2e3216cd) introduced a complication - if a packet contains
+two COOKIE_ECHO chunks and nothing else then SCTP state machine corks the
+socket while processing first COOKIE_ECHO and then loses the association
+and forgets to uncork the socket. To deal with the issue add new SCTP
+command which can be used to set association explictly. Use this new
+command when processing second COOKIE_ECHO chunk to restore the context
+for SCTP state machine.
+
+Signed-off-by: Max Matveev <makc@redhat.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+[dannf: backported to Debian's 2.6.32]
+
+diff --git a/include/net/sctp/command.h b/include/net/sctp/command.h
+index 2c55a7e..0edc14d 100644
+--- a/include/net/sctp/command.h
++++ b/include/net/sctp/command.h
+@@ -108,6 +108,7 @@ typedef enum {
+ 	SCTP_CMD_UPDATE_INITTAG, /* Update peer inittag */
+ 	SCTP_CMD_SEND_MSG,	 /* Send the whole use message */
+ 	SCTP_CMD_SEND_NEXT_ASCONF, /* Send the next ASCONF after ACK */
++	SCTP_CMD_SET_ASOC,	 /* Restore association context */
+ 	SCTP_CMD_LAST
+ } sctp_verb_t;
+ 
+diff --git a/net/sctp/sm_sideeffect.c b/net/sctp/sm_sideeffect.c
+index ed742bf..9005d83 100644
+--- a/net/sctp/sm_sideeffect.c
++++ b/net/sctp/sm_sideeffect.c
+@@ -1676,6 +1676,11 @@ static int sctp_cmd_interpreter(sctp_event_t event_type,
+ 		case SCTP_CMD_SEND_NEXT_ASCONF:
+ 			sctp_cmd_send_asconf(asoc);
+ 			break;
++
++		case SCTP_CMD_SET_ASOC:
++			asoc = cmd->obj.asoc;
++			break;
++
+ 		default:
+ 			printk(KERN_WARNING "Impossible command: %u, %p\n",
+ 			       cmd->verb, cmd->obj.ptr);
+diff --git a/net/sctp/sm_statefuns.c b/net/sctp/sm_statefuns.c
+index 6f67490..486df56 100644
+--- a/net/sctp/sm_statefuns.c
++++ b/net/sctp/sm_statefuns.c
+@@ -2048,6 +2048,12 @@ sctp_disposition_t sctp_sf_do_5_2_4_dupcook(const struct sctp_endpoint *ep,
+ 	sctp_add_cmd_sf(commands, SCTP_CMD_SET_ASOC, SCTP_ASOC(new_asoc));
+ 	sctp_add_cmd_sf(commands, SCTP_CMD_DELETE_TCB, SCTP_NULL());
+ 
++	/* Restore association pointer to provide SCTP command interpeter
++	 * with a valid context in case it needs to manipulate
++	 * the queues */
++	sctp_add_cmd_sf(commands, SCTP_CMD_SET_ASOC,
++			 SCTP_ASOC((struct sctp_association *)asoc));
++
+ 	return retval;
+ 
+ nomem:
