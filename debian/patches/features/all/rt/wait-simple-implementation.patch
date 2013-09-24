@@ -12,19 +12,19 @@ should go mainline as well, as it lowers memory consumption and
 runtime overhead.
     
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
-Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.10/patches-3.10.4-rt1.tar.xz
+Origin: https://www.kernel.org/pub/linux/kernel/projects/rt/3.10/patches-3.10.10-rt7.tar.xz
 
+smp_mb() added by Steven Rostedt to fix a race condition with swait
+wakeups vs adding items to the list.
 ---
- include/linux/wait-simple.h |  231 ++++++++++++++++++++++++++++++++++++++++++++
+ include/linux/wait-simple.h |  235 ++++++++++++++++++++++++++++++++++++++++++++
  kernel/Makefile             |    2 
  kernel/wait-simple.c        |   68 ++++++++++++
- 3 files changed, 300 insertions(+), 1 deletion(-)
+ 3 files changed, 304 insertions(+), 1 deletion(-)
 
-Index: linux-stable/include/linux/wait-simple.h
-===================================================================
 --- /dev/null
-+++ linux-stable/include/linux/wait-simple.h
-@@ -0,0 +1,231 @@
++++ b/include/linux/wait-simple.h
+@@ -0,0 +1,235 @@
 +#ifndef _LINUX_WAIT_SIMPLE_H
 +#define _LINUX_WAIT_SIMPLE_H
 +
@@ -81,6 +81,8 @@ Index: linux-stable/include/linux/wait-simple.h
 +static inline void __swait_enqueue(struct swait_head *head, struct swaiter *w)
 +{
 +	list_add(&w->node, &head->list);
++	/* We can't let the condition leak before the setting of head */
++	smp_mb();
 +}
 +
 +/*
@@ -96,6 +98,8 @@ Index: linux-stable/include/linux/wait-simple.h
 + */
 +static inline bool swait_head_has_waiters(struct swait_head *h)
 +{
++	/* Make sure the condition is visible before checking list_empty() */
++	smp_mb();
 +	return !list_empty(&h->list);
 +}
 +
@@ -256,10 +260,8 @@ Index: linux-stable/include/linux/wait-simple.h
 +})
 +
 +#endif
-Index: linux-stable/kernel/Makefile
-===================================================================
---- linux-stable.orig/kernel/Makefile
-+++ linux-stable/kernel/Makefile
+--- a/kernel/Makefile
++++ b/kernel/Makefile
 @@ -10,7 +10,7 @@ obj-y     = fork.o exec_domain.o panic.o
  	    kthread.o wait.o sys_ni.o posix-cpu-timers.o \
  	    hrtimer.o nsproxy.o srcu.o semaphore.o \
@@ -269,10 +271,8 @@ Index: linux-stable/kernel/Makefile
  
  ifdef CONFIG_FUNCTION_TRACER
  # Do not trace debug files and internal ftrace files
-Index: linux-stable/kernel/wait-simple.c
-===================================================================
 --- /dev/null
-+++ linux-stable/kernel/wait-simple.c
++++ b/kernel/wait-simple.c
 @@ -0,0 +1,68 @@
 +/*
 + * Simple waitqueues without fancy flags and callbacks
