@@ -1,0 +1,91 @@
+From 0fb6bd06e06792469acc15bbe427361b56ada528 Mon Sep 17 00:00:00 2001
+From: Kees Cook <keescook@chromium.org>
+Date: Wed, 11 Sep 2013 19:56:54 +0000
+Subject: HID: LG: validate HID output report details
+
+A HID device could send a malicious output report that would cause the
+lg, lg3, and lg4 HID drivers to write beyond the output report allocation
+during an event, causing a heap overflow:
+
+[  325.245240] usb 1-1: New USB device found, idVendor=046d, idProduct=c287
+...
+[  414.518960] BUG kmalloc-4096 (Not tainted): Redzone overwritten
+
+Additionally, while lg2 did correctly validate the report details, it was
+cleaned up and shortened.
+
+CVE-2013-2893
+
+Signed-off-by: Kees Cook <keescook@chromium.org>
+Cc: stable@vger.kernel.org
+Reviewed-by: Benjamin Tissoires <benjamin.tissoires@redhat.com>
+Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+
+[jmm: backported to 2.6.32]
+
+diff -aur linux-2.6-2.6.32.orig/drivers/hid/hid-lg2ff.c linux-2.6-2.6.32/drivers/hid/hid-lg2ff.c
+--- linux-2.6-2.6.32.orig/drivers/hid/hid-lg2ff.c	2009-12-03 04:51:21.000000000 +0100
++++ linux-2.6-2.6.32/drivers/hid/hid-lg2ff.c	2013-10-04 11:27:33.227164664 +0200
+@@ -65,26 +65,13 @@
+ 	struct hid_report *report;
+ 	struct hid_input *hidinput = list_entry(hid->inputs.next,
+ 						struct hid_input, list);
+-	struct list_head *report_list =
+-			&hid->report_enum[HID_OUTPUT_REPORT].report_list;
+ 	struct input_dev *dev = hidinput->input;
+ 	int error;
+ 
+-	if (list_empty(report_list)) {
+-		dev_err(&hid->dev, "no output report found\n");
++	/* Check that the report looks ok */
++	report = hid_validate_values(hid, HID_OUTPUT_REPORT, 0, 0, 7);
++	if (!report)
+ 		return -ENODEV;
+-	}
+-
+-	report = list_entry(report_list->next, struct hid_report, list);
+-
+-	if (report->maxfield < 1) {
+-		dev_err(&hid->dev, "output report is empty\n");
+-		return -ENODEV;
+-	}
+-	if (report->field[0]->report_count < 7) {
+-		dev_err(&hid->dev, "not enough values in the field\n");
+-		return -ENODEV;
+-	}
+ 
+ 	lg2ff = kmalloc(sizeof(struct lg2ff_device), GFP_KERNEL);
+ 	if (!lg2ff)
+diff -aur linux-2.6-2.6.32.orig/drivers/hid/hid-lgff.c linux-2.6-2.6.32/drivers/hid/hid-lgff.c
+--- linux-2.6-2.6.32.orig/drivers/hid/hid-lgff.c	2009-12-03 04:51:21.000000000 +0100
++++ linux-2.6-2.6.32/drivers/hid/hid-lgff.c	2013-10-04 11:28:34.491831248 +0200
+@@ -135,27 +135,14 @@
+ int lgff_init(struct hid_device* hid)
+ {
+ 	struct hid_input *hidinput = list_entry(hid->inputs.next, struct hid_input, list);
+-	struct list_head *report_list = &hid->report_enum[HID_OUTPUT_REPORT].report_list;
+ 	struct input_dev *dev = hidinput->input;
+-	struct hid_report *report;
+-	struct hid_field *field;
+ 	const signed short *ff_bits = ff_joystick;
+ 	int error;
+ 	int i;
+ 
+-	/* Find the report to use */
+-	if (list_empty(report_list)) {
+-		err_hid("No output report found");
+-		return -1;
+-	}
+-
+ 	/* Check that the report looks ok */
+-	report = list_entry(report_list->next, struct hid_report, list);
+-	field = report->field[0];
+-	if (!field) {
+-		err_hid("NULL field");
+-		return -1;
+-	}
++	if (!hid_validate_values(hid, HID_OUTPUT_REPORT, 0, 0, 7))
++		return -ENODEV;
+ 
+ 	for (i = 0; i < ARRAY_SIZE(devices); i++) {
+ 		if (dev->id.vendor == devices[i].idVendor &&

@@ -1,0 +1,52 @@
+From 78214e81a1bf43740ce89bb5efda78eac2f8ef83 Mon Sep 17 00:00:00 2001
+From: Kees Cook <keescook@chromium.org>
+Date: Wed, 11 Sep 2013 19:56:51 +0000
+Subject: HID: zeroplus: validate output report details
+
+The zeroplus HID driver was not checking the size of allocated values
+in fields it used. A HID device could send a malicious output report
+that would cause the driver to write beyond the output report allocation
+during initialization, causing a heap overflow:
+
+[ 1442.728680] usb 1-1: New USB device found, idVendor=0c12, idProduct=0005
+...
+[ 1466.243173] BUG kmalloc-192 (Tainted: G        W   ): Redzone overwritten
+
+CVE-2013-2889
+
+Signed-off-by: Kees Cook <keescook@chromium.org>
+Cc: stable@vger.kernel.org
+Reviewed-by: Benjamin Tissoires <benjamin.tissoires@redhat.com>
+Signed-off-by: Jiri Kosina <jkosina@suse.cz>
+[jmm: backport to 2.6.32]
+
+diff -aur linux-2.6-2.6.32.orig/drivers/hid/hid-zpff.c linux-2.6-2.6.32/drivers/hid/hid-zpff.c
+--- linux-2.6-2.6.32.orig/drivers/hid/hid-zpff.c	2009-12-03 04:51:21.000000000 +0100
++++ linux-2.6-2.6.32/drivers/hid/hid-zpff.c	2013-10-04 11:37:26.197616404 +0200
+@@ -68,21 +68,13 @@
+ 	struct hid_report *report;
+ 	struct hid_input *hidinput = list_entry(hid->inputs.next,
+ 						struct hid_input, list);
+-	struct list_head *report_list =
+-			&hid->report_enum[HID_OUTPUT_REPORT].report_list;
+ 	struct input_dev *dev = hidinput->input;
+-	int error;
++	int i, error;
+ 
+-	if (list_empty(report_list)) {
+-		dev_err(&hid->dev, "no output report found\n");
+-		return -ENODEV;
+-	}
+-
+-	report = list_entry(report_list->next, struct hid_report, list);
+-
+-	if (report->maxfield < 4) {
+-		dev_err(&hid->dev, "not enough fields in report\n");
+-		return -ENODEV;
++	for (i = 0; i < 4; i++) {
++		report = hid_validate_values(hid, HID_OUTPUT_REPORT, 0, i, 1);
++		if (!report)
++			return -ENODEV;
+ 	}
+ 
+ 	zpff = kzalloc(sizeof(struct zpff_device), GFP_KERNEL);
