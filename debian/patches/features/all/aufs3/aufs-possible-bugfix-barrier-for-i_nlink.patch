@@ -1,0 +1,48 @@
+From: "J. R. Okajima" <hooanon05@yahoo.co.jp>
+Date: Mon, 3 Jun 2013 03:07:33 +0900
+Subject: [43/83] aufs: possible bugfix, barrier for i_nlink
+Origin: http://sourceforge.net/p/aufs/aufs3-standalone/ci/43cebe5721050a4a69e2323aab665830ca66a42a
+
+Set i_nlink carefully since its value is tested in au_new_inode(). If
+the value becomes 0, aufs produces an incorrect warning about UDBA.
+Generally i_nlink is set with i_mutex (or other locks) held. But for
+aufs virtual inode, it is set without i_mutex in very special case
+(copyup with a different name for link(2)).
+Prasad Koya reported this phenomenon in aufs2.2. aufs3.0 already changed
+the assignment to be careful. This commit is just to be more careful.
+
+Reported-by: Prasad Koya <prasad.koya@gmail.com>
+Signed-off-by: J. R. Okajima <hooanon05@yahoo.co.jp>
+---
+ fs/aufs/dir.c  | 2 ++
+ fs/aufs/i_op.c | 1 +
+ 2 files changed, 3 insertions(+)
+
+--- a/fs/aufs/dir.c
++++ b/fs/aufs/dir.c
+@@ -33,6 +33,7 @@ void au_add_nlink(struct inode *dir, str
+ 	nlink += h_dir->i_nlink - 2;
+ 	if (h_dir->i_nlink < 2)
+ 		nlink += 2;
++	smp_mb();
+ 	set_nlink(dir, nlink);
+ }
+ 
+@@ -46,6 +47,7 @@ void au_sub_nlink(struct inode *dir, str
+ 	nlink -= h_dir->i_nlink - 2;
+ 	if (h_dir->i_nlink < 2)
+ 		nlink -= 2;
++	smp_mb();
+ 	set_nlink(dir, nlink);
+ }
+ 
+--- a/fs/aufs/i_op.c
++++ b/fs/aufs/i_op.c
+@@ -776,6 +776,7 @@ static void au_refresh_iattr(struct inod
+ 		n = inode->i_nlink;
+ 		n -= nlink;
+ 		n += st->nlink;
++		smp_mb();
+ 		set_nlink(inode, n);
+ 	}
+ 

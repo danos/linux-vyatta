@@ -1,0 +1,44 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Sun, 15 Sep 2013 18:25:53 +0100
+Subject: Revert "zram: use zram->lock to protect zram_free_page() in swap free notify path"
+
+This reverts commit 9e443904906ca2b5b3ae71f34ac4a4fa6905623e which
+was commit 57ab048532c0d975538cebd4456491b5c34248f4 upstream.
+
+The added locking can lead to sleeping in atomic context and deadlock.
+The upstream fix for this, commit
+a0c516cbfc7452c8cbd564525fef66d9f20b46d1 'zram: don't grab mutex in
+zram_slot_free_noity', cannot easily be backported.
+
+Cc: Luis Henriques <luis.henriques@canonical.com>
+Cc: Minchan Kim <minchan@kernel.org>
+Cc: Nitin Gupta <ngupta@vflare.org>
+Cc: Jiang Liu <jiang.liu@huawei.com>
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+--- a/drivers/staging/zram/zram_drv.c
++++ b/drivers/staging/zram/zram_drv.c
+@@ -709,9 +709,7 @@ static void zram_slot_free_notify(struct
+ 	struct zram *zram;
+ 
+ 	zram = bdev->bd_disk->private_data;
+-	down_write(&zram->lock);
+ 	zram_free_page(zram, index);
+-	up_write(&zram->lock);
+ 	zram_stat64_inc(zram, &zram->stats.notify_free);
+ }
+ 
+--- a/drivers/staging/zram/zram_drv.h
++++ b/drivers/staging/zram/zram_drv.h
+@@ -107,9 +107,8 @@ struct zram {
+ 	void *compress_buffer;
+ 	struct table *table;
+ 	spinlock_t stat64_lock;	/* protect 64-bit stats */
+-	struct rw_semaphore lock; /* protect compression buffers, table,
+-				   * 32bit stat counters against concurrent
+-				   * notifications, reads and writes */
++	struct rw_semaphore lock; /* protect compression buffers and table
++				   * against concurrent read and writes */
+ 	struct request_queue *queue;
+ 	struct gendisk *disk;
+ 	int init_done;

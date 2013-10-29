@@ -1,0 +1,68 @@
+From: Ivo Sieben <meltedpianoman@gmail.com>
+Date: Mon, 3 Jun 2013 10:12:02 +0000
+Subject: [PATCH 308/321] genirq: Set irq thread to RT priority on creation
+Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=20406fb199a2a9d77ca890a35a20e750b707bfd9
+
+When a threaded irq handler is installed the irq thread is initially
+created on normal scheduling priority. Only after the irq thread is
+woken up it sets its priority to RT_FIFO MAX_USER_RT_PRIO/2 itself.
+
+This means that interrupts that occur directly after the irq handler
+is installed will be handled on a normal scheduling priority instead
+of the realtime priority that one would expect.
+
+Fix this by setting the RT priority on creation of the irq_thread.
+
+Cc: stable-rt@vger.kernel.org
+Signed-off-by: Ivo Sieben <meltedpianoman@gmail.com>
+Cc: Sebastian Andrzej Siewior  <bigeasy@linutronix.de>
+Cc: Steven Rostedt <rostedt@goodmis.org>
+Link: http://lkml.kernel.org/r/1370254322-17240-1-git-send-email-meltedpianoman@gmail.com
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+---
+ kernel/irq/manage.c | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/kernel/irq/manage.c b/kernel/irq/manage.c
+index b3c753e..2e8ca37 100644
+--- a/kernel/irq/manage.c
++++ b/kernel/irq/manage.c
+@@ -783,9 +783,6 @@ static irqreturn_t irq_thread_fn(struct irq_desc *desc,
+  */
+ static int irq_thread(void *data)
+ {
+-	static const struct sched_param param = {
+-		.sched_priority = MAX_USER_RT_PRIO/2,
+-	};
+ 	struct irqaction *action = data;
+ 	struct irq_desc *desc = irq_to_desc(action->irq);
+ 	irqreturn_t (*handler_fn)(struct irq_desc *desc,
+@@ -798,7 +795,6 @@ static int irq_thread(void *data)
+ 	else
+ 		handler_fn = irq_thread_fn;
+ 
+-	sched_setscheduler(current, SCHED_FIFO, &param);
+ 	current->irqaction = action;
+ 
+ 	while (!irq_wait_for_interrupt(action)) {
+@@ -961,6 +957,9 @@ __setup_irq(unsigned int irq, struct irq_desc *desc, struct irqaction *new)
+ 	 */
+ 	if (new->thread_fn && !nested) {
+ 		struct task_struct *t;
++		static const struct sched_param param = {
++			.sched_priority = MAX_USER_RT_PRIO/2,
++		};
+ 
+ 		t = kthread_create(irq_thread, new, "irq/%d-%s", irq,
+ 				   new->name);
+@@ -968,6 +967,9 @@ __setup_irq(unsigned int irq, struct irq_desc *desc, struct irqaction *new)
+ 			ret = PTR_ERR(t);
+ 			goto out_mput;
+ 		}
++
++		sched_setscheduler(t, SCHED_FIFO, &param);
++
+ 		/*
+ 		 * We keep the reference to the task struct even if
+ 		 * the thread dies to avoid that the interrupt code

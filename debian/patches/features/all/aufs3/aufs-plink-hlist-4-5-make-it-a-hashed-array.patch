@@ -1,0 +1,281 @@
+From: "J. R. Okajima" <hooanon05@yahoo.co.jp>
+Date: Tue, 30 Apr 2013 02:36:54 +0900
+Subject: [35/83] aufs: plink hlist 4/5, make it a hashed array
+Origin: http://sourceforge.net/p/aufs/aufs3-standalone/ci/5c1ebfc31856c5c1de7fc036ab78863892c6b862
+
+Make it a hashed array using struct au_sphl.
+The number of hashing buckets is still defined as 100 (AuPlink_NHASH).
+I don't know the most proper number, so it may be changed in the future.
+When the number of objects in a single bucket reaches AUFS_PLINK_WARN, a
+warning is produced.
+By this commit, the meaning of AUFS_PLINK_WARN changes.
+
+This commit is a part of 'plink hlist' series which converts a simple
+linked list intoa hashed array. See other commits too.
+
+Signed-off-by: J. R. Okajima <hooanon05@yahoo.co.jp>
+---
+ fs/aufs/plink.c           | 91 +++++++++++++++++++++++++----------------------
+ fs/aufs/sbinfo.c          |  9 +++--
+ fs/aufs/super.h           |  8 ++++-
+ include/linux/aufs_type.h |  2 +-
+ 4 files changed, 63 insertions(+), 47 deletions(-)
+
+--- a/fs/aufs/plink.c
++++ b/fs/aufs/plink.c
+@@ -130,6 +130,7 @@ struct pseudo_link {
+ #ifdef CONFIG_AUFS_DEBUG
+ void au_plink_list(struct super_block *sb)
+ {
++	int i;
+ 	struct au_sbinfo *sbinfo;
+ 	struct hlist_head *plink_hlist;
+ 	struct hlist_node *pos;
+@@ -141,18 +142,20 @@ void au_plink_list(struct super_block *s
+ 	AuDebugOn(!au_opt_test(au_mntflags(sb), PLINK));
+ 	AuDebugOn(au_plink_maint(sb, AuLock_NOPLM));
+ 
+-	plink_hlist = &sbinfo->si_plink.head;
+-	rcu_read_lock();
+-	hlist_for_each_entry_rcu(plink, pos, plink_hlist, hlist)
+-		AuDbg("%lu\n", plink->inode->i_ino);
+-	rcu_read_unlock();
++	for (i = 0; i < AuPlink_NHASH; i++) {
++		plink_hlist = &sbinfo->si_plink[i].head;
++		rcu_read_lock();
++		hlist_for_each_entry_rcu(plink, pos, plink_hlist, hlist)
++			AuDbg("%lu\n", plink->inode->i_ino);
++		rcu_read_unlock();
++	}
+ }
+ #endif
+ 
+ /* is the inode pseudo-linked? */
+ int au_plink_test(struct inode *inode)
+ {
+-	int found;
++	int found, i;
+ 	struct au_sbinfo *sbinfo;
+ 	struct hlist_head *plink_hlist;
+ 	struct hlist_node *pos;
+@@ -164,7 +167,8 @@ int au_plink_test(struct inode *inode)
+ 	AuDebugOn(au_plink_maint(inode->i_sb, AuLock_NOPLM));
+ 
+ 	found = 0;
+-	plink_hlist = &sbinfo->si_plink.head;
++	i = au_plink_hash(inode->i_ino);
++	plink_hlist = &sbinfo->si_plink[i].head;
+ 	rcu_read_lock();
+ 	hlist_for_each_entry_rcu(plink, pos, plink_hlist, hlist)
+ 		if (plink->inode == inode) {
+@@ -375,28 +379,21 @@ void au_plink_append(struct inode *inode
+ 	struct hlist_head *plink_hlist;
+ 	struct hlist_node *pos;
+ 	struct pseudo_link *plink, *tmp;
+-	int found, err, cnt;
++	struct au_sphlhead *sphl;
++	int found, err, cnt, i;
+ 
+ 	sb = inode->i_sb;
+ 	sbinfo = au_sbi(sb);
+ 	AuDebugOn(!au_opt_test(au_mntflags(sb), PLINK));
+ 	AuDebugOn(au_plink_maint(sb, AuLock_NOPLM));
+ 
+-	cnt = 0;
+-	found = 0;
+-	plink_hlist = &sbinfo->si_plink.head;
+-	rcu_read_lock();
+-	hlist_for_each_entry_rcu(plink, pos, plink_hlist, hlist) {
+-		cnt++;
+-		if (plink->inode == inode) {
+-			found = 1;
+-			break;
+-		}
+-	}
+-	rcu_read_unlock();
++	found = au_plink_test(inode);
+ 	if (found)
+ 		return;
+ 
++	i = au_plink_hash(inode->i_ino);
++	sphl = sbinfo->si_plink + i;
++	plink_hlist = &sphl->head;
+ 	tmp = kmalloc(sizeof(*plink), GFP_NOFS);
+ 	if (tmp)
+ 		tmp->inode = au_igrab(inode);
+@@ -405,7 +402,7 @@ void au_plink_append(struct inode *inode
+ 		goto out;
+ 	}
+ 
+-	spin_lock(&sbinfo->si_plink.spin);
++	spin_lock(&sphl->spin);
+ 	hlist_for_each_entry(plink, pos, plink_hlist, hlist) {
+ 		if (plink->inode == inode) {
+ 			found = 1;
+@@ -414,11 +411,13 @@ void au_plink_append(struct inode *inode
+ 	}
+ 	if (!found)
+ 		hlist_add_head_rcu(&tmp->hlist, plink_hlist);
+-	spin_unlock(&sbinfo->si_plink.spin);
++	spin_unlock(&sphl->spin);
+ 	if (!found) {
+-		cnt++;
+-		WARN_ONCE(cnt > AUFS_PLINK_WARN,
+-			  "unexpectedly many pseudo links, %d\n", cnt);
++		cnt = au_sphl_count(sphl);
++#define msg "unexpectedly unblanced or too many pseudo-links"
++		if (cnt > AUFS_PLINK_WARN)
++			AuWarn1(msg ", %d\n", cnt);
++#undef msg
+ 		err = whplink(h_dentry, inode, bindex, au_sbr(sb, bindex));
+ 	} else {
+ 		do_put_plink(tmp, 0);
+@@ -429,7 +428,7 @@ out:
+ 	if (unlikely(err)) {
+ 		pr_warn("err %d, damaged pseudo link.\n", err);
+ 		if (tmp) {
+-			au_sphl_del_rcu(&tmp->hlist, &sbinfo->si_plink);
++			au_sphl_del_rcu(&tmp->hlist, sphl);
+ 			call_rcu(&tmp->rcu, do_put_plink_rcu);
+ 		}
+ 	}
+@@ -438,6 +437,7 @@ out:
+ /* free all plinks */
+ void au_plink_put(struct super_block *sb, int verbose)
+ {
++	int i, warned;
+ 	struct au_sbinfo *sbinfo;
+ 	struct hlist_head *plink_hlist;
+ 	struct hlist_node *pos, *tmp;
+@@ -449,13 +449,18 @@ void au_plink_put(struct super_block *sb
+ 	AuDebugOn(!au_opt_test(au_mntflags(sb), PLINK));
+ 	AuDebugOn(au_plink_maint(sb, AuLock_NOPLM));
+ 
+-	plink_hlist = &sbinfo->si_plink.head;
+ 	/* no spin_lock since sbinfo is write-locked */
+-	WARN(verbose && !hlist_empty(plink_hlist),
+-	     "pseudo-link is not flushed");
+-	hlist_for_each_entry_safe(plink, pos, tmp, plink_hlist, hlist)
+-		do_put_plink(plink, 0);
+-	INIT_HLIST_HEAD(plink_hlist);
++	warned = 0;
++	for (i = 0; i < AuPlink_NHASH; i++) {
++		plink_hlist = &sbinfo->si_plink[i].head;
++		if (!warned && verbose && !hlist_empty(plink_hlist)) {
++			pr_warn("pseudo-link is not flushed");
++			warned = 1;
++		}
++		hlist_for_each_entry_safe(plink, pos, tmp, plink_hlist, hlist)
++			do_put_plink(plink, 0);
++		INIT_HLIST_HEAD(plink_hlist);
++	}
+ }
+ 
+ void au_plink_clean(struct super_block *sb, int verbose)
+@@ -506,7 +511,7 @@ void au_plink_half_refresh(struct super_
+ 	struct hlist_node *pos, *tmp;
+ 	struct pseudo_link *plink;
+ 	struct inode *inode;
+-	int do_put;
++	int i, do_put;
+ 
+ 	SiMustWriteLock(sb);
+ 
+@@ -514,15 +519,17 @@ void au_plink_half_refresh(struct super_
+ 	AuDebugOn(!au_opt_test(au_mntflags(sb), PLINK));
+ 	AuDebugOn(au_plink_maint(sb, AuLock_NOPLM));
+ 
+-	plink_hlist = &sbinfo->si_plink.head;
+ 	/* no spin_lock since sbinfo is write-locked */
+-	hlist_for_each_entry_safe(plink, pos, tmp, plink_hlist, hlist) {
+-		inode = au_igrab(plink->inode);
+-		ii_write_lock_child(inode);
+-		do_put = au_plink_do_half_refresh(inode, br_id);
+-		if (do_put)
+-			do_put_plink(plink, 1);
+-		ii_write_unlock(inode);
+-		iput(inode);
++	for (i = 0; i < AuPlink_NHASH; i++) {
++		plink_hlist = &sbinfo->si_plink[i].head;
++		hlist_for_each_entry_safe(plink, pos, tmp, plink_hlist, hlist) {
++			inode = au_igrab(plink->inode);
++			ii_write_lock_child(inode);
++			do_put = au_plink_do_half_refresh(inode, br_id);
++			if (do_put)
++				do_put_plink(plink, 1);
++			ii_write_unlock(inode);
++			iput(inode);
++		}
+ 	}
+ }
+--- a/fs/aufs/sbinfo.c
++++ b/fs/aufs/sbinfo.c
+@@ -27,11 +27,13 @@
+  */
+ void au_si_free(struct kobject *kobj)
+ {
++	int i;
+ 	struct au_sbinfo *sbinfo;
+ 	char *locked __maybe_unused; /* debug only */
+ 
+ 	sbinfo = container_of(kobj, struct au_sbinfo, si_kobj);
+-	AuDebugOn(!hlist_empty(&sbinfo->si_plink.head));
++	for (i = 0; i < AuPlink_NHASH; i++)
++		AuDebugOn(!hlist_empty(&sbinfo->si_plink[i].head));
+ 	AuDebugOn(atomic_read(&sbinfo->si_nowait.nw_len));
+ 
+ 	au_rw_write_lock(&sbinfo->si_rwsem);
+@@ -53,7 +55,7 @@ void au_si_free(struct kobject *kobj)
+ 
+ int au_si_alloc(struct super_block *sb)
+ {
+-	int err;
++	int err, i;
+ 	struct au_sbinfo *sbinfo;
+ 	static struct lock_class_key aufs_si;
+ 
+@@ -106,7 +108,8 @@ int au_si_alloc(struct super_block *sb)
+ 	sbinfo->si_rdhash = AUFS_RDHASH_DEF;
+ 	sbinfo->si_dirwh = AUFS_DIRWH_DEF;
+ 
+-	au_sphl_init(&sbinfo->si_plink);
++	for (i = 0; i < AuPlink_NHASH; i++)
++		au_sphl_init(sbinfo->si_plink + i);
+ 	init_waitqueue_head(&sbinfo->si_plink_wq);
+ 	spin_lock_init(&sbinfo->si_plink_maint_lock);
+ 
+--- a/fs/aufs/super.h
++++ b/fs/aufs/super.h
+@@ -55,6 +55,12 @@ struct au_wbr_mfs {
+ 	unsigned long long	mfsrr_watermark;
+ };
+ 
++#define AuPlink_NHASH 100
++static inline int au_plink_hash(ino_t ino)
++{
++	return ino % AuPlink_NHASH;
++}
++
+ struct au_branch;
+ struct au_sbinfo {
+ 	/* nowait tasks in the system-wide workqueue */
+@@ -145,7 +151,7 @@ struct au_sbinfo {
+ 	/* int			si_rendir; */
+ 
+ 	/* pseudo_link list */
+-	struct au_sphlhead	si_plink;
++	struct au_sphlhead	si_plink[AuPlink_NHASH];
+ 	wait_queue_head_t	si_plink_wq;
+ 	spinlock_t		si_plink_maint_lock;
+ 	pid_t			si_plink_maint_pid;
+--- a/include/linux/aufs_type.h
++++ b/include/linux/aufs_type.h
+@@ -93,7 +93,7 @@ typedef int16_t aufs_bindex_t;
+ #define AUFS_WKQ_NAME		AUFS_NAME "d"
+ #define AUFS_MFS_DEF_SEC	30 /* seconds */
+ #define AUFS_MFS_MAX_SEC	3600 /* seconds */
+-#define AUFS_PLINK_WARN		100 /* number of plinks */
++#define AUFS_PLINK_WARN		50 /* number of plinks in a single bucket */
+ 
+ /* pseudo-link maintenace under /proc */
+ #define AUFS_PLINK_MAINT_NAME	"plink_maint"

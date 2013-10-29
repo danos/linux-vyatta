@@ -1,0 +1,101 @@
+From: "J. R. Okajima" <hooanon05@yahoo.co.jp>
+Date: Tue, 30 Apr 2013 00:53:04 +0900
+Subject: [32/83] aufs: plink hlist 1/5, tiny, split au_plink_half_refresh()
+Origin: http://sourceforge.net/p/aufs/aufs3-standalone/ci/9ae45f32d05e51070d4e22b9b6b09fc0e3540e66
+
+extract a part of au_plink_half_refresh() and create a new function
+au_plink_do_half_refresh(). The behaviour doesn't change.
+
+This commit is a part of 'plink hlist' series which converts a simple
+linked list intoa hashed array. See other commits too.
+
+Signed-off-by: J. R. Okajima <hooanon05@yahoo.co.jp>
+---
+ fs/aufs/plink.c | 57 ++++++++++++++++++++++++++++++++-------------------------
+ 1 file changed, 32 insertions(+), 25 deletions(-)
+
+diff --git a/fs/aufs/plink.c b/fs/aufs/plink.c
+index c8c14a8..d00a260 100644
+--- a/fs/aufs/plink.c
++++ b/fs/aufs/plink.c
+@@ -464,6 +464,35 @@ void au_plink_clean(struct super_block *sb, int verbose)
+ 	aufs_write_unlock(root);
+ }
+ 
++static int au_plink_do_half_refresh(struct inode *inode, aufs_bindex_t br_id)
++{
++	int do_put;
++	aufs_bindex_t bstart, bend, bindex;
++
++	do_put = 0;
++	bstart = au_ibstart(inode);
++	bend = au_ibend(inode);
++	if (bstart >= 0) {
++		for (bindex = bstart; bindex <= bend; bindex++) {
++			if (!au_h_iptr(inode, bindex)
++			    || au_ii_br_id(inode, bindex) != br_id)
++				continue;
++			au_set_h_iptr(inode, bindex, NULL, 0);
++			do_put = 1;
++			break;
++		}
++		if (do_put)
++			for (bindex = bstart; bindex <= bend; bindex++)
++				if (au_h_iptr(inode, bindex)) {
++					do_put = 0;
++					break;
++				}
++	} else
++		do_put = 1;
++
++	return do_put;
++}
++
+ /* free the plinks on a branch specified by @br_id */
+ void au_plink_half_refresh(struct super_block *sb, aufs_bindex_t br_id)
+ {
+@@ -471,8 +500,7 @@ void au_plink_half_refresh(struct super_block *sb, aufs_bindex_t br_id)
+ 	struct list_head *plink_list;
+ 	struct pseudo_link *plink, *tmp;
+ 	struct inode *inode;
+-	aufs_bindex_t bstart, bend, bindex;
+-	unsigned char do_put;
++	int do_put;
+ 
+ 	SiMustWriteLock(sb);
+ 
+@@ -483,32 +511,11 @@ void au_plink_half_refresh(struct super_block *sb, aufs_bindex_t br_id)
+ 	plink_list = &sbinfo->si_plink.head;
+ 	/* no spin_lock since sbinfo is write-locked */
+ 	list_for_each_entry_safe(plink, tmp, plink_list, list) {
+-		do_put = 0;
+ 		inode = au_igrab(plink->inode);
+ 		ii_write_lock_child(inode);
+-		bstart = au_ibstart(inode);
+-		bend = au_ibend(inode);
+-		if (bstart >= 0) {
+-			for (bindex = bstart; bindex <= bend; bindex++) {
+-				if (!au_h_iptr(inode, bindex)
+-				    || au_ii_br_id(inode, bindex) != br_id)
+-					continue;
+-				au_set_h_iptr(inode, bindex, NULL, 0);
+-				do_put = 1;
+-				break;
+-			}
+-		} else
++		do_put = au_plink_do_half_refresh(inode, br_id);
++		if (do_put)
+ 			do_put_plink(plink, 1);
+-
+-		if (do_put) {
+-			for (bindex = bstart; bindex <= bend; bindex++)
+-				if (au_h_iptr(inode, bindex)) {
+-					do_put = 0;
+-					break;
+-				}
+-			if (do_put)
+-				do_put_plink(plink, 1);
+-		}
+ 		ii_write_unlock(inode);
+ 		iput(inode);
+ 	}
