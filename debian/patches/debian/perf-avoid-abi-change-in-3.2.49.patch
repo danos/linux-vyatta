@@ -1,0 +1,37 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Wed, 28 Aug 2013 03:00:51 +0100
+Subject: perf: Avoid ABI change in 3.2.49
+
+Some mmap metadata was moved from struct perf_event to struct
+ring_buffer.  These fields should never have been used by OOT modules,
+but need to be retained in struct perf_event so the following field
+offsets don't change.
+
+struct ring_buffer is opaque to modules, so just hide the insertions
+there from genksyms.
+--- a/include/linux/perf_event.h
++++ b/include/linux/perf_event.h
+@@ -823,6 +823,9 @@ struct perf_event {
+ 	/* mmap bits */
+ 	struct mutex			mmap_mutex;
+ 	atomic_t			mmap_count;
++	/* These two are unused but kept here for ABI compat */
++	int				mmap_locked;
++	struct user_struct		*mmap_user;
+ 
+ 	struct ring_buffer		*rb;
+ 	struct list_head		rb_entry;
+--- a/kernel/events/internal.h
++++ b/kernel/events/internal.h
+@@ -26,9 +26,11 @@ struct ring_buffer {
+ 	spinlock_t			event_lock;
+ 	struct list_head		event_list;
+ 
++#ifndef __GENKSYMS__
+ 	atomic_t			mmap_count;
+ 	unsigned long			mmap_locked;
+ 	struct user_struct		*mmap_user;
++#endif
+ 
+ 	struct perf_event_mmap_page	*user_page;
+ 	void				*data_pages[0];

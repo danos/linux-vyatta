@@ -1,0 +1,62 @@
+From: =?UTF-8?q?Uwe=20Kleine-K=C3=B6nig?= <u.kleine-koenig@pengutronix.de>
+Date: Tue, 9 Jul 2013 00:26:32 +0200
+Subject: [PATCH 310/321] list_bl.h: fix it for for !SMP && !DEBUG_SPINLOCK
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=cf1fadd17f07f449fc7c338c6e0f5a0886e48f30
+
+The patch "list_bl.h: make list head locking RT safe" introduced
+an unconditional
+
+	__set_bit(0, (unsigned long *)b);
+
+in void hlist_bl_lock(struct hlist_bl_head *b). This clobbers the value
+of b->first. When the value of b->first is retrieved using
+hlist_bl_first the clobbering is undone using
+
+	(unsigned long)h->first & ~LIST_BL_LOCKMASK
+
+and so depending on LIST_BL_LOCKMASK being one. But LIST_BL_LOCKMASK is
+only one if at least on of CONFIG_SMP and CONFIG_DEBUG_SPINLOCK are
+defined. Without these the value returned by hlist_bl_first has the
+zeroth bit set which likely results in a crash.
+
+So only do the clobbering in the cases where LIST_BL_LOCKMASK is one.
+An alternative would be to always define LIST_BL_LOCKMASK to one with
+CONFIG_PREEMPT_RT_BASE.
+
+Cc: stable-rt@vger.kernel.org
+Acked-by: Paul Gortmaker <paul.gortmaker@windriver.com>
+Tested-by: Paul Gortmaker <paul.gortmaker@windriver.com>
+Signed-off-by: Uwe Kleine-König <u.kleine-koenig@pengutronix.de>
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+---
+ include/linux/list_bl.h | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/include/linux/list_bl.h b/include/linux/list_bl.h
+index ddfd46a..becd7a6 100644
+--- a/include/linux/list_bl.h
++++ b/include/linux/list_bl.h
+@@ -131,8 +131,10 @@ static inline void hlist_bl_lock(struct hlist_bl_head *b)
+ 	bit_spin_lock(0, (unsigned long *)b);
+ #else
+ 	raw_spin_lock(&b->lock);
++#if defined(CONFIG_SMP) || defined(CONFIG_DEBUG_SPINLOCK)
+ 	__set_bit(0, (unsigned long *)b);
+ #endif
++#endif
+ }
+ 
+ static inline void hlist_bl_unlock(struct hlist_bl_head *b)
+@@ -140,7 +142,9 @@ static inline void hlist_bl_unlock(struct hlist_bl_head *b)
+ #ifndef CONFIG_PREEMPT_RT_BASE
+ 	__bit_spin_unlock(0, (unsigned long *)b);
+ #else
++#if defined(CONFIG_SMP) || defined(CONFIG_DEBUG_SPINLOCK)
+ 	__clear_bit(0, (unsigned long *)b);
++#endif
+ 	raw_spin_unlock(&b->lock);
+ #endif
+ }
