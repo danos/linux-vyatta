@@ -3,6 +3,9 @@
 import sys
 sys.path.append("debian/lib/python")
 
+import codecs
+import errno
+import glob
 import os
 import os.path
 import subprocess
@@ -59,6 +62,18 @@ class Gencontrol(Base):
             'SOURCEVERSION': self.version.complete,
         })
 
+        # Prepare to generate template-substituted translations
+        try:
+            os.mkdir('debian/po')
+        except OSError:
+            pass
+        for path in glob.glob('debian/templates/po/*.po'):
+            target = 'debian/po/' + os.path.basename(path)
+            with open(target, 'w') as f:
+                f.write('# THIS IS A GENERATED FILE; DO NOT EDIT IT!\n'
+                        '# Translators should edit %s instead.\n'
+                        '#\n' % path)
+
     def do_main_makefile(self, makefile, makeflags, extra):
         fs_enabled = [featureset
                       for featureset in self.config['base', ]['featuresets']
@@ -98,6 +113,12 @@ class Gencontrol(Base):
 
     def do_arch_setup(self, vars, makeflags, arch, extra):
         config_base = self.config.merge('base', arch)
+
+        if config_base['kernel-arch'] in ['mips', 'parisc', 'powerpc']:
+            vars['image-stem'] = 'vmlinux'
+        else:
+            vars['image-stem'] = 'vmlinuz'
+
         self._setup_makeflags(self.arch_makeflags, makeflags, config_base)
 
     def do_arch_packages(self, packages, makefile, arch, vars, makeflags, extra):
@@ -107,10 +128,12 @@ class Gencontrol(Base):
 
         if self.version.linux_modifier is None:
             try:
-                vars['abiname'] = '-%s' % self.config['abi', arch]['abiname']
+                abiname_part = '-%s' % self.config['abi', arch]['abiname']
             except KeyError:
-                vars['abiname'] = self.abiname
-            makeflags['ABINAME'] = vars['abiname']
+                abiname_part = self.abiname_part
+            makeflags['ABINAME'] = vars['abiname'] = \
+                self.version.linux_upstream + abiname_part
+            makeflags['ABINAME_PART'] = abiname_part
 
         if foreign_kernel:
             packages_headers_arch = []
@@ -154,8 +177,7 @@ class Gencontrol(Base):
                 kw_env['KW_DEFCONFIG_DIR'] = installer_def_dir
                 kw_env['KW_CONFIG_DIR'] = installer_arch_dir
                 kw_proc = subprocess.Popen(
-                    ['kernel-wedge', 'gen-control',
-                     self.abiname],
+                    ['kernel-wedge', 'gen-control', vars['abiname']],
                     stdout=subprocess.PIPE,
                     env=kw_env)
                 udeb_packages = read_control(kw_proc.stdout)
@@ -199,7 +221,6 @@ class Gencontrol(Base):
 
     flavour_makeflags_image = (
         ('type', 'TYPE', False),
-        ('initramfs', 'INITRAMFS', True),
     )
 
     flavour_makeflags_other = (
@@ -219,6 +240,7 @@ class Gencontrol(Base):
         override_localversion = config_image.get('override-localversion', None)
         if override_localversion is not None:
             vars['localversion-image'] = vars['localversion_headers'] + '-' + override_localversion
+        vars['initramfs'] = 'YES' if config_image.get('initramfs', True) else ''
 
         self._setup_makeflags(self.flavour_makeflags_base, makeflags, config_base)
         self._setup_makeflags(self.flavour_makeflags_image, makeflags, config_image)
@@ -379,6 +401,29 @@ class Gencontrol(Base):
         makefile.add('build-arch_%s_%s_%s_real' % (arch, featureset, flavour), cmds=cmds_build)
         makefile.add('setup_%s_%s_%s_real' % (arch, featureset, flavour), cmds=cmds_setup)
 
+        # Substitute kernel version etc. into maintainer scripts,
+        # translations and lintian overrides
+        def substitute_file(template, target, append=False):
+            with codecs.open(target, 'a' if append else 'w',
+                             'utf-8') as f:
+                f.write(self.substitute(self.templates[template], vars))
+        if config_entry_image['type'] == 'plain':
+            substitute_file('headers.plain.postinst',
+                            'debian/linux-headers-%s%s.postinst' %
+                            (vars['abiname'], vars['localversion']))
+            for name in ['postinst', 'postrm', 'preinst', 'prerm', 'templates']:
+                substitute_file('image.plain.%s' % name,
+                                'debian/linux-image-%s%s.%s' %
+                                (vars['abiname'], vars['localversion'], name))
+            for path in glob.glob('debian/templates/po/*.po'):
+                substitute_file('po/' + os.path.basename(path),
+                                'debian/po/' + os.path.basename(path),
+                                append=True)
+        if build_debug:
+            substitute_file('image-dbg.lintian-override',
+                            'debian/linux-image-%s%s-dbg.lintian-overrides' %
+                            (vars['abiname'], vars['localversion']))
+
     def merge_packages(self, packages, new, arch):
         for new_package in new:
             name = new_package['Package']
@@ -419,7 +464,9 @@ class Gencontrol(Base):
             'source_package': self.changelog[0].source,
             'abiname': self.abiname,
         }
-        self.config['version', ] = {'source': self.version.complete, 'abiname': self.abiname}
+        self.config['version', ] = {'source': self.version.complete,
+                                    'upstream': self.version.linux_upstream,
+                                    'abiname': self.abiname}
 
         distribution = self.changelog[0].distribution
         if distribution in ('unstable', ):
