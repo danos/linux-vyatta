@@ -1,0 +1,69 @@
+commit 2b4df6ea53d05625e9ca2dd73bc0e831976e009d
+Author: Mahesh Rajashekhara <Mahesh_Rajashekhara@pmc-sierra.com>
+Date:   Thu Jan 10 17:52:51 2013 +0530
+
+    [SCSI] aacraid: 1024 max outstanding command support for Series 7 and above
+    
+    Signed-off-by: Mahesh Rajashekhara <Mahesh_Rajashekhara@pmc-sierra.com>
+    Signed-off-by: James Bottomley <JBottomley@Parallels.com>
+
+diff --git a/drivers/scsi/aacraid/aacraid.h b/drivers/scsi/aacraid/aacraid.h
+index 742f5d7..a6f7190 100644
+--- a/drivers/scsi/aacraid/aacraid.h
++++ b/drivers/scsi/aacraid/aacraid.h
+@@ -12,13 +12,13 @@
+  *----------------------------------------------------------------------------*/
+ 
+ #ifndef AAC_DRIVER_BUILD
+-# define AAC_DRIVER_BUILD 29801
++# define AAC_DRIVER_BUILD 30000
+ # define AAC_DRIVER_BRANCH "-ms"
+ #endif
+ #define MAXIMUM_NUM_CONTAINERS	32
+ 
+ #define AAC_NUM_MGT_FIB         8
+-#define AAC_NUM_IO_FIB		(512 - AAC_NUM_MGT_FIB)
++#define AAC_NUM_IO_FIB		(1024 - AAC_NUM_MGT_FIB)
+ #define AAC_NUM_FIB		(AAC_NUM_IO_FIB + AAC_NUM_MGT_FIB)
+ 
+ #define AAC_MAX_LUN		(8)
+@@ -36,6 +36,10 @@
+ #define CONTAINER_TO_ID(cont)		(cont)
+ #define CONTAINER_TO_LUN(cont)		(0)
+ 
++#define PMC_DEVICE_S7	0x28c
++#define PMC_DEVICE_S8	0x28d
++#define PMC_DEVICE_S9	0x28f
++
+ #define aac_phys_to_logical(x)  ((x)+1)
+ #define aac_logical_to_phys(x)  ((x)?(x)-1:0)
+ 
+diff --git a/drivers/scsi/aacraid/comminit.c b/drivers/scsi/aacraid/comminit.c
+index 8e5d3be..3f75995 100644
+--- a/drivers/scsi/aacraid/comminit.c
++++ b/drivers/scsi/aacraid/comminit.c
+@@ -404,7 +404,13 @@ struct aac_dev *aac_init_adapter(struct aac_dev *dev)
+ 		dev->max_fib_size = status[1] & 0xFFE0;
+ 		host->sg_tablesize = status[2] >> 16;
+ 		dev->sg_tablesize = status[2] & 0xFFFF;
+-		host->can_queue = (status[3] & 0xFFFF) - AAC_NUM_MGT_FIB;
++		if (dev->pdev->device == PMC_DEVICE_S7 ||
++		    dev->pdev->device == PMC_DEVICE_S8 ||
++		    dev->pdev->device == PMC_DEVICE_S9)
++			host->can_queue = ((status[3] >> 16) ? (status[3] >> 16) :
++				(status[3] & 0xFFFF)) - AAC_NUM_MGT_FIB;
++		else
++			host->can_queue = (status[3] & 0xFFFF) - AAC_NUM_MGT_FIB;
+ 		dev->max_num_aif = status[4] & 0xFFFF;
+ 		/*
+ 		 *	NOTE:
+@@ -452,6 +458,9 @@ struct aac_dev *aac_init_adapter(struct aac_dev *dev)
+ 		}
+ 	}
+ 
++	if (host->can_queue > AAC_NUM_IO_FIB)
++		host->can_queue = AAC_NUM_IO_FIB;
++
+ 	/*
+ 	 *	Ok now init the communication subsystem
+ 	 */
