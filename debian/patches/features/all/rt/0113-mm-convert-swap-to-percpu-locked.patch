@@ -1,27 +1,26 @@
 From: Ingo Molnar <mingo@elte.hu>
 Date: Fri, 3 Jul 2009 08:29:51 -0500
-Subject: [PATCH 113/325] mm: convert swap to percpu locked
-Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=ae0323028c103d8ebf090f90af6eabf2bf35fe22
+Subject: [PATCH 113/332] mm: convert swap to percpu locked
+Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=e1bf42344bfff9eee7b328b5696fb8a91f7bb1ad
 
 Signed-off-by: Ingo Molnar <mingo@elte.hu>
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+[bwh: Adjust context to apply after Debian ABI fix]
 ---
  mm/swap.c | 33 +++++++++++++++++++++------------
  1 file changed, 21 insertions(+), 12 deletions(-)
 
-diff --git a/mm/swap.c b/mm/swap.c
-index 55b266d..e3f7d6f 100644
 --- a/mm/swap.c
 +++ b/mm/swap.c
-@@ -31,6 +31,7 @@
- #include <linux/backing-dev.h>
- #include <linux/memcontrol.h>
- #include <linux/gfp.h>
+@@ -34,6 +34,7 @@
+ #ifndef __GENKSYMS__
+ #include <linux/hugetlb.h>
+ #endif
 +#include <linux/locallock.h>
  
  #include "internal.h"
  
-@@ -41,6 +42,9 @@ static DEFINE_PER_CPU(struct pagevec[NR_LRU_LISTS], lru_add_pvecs);
+@@ -44,6 +45,9 @@ static DEFINE_PER_CPU(struct pagevec[NR_
  static DEFINE_PER_CPU(struct pagevec, lru_rotate_pvecs);
  static DEFINE_PER_CPU(struct pagevec, lru_deactivate_pvecs);
  
@@ -31,7 +30,7 @@ index 55b266d..e3f7d6f 100644
  /*
   * This path almost never happens for VM activity - pages are normally
   * freed via pagevecs.  But it gets used by networking.
-@@ -267,11 +271,11 @@ void rotate_reclaimable_page(struct page *page)
+@@ -345,11 +349,11 @@ void rotate_reclaimable_page(struct page
  		unsigned long flags;
  
  		page_cache_get(page);
@@ -45,7 +44,7 @@ index 55b266d..e3f7d6f 100644
  	}
  }
  
-@@ -327,12 +331,13 @@ static void activate_page_drain(int cpu)
+@@ -405,12 +409,13 @@ static void activate_page_drain(int cpu)
  void activate_page(struct page *page)
  {
  	if (PageLRU(page) && !PageActive(page) && !PageUnevictable(page)) {
@@ -61,7 +60,7 @@ index 55b266d..e3f7d6f 100644
  	}
  }
  
-@@ -373,12 +378,12 @@ EXPORT_SYMBOL(mark_page_accessed);
+@@ -451,12 +456,12 @@ EXPORT_SYMBOL(mark_page_accessed);
  
  void __lru_cache_add(struct page *page, enum lru_list lru)
  {
@@ -76,7 +75,7 @@ index 55b266d..e3f7d6f 100644
  }
  EXPORT_SYMBOL(__lru_cache_add);
  
-@@ -512,9 +517,9 @@ static void drain_cpu_pagevecs(int cpu)
+@@ -590,9 +595,9 @@ static void drain_cpu_pagevecs(int cpu)
  		unsigned long flags;
  
  		/* No harm done if a racing interrupt already did this */
@@ -88,7 +87,7 @@ index 55b266d..e3f7d6f 100644
  	}
  
  	pvec = &per_cpu(lru_deactivate_pvecs, cpu);
-@@ -542,18 +547,19 @@ void deactivate_page(struct page *page)
+@@ -620,18 +625,19 @@ void deactivate_page(struct page *page)
  		return;
  
  	if (likely(get_page_unless_zero(page))) {
@@ -112,7 +111,7 @@ index 55b266d..e3f7d6f 100644
  }
  
  static void lru_add_drain_per_cpu(struct work_struct *dummy)
-@@ -783,6 +789,9 @@ void __init swap_setup(void)
+@@ -861,6 +867,9 @@ void __init swap_setup(void)
  {
  	unsigned long megs = totalram_pages >> (20 - PAGE_SHIFT);
  
