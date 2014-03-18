@@ -1,0 +1,56 @@
+From: Russell King <rmk+kernel@arm.linux.org.uk>
+Date: Thu, 16 May 2013 10:30:59 +0000
+Subject: i2c: mv64xxx: work around signals causing I2C transactions to be
+ aborted
+Origin: https://git.kernel.org/linus/d295a86eab200b3f0c513e78dbe1f189fd32d397
+
+Do not use interruptible waits in an I2C driver; if a process uses
+signals (eg, Xorg uses SIGALRM and SIGPIPE) then these signals can
+cause the I2C driver to abort a transaction in progress by another
+driver, which can cause that driver to fail.  I2C drivers are not
+expected to abort transactions on signals.
+
+Signed-off-by: Russell King <rmk+kernel@arm.linux.org.uk>
+Signed-off-by: Wolfram Sang <wsa@the-dreams.de>
+---
+ drivers/i2c/busses/i2c-mv64xxx.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+--- a/drivers/i2c/busses/i2c-mv64xxx.c
++++ b/drivers/i2c/busses/i2c-mv64xxx.c
+@@ -244,7 +244,7 @@ mv64xxx_i2c_do_action(struct mv64xxx_i2c
+ 		writel(drv_data->cntl_bits,
+ 			drv_data->reg_base + MV64XXX_I2C_REG_CONTROL);
+ 		drv_data->block = 0;
+-		wake_up_interruptible(&drv_data->waitq);
++		wake_up(&drv_data->waitq);
+ 		break;
+ 
+ 	case MV64XXX_I2C_ACTION_CONTINUE:
+@@ -292,7 +292,7 @@ mv64xxx_i2c_do_action(struct mv64xxx_i2c
+ 		writel(drv_data->cntl_bits | MV64XXX_I2C_REG_CONTROL_STOP,
+ 			drv_data->reg_base + MV64XXX_I2C_REG_CONTROL);
+ 		drv_data->block = 0;
+-		wake_up_interruptible(&drv_data->waitq);
++		wake_up(&drv_data->waitq);
+ 		break;
+ 
+ 	case MV64XXX_I2C_ACTION_INVALID:
+@@ -307,7 +307,7 @@ mv64xxx_i2c_do_action(struct mv64xxx_i2c
+ 		writel(drv_data->cntl_bits | MV64XXX_I2C_REG_CONTROL_STOP,
+ 			drv_data->reg_base + MV64XXX_I2C_REG_CONTROL);
+ 		drv_data->block = 0;
+-		wake_up_interruptible(&drv_data->waitq);
++		wake_up(&drv_data->waitq);
+ 		break;
+ 	}
+ }
+@@ -373,7 +373,7 @@ mv64xxx_i2c_wait_for_completion(struct m
+ 	unsigned long	flags;
+ 	char		abort = 0;
+ 
+-	time_left = wait_event_interruptible_timeout(drv_data->waitq,
++	time_left = wait_event_timeout(drv_data->waitq,
+ 		!drv_data->block, drv_data->adapter.timeout);
+ 
+ 	spin_lock_irqsave(&drv_data->lock, flags);

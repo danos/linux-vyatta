@@ -1,0 +1,39 @@
+From 26bef1318adc1b3a530ecc807ef99346db2aa8b0 Mon Sep 17 00:00:00 2001
+From: Linus Torvalds <torvalds@linux-foundation.org>
+Date: Sat, 11 Jan 2014 19:15:52 -0800
+Subject: [PATCH] x86, fpu, amd: Clear exceptions in AMD FXSAVE workaround
+
+Before we do an EMMS in the AMD FXSAVE information leak workaround we
+need to clear any pending exceptions, otherwise we trap with a
+floating-point exception inside this code.
+
+Reported-by: halfdog <me@halfdog.net>
+Tested-by: Borislav Petkov <bp@suse.de>
+Link: http://lkml.kernel.org/r/CA%2B55aFxQnY_PCG_n4=0w-VG=YLXL-yr7oMxyy0WU2gCBAf3ydg@mail.gmail.com
+Signed-off-by: H. Peter Anvin <hpa@zytor.com>
+[backported to Debian's 3.2]
+
+diff --git a/arch/x86/kernel/traps.c b/arch/x86/kernel/traps.c
+index e6fbb94..20061b9 100644
+--- a/arch/x86/kernel/traps.c
++++ b/arch/x86/kernel/traps.c
+@@ -582,12 +582,13 @@ void __math_state_restore(struct task_struct *tsk)
+ 	/* AMD K7/K8 CPUs don't save/restore FDP/FIP/FOP unless an exception
+ 	   is pending.  Clear the x87 state here by setting it to fixed
+ 	   values. safe_address is a random variable that should be in L1 */
+-	alternative_input(
+-		ASM_NOP8 ASM_NOP2,
+-		"emms\n\t"	  	/* clear stack tags */
+-		"fildl %P[addr]",	/* set F?P to defined value */
+-		X86_FEATURE_FXSAVE_LEAK,
+-		[addr] "m" (safe_address));
++	if (unlikely(static_cpu_has(X86_FEATURE_FXSAVE_LEAK))) {
++		asm volatile(
++			"fnclex\n\t"
++			"emms\n\t"
++			"fildl %P[addr]"	/* set F?P to defined value */
++			: : [addr] "m" (safe_address));
++	}
+ 
+ 	/*
+ 	 * Paranoid restore. send a SIGSEGV if we fail to restore the state.
