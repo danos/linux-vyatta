@@ -13,16 +13,16 @@ preemptible.
 Reported-by: Udo van den Heuvel <udovdh@xs4all.nl>
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 Tested-by: Udo van den Heuvel <udovdh@xs4all.nl>
+[bwh: Commit 789b5e031528 ('md/raid5: Fix CPU hotplug callback registration')
+ fixed in initialisation of the percpu buffers between the hotplug callback
+ and device setup.  That conflicts with this, and reveals that this fix
+ doesn't initialise the spinlock at all in the hotplug callback!  As there
+ is no good way to tell whether a spinlock has been initialised, and no
+ allocation is needed, initialise it for all possible CPUs immediately.]
 ---
- drivers/md/raid5.c | 7 +++++--
- drivers/md/raid5.h | 1 +
- 2 files changed, 6 insertions(+), 2 deletions(-)
-
-diff --git a/drivers/md/raid5.c b/drivers/md/raid5.c
-index fb67833..7828c5f 100644
 --- a/drivers/md/raid5.c
 +++ b/drivers/md/raid5.c
-@@ -1253,8 +1253,9 @@ static void __raid_run_ops(struct stripe_head *sh, unsigned long ops_request)
+@@ -1253,8 +1253,9 @@ static void __raid_run_ops(struct stripe
  	struct raid5_percpu *percpu;
  	unsigned long cpu;
  
@@ -33,7 +33,7 @@ index fb67833..7828c5f 100644
  	if (test_bit(STRIPE_OP_BIOFILL, &ops_request)) {
  		ops_run_biofill(sh);
  		overlap_clear++;
-@@ -1306,7 +1307,8 @@ static void __raid_run_ops(struct stripe_head *sh, unsigned long ops_request)
+@@ -1306,7 +1307,8 @@ static void __raid_run_ops(struct stripe
  			if (test_and_clear_bit(R5_Overlap, &dev->flags))
  				wake_up(&sh->raid_conf->wait_for_overlap);
  		}
@@ -43,16 +43,16 @@ index fb67833..7828c5f 100644
  }
  
  #ifdef CONFIG_MULTICORE_RAID456
-@@ -4549,6 +4551,7 @@ static int raid5_alloc_percpu(struct r5conf *conf)
- 			break;
- 		}
- 		per_cpu_ptr(conf->percpu, cpu)->scribble = scribble;
+@@ -4538,6 +4540,9 @@ static int raid5_alloc_percpu(struct r5c
+ 	if (!conf->percpu)
+ 		return -ENOMEM;
+ 
++	for_each_possible_cpu(cpu)
 +		spin_lock_init(&per_cpu_ptr(conf->percpu, cpu)->lock);
- 	}
++
  #ifdef CONFIG_HOTPLUG_CPU
  	conf->cpu_notify.notifier_call = raid456_cpu_notify;
-diff --git a/drivers/md/raid5.h b/drivers/md/raid5.h
-index e10c553..010a969 100644
+ 	conf->cpu_notify.priority = 0;
 --- a/drivers/md/raid5.h
 +++ b/drivers/md/raid5.h
 @@ -405,6 +405,7 @@ struct r5conf {
