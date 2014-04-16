@@ -1,0 +1,1658 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Wed, 8 Feb 2012 02:55:56 +0000
+Subject: [PATCH 061/246] e1000e: cleanup goto statements to exit points
+ without common work
+Origin: https://git.kernel.org/linus/5015e53a4cf0c88977120faede7eb02b0459d90e
+
+Per ./Documentation/CodingStyle, goto statements are acceptable for the
+centralized exiting of functions when there are multiple exit points which
+share common work such as cleanup.  When no common work is required for
+multiple exit points, the function should just return at these exit points
+instead of doing an unnecessary jump to a centralized return.  This patch
+cleans up the inappropriate use of goto statements, and removes unnecessary
+variables (or move to a smaller scope) where possible as a result of the
+cleanups.
+
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Tested-by: Aaron Brown <aaron.f.brown@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/e1000e/80003es2lan.c |  18 +-
+ drivers/net/ethernet/intel/e1000e/82571.c       |  30 ++--
+ drivers/net/ethernet/intel/e1000e/ich8lan.c     | 176 +++++++++-----------
+ drivers/net/ethernet/intel/e1000e/mac.c         |  15 +-
+ drivers/net/ethernet/intel/e1000e/manage.c      |  32 ++--
+ drivers/net/ethernet/intel/e1000e/netdev.c      |  12 +-
+ drivers/net/ethernet/intel/e1000e/nvm.c         |  22 +--
+ drivers/net/ethernet/intel/e1000e/phy.c         | 210 ++++++++++--------------
+ 8 files changed, 212 insertions(+), 303 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/e1000e/80003es2lan.c b/drivers/net/ethernet/intel/e1000e/80003es2lan.c
+index 05a79cb..bc960fe 100644
+--- a/drivers/net/ethernet/intel/e1000e/80003es2lan.c
++++ b/drivers/net/ethernet/intel/e1000e/80003es2lan.c
+@@ -714,22 +714,19 @@ static s32 e1000_get_cable_length_80003es2lan(struct e1000_hw *hw)
+ 
+ 	ret_val = e1e_rphy(hw, GG82563_PHY_DSP_DISTANCE, &phy_data);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	index = phy_data & GG82563_DSPD_CABLE_LENGTH;
+ 
+-	if (index >= GG82563_CABLE_LENGTH_TABLE_SIZE - 5) {
+-		ret_val = -E1000_ERR_PHY;
+-		goto out;
+-	}
++	if (index >= GG82563_CABLE_LENGTH_TABLE_SIZE - 5)
++		return -E1000_ERR_PHY;
+ 
+ 	phy->min_cable_length = e1000_gg82563_cable_length_table[index];
+ 	phy->max_cable_length = e1000_gg82563_cable_length_table[index + 5];
+ 
+ 	phy->cable_length = (phy->min_cable_length + phy->max_cable_length) / 2;
+ 
+-out:
+-	return ret_val;
++	return 0;
+ }
+ 
+ /**
+@@ -1348,12 +1345,9 @@ static s32 e1000_read_mac_addr_80003es2lan(struct e1000_hw *hw)
+ 	 */
+ 	ret_val = e1000_check_alt_mac_addr_generic(hw);
+ 	if (ret_val)
+-		goto out;
+-
+-	ret_val = e1000_read_mac_addr_generic(hw);
++		return ret_val;
+ 
+-out:
+-	return ret_val;
++	return e1000_read_mac_addr_generic(hw);
+ }
+ 
+ /**
+diff --git a/drivers/net/ethernet/intel/e1000e/82571.c b/drivers/net/ethernet/intel/e1000e/82571.c
+index 106b48d..d7d66c8 100644
+--- a/drivers/net/ethernet/intel/e1000e/82571.c
++++ b/drivers/net/ethernet/intel/e1000e/82571.c
+@@ -564,7 +564,6 @@ static void e1000_put_hw_semaphore_82571(struct e1000_hw *hw)
+ static s32 e1000_get_hw_semaphore_82573(struct e1000_hw *hw)
+ {
+ 	u32 extcnf_ctrl;
+-	s32 ret_val = 0;
+ 	s32 i = 0;
+ 
+ 	extcnf_ctrl = er32(EXTCNF_CTRL);
+@@ -586,12 +585,10 @@ static s32 e1000_get_hw_semaphore_82573(struct e1000_hw *hw)
+ 		/* Release semaphores */
+ 		e1000_put_hw_semaphore_82573(hw);
+ 		e_dbg("Driver can't access the PHY\n");
+-		ret_val = -E1000_ERR_PHY;
+-		goto out;
++		return -E1000_ERR_PHY;
+ 	}
+ 
+-out:
+-	return ret_val;
++	return 0;
+ }
+ 
+ /**
+@@ -1409,7 +1406,6 @@ bool e1000_check_phy_82574(struct e1000_hw *hw)
+ {
+ 	u16 status_1kbt = 0;
+ 	u16 receive_errors = 0;
+-	bool phy_hung = false;
+ 	s32 ret_val = 0;
+ 
+ 	/*
+@@ -1417,19 +1413,18 @@ bool e1000_check_phy_82574(struct e1000_hw *hw)
+ 	 * read the Base1000T status register If both are max then PHY is hung.
+ 	 */
+ 	ret_val = e1e_rphy(hw, E1000_RECEIVE_ERROR_COUNTER, &receive_errors);
+-
+ 	if (ret_val)
+-		goto out;
++		return false;
+ 	if (receive_errors == E1000_RECEIVE_ERROR_MAX)  {
+ 		ret_val = e1e_rphy(hw, E1000_BASE1000T_STATUS, &status_1kbt);
+ 		if (ret_val)
+-			goto out;
++			return false;
+ 		if ((status_1kbt & E1000_IDLE_ERROR_COUNT_MASK) ==
+ 		    E1000_IDLE_ERROR_COUNT_MASK)
+-			phy_hung = true;
++			return true;
+ 	}
+-out:
+-	return phy_hung;
++
++	return false;
+ }
+ 
+ /**
+@@ -1832,9 +1827,9 @@ static s32 e1000_fix_nvm_checksum_82571(struct e1000_hw *hw)
+  **/
+ static s32 e1000_read_mac_addr_82571(struct e1000_hw *hw)
+ {
+-	s32 ret_val = 0;
+-
+ 	if (hw->mac.type == e1000_82571) {
++		s32 ret_val = 0;
++
+ 		/*
+ 		 * If there's an alternate MAC address place it in RAR0
+ 		 * so that it will override the Si installed default perm
+@@ -1842,13 +1837,10 @@ static s32 e1000_read_mac_addr_82571(struct e1000_hw *hw)
+ 		 */
+ 		ret_val = e1000_check_alt_mac_addr_generic(hw);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 	}
+ 
+-	ret_val = e1000_read_mac_addr_generic(hw);
+-
+-out:
+-	return ret_val;
++	return e1000_read_mac_addr_generic(hw);
+ }
+ 
+ /**
+diff --git a/drivers/net/ethernet/intel/e1000e/ich8lan.c b/drivers/net/ethernet/intel/e1000e/ich8lan.c
+index c4d65b8..f3282dc 100644
+--- a/drivers/net/ethernet/intel/e1000e/ich8lan.c
++++ b/drivers/net/ethernet/intel/e1000e/ich8lan.c
+@@ -351,7 +351,7 @@ static s32 e1000_init_phy_params_pchlan(struct e1000_hw *hw)
+ 		 */
+ 		ret_val = e1000e_phy_hw_reset_generic(hw);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 
+ 		/* Ungate automatic PHY configuration on non-managed 82579 */
+ 		if ((hw->mac.type == e1000_pch2lan) &&
+@@ -366,7 +366,7 @@ static s32 e1000_init_phy_params_pchlan(struct e1000_hw *hw)
+ 	default:
+ 		ret_val = e1000e_get_phy_id(hw);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 		if ((phy->id != 0) && (phy->id != PHY_REVISION_MASK))
+ 			break;
+ 		/* fall-through */
+@@ -377,10 +377,10 @@ static s32 e1000_init_phy_params_pchlan(struct e1000_hw *hw)
+ 		 */
+ 		ret_val = e1000_set_mdio_slow_mode_hv(hw);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 		ret_val = e1000e_get_phy_id(hw);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 		break;
+ 	}
+ 	phy->type = e1000e_get_phy_type_from_id(phy->id);
+@@ -406,7 +406,6 @@ static s32 e1000_init_phy_params_pchlan(struct e1000_hw *hw)
+ 		break;
+ 	}
+ 
+-out:
+ 	return ret_val;
+ }
+ 
+@@ -635,20 +634,18 @@ static s32 e1000_set_eee_pchlan(struct e1000_hw *hw)
+ 	u16 phy_reg;
+ 
+ 	if (hw->phy.type != e1000_phy_82579)
+-		goto out;
++		return 0;
+ 
+ 	ret_val = e1e_rphy(hw, I82579_LPI_CTRL, &phy_reg);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	if (hw->dev_spec.ich8lan.eee_disable)
+ 		phy_reg &= ~I82579_LPI_CTRL_ENABLE_MASK;
+ 	else
+ 		phy_reg |= I82579_LPI_CTRL_ENABLE_MASK;
+ 
+-	ret_val = e1e_wphy(hw, I82579_LPI_CTRL, phy_reg);
+-out:
+-	return ret_val;
++	return e1e_wphy(hw, I82579_LPI_CTRL, phy_reg);
+ }
+ 
+ /**
+@@ -672,10 +669,8 @@ static s32 e1000_check_for_copper_link_ich8lan(struct e1000_hw *hw)
+ 	 * get_link_status flag is set upon receiving a Link Status
+ 	 * Change or Rx Sequence Error interrupt.
+ 	 */
+-	if (!mac->get_link_status) {
+-		ret_val = 0;
+-		goto out;
+-	}
++	if (!mac->get_link_status)
++		return 0;
+ 
+ 	/*
+ 	 * First we want to see if the MII Status Register reports
+@@ -684,16 +679,16 @@ static s32 e1000_check_for_copper_link_ich8lan(struct e1000_hw *hw)
+ 	 */
+ 	ret_val = e1000e_phy_has_link_generic(hw, 1, 0, &link);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	if (hw->mac.type == e1000_pchlan) {
+ 		ret_val = e1000_k1_gig_workaround_hv(hw, link);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 	}
+ 
+ 	if (!link)
+-		goto out; /* No link detected */
++		return 0; /* No link detected */
+ 
+ 	mac->get_link_status = false;
+ 
+@@ -701,13 +696,13 @@ static s32 e1000_check_for_copper_link_ich8lan(struct e1000_hw *hw)
+ 	case e1000_pch2lan:
+ 		ret_val = e1000_k1_workaround_lv(hw);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 		/* fall-thru */
+ 	case e1000_pchlan:
+ 		if (hw->phy.type == e1000_phy_82578) {
+ 			ret_val = e1000_link_stall_workaround_hv(hw);
+ 			if (ret_val)
+-				goto out;
++				return ret_val;
+ 		}
+ 
+ 		/*
+@@ -737,16 +732,14 @@ static s32 e1000_check_for_copper_link_ich8lan(struct e1000_hw *hw)
+ 	/* Enable/Disable EEE after link up */
+ 	ret_val = e1000_set_eee_pchlan(hw);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	/*
+ 	 * If we are forcing speed/duplex, then we simply return since
+ 	 * we have already determined whether we have link or not.
+ 	 */
+-	if (!mac->autoneg) {
+-		ret_val = -E1000_ERR_CONFIG;
+-		goto out;
+-	}
++	if (!mac->autoneg)
++		return -E1000_ERR_CONFIG;
+ 
+ 	/*
+ 	 * Auto-Neg is enabled.  Auto Speed Detection takes care
+@@ -765,7 +758,6 @@ static s32 e1000_check_for_copper_link_ich8lan(struct e1000_hw *hw)
+ 	if (ret_val)
+ 		e_dbg("Error configuring flow control\n");
+ 
+-out:
+ 	return ret_val;
+ }
+ 
+@@ -1008,15 +1000,13 @@ static s32 e1000_write_smbus_addr(struct e1000_hw *hw)
+ 
+ 	ret_val = e1000_read_phy_reg_hv_locked(hw, HV_SMB_ADDR, &phy_data);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	phy_data &= ~HV_SMB_ADDR_MASK;
+ 	phy_data |= (strap >> E1000_STRAP_SMBUS_ADDRESS_SHIFT);
+ 	phy_data |= HV_SMB_ADDR_PEC_EN | HV_SMB_ADDR_VALID;
+-	ret_val = e1000_write_phy_reg_hv_locked(hw, HV_SMB_ADDR, phy_data);
+ 
+-out:
+-	return ret_val;
++	return e1000_write_phy_reg_hv_locked(hw, HV_SMB_ADDR, phy_data);
+ }
+ 
+ /**
+@@ -1159,12 +1149,12 @@ static s32 e1000_k1_gig_workaround_hv(struct e1000_hw *hw, bool link)
+ 	bool k1_enable = hw->dev_spec.ich8lan.nvm_k1_enabled;
+ 
+ 	if (hw->mac.type != e1000_pchlan)
+-		goto out;
++		return 0;
+ 
+ 	/* Wrap the whole flow with the sw flag */
+ 	ret_val = hw->phy.ops.acquire(hw);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	/* Disable K1 when link is 1Gbps, otherwise use the NVM setting */
+ 	if (link) {
+@@ -1218,7 +1208,7 @@ static s32 e1000_k1_gig_workaround_hv(struct e1000_hw *hw, bool link)
+ 
+ release:
+ 	hw->phy.ops.release(hw);
+-out:
++
+ 	return ret_val;
+ }
+ 
+@@ -1244,7 +1234,7 @@ s32 e1000_configure_k1_ich8lan(struct e1000_hw *hw, bool k1_enable)
+ 	                                     E1000_KMRNCTRLSTA_K1_CONFIG,
+ 	                                     &kmrn_reg);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	if (k1_enable)
+ 		kmrn_reg |= E1000_KMRNCTRLSTA_K1_ENABLE;
+@@ -1255,7 +1245,7 @@ s32 e1000_configure_k1_ich8lan(struct e1000_hw *hw, bool k1_enable)
+ 	                                      E1000_KMRNCTRLSTA_K1_CONFIG,
+ 	                                      kmrn_reg);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	udelay(20);
+ 	ctrl_ext = er32(CTRL_EXT);
+@@ -1273,8 +1263,7 @@ s32 e1000_configure_k1_ich8lan(struct e1000_hw *hw, bool k1_enable)
+ 	e1e_flush();
+ 	udelay(20);
+ 
+-out:
+-	return ret_val;
++	return 0;
+ }
+ 
+ /**
+@@ -1376,13 +1365,13 @@ static s32 e1000_hv_phy_workarounds_ich8lan(struct e1000_hw *hw)
+ 	u16 phy_data;
+ 
+ 	if (hw->mac.type != e1000_pchlan)
+-		return ret_val;
++		return 0;
+ 
+ 	/* Set MDIO slow mode before any other MDIO access */
+ 	if (hw->phy.type == e1000_phy_82577) {
+ 		ret_val = e1000_set_mdio_slow_mode_hv(hw);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 	}
+ 
+ 	if (((hw->phy.type == e1000_phy_82577) &&
+@@ -1419,7 +1408,7 @@ static s32 e1000_hv_phy_workarounds_ich8lan(struct e1000_hw *hw)
+ 	ret_val = e1000e_write_phy_reg_mdic(hw, IGP01E1000_PHY_PAGE_SELECT, 0);
+ 	hw->phy.ops.release(hw);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	/*
+ 	 * Configure the K1 Si workaround during phy reset assuming there is
+@@ -1427,12 +1416,12 @@ static s32 e1000_hv_phy_workarounds_ich8lan(struct e1000_hw *hw)
+ 	 */
+ 	ret_val = e1000_k1_gig_workaround_hv(hw, true);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	/* Workaround for link disconnects on a busy hub in half duplex */
+ 	ret_val = hw->phy.ops.acquire(hw);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 	ret_val = hw->phy.ops.read_reg_locked(hw, BM_PORT_GEN_CFG, &phy_data);
+ 	if (ret_val)
+ 		goto release;
+@@ -1440,7 +1429,7 @@ static s32 e1000_hv_phy_workarounds_ich8lan(struct e1000_hw *hw)
+ 					       phy_data & 0x00FF);
+ release:
+ 	hw->phy.ops.release(hw);
+-out:
++
+ 	return ret_val;
+ }
+ 
+@@ -1497,13 +1486,13 @@ s32 e1000_lv_jumbo_workaround_ich8lan(struct e1000_hw *hw, bool enable)
+ 	u16 i;
+ 
+ 	if (hw->mac.type != e1000_pch2lan)
+-		goto out;
++		return 0;
+ 
+ 	/* disable Rx path while enabling/disabling workaround */
+ 	e1e_rphy(hw, PHY_REG(769, 20), &phy_reg);
+ 	ret_val = e1e_wphy(hw, PHY_REG(769, 20), phy_reg | (1 << 14));
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	if (enable) {
+ 		/*
+@@ -1545,24 +1534,24 @@ s32 e1000_lv_jumbo_workaround_ich8lan(struct e1000_hw *hw, bool enable)
+ 						E1000_KMRNCTRLSTA_CTRL_OFFSET,
+ 						&data);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 		ret_val = e1000e_write_kmrn_reg(hw,
+ 						E1000_KMRNCTRLSTA_CTRL_OFFSET,
+ 						data | (1 << 0));
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 		ret_val = e1000e_read_kmrn_reg(hw,
+ 						E1000_KMRNCTRLSTA_HD_CTRL,
+ 						&data);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 		data &= ~(0xF << 8);
+ 		data |= (0xB << 8);
+ 		ret_val = e1000e_write_kmrn_reg(hw,
+ 						E1000_KMRNCTRLSTA_HD_CTRL,
+ 						data);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 
+ 		/* Enable jumbo frame workaround in the PHY */
+ 		e1e_rphy(hw, PHY_REG(769, 23), &data);
+@@ -1570,25 +1559,25 @@ s32 e1000_lv_jumbo_workaround_ich8lan(struct e1000_hw *hw, bool enable)
+ 		data |= (0x37 << 5);
+ 		ret_val = e1e_wphy(hw, PHY_REG(769, 23), data);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 		e1e_rphy(hw, PHY_REG(769, 16), &data);
+ 		data &= ~(1 << 13);
+ 		ret_val = e1e_wphy(hw, PHY_REG(769, 16), data);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 		e1e_rphy(hw, PHY_REG(776, 20), &data);
+ 		data &= ~(0x3FF << 2);
+ 		data |= (0x1A << 2);
+ 		ret_val = e1e_wphy(hw, PHY_REG(776, 20), data);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 		ret_val = e1e_wphy(hw, PHY_REG(776, 23), 0xF100);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 		e1e_rphy(hw, HV_PM_CTRL, &data);
+ 		ret_val = e1e_wphy(hw, HV_PM_CTRL, data | (1 << 10));
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 	} else {
+ 		/* Write MAC register values back to h/w defaults */
+ 		mac_reg = er32(FFLT_DBG);
+@@ -1603,56 +1592,53 @@ s32 e1000_lv_jumbo_workaround_ich8lan(struct e1000_hw *hw, bool enable)
+ 						E1000_KMRNCTRLSTA_CTRL_OFFSET,
+ 						&data);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 		ret_val = e1000e_write_kmrn_reg(hw,
+ 						E1000_KMRNCTRLSTA_CTRL_OFFSET,
+ 						data & ~(1 << 0));
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 		ret_val = e1000e_read_kmrn_reg(hw,
+ 						E1000_KMRNCTRLSTA_HD_CTRL,
+ 						&data);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 		data &= ~(0xF << 8);
+ 		data |= (0xB << 8);
+ 		ret_val = e1000e_write_kmrn_reg(hw,
+ 						E1000_KMRNCTRLSTA_HD_CTRL,
+ 						data);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 
+ 		/* Write PHY register values back to h/w defaults */
+ 		e1e_rphy(hw, PHY_REG(769, 23), &data);
+ 		data &= ~(0x7F << 5);
+ 		ret_val = e1e_wphy(hw, PHY_REG(769, 23), data);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 		e1e_rphy(hw, PHY_REG(769, 16), &data);
+ 		data |= (1 << 13);
+ 		ret_val = e1e_wphy(hw, PHY_REG(769, 16), data);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 		e1e_rphy(hw, PHY_REG(776, 20), &data);
+ 		data &= ~(0x3FF << 2);
+ 		data |= (0x8 << 2);
+ 		ret_val = e1e_wphy(hw, PHY_REG(776, 20), data);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 		ret_val = e1e_wphy(hw, PHY_REG(776, 23), 0x7E00);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 		e1e_rphy(hw, HV_PM_CTRL, &data);
+ 		ret_val = e1e_wphy(hw, HV_PM_CTRL, data & ~(1 << 10));
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 	}
+ 
+ 	/* re-enable Rx path after enabling/disabling workaround */
+-	ret_val = e1e_wphy(hw, PHY_REG(769, 20), phy_reg & ~(1 << 14));
+-
+-out:
+-	return ret_val;
++	return e1e_wphy(hw, PHY_REG(769, 20), phy_reg & ~(1 << 14));
+ }
+ 
+ /**
+@@ -1664,14 +1650,14 @@ static s32 e1000_lv_phy_workarounds_ich8lan(struct e1000_hw *hw)
+ 	s32 ret_val = 0;
+ 
+ 	if (hw->mac.type != e1000_pch2lan)
+-		goto out;
++		return 0;
+ 
+ 	/* Set MDIO slow mode before any other MDIO access */
+ 	ret_val = e1000_set_mdio_slow_mode_hv(hw);
+ 
+ 	ret_val = hw->phy.ops.acquire(hw);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 	ret_val = hw->phy.ops.write_reg_locked(hw, I82579_EMI_ADDR,
+ 					       I82579_MSE_THRESHOLD);
+ 	if (ret_val)
+@@ -1689,7 +1675,6 @@ static s32 e1000_lv_phy_workarounds_ich8lan(struct e1000_hw *hw)
+ release:
+ 	hw->phy.ops.release(hw);
+ 
+-out:
+ 	return ret_val;
+ }
+ 
+@@ -1707,12 +1692,12 @@ static s32 e1000_k1_workaround_lv(struct e1000_hw *hw)
+ 	u16 phy_reg;
+ 
+ 	if (hw->mac.type != e1000_pch2lan)
+-		goto out;
++		return 0;
+ 
+ 	/* Set K1 beacon duration based on 1Gbps speed or otherwise */
+ 	ret_val = e1e_rphy(hw, HV_M_STATUS, &status_reg);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	if ((status_reg & (HV_M_STATUS_LINK_UP | HV_M_STATUS_AUTONEG_COMPLETE))
+ 	    == (HV_M_STATUS_LINK_UP | HV_M_STATUS_AUTONEG_COMPLETE)) {
+@@ -1721,7 +1706,7 @@ static s32 e1000_k1_workaround_lv(struct e1000_hw *hw)
+ 
+ 		ret_val = e1e_rphy(hw, I82579_LPI_CTRL, &phy_reg);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 
+ 		if (status_reg & HV_M_STATUS_SPEED_1000) {
+ 			mac_reg |= E1000_FEXTNVM4_BEACON_DURATION_8USEC;
+@@ -1734,7 +1719,6 @@ static s32 e1000_k1_workaround_lv(struct e1000_hw *hw)
+ 		ret_val = e1e_wphy(hw, I82579_LPI_CTRL, phy_reg);
+ 	}
+ 
+-out:
+ 	return ret_val;
+ }
+ 
+@@ -1805,7 +1789,7 @@ static s32 e1000_post_phy_reset_ich8lan(struct e1000_hw *hw)
+ 	u16 reg;
+ 
+ 	if (e1000_check_reset_block(hw))
+-		goto out;
++		return 0;
+ 
+ 	/* Allow time for h/w to get to quiescent state after reset */
+ 	usleep_range(10000, 20000);
+@@ -1815,12 +1799,12 @@ static s32 e1000_post_phy_reset_ich8lan(struct e1000_hw *hw)
+ 	case e1000_pchlan:
+ 		ret_val = e1000_hv_phy_workarounds_ich8lan(hw);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 		break;
+ 	case e1000_pch2lan:
+ 		ret_val = e1000_lv_phy_workarounds_ich8lan(hw);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 		break;
+ 	default:
+ 		break;
+@@ -1836,7 +1820,7 @@ static s32 e1000_post_phy_reset_ich8lan(struct e1000_hw *hw)
+ 	/* Configure the LCD with the extended configuration region in NVM */
+ 	ret_val = e1000_sw_lcd_config_ich8lan(hw);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	/* Configure the LCD with the OEM bits in NVM */
+ 	ret_val = e1000_oem_bits_config_ich8lan(hw, true);
+@@ -1851,18 +1835,16 @@ static s32 e1000_post_phy_reset_ich8lan(struct e1000_hw *hw)
+ 		/* Set EEE LPI Update Timer to 200usec */
+ 		ret_val = hw->phy.ops.acquire(hw);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 		ret_val = hw->phy.ops.write_reg_locked(hw, I82579_EMI_ADDR,
+ 						       I82579_LPI_UPDATE_TIMER);
+-		if (ret_val)
+-			goto release;
+-		ret_val = hw->phy.ops.write_reg_locked(hw, I82579_EMI_DATA,
+-						       0x1387);
+-release:
++		if (!ret_val)
++			ret_val = hw->phy.ops.write_reg_locked(hw,
++							       I82579_EMI_DATA,
++							       0x1387);
+ 		hw->phy.ops.release(hw);
+ 	}
+ 
+-out:
+ 	return ret_val;
+ }
+ 
+@@ -1885,12 +1867,9 @@ static s32 e1000_phy_hw_reset_ich8lan(struct e1000_hw *hw)
+ 
+ 	ret_val = e1000e_phy_hw_reset_generic(hw);
+ 	if (ret_val)
+-		goto out;
+-
+-	ret_val = e1000_post_phy_reset_ich8lan(hw);
++		return ret_val;
+ 
+-out:
+-	return ret_val;
++	return e1000_post_phy_reset_ich8lan(hw);
+ }
+ 
+ /**
+@@ -1911,7 +1890,7 @@ static s32 e1000_set_lplu_state_pchlan(struct e1000_hw *hw, bool active)
+ 
+ 	ret_val = e1e_rphy(hw, HV_OEM_BITS, &oem_reg);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	if (active)
+ 		oem_reg |= HV_OEM_BITS_LPLU;
+@@ -1921,10 +1900,7 @@ static s32 e1000_set_lplu_state_pchlan(struct e1000_hw *hw, bool active)
+ 	if (!e1000_check_reset_block(hw))
+ 		oem_reg |= HV_OEM_BITS_RESTART_AN;
+ 
+-	ret_val = e1e_wphy(hw, HV_OEM_BITS, oem_reg);
+-
+-out:
+-	return ret_val;
++	return e1e_wphy(hw, HV_OEM_BITS, oem_reg);
+ }
+ 
+ /**
+@@ -3001,7 +2977,7 @@ static s32 e1000_id_led_init_pchlan(struct e1000_hw *hw)
+ 	/* Get default ID LED modes */
+ 	ret_val = hw->nvm.ops.valid_led_default(hw, &data);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	mac->ledctl_default = er32(LEDCTL);
+ 	mac->ledctl_mode1 = mac->ledctl_default;
+@@ -3046,8 +3022,7 @@ static s32 e1000_id_led_init_pchlan(struct e1000_hw *hw)
+ 		}
+ 	}
+ 
+-out:
+-	return ret_val;
++	return 0;
+ }
+ 
+ /**
+@@ -3162,11 +3137,11 @@ static s32 e1000_reset_hw_ich8lan(struct e1000_hw *hw)
+ 	if (ctrl & E1000_CTRL_PHY_RST) {
+ 		ret_val = hw->phy.ops.get_cfg_done(hw);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 
+ 		ret_val = e1000_post_phy_reset_ich8lan(hw);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 	}
+ 
+ 	/*
+@@ -3184,8 +3159,7 @@ static s32 e1000_reset_hw_ich8lan(struct e1000_hw *hw)
+ 	kab |= E1000_KABGTXD_BGSQLBIAS;
+ 	ew32(KABGTXD, kab);
+ 
+-out:
+-	return ret_val;
++	return 0;
+ }
+ 
+ /**
+diff --git a/drivers/net/ethernet/intel/e1000e/mac.c b/drivers/net/ethernet/intel/e1000e/mac.c
+index 943b909..17991e6 100644
+--- a/drivers/net/ethernet/intel/e1000e/mac.c
++++ b/drivers/net/ethernet/intel/e1000e/mac.c
+@@ -172,23 +172,23 @@ s32 e1000_check_alt_mac_addr_generic(struct e1000_hw *hw)
+ 
+ 	ret_val = e1000_read_nvm(hw, NVM_COMPAT, 1, &nvm_data);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	/* not supported on 82573 */
+ 	if (hw->mac.type == e1000_82573)
+-		goto out;
++		return 0;
+ 
+ 	ret_val = e1000_read_nvm(hw, NVM_ALT_MAC_ADDR_PTR, 1,
+ 				 &nvm_alt_mac_addr_offset);
+ 	if (ret_val) {
+ 		e_dbg("NVM Read Error\n");
+-		goto out;
++		return ret_val;
+ 	}
+ 
+ 	if ((nvm_alt_mac_addr_offset == 0xFFFF) ||
+ 	    (nvm_alt_mac_addr_offset == 0x0000))
+ 		/* There is no Alternate MAC Address */
+-		goto out;
++		return 0;
+ 
+ 	if (hw->bus.func == E1000_FUNC_1)
+ 		nvm_alt_mac_addr_offset += E1000_ALT_MAC_ADDRESS_OFFSET_LAN1;
+@@ -197,7 +197,7 @@ s32 e1000_check_alt_mac_addr_generic(struct e1000_hw *hw)
+ 		ret_val = e1000_read_nvm(hw, offset, 1, &nvm_data);
+ 		if (ret_val) {
+ 			e_dbg("NVM Read Error\n");
+-			goto out;
++			return ret_val;
+ 		}
+ 
+ 		alt_mac_addr[i] = (u8)(nvm_data & 0xFF);
+@@ -207,7 +207,7 @@ s32 e1000_check_alt_mac_addr_generic(struct e1000_hw *hw)
+ 	/* if multicast bit is set, the alternate address will not be used */
+ 	if (is_multicast_ether_addr(alt_mac_addr)) {
+ 		e_dbg("Ignoring Alternate Mac Address with MC bit set\n");
+-		goto out;
++		return 0;
+ 	}
+ 
+ 	/*
+@@ -217,8 +217,7 @@ s32 e1000_check_alt_mac_addr_generic(struct e1000_hw *hw)
+ 	 */
+ 	e1000e_rar_set(hw, alt_mac_addr, 0);
+ 
+-out:
+-	return ret_val;
++	return 0;
+ }
+ 
+ /**
+diff --git a/drivers/net/ethernet/intel/e1000e/manage.c b/drivers/net/ethernet/intel/e1000e/manage.c
+index c54caf6..0d24b13 100644
+--- a/drivers/net/ethernet/intel/e1000e/manage.c
++++ b/drivers/net/ethernet/intel/e1000e/manage.c
+@@ -140,7 +140,7 @@ bool e1000e_enable_tx_pkt_filtering(struct e1000_hw *hw)
+ 	/* No manageability, no filtering */
+ 	if (!e1000e_check_mng_mode(hw)) {
+ 		hw->mac.tx_pkt_filtering = false;
+-		goto out;
++		return hw->mac.tx_pkt_filtering;
+ 	}
+ 
+ 	/*
+@@ -150,7 +150,7 @@ bool e1000e_enable_tx_pkt_filtering(struct e1000_hw *hw)
+ 	ret_val = e1000_mng_enable_host_if(hw);
+ 	if (ret_val) {
+ 		hw->mac.tx_pkt_filtering = false;
+-		goto out;
++		return hw->mac.tx_pkt_filtering;
+ 	}
+ 
+ 	/* Read in the header.  Length and offset are in dwords. */
+@@ -170,16 +170,13 @@ bool e1000e_enable_tx_pkt_filtering(struct e1000_hw *hw)
+ 	 */
+ 	if ((hdr_csum != csum) || (hdr->signature != E1000_IAMT_SIGNATURE)) {
+ 		hw->mac.tx_pkt_filtering = true;
+-		goto out;
++		return hw->mac.tx_pkt_filtering;
+ 	}
+ 
+ 	/* Cookie area is valid, make the final check for filtering. */
+-	if (!(hdr->status & E1000_MNG_DHCP_COOKIE_STATUS_PARSING)) {
++	if (!(hdr->status & E1000_MNG_DHCP_COOKIE_STATUS_PARSING))
+ 		hw->mac.tx_pkt_filtering = false;
+-		goto out;
+-	}
+ 
+-out:
+ 	return hw->mac.tx_pkt_filtering;
+ }
+ 
+@@ -336,12 +333,11 @@ bool e1000e_enable_mng_pass_thru(struct e1000_hw *hw)
+ {
+ 	u32 manc;
+ 	u32 fwsm, factps;
+-	bool ret_val = false;
+ 
+ 	manc = er32(MANC);
+ 
+ 	if (!(manc & E1000_MANC_RCV_TCO_EN))
+-		goto out;
++		return false;
+ 
+ 	if (hw->mac.has_fwsm) {
+ 		fwsm = er32(FWSM);
+@@ -349,10 +345,8 @@ bool e1000e_enable_mng_pass_thru(struct e1000_hw *hw)
+ 
+ 		if (!(factps & E1000_FACTPS_MNGCG) &&
+ 		    ((fwsm & E1000_FWSM_MODE_MASK) ==
+-		     (e1000_mng_mode_pt << E1000_FWSM_MODE_SHIFT))) {
+-			ret_val = true;
+-			goto out;
+-		}
++		     (e1000_mng_mode_pt << E1000_FWSM_MODE_SHIFT)))
++			return true;
+ 	} else if ((hw->mac.type == e1000_82574) ||
+ 		   (hw->mac.type == e1000_82583)) {
+ 		u16 data;
+@@ -362,16 +356,12 @@ bool e1000e_enable_mng_pass_thru(struct e1000_hw *hw)
+ 
+ 		if (!(factps & E1000_FACTPS_MNGCG) &&
+ 		    ((data & E1000_NVM_INIT_CTRL2_MNGM) ==
+-		     (e1000_mng_mode_pt << 13))) {
+-			ret_val = true;
+-			goto out;
+-		}
++		     (e1000_mng_mode_pt << 13)))
++			return true;
+ 	} else if ((manc & E1000_MANC_SMBUS_EN) &&
+ 		   !(manc & E1000_MANC_ASF_EN)) {
+-		ret_val = true;
+-		goto out;
++		return true;
+ 	}
+ 
+-out:
+-	return ret_val;
++	return false;
+ }
+diff --git a/drivers/net/ethernet/intel/e1000e/netdev.c b/drivers/net/ethernet/intel/e1000e/netdev.c
+index ed8451c..4858437 100644
+--- a/drivers/net/ethernet/intel/e1000e/netdev.c
++++ b/drivers/net/ethernet/intel/e1000e/netdev.c
+@@ -1985,7 +1985,7 @@ static int e1000_request_msix(struct e1000_adapter *adapter)
+ 			  e1000_intr_msix_rx, 0, adapter->rx_ring->name,
+ 			  netdev);
+ 	if (err)
+-		goto out;
++		return err;
+ 	adapter->rx_ring->itr_register = adapter->hw.hw_addr +
+ 	    E1000_EITR_82574(vector);
+ 	adapter->rx_ring->itr_val = adapter->itr;
+@@ -2001,7 +2001,7 @@ static int e1000_request_msix(struct e1000_adapter *adapter)
+ 			  e1000_intr_msix_tx, 0, adapter->tx_ring->name,
+ 			  netdev);
+ 	if (err)
+-		goto out;
++		return err;
+ 	adapter->tx_ring->itr_register = adapter->hw.hw_addr +
+ 	    E1000_EITR_82574(vector);
+ 	adapter->tx_ring->itr_val = adapter->itr;
+@@ -2010,12 +2010,11 @@ static int e1000_request_msix(struct e1000_adapter *adapter)
+ 	err = request_irq(adapter->msix_entries[vector].vector,
+ 			  e1000_msix_other, 0, netdev->name, netdev);
+ 	if (err)
+-		goto out;
++		return err;
+ 
+ 	e1000_configure_msix(adapter);
++
+ 	return 0;
+-out:
+-	return err;
+ }
+ 
+ /**
+@@ -2367,7 +2366,7 @@ static unsigned int e1000_update_itr(struct e1000_adapter *adapter,
+ 	unsigned int retval = itr_setting;
+ 
+ 	if (packets == 0)
+-		goto update_itr_done;
++		return itr_setting;
+ 
+ 	switch (itr_setting) {
+ 	case lowest_latency:
+@@ -2402,7 +2401,6 @@ static unsigned int e1000_update_itr(struct e1000_adapter *adapter,
+ 		break;
+ 	}
+ 
+-update_itr_done:
+ 	return retval;
+ }
+ 
+diff --git a/drivers/net/ethernet/intel/e1000e/nvm.c b/drivers/net/ethernet/intel/e1000e/nvm.c
+index 1b50db5..24b7930 100644
+--- a/drivers/net/ethernet/intel/e1000e/nvm.c
++++ b/drivers/net/ethernet/intel/e1000e/nvm.c
+@@ -446,20 +446,19 @@ s32 e1000_read_pba_string_generic(struct e1000_hw *hw, u8 *pba_num,
+ 
+ 	if (pba_num == NULL) {
+ 		e_dbg("PBA string buffer was null\n");
+-		ret_val = E1000_ERR_INVALID_ARGUMENT;
+-		goto out;
++		return -E1000_ERR_INVALID_ARGUMENT;
+ 	}
+ 
+ 	ret_val = e1000_read_nvm(hw, NVM_PBA_OFFSET_0, 1, &nvm_data);
+ 	if (ret_val) {
+ 		e_dbg("NVM Read Error\n");
+-		goto out;
++		return ret_val;
+ 	}
+ 
+ 	ret_val = e1000_read_nvm(hw, NVM_PBA_OFFSET_1, 1, &pba_ptr);
+ 	if (ret_val) {
+ 		e_dbg("NVM Read Error\n");
+-		goto out;
++		return ret_val;
+ 	}
+ 
+ 	/*
+@@ -499,25 +498,23 @@ s32 e1000_read_pba_string_generic(struct e1000_hw *hw, u8 *pba_num,
+ 				pba_num[offset] += 'A' - 0xA;
+ 		}
+ 
+-		goto out;
++		return 0;
+ 	}
+ 
+ 	ret_val = e1000_read_nvm(hw, pba_ptr, 1, &length);
+ 	if (ret_val) {
+ 		e_dbg("NVM Read Error\n");
+-		goto out;
++		return ret_val;
+ 	}
+ 
+ 	if (length == 0xFFFF || length == 0) {
+ 		e_dbg("NVM PBA number section invalid length\n");
+-		ret_val = E1000_ERR_NVM_PBA_SECTION;
+-		goto out;
++		return -E1000_ERR_NVM_PBA_SECTION;
+ 	}
+ 	/* check if pba_num buffer is big enough */
+ 	if (pba_num_size < (((u32)length * 2) - 1)) {
+ 		e_dbg("PBA string buffer too small\n");
+-		ret_val = E1000_ERR_NO_SPACE;
+-		goto out;
++		return -E1000_ERR_NO_SPACE;
+ 	}
+ 
+ 	/* trim pba length from start of string */
+@@ -528,15 +525,14 @@ s32 e1000_read_pba_string_generic(struct e1000_hw *hw, u8 *pba_num,
+ 		ret_val = e1000_read_nvm(hw, pba_ptr + offset, 1, &nvm_data);
+ 		if (ret_val) {
+ 			e_dbg("NVM Read Error\n");
+-			goto out;
++			return ret_val;
+ 		}
+ 		pba_num[offset * 2] = (u8)(nvm_data >> 8);
+ 		pba_num[(offset * 2) + 1] = (u8)(nvm_data & 0xFF);
+ 	}
+ 	pba_num[offset * 2] = '\0';
+ 
+-out:
+-	return ret_val;
++	return 0;
+ }
+ 
+ /**
+diff --git a/drivers/net/ethernet/intel/e1000e/phy.c b/drivers/net/ethernet/intel/e1000e/phy.c
+index 0e86c7e..d4dbbe7 100644
+--- a/drivers/net/ethernet/intel/e1000e/phy.c
++++ b/drivers/net/ethernet/intel/e1000e/phy.c
+@@ -133,29 +133,29 @@ s32 e1000e_get_phy_id(struct e1000_hw *hw)
+ 	u16 retry_count = 0;
+ 
+ 	if (!phy->ops.read_reg)
+-		goto out;
++		return 0;
+ 
+ 	while (retry_count < 2) {
+ 		ret_val = e1e_rphy(hw, PHY_ID1, &phy_id);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 
+ 		phy->id = (u32)(phy_id << 16);
+ 		udelay(20);
+ 		ret_val = e1e_rphy(hw, PHY_ID2, &phy_id);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 
+ 		phy->id |= (u32)(phy_id & PHY_REVISION_MASK);
+ 		phy->revision = (u32)(phy_id & ~PHY_REVISION_MASK);
+ 
+ 		if (phy->id != 0 && phy->id != PHY_REVISION_MASK)
+-			goto out;
++			return 0;
+ 
+ 		retry_count++;
+ 	}
+-out:
+-	return ret_val;
++
++	return 0;
+ }
+ 
+ /**
+@@ -383,28 +383,24 @@ static s32 __e1000e_read_phy_reg_igp(struct e1000_hw *hw, u32 offset, u16 *data,
+ 
+ 	if (!locked) {
+ 		if (!hw->phy.ops.acquire)
+-			goto out;
++			return 0;
+ 
+ 		ret_val = hw->phy.ops.acquire(hw);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 	}
+ 
+-	if (offset > MAX_PHY_MULTI_PAGE_REG) {
++	if (offset > MAX_PHY_MULTI_PAGE_REG)
+ 		ret_val = e1000e_write_phy_reg_mdic(hw,
+ 						    IGP01E1000_PHY_PAGE_SELECT,
+ 						    (u16)offset);
+-		if (ret_val)
+-			goto release;
+-	}
+-
+-	ret_val = e1000e_read_phy_reg_mdic(hw, MAX_PHY_REG_ADDRESS & offset,
+-	                                  data);
+-
+-release:
++	if (!ret_val)
++		ret_val = e1000e_read_phy_reg_mdic(hw,
++						   MAX_PHY_REG_ADDRESS & offset,
++						   data);
+ 	if (!locked)
+ 		hw->phy.ops.release(hw);
+-out:
++
+ 	return ret_val;
+ }
+ 
+@@ -454,29 +450,24 @@ static s32 __e1000e_write_phy_reg_igp(struct e1000_hw *hw, u32 offset, u16 data,
+ 
+ 	if (!locked) {
+ 		if (!hw->phy.ops.acquire)
+-			goto out;
++			return 0;
+ 
+ 		ret_val = hw->phy.ops.acquire(hw);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 	}
+ 
+-	if (offset > MAX_PHY_MULTI_PAGE_REG) {
++	if (offset > MAX_PHY_MULTI_PAGE_REG)
+ 		ret_val = e1000e_write_phy_reg_mdic(hw,
+ 						    IGP01E1000_PHY_PAGE_SELECT,
+ 						    (u16)offset);
+-		if (ret_val)
+-			goto release;
+-	}
+-
+-	ret_val = e1000e_write_phy_reg_mdic(hw, MAX_PHY_REG_ADDRESS & offset,
+-					    data);
+-
+-release:
++	if (!ret_val)
++		ret_val = e1000e_write_phy_reg_mdic(hw, MAX_PHY_REG_ADDRESS &
++							offset,
++						    data);
+ 	if (!locked)
+ 		hw->phy.ops.release(hw);
+ 
+-out:
+ 	return ret_val;
+ }
+ 
+@@ -523,15 +514,16 @@ static s32 __e1000_read_kmrn_reg(struct e1000_hw *hw, u32 offset, u16 *data,
+                                  bool locked)
+ {
+ 	u32 kmrnctrlsta;
+-	s32 ret_val = 0;
+ 
+ 	if (!locked) {
++		s32 ret_val = 0;
++
+ 		if (!hw->phy.ops.acquire)
+-			goto out;
++			return 0;
+ 
+ 		ret_val = hw->phy.ops.acquire(hw);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 	}
+ 
+ 	kmrnctrlsta = ((offset << E1000_KMRNCTRLSTA_OFFSET_SHIFT) &
+@@ -547,8 +539,7 @@ static s32 __e1000_read_kmrn_reg(struct e1000_hw *hw, u32 offset, u16 *data,
+ 	if (!locked)
+ 		hw->phy.ops.release(hw);
+ 
+-out:
+-	return ret_val;
++	return 0;
+ }
+ 
+ /**
+@@ -596,15 +587,16 @@ static s32 __e1000_write_kmrn_reg(struct e1000_hw *hw, u32 offset, u16 data,
+                                   bool locked)
+ {
+ 	u32 kmrnctrlsta;
+-	s32 ret_val = 0;
+ 
+ 	if (!locked) {
++		s32 ret_val = 0;
++
+ 		if (!hw->phy.ops.acquire)
+-			goto out;
++			return 0;
+ 
+ 		ret_val = hw->phy.ops.acquire(hw);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 	}
+ 
+ 	kmrnctrlsta = ((offset << E1000_KMRNCTRLSTA_OFFSET_SHIFT) &
+@@ -617,8 +609,7 @@ static s32 __e1000_write_kmrn_reg(struct e1000_hw *hw, u32 offset, u16 data,
+ 	if (!locked)
+ 		hw->phy.ops.release(hw);
+ 
+-out:
+-	return ret_val;
++	return 0;
+ }
+ 
+ /**
+@@ -663,17 +654,14 @@ s32 e1000_copper_link_setup_82577(struct e1000_hw *hw)
+ 	/* Enable CRS on Tx. This must be set for half-duplex operation. */
+ 	ret_val = e1e_rphy(hw, I82577_CFG_REG, &phy_data);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	phy_data |= I82577_CFG_ASSERT_CRS_ON_TX;
+ 
+ 	/* Enable downshift */
+ 	phy_data |= I82577_CFG_ENABLE_DOWNSHIFT;
+ 
+-	ret_val = e1e_wphy(hw, I82577_CFG_REG, phy_data);
+-
+-out:
+-	return ret_val;
++	return e1e_wphy(hw, I82577_CFG_REG, phy_data);
+ }
+ 
+ /**
+@@ -1397,25 +1385,25 @@ s32 e1000_phy_force_speed_duplex_ife(struct e1000_hw *hw)
+ 
+ 	ret_val = e1e_rphy(hw, PHY_CONTROL, &data);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	e1000e_phy_force_speed_duplex_setup(hw, &data);
+ 
+ 	ret_val = e1e_wphy(hw, PHY_CONTROL, data);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	/* Disable MDI-X support for 10/100 */
+ 	ret_val = e1e_rphy(hw, IFE_PHY_MDIX_CONTROL, &data);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	data &= ~IFE_PMC_AUTO_MDIX;
+ 	data &= ~IFE_PMC_FORCE_MDIX;
+ 
+ 	ret_val = e1e_wphy(hw, IFE_PHY_MDIX_CONTROL, data);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	e_dbg("IFE PMC: %X\n", data);
+ 
+@@ -1429,7 +1417,7 @@ s32 e1000_phy_force_speed_duplex_ife(struct e1000_hw *hw)
+ 		                                     100000,
+ 		                                     &link);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 
+ 		if (!link)
+ 			e_dbg("Link taking longer than expected.\n");
+@@ -1440,11 +1428,10 @@ s32 e1000_phy_force_speed_duplex_ife(struct e1000_hw *hw)
+ 		                                     100000,
+ 		                                     &link);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 	}
+ 
+-out:
+-	return ret_val;
++	return 0;
+ }
+ 
+ /**
+@@ -1829,22 +1816,20 @@ s32 e1000e_get_cable_length_m88(struct e1000_hw *hw)
+ 
+ 	ret_val = e1e_rphy(hw, M88E1000_PHY_SPEC_STATUS, &phy_data);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	index = (phy_data & M88E1000_PSSR_CABLE_LENGTH) >>
+ 	        M88E1000_PSSR_CABLE_LENGTH_SHIFT;
+-	if (index >= M88E1000_CABLE_LENGTH_TABLE_SIZE - 1) {
+-		ret_val = -E1000_ERR_PHY;
+-		goto out;
+-	}
++
++	if (index >= M88E1000_CABLE_LENGTH_TABLE_SIZE - 1)
++		return -E1000_ERR_PHY;
+ 
+ 	phy->min_cable_length = e1000_m88_cable_length_table[index];
+ 	phy->max_cable_length = e1000_m88_cable_length_table[index + 1];
+ 
+ 	phy->cable_length = (phy->min_cable_length + phy->max_cable_length) / 2;
+ 
+-out:
+-	return ret_val;
++	return 0;
+ }
+ 
+ /**
+@@ -2069,24 +2054,23 @@ s32 e1000_get_phy_info_ife(struct e1000_hw *hw)
+ 
+ 	ret_val = e1000e_phy_has_link_generic(hw, 1, 0, &link);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	if (!link) {
+ 		e_dbg("Phy info is only valid if link is up\n");
+-		ret_val = -E1000_ERR_CONFIG;
+-		goto out;
++		return -E1000_ERR_CONFIG;
+ 	}
+ 
+ 	ret_val = e1e_rphy(hw, IFE_PHY_SPECIAL_CONTROL, &data);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 	phy->polarity_correction = (data & IFE_PSC_AUTO_POLARITY_DISABLE)
+ 	                           ? false : true;
+ 
+ 	if (phy->polarity_correction) {
+ 		ret_val = e1000_check_polarity_ife(hw);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 	} else {
+ 		/* Polarity is forced */
+ 		phy->cable_polarity = (data & IFE_PSC_FORCE_POLARITY)
+@@ -2096,7 +2080,7 @@ s32 e1000_get_phy_info_ife(struct e1000_hw *hw)
+ 
+ 	ret_val = e1e_rphy(hw, IFE_PHY_MDIX_CONTROL, &data);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	phy->is_mdix = (data & IFE_PMC_MDIX_STATUS) ? true : false;
+ 
+@@ -2105,8 +2089,7 @@ s32 e1000_get_phy_info_ife(struct e1000_hw *hw)
+ 	phy->local_rx = e1000_1000t_rx_status_undefined;
+ 	phy->remote_rx = e1000_1000t_rx_status_undefined;
+ 
+-out:
+-	return ret_val;
++	return 0;
+ }
+ 
+ /**
+@@ -2365,7 +2348,6 @@ enum e1000_phy_type e1000e_get_phy_type_from_id(u32 phy_id)
+  **/
+ s32 e1000e_determine_phy_address(struct e1000_hw *hw)
+ {
+-	s32 ret_val = -E1000_ERR_PHY_TYPE;
+ 	u32 phy_addr = 0;
+ 	u32 i;
+ 	enum e1000_phy_type phy_type = e1000_phy_unknown;
+@@ -2384,17 +2366,15 @@ s32 e1000e_determine_phy_address(struct e1000_hw *hw)
+ 			 * If phy_type is valid, break - we found our
+ 			 * PHY address
+ 			 */
+-			if (phy_type  != e1000_phy_unknown) {
+-				ret_val = 0;
+-				goto out;
+-			}
++			if (phy_type  != e1000_phy_unknown)
++				return 0;
++
+ 			usleep_range(1000, 2000);
+ 			i++;
+ 		} while (i < 10);
+ 	}
+ 
+-out:
+-	return ret_val;
++	return -E1000_ERR_PHY_TYPE;
+ }
+ 
+ /**
+@@ -2638,14 +2618,14 @@ s32 e1000_enable_phy_wakeup_reg_access_bm(struct e1000_hw *hw, u16 *phy_reg)
+ 	ret_val = e1000_set_page_igp(hw, (BM_PORT_CTRL_PAGE << IGP_PAGE_SHIFT));
+ 	if (ret_val) {
+ 		e_dbg("Could not set Port Control page\n");
+-		goto out;
++		return ret_val;
+ 	}
+ 
+ 	ret_val = e1000e_read_phy_reg_mdic(hw, BM_WUC_ENABLE_REG, phy_reg);
+ 	if (ret_val) {
+ 		e_dbg("Could not read PHY register %d.%d\n",
+ 		      BM_PORT_CTRL_PAGE, BM_WUC_ENABLE_REG);
+-		goto out;
++		return ret_val;
+ 	}
+ 
+ 	/*
+@@ -2660,15 +2640,14 @@ s32 e1000_enable_phy_wakeup_reg_access_bm(struct e1000_hw *hw, u16 *phy_reg)
+ 	if (ret_val) {
+ 		e_dbg("Could not write PHY register %d.%d\n",
+ 		      BM_PORT_CTRL_PAGE, BM_WUC_ENABLE_REG);
+-		goto out;
++		return ret_val;
+ 	}
+ 
+-	/* Select Host Wakeup Registers page */
+-	ret_val = e1000_set_page_igp(hw, (BM_WUC_PAGE << IGP_PAGE_SHIFT));
+-
+-	/* caller now able to write registers on the Wakeup registers page */
+-out:
+-	return ret_val;
++	/*
++	 * Select Host Wakeup Registers page - caller now able to write
++	 * registers on the Wakeup registers page
++	 */
++	return e1000_set_page_igp(hw, (BM_WUC_PAGE << IGP_PAGE_SHIFT));
+ }
+ 
+ /**
+@@ -2690,7 +2669,7 @@ s32 e1000_disable_phy_wakeup_reg_access_bm(struct e1000_hw *hw, u16 *phy_reg)
+ 	ret_val = e1000_set_page_igp(hw, (BM_PORT_CTRL_PAGE << IGP_PAGE_SHIFT));
+ 	if (ret_val) {
+ 		e_dbg("Could not set Port Control page\n");
+-		goto out;
++		return ret_val;
+ 	}
+ 
+ 	/* Restore 769.17 to its original value */
+@@ -2698,7 +2677,7 @@ s32 e1000_disable_phy_wakeup_reg_access_bm(struct e1000_hw *hw, u16 *phy_reg)
+ 	if (ret_val)
+ 		e_dbg("Could not restore PHY register %d.%d\n",
+ 		      BM_PORT_CTRL_PAGE, BM_WUC_ENABLE_REG);
+-out:
++
+ 	return ret_val;
+ }
+ 
+@@ -2746,7 +2725,7 @@ static s32 e1000_access_phy_wakeup_reg_bm(struct e1000_hw *hw, u32 offset,
+ 		ret_val = e1000_enable_phy_wakeup_reg_access_bm(hw, &phy_reg);
+ 		if (ret_val) {
+ 			e_dbg("Could not enable PHY wakeup reg access\n");
+-			goto out;
++			return ret_val;
+ 		}
+ 	}
+ 
+@@ -2756,7 +2735,7 @@ static s32 e1000_access_phy_wakeup_reg_bm(struct e1000_hw *hw, u32 offset,
+ 	ret_val = e1000e_write_phy_reg_mdic(hw, BM_WUC_ADDRESS_OPCODE, reg);
+ 	if (ret_val) {
+ 		e_dbg("Could not write address opcode to page %d\n", page);
+-		goto out;
++		return ret_val;
+ 	}
+ 
+ 	if (read) {
+@@ -2771,13 +2750,12 @@ static s32 e1000_access_phy_wakeup_reg_bm(struct e1000_hw *hw, u32 offset,
+ 
+ 	if (ret_val) {
+ 		e_dbg("Could not access PHY reg %d.%d\n", page, reg);
+-		goto out;
++		return ret_val;
+ 	}
+ 
+ 	if (!page_set)
+ 		ret_val = e1000_disable_phy_wakeup_reg_access_bm(hw, &phy_reg);
+ 
+-out:
+ 	return ret_val;
+ }
+ 
+@@ -3133,7 +3111,7 @@ static s32 e1000_access_phy_debug_regs_hv(struct e1000_hw *hw, u32 offset,
+ 	ret_val = e1000e_write_phy_reg_mdic(hw, addr_reg, (u16)offset & 0x3F);
+ 	if (ret_val) {
+ 		e_dbg("Could not write the Address Offset port register\n");
+-		goto out;
++		return ret_val;
+ 	}
+ 
+ 	/* Read or write the data value next */
+@@ -3142,12 +3120,9 @@ static s32 e1000_access_phy_debug_regs_hv(struct e1000_hw *hw, u32 offset,
+ 	else
+ 		ret_val = e1000e_write_phy_reg_mdic(hw, data_reg, *data);
+ 
+-	if (ret_val) {
++	if (ret_val)
+ 		e_dbg("Could not access the Data port register\n");
+-		goto out;
+-	}
+ 
+-out:
+ 	return ret_val;
+ }
+ 
+@@ -3168,17 +3143,17 @@ s32 e1000_link_stall_workaround_hv(struct e1000_hw *hw)
+ 	u16 data;
+ 
+ 	if (hw->phy.type != e1000_phy_82578)
+-		goto out;
++		return 0;
+ 
+ 	/* Do not apply workaround if in PHY loopback bit 14 set */
+ 	e1e_rphy(hw, PHY_CONTROL, &data);
+ 	if (data & PHY_CONTROL_LB)
+-		goto out;
++		return 0;
+ 
+ 	/* check if link is up and at 1Gbps */
+ 	ret_val = e1e_rphy(hw, BM_CS_STATUS, &data);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	data &= BM_CS_STATUS_LINK_UP |
+ 	        BM_CS_STATUS_RESOLVED |
+@@ -3187,7 +3162,7 @@ s32 e1000_link_stall_workaround_hv(struct e1000_hw *hw)
+ 	if (data != (BM_CS_STATUS_LINK_UP |
+ 	             BM_CS_STATUS_RESOLVED |
+ 	             BM_CS_STATUS_SPEED_1000))
+-		goto out;
++		return 0;
+ 
+ 	mdelay(200);
+ 
+@@ -3195,12 +3170,9 @@ s32 e1000_link_stall_workaround_hv(struct e1000_hw *hw)
+ 	ret_val = e1e_wphy(hw, HV_MUX_DATA_CTRL, HV_MUX_DATA_CTRL_GEN_TO_MAC |
+ 			   HV_MUX_DATA_CTRL_FORCE_SPEED);
+ 	if (ret_val)
+-		goto out;
+-
+-	ret_val = e1e_wphy(hw, HV_MUX_DATA_CTRL, HV_MUX_DATA_CTRL_GEN_TO_MAC);
++		return ret_val;
+ 
+-out:
+-	return ret_val;
++	return e1e_wphy(hw, HV_MUX_DATA_CTRL, HV_MUX_DATA_CTRL_GEN_TO_MAC);
+ }
+ 
+ /**
+@@ -3242,13 +3214,13 @@ s32 e1000_phy_force_speed_duplex_82577(struct e1000_hw *hw)
+ 
+ 	ret_val = e1e_rphy(hw, PHY_CONTROL, &phy_data);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	e1000e_phy_force_speed_duplex_setup(hw, &phy_data);
+ 
+ 	ret_val = e1e_wphy(hw, PHY_CONTROL, phy_data);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	udelay(1);
+ 
+@@ -3260,7 +3232,7 @@ s32 e1000_phy_force_speed_duplex_82577(struct e1000_hw *hw)
+ 		                                     100000,
+ 		                                     &link);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 
+ 		if (!link)
+ 			e_dbg("Link taking longer than expected.\n");
+@@ -3270,11 +3242,8 @@ s32 e1000_phy_force_speed_duplex_82577(struct e1000_hw *hw)
+ 		                                     PHY_FORCE_LIMIT,
+ 		                                     100000,
+ 		                                     &link);
+-		if (ret_val)
+-			goto out;
+ 	}
+ 
+-out:
+ 	return ret_val;
+ }
+ 
+@@ -3296,23 +3265,22 @@ s32 e1000_get_phy_info_82577(struct e1000_hw *hw)
+ 
+ 	ret_val = e1000e_phy_has_link_generic(hw, 1, 0, &link);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	if (!link) {
+ 		e_dbg("Phy info is only valid if link is up\n");
+-		ret_val = -E1000_ERR_CONFIG;
+-		goto out;
++		return -E1000_ERR_CONFIG;
+ 	}
+ 
+ 	phy->polarity_correction = true;
+ 
+ 	ret_val = e1000_check_polarity_82577(hw);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	ret_val = e1e_rphy(hw, I82577_PHY_STATUS_2, &data);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	phy->is_mdix = (data & I82577_PHY_STATUS2_MDIX) ? true : false;
+ 
+@@ -3320,11 +3288,11 @@ s32 e1000_get_phy_info_82577(struct e1000_hw *hw)
+ 	    I82577_PHY_STATUS2_SPEED_1000MBPS) {
+ 		ret_val = hw->phy.ops.get_cable_length(hw);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 
+ 		ret_val = e1e_rphy(hw, PHY_1000T_STATUS, &data);
+ 		if (ret_val)
+-			goto out;
++			return ret_val;
+ 
+ 		phy->local_rx = (data & SR_1000T_LOCAL_RX_STATUS)
+ 		                ? e1000_1000t_rx_status_ok
+@@ -3339,8 +3307,7 @@ s32 e1000_get_phy_info_82577(struct e1000_hw *hw)
+ 		phy->remote_rx = e1000_1000t_rx_status_undefined;
+ 	}
+ 
+-out:
+-	return ret_val;
++	return 0;
+ }
+ 
+ /**
+@@ -3358,7 +3325,7 @@ s32 e1000_get_cable_length_82577(struct e1000_hw *hw)
+ 
+ 	ret_val = e1e_rphy(hw, I82577_PHY_DIAG_STATUS, &phy_data);
+ 	if (ret_val)
+-		goto out;
++		return ret_val;
+ 
+ 	length = (phy_data & I82577_DSTATUS_CABLE_LENGTH) >>
+ 	         I82577_DSTATUS_CABLE_LENGTH_SHIFT;
+@@ -3368,6 +3335,5 @@ s32 e1000_get_cable_length_82577(struct e1000_hw *hw)
+ 
+ 	phy->cable_length = length;
+ 
+-out:
+-	return ret_val;
++	return 0;
+ }

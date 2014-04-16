@@ -1,0 +1,49 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Sat, 20 Apr 2013 05:37:29 +0000
+Subject: [PATCH 219/246] e1000e: panic caused by Rx traffic arriving while
+ interface going down
+Origin: https://git.kernel.org/linus/a3b87a4c69619f5366b7225aafbf7983eed31a9a
+
+An "unable to handle kernel paging request" panic can occur when receiving
+traffic while the interface is going down.  Wait for NAPI to be done with
+current context after disabling interrupts and then disable NAPI.
+
+See https://bugzilla.vyatta.com/show_bug.cgi?id=8837.
+
+Reported-by: Stephen Hemminger <stephen@networkplumber.org>
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Tested-by: Aaron Brown <aaron.f.brown@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/e1000e/netdev.c | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/e1000e/netdev.c b/drivers/net/ethernet/intel/e1000e/netdev.c
+index d7618f9..044b985 100644
+--- a/drivers/net/ethernet/intel/e1000e/netdev.c
++++ b/drivers/net/ethernet/intel/e1000e/netdev.c
+@@ -3977,6 +3977,8 @@ void e1000e_down(struct e1000_adapter *adapter)
+ 
+ 	e1000_irq_disable(adapter);
+ 
++	napi_synchronize(&adapter->napi);
++
+ 	del_timer_sync(&adapter->watchdog_timer);
+ 	del_timer_sync(&adapter->phy_info_timer);
+ 
+@@ -4333,12 +4335,13 @@ static int e1000_close(struct net_device *netdev)
+ 
+ 	pm_runtime_get_sync(&pdev->dev);
+ 
+-	napi_disable(&adapter->napi);
+-
+ 	if (!test_bit(__E1000_DOWN, &adapter->state)) {
+ 		e1000e_down(adapter);
+ 		e1000_free_irq(adapter);
+ 	}
++
++	napi_disable(&adapter->napi);
++
+ 	e1000_power_down_phy(adapter);
+ 
+ 	e1000e_free_tx_resources(adapter->tx_ring);

@@ -1,0 +1,92 @@
+From: Emil Tantilov <emil.s.tantilov@intel.com>
+Date: Wed, 1 Aug 2012 08:12:21 +0000
+Subject: [PATCH 119/246] e1000e: fix panic while dumping packets on Tx hang
+ with IOMMU
+Origin: https://git.kernel.org/linus/f0c5dadff3fbda77a65b8577fee437c3d771233d
+
+This patch resolves a "BUG: unable to handle kernel paging request at ..."
+oops while dumping packet data. The issue occurs with IOMMU enabled due to
+the address provided by phys_to_virt().
+
+This patch avoids phys_to_virt() by using skb->data and the address of the
+pages allocated for Rx.
+
+Signed-off-by: Emil Tantilov <emil.s.tantilov@intel.com>
+Tested-by: Jeff Pieper <jeffrey.e.pieper@intel.com>
+Signed-off-by: Peter P Waskiewicz Jr <peter.p.waskiewicz.jr@intel.com>
+---
+ drivers/net/ethernet/intel/e1000e/netdev.c | 36 +++++++++++++++++++++---------
+ 1 file changed, 26 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/e1000e/netdev.c b/drivers/net/ethernet/intel/e1000e/netdev.c
+index f5e19f2..bf93fe2 100644
+--- a/drivers/net/ethernet/intel/e1000e/netdev.c
++++ b/drivers/net/ethernet/intel/e1000e/netdev.c
+@@ -178,6 +178,24 @@ static void e1000_regdump(struct e1000_hw *hw, struct e1000_reg_info *reginfo)
+ 	pr_info("%-15s %08x %08x\n", rname, regs[0], regs[1]);
+ }
+ 
++static void e1000e_dump_ps_pages(struct e1000_adapter *adapter,
++				 struct e1000_buffer *bi)
++{
++	int i;
++	struct e1000_ps_page *ps_page;
++
++	for (i = 0; i < adapter->rx_ps_pages; i++) {
++		ps_page = &bi->ps_pages[i];
++
++		if (ps_page->page) {
++			pr_info("packet dump for ps_page %d:\n", i);
++			print_hex_dump(KERN_INFO, "", DUMP_PREFIX_ADDRESS,
++				       16, 1, page_address(ps_page->page),
++				       PAGE_SIZE, true);
++		}
++	}
++}
++
+ /*
+  * e1000e_dump - Print registers, Tx-ring and Rx-ring
+  */
+@@ -299,10 +317,10 @@ static void e1000e_dump(struct e1000_adapter *adapter)
+ 			(unsigned long long)buffer_info->time_stamp,
+ 			buffer_info->skb, next_desc);
+ 
+-		if (netif_msg_pktdata(adapter) && buffer_info->dma != 0)
++		if (netif_msg_pktdata(adapter) && buffer_info->skb)
+ 			print_hex_dump(KERN_INFO, "", DUMP_PREFIX_ADDRESS,
+-				       16, 1, phys_to_virt(buffer_info->dma),
+-				       buffer_info->length, true);
++				       16, 1, buffer_info->skb->data,
++				       buffer_info->skb->len, true);
+ 	}
+ 
+ 	/* Print Rx Ring Summary */
+@@ -381,10 +399,8 @@ rx_ring_summary:
+ 					buffer_info->skb, next_desc);
+ 
+ 				if (netif_msg_pktdata(adapter))
+-					print_hex_dump(KERN_INFO, "",
+-						DUMP_PREFIX_ADDRESS, 16, 1,
+-						phys_to_virt(buffer_info->dma),
+-						adapter->rx_ps_bsize0, true);
++					e1000e_dump_ps_pages(adapter,
++							     buffer_info);
+ 			}
+ 		}
+ 		break;
+@@ -444,12 +460,12 @@ rx_ring_summary:
+ 					(unsigned long long)buffer_info->dma,
+ 					buffer_info->skb, next_desc);
+ 
+-				if (netif_msg_pktdata(adapter))
++				if (netif_msg_pktdata(adapter) &&
++				    buffer_info->skb)
+ 					print_hex_dump(KERN_INFO, "",
+ 						       DUMP_PREFIX_ADDRESS, 16,
+ 						       1,
+-						       phys_to_virt
+-						       (buffer_info->dma),
++						       buffer_info->skb->data,
+ 						       adapter->rx_buffer_len,
+ 						       true);
+ 			}

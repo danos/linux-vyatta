@@ -1,0 +1,64 @@
+From: Yijing Wang <wangyijing@huawei.com>
+Date: Tue, 24 Jul 2012 17:20:02 +0800
+Subject: [PATCH 2/6] PCI: Add pcie_flags_reg to cache PCIe capabilities
+ register
+Origin: https://git.kernel.org/linus/ 786e22885d9959fda0473ace5a61cb11620fba9b
+
+Since PCI Express Capabilities Register is read only, cache its value
+into struct pci_dev to avoid repeatedly calling pci_read_config_*().
+
+Signed-off-by: Yijing Wang <wangyijing@huawei.com>
+Signed-off-by: Jiang Liu <jiang.liu@huawei.com>
+Signed-off-by: Bjorn Helgaas <bhelgaas@google.com>
+[bwh: Backported to wheezy: To maintain ABI, move pcie_flags_reg into
+ a bitfield and hide it from genksyms.]
+---
+ drivers/pci/probe.c |  3 ++-
+ include/linux/pci.h | 13 +++++++++++++
+ 2 files changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/pci/probe.c b/drivers/pci/probe.c
+index 9005380..679de23 100644
+--- a/drivers/pci/probe.c
++++ b/drivers/pci/probe.c
+@@ -862,7 +862,8 @@ void set_pcie_port_type(struct pci_dev *pdev)
+ 	pdev->is_pcie = 1;
+ 	pdev->pcie_cap = pos;
+ 	pci_read_config_word(pdev, pos + PCI_EXP_FLAGS, &reg16);
+-	pdev->pcie_type = (reg16 & PCI_EXP_FLAGS_TYPE) >> 4;
++	pdev->pcie_flags_reg = reg16;
++	pdev->pcie_type = pci_pcie_type(pdev);
+ 	pci_read_config_word(pdev, pos + PCI_EXP_DEVCAP, &reg16);
+ 	pdev->pcie_mpss = reg16 & PCI_EXP_DEVCAP_PAYLOAD;
+ }
+diff --git a/include/linux/pci.h b/include/linux/pci.h
+index e92d8ee..005cb71 100644
+--- a/include/linux/pci.h
++++ b/include/linux/pci.h
+@@ -282,6 +282,10 @@ struct pci_dev {
+ 	unsigned int	mmio_always_on:1;	/* disallow turning off io/mem
+ 						   decoding during bar sizing */
+ 	unsigned int	wakeup_prepared:1;
++#ifndef __GENKSYMS__
++	unsigned int	:4;		/* spare */
++	unsigned int	pcie_flags_reg:16; /* cached PCI-E Capabilities Register */
++#endif
+ 	unsigned int	d3_delay;	/* D3->D0 transition time in ms */
+ 
+ #ifdef CONFIG_PCIEASPM
+@@ -1544,6 +1548,15 @@ static inline bool pci_is_pcie(struct pci_dev *dev)
+ 	return !!pci_pcie_cap(dev);
+ }
+ 
++/**
++ * pci_pcie_type - get the PCIe device/port type
++ * @dev: PCI device
++ */
++static inline int pci_pcie_type(const struct pci_dev *dev)
++{
++	return (dev->pcie_flags_reg & PCI_EXP_FLAGS_TYPE) >> 4;
++}
++
+ void pci_request_acs(void);
+ 
+ 

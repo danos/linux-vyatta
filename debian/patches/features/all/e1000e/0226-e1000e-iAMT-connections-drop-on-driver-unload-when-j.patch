@@ -1,0 +1,58 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Fri, 21 Jun 2013 09:07:02 +0000
+Subject: [PATCH 226/246] e1000e: iAMT connections drop on driver unload when
+ jumbo frames enabled
+Origin: https://git.kernel.org/linus/da1e2046e5f5ab268e55d30d6b74099ade0aeb6f
+
+The jumbo frame configuration in the MAC/PHY should be reverted on 82579
+and newer parts when the interface is brought down (not just when the MTU
+is changed back to standard frame size) otherwise iAMT connections (e.g.
+SoL, IDE-R) will be dropped and cannot be re-acquired until the MTU is
+changed again.
+
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Tested-by: Aaron Brown <aaron.f.brown@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/e1000e/netdev.c | 21 ++++++++++-----------
+ 1 file changed, 10 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/e1000e/netdev.c b/drivers/net/ethernet/intel/e1000e/netdev.c
+index 2c77472..e3fb06c 100644
+--- a/drivers/net/ethernet/intel/e1000e/netdev.c
++++ b/drivers/net/ethernet/intel/e1000e/netdev.c
+@@ -2957,17 +2957,10 @@ static void e1000_setup_rctl(struct e1000_adapter *adapter)
+ 	u32 pages = 0;
+ 
+ 	/* Workaround Si errata on PCHx - configure jumbo frame flow */
+-	if (hw->mac.type >= e1000_pch2lan) {
+-		s32 ret_val;
+-
+-		if (adapter->netdev->mtu > ETH_DATA_LEN)
+-			ret_val = e1000_lv_jumbo_workaround_ich8lan(hw, true);
+-		else
+-			ret_val = e1000_lv_jumbo_workaround_ich8lan(hw, false);
+-
+-		if (ret_val)
+-			e_dbg("failed to enable jumbo frame workaround mode\n");
+-	}
++	if ((hw->mac.type >= e1000_pch2lan) &&
++	    (adapter->netdev->mtu > ETH_DATA_LEN) &&
++	    e1000_lv_jumbo_workaround_ich8lan(hw, true))
++		e_dbg("failed to enable jumbo frame workaround mode\n");
+ 
+ 	/* Program MC offset vector base */
+ 	rctl = er32(RCTL);
+@@ -3995,6 +3988,12 @@ void e1000e_down(struct e1000_adapter *adapter)
+ 	adapter->link_speed = 0;
+ 	adapter->link_duplex = 0;
+ 
++	/* Disable Si errata workaround on PCHx for jumbo frame flow */
++	if ((hw->mac.type >= e1000_pch2lan) &&
++	    (adapter->netdev->mtu > ETH_DATA_LEN) &&
++	    e1000_lv_jumbo_workaround_ich8lan(hw, false))
++		e_dbg("failed to disable jumbo frame workaround mode\n");
++
+ 	if (!pci_channel_offline(adapter->pdev))
+ 		e1000e_reset(adapter);
+ 

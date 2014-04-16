@@ -1,0 +1,115 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Wed, 22 Feb 2012 09:02:26 +0000
+Subject: [PATCH 065/246] e1000e: cleanup: rename e1000e_setup_link() and call
+ as function pointer
+Origin: https://git.kernel.org/linus/1a46b40fbb1dfd698efbc7a9575aa64aed04d568
+
+Rename e1000e_setup_link() to e1000e_setup_link_generic() to signify the
+function is used for more than one MAC-family type.  The 82571-family has
+a custom setup_link function which also calls the generic function.  The
+ich8lan-family has a custom function which should just be called via the
+function pointer.  The 80003es2lan-family just uses the generic function.
+
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Tested-by: Aaron Brown <aaron.f.brown@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/e1000e/80003es2lan.c | 4 ++--
+ drivers/net/ethernet/intel/e1000e/82571.c       | 4 ++--
+ drivers/net/ethernet/intel/e1000e/e1000.h       | 2 +-
+ drivers/net/ethernet/intel/e1000e/ich8lan.c     | 2 +-
+ drivers/net/ethernet/intel/e1000e/mac.c         | 4 ++--
+ 5 files changed, 8 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/e1000e/80003es2lan.c b/drivers/net/ethernet/intel/e1000e/80003es2lan.c
+index c146484..e1cbead 100644
+--- a/drivers/net/ethernet/intel/e1000e/80003es2lan.c
++++ b/drivers/net/ethernet/intel/e1000e/80003es2lan.c
+@@ -838,7 +838,7 @@ static s32 e1000_init_hw_80003es2lan(struct e1000_hw *hw)
+ 		E1000_WRITE_REG_ARRAY(hw, E1000_MTA, i, 0);
+ 
+ 	/* Setup link and flow control */
+-	ret_val = e1000e_setup_link(hw);
++	ret_val = mac->ops.setup_link(hw);
+ 
+ 	/* Disable IBIST slave mode (far-end loopback) */
+ 	e1000_read_kmrn_reg_80003es2lan(hw, E1000_KMRNCTRLSTA_INBAND_PARAM,
+@@ -1429,7 +1429,7 @@ static const struct e1000_mac_operations es2_mac_ops = {
+ 	.clear_vfta		= e1000_clear_vfta_generic,
+ 	.reset_hw		= e1000_reset_hw_80003es2lan,
+ 	.init_hw		= e1000_init_hw_80003es2lan,
+-	.setup_link		= e1000e_setup_link,
++	.setup_link		= e1000e_setup_link_generic,
+ 	/* setup_physical_interface dependent on media type */
+ 	.setup_led		= e1000e_setup_led_generic,
+ };
+diff --git a/drivers/net/ethernet/intel/e1000e/82571.c b/drivers/net/ethernet/intel/e1000e/82571.c
+index 5f31b1a..d885e7f4 100644
+--- a/drivers/net/ethernet/intel/e1000e/82571.c
++++ b/drivers/net/ethernet/intel/e1000e/82571.c
+@@ -1143,7 +1143,7 @@ static s32 e1000_init_hw_82571(struct e1000_hw *hw)
+ 		E1000_WRITE_REG_ARRAY(hw, E1000_MTA, i, 0);
+ 
+ 	/* Setup link and flow control */
+-	ret_val = e1000_setup_link_82571(hw);
++	ret_val = mac->ops.setup_link(hw);
+ 
+ 	/* Set the transmit descriptor write-back policy */
+ 	reg_data = er32(TXDCTL(0));
+@@ -1455,7 +1455,7 @@ static s32 e1000_setup_link_82571(struct e1000_hw *hw)
+ 		break;
+ 	}
+ 
+-	return e1000e_setup_link(hw);
++	return e1000e_setup_link_generic(hw);
+ }
+ 
+ /**
+diff --git a/drivers/net/ethernet/intel/e1000e/e1000.h b/drivers/net/ethernet/intel/e1000e/e1000.h
+index 85931e2..66c8d4d 100644
+--- a/drivers/net/ethernet/intel/e1000e/e1000.h
++++ b/drivers/net/ethernet/intel/e1000e/e1000.h
+@@ -564,7 +564,7 @@ extern void e1000e_clear_hw_cntrs_base(struct e1000_hw *hw);
+ extern s32 e1000e_setup_fiber_serdes_link(struct e1000_hw *hw);
+ extern s32 e1000e_copper_link_setup_m88(struct e1000_hw *hw);
+ extern s32 e1000e_copper_link_setup_igp(struct e1000_hw *hw);
+-extern s32 e1000e_setup_link(struct e1000_hw *hw);
++extern s32 e1000e_setup_link_generic(struct e1000_hw *hw);
+ extern void e1000_clear_vfta_generic(struct e1000_hw *hw);
+ extern void e1000e_init_rx_addrs(struct e1000_hw *hw, u16 rar_count);
+ extern void e1000e_update_mc_addr_list_generic(struct e1000_hw *hw,
+diff --git a/drivers/net/ethernet/intel/e1000e/ich8lan.c b/drivers/net/ethernet/intel/e1000e/ich8lan.c
+index 7d3a7fb..8b9bf94 100644
+--- a/drivers/net/ethernet/intel/e1000e/ich8lan.c
++++ b/drivers/net/ethernet/intel/e1000e/ich8lan.c
+@@ -3212,7 +3212,7 @@ static s32 e1000_init_hw_ich8lan(struct e1000_hw *hw)
+ 	}
+ 
+ 	/* Setup link and flow control */
+-	ret_val = e1000_setup_link_ich8lan(hw);
++	ret_val = mac->ops.setup_link(hw);
+ 
+ 	/* Set the transmit descriptor write-back policy for both queues */
+ 	txdctl = er32(TXDCTL(0));
+diff --git a/drivers/net/ethernet/intel/e1000e/mac.c b/drivers/net/ethernet/intel/e1000e/mac.c
+index aaf4a4d..6e48895 100644
+--- a/drivers/net/ethernet/intel/e1000e/mac.c
++++ b/drivers/net/ethernet/intel/e1000e/mac.c
+@@ -693,7 +693,7 @@ static s32 e1000_set_default_fc_generic(struct e1000_hw *hw)
+ }
+ 
+ /**
+- *  e1000e_setup_link - Setup flow control and link settings
++ *  e1000e_setup_link_generic - Setup flow control and link settings
+  *  @hw: pointer to the HW structure
+  *
+  *  Determines which flow control settings to use, then configures flow
+@@ -702,7 +702,7 @@ static s32 e1000_set_default_fc_generic(struct e1000_hw *hw)
+  *  should be established.  Assumes the hardware has previously been reset
+  *  and the transmitter and receiver are not enabled.
+  **/
+-s32 e1000e_setup_link(struct e1000_hw *hw)
++s32 e1000e_setup_link_generic(struct e1000_hw *hw)
+ {
+ 	struct e1000_mac_info *mac = &hw->mac;
+ 	s32 ret_val;

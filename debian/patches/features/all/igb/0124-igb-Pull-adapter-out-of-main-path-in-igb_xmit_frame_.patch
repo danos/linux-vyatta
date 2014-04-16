@@ -1,0 +1,60 @@
+From: Alexander Duyck <alexander.h.duyck@intel.com>
+Date: Thu, 7 Feb 2013 08:55:46 +0000
+Subject: [PATCH 124/179] igb: Pull adapter out of main path in
+ igb_xmit_frame_ring
+Origin: https://git.kernel.org/linus/b646c22edef1c350d26237a6f60d3a890ceedf6e
+
+We only need the adapter pointer in the case of ptp.  As such we can pull the
+adapter out of the main path and place it inside the if statement to avoid
+the temptation of accessing the adapter pointer in the fast path.
+
+Signed-off-by: Alexander Duyck <alexander.h.duyck@intel.com>
+Tested-by: Aaron Brown <aaron.f.brown@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+[bwh: Backported to wheezy: adjust context]
+---
+ drivers/net/ethernet/intel/igb/igb_main.c | 24 ++++++++++++------------
+ 1 file changed, 12 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/igb/igb_main.c b/drivers/net/ethernet/intel/igb/igb_main.c
+index db91ddd..71083a4 100644
+--- a/drivers/net/ethernet/intel/igb/igb_main.c
++++ b/drivers/net/ethernet/intel/igb/igb_main.c
+@@ -4505,9 +4505,6 @@ static inline int igb_maybe_stop_tx(struct igb_ring *tx_ring, const u16 size)
+ netdev_tx_t igb_xmit_frame_ring(struct sk_buff *skb,
+ 				struct igb_ring *tx_ring)
+ {
+-#ifdef CONFIG_IGB_PTP
+-	struct igb_adapter *adapter = netdev_priv(tx_ring->netdev);
+-#endif /* CONFIG_IGB_PTP */
+ 	struct igb_tx_buffer *first;
+ 	int tso;
+ 	u32 tx_flags = 0;
+@@ -4543,15 +4540,18 @@ netdev_tx_t igb_xmit_frame_ring(struct sk_buff *skb,
+ 	skb_tx_timestamp(skb);
+ 
+ #ifdef CONFIG_IGB_PTP
+-	if (unlikely((skb_shinfo(skb)->tx_flags & SKBTX_HW_TSTAMP) &&
+-		     !(adapter->ptp_tx_skb))) {
+-		skb_shinfo(skb)->tx_flags |= SKBTX_IN_PROGRESS;
+-		tx_flags |= IGB_TX_FLAGS_TSTAMP;
+-
+-		adapter->ptp_tx_skb = skb_get(skb);
+-		adapter->ptp_tx_start = jiffies;
+-		if (adapter->hw.mac.type == e1000_82576)
+-			schedule_work(&adapter->ptp_tx_work);
++	if (unlikely(skb_shinfo(skb)->tx_flags & SKBTX_HW_TSTAMP)) {
++		struct igb_adapter *adapter = netdev_priv(tx_ring->netdev);
++
++		if (!(adapter->ptp_tx_skb)) {
++			skb_shinfo(skb)->tx_flags |= SKBTX_IN_PROGRESS;
++			tx_flags |= IGB_TX_FLAGS_TSTAMP;
++
++			adapter->ptp_tx_skb = skb_get(skb);
++			adapter->ptp_tx_start = jiffies;
++			if (adapter->hw.mac.type == e1000_82576)
++				schedule_work(&adapter->ptp_tx_work);
++		}
+ 	}
+ #endif /* CONFIG_IGB_PTP */
+ 

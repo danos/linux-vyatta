@@ -1,0 +1,97 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Thu, 5 Jan 2012 00:34:05 +0000
+Subject: [PATCH 008/246] e1000e: cleanup Rx checksum offload code
+Origin: https://git.kernel.org/linus/afd12939a09ca8f96cf8349c913dc143471c9b3c
+
+1) cleanup whitespace in e1000_rx_checksum() function header comment
+2) do not check hardware checksum when Rx checksum is disabled
+3) reduce duplicated calls to le16_to_cpu() by just using it within
+   e1000_rx_checksum() instead of in each call to the function
+
+v2: use swab16 instead of le16_to_cpu & htons and corrected type for the
+passed-in csum
+
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Tested-by: Aaron Brown <aaron.f.brown@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/e1000e/netdev.c | 27 +++++++++++++++------------
+ 1 file changed, 15 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/e1000e/netdev.c b/drivers/net/ethernet/intel/e1000e/netdev.c
+index 3a5b559..43aff9d 100644
+--- a/drivers/net/ethernet/intel/e1000e/netdev.c
++++ b/drivers/net/ethernet/intel/e1000e/netdev.c
+@@ -487,22 +487,27 @@ static void e1000_receive_skb(struct e1000_adapter *adapter,
+ 
+ /**
+  * e1000_rx_checksum - Receive Checksum Offload
+- * @adapter:     board private structure
+- * @status_err:  receive descriptor status and error fields
+- * @csum:	receive descriptor csum field
+- * @sk_buff:     socket buffer with received data
++ * @adapter: board private structure
++ * @status_err: receive descriptor status and error fields
++ * @csum: receive descriptor csum field
++ * @sk_buff: socket buffer with received data
+  **/
+ static void e1000_rx_checksum(struct e1000_adapter *adapter, u32 status_err,
+-			      u32 csum, struct sk_buff *skb)
++			      __le16 csum, struct sk_buff *skb)
+ {
+ 	u16 status = (u16)status_err;
+ 	u8 errors = (u8)(status_err >> 24);
+ 
+ 	skb_checksum_none_assert(skb);
+ 
++	/* Rx checksum disabled */
++	if (!(adapter->netdev->features & NETIF_F_RXCSUM))
++		return;
++
+ 	/* Ignore Checksum bit is set */
+ 	if (status & E1000_RXD_STAT_IXSM)
+ 		return;
++
+ 	/* TCP/UDP checksum error bit is set */
+ 	if (errors & E1000_RXD_ERR_TCPE) {
+ 		/* let the stack verify checksum errors */
+@@ -524,7 +529,7 @@ static void e1000_rx_checksum(struct e1000_adapter *adapter, u32 status_err,
+ 		 * Hardware complements the payload checksum, so we undo it
+ 		 * and then put the value in host order for further stack use.
+ 		 */
+-		__sum16 sum = (__force __sum16)htons(csum);
++		__sum16 sum = (__force __sum16)swab16((__force u16)csum);
+ 		skb->csum = csum_unfold(~sum);
+ 		skb->ip_summed = CHECKSUM_COMPLETE;
+ 	}
+@@ -957,8 +962,7 @@ static bool e1000_clean_rx_irq(struct e1000_adapter *adapter,
+ 
+ 		/* Receive Checksum Offload */
+ 		e1000_rx_checksum(adapter, staterr,
+-				  le16_to_cpu(rx_desc->wb.lower.hi_dword.
+-					      csum_ip.csum), skb);
++				  rx_desc->wb.lower.hi_dword.csum_ip.csum, skb);
+ 
+ 		e1000_receive_skb(adapter, netdev, skb, staterr,
+ 				  rx_desc->wb.upper.vlan);
+@@ -1318,8 +1322,8 @@ copydone:
+ 		total_rx_bytes += skb->len;
+ 		total_rx_packets++;
+ 
+-		e1000_rx_checksum(adapter, staterr, le16_to_cpu(
+-			rx_desc->wb.lower.hi_dword.csum_ip.csum), skb);
++		e1000_rx_checksum(adapter, staterr,
++				  rx_desc->wb.lower.hi_dword.csum_ip.csum, skb);
+ 
+ 		if (rx_desc->wb.upper.header_status &
+ 			   cpu_to_le16(E1000_RXDPS_HDRSTAT_HDRSP))
+@@ -1491,8 +1495,7 @@ static bool e1000_clean_jumbo_rx_irq(struct e1000_adapter *adapter,
+ 
+ 		/* Receive Checksum Offload XXX recompute due to CRC strip? */
+ 		e1000_rx_checksum(adapter, staterr,
+-				  le16_to_cpu(rx_desc->wb.lower.hi_dword.
+-					      csum_ip.csum), skb);
++				  rx_desc->wb.lower.hi_dword.csum_ip.csum, skb);
+ 
+ 		/* probably a little skewed due to removing CRC */
+ 		total_rx_bytes += skb->len;

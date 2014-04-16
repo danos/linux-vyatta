@@ -1,0 +1,73 @@
+From: Ben Hutchings <bhutchings@solarflare.com>
+Date: Thu, 14 Nov 2013 00:41:38 +0000
+Subject: [PATCH 242/246] e1000e: Validate hwtstamp_config completely before
+ applying it
+Origin: https://git.kernel.org/linus/62d7e3a2d00675970bc7afccc2e407e1df8f1d0f
+
+e1000e_hwtstamp_ioctl() should validate all fields of hwtstamp_config
+before making any changes.  Currently it copies the configuration to
+the e1000_adapter structure before validating it at all.
+
+Change e1000e_config_hwtstamp() to take a pointer to the
+hwstamp_config and to copy the config after validating it.
+
+Compile-tested only.
+
+Signed-off-by: Ben Hutchings <bhutchings@solarflare.com>
+Acked-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ drivers/net/ethernet/intel/e1000e/netdev.c | 14 ++++++--------
+ 1 file changed, 6 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/e1000e/netdev.c b/drivers/net/ethernet/intel/e1000e/netdev.c
+index fd8b898..6192bec 100644
+--- a/drivers/net/ethernet/intel/e1000e/netdev.c
++++ b/drivers/net/ethernet/intel/e1000e/netdev.c
+@@ -3443,10 +3443,10 @@ s32 e1000e_get_base_timinca(struct e1000_adapter *adapter, u32 *timinca)
+  * specified. Matching the kind of event packet is not supported, with the
+  * exception of "all V2 events regardless of level 2 or 4".
+  **/
+-static int e1000e_config_hwtstamp(struct e1000_adapter *adapter)
++static int e1000e_config_hwtstamp(struct e1000_adapter *adapter,
++				  struct hwtstamp_config *config)
+ {
+ 	struct e1000_hw *hw = &adapter->hw;
+-	struct hwtstamp_config *config = &adapter->hwtstamp_config;
+ 	u32 tsync_tx_ctl = E1000_TSYNCTXCTL_ENABLED;
+ 	u32 tsync_rx_ctl = E1000_TSYNCRXCTL_ENABLED;
+ 	u32 rxmtrl = 0;
+@@ -3547,6 +3547,8 @@ static int e1000e_config_hwtstamp(struct e1000_adapter *adapter)
+ 		return -ERANGE;
+ 	}
+ 
++	adapter->hwtstamp_config = *config;
++
+ 	/* enable/disable Tx h/w time stamping */
+ 	regval = er32(TSYNCTXCTL);
+ 	regval &= ~E1000_TSYNCTXCTL_ENABLED;
+@@ -3835,7 +3837,7 @@ void e1000e_reset(struct e1000_adapter *adapter)
+ 	e1000e_reset_adaptive(hw);
+ 
+ 	/* initialize systim and reset the ns time counter */
+-	e1000e_config_hwtstamp(adapter);
++	e1000e_config_hwtstamp(adapter, &adapter->hwtstamp_config);
+ 
+ 	/* Set EEE advertisement as appropriate */
+ 	if (adapter->flags2 & FLAG2_HAS_EEE) {
+@@ -5746,14 +5748,10 @@ static int e1000e_hwtstamp_ioctl(struct net_device *netdev, struct ifreq *ifr)
+ 	if (copy_from_user(&config, ifr->ifr_data, sizeof(config)))
+ 		return -EFAULT;
+ 
+-	adapter->hwtstamp_config = config;
+-
+-	ret_val = e1000e_config_hwtstamp(adapter);
++	ret_val = e1000e_config_hwtstamp(adapter, &config);
+ 	if (ret_val)
+ 		return ret_val;
+ 
+-	config = adapter->hwtstamp_config;
+-
+ 	switch (config.rx_filter) {
+ 	case HWTSTAMP_FILTER_PTP_V2_L4_SYNC:
+ 	case HWTSTAMP_FILTER_PTP_V2_L2_SYNC:

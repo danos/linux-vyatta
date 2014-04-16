@@ -1,0 +1,47 @@
+From: Matthew Vick <matthew.vick@intel.com>
+Date: Wed, 25 Apr 2012 07:25:18 +0000
+Subject: [PATCH 101/246] e1000e: Resolve intermittent negotiation issue on
+ 82574/82583.
+Origin: https://git.kernel.org/linus/885fe7be4b23d8b9e46cdd87148cefbec926868b
+
+For 82574 and 82583 devices, resolve an intermittent link issue where
+the link negotiates to 100Mbps rather than 1Gbps when powering off the
+PHY and powering on the PHY after several seconds.
+
+Signed-off-by: Matthew Vick <matthew.vick@intel.com>
+Tested-by: Aaron Brown <aaron.f.brown@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/e1000e/phy.c | 18 +++++++++++++++++-
+ 1 file changed, 17 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/intel/e1000e/phy.c b/drivers/net/ethernet/intel/e1000e/phy.c
+index bd5ef64..ad22b8c 100644
+--- a/drivers/net/ethernet/intel/e1000e/phy.c
++++ b/drivers/net/ethernet/intel/e1000e/phy.c
+@@ -722,8 +722,24 @@ s32 e1000e_copper_link_setup_m88(struct e1000_hw *hw)
+ 		phy_data |= M88E1000_PSCR_POLARITY_REVERSAL;
+ 
+ 	/* Enable downshift on BM (disabled by default) */
+-	if (phy->type == e1000_phy_bm)
++	if (phy->type == e1000_phy_bm) {
++		/* For 82574/82583, first disable then enable downshift */
++		if (phy->id == BME1000_E_PHY_ID_R2) {
++			phy_data &= ~BME1000_PSCR_ENABLE_DOWNSHIFT;
++			ret_val = e1e_wphy(hw, M88E1000_PHY_SPEC_CTRL,
++					   phy_data);
++			if (ret_val)
++				return ret_val;
++			/* Commit the changes. */
++			ret_val = e1000e_commit_phy(hw);
++			if (ret_val) {
++				e_dbg("Error committing the PHY changes\n");
++				return ret_val;
++			}
++		}
++
+ 		phy_data |= BME1000_PSCR_ENABLE_DOWNSHIFT;
++	}
+ 
+ 	ret_val = e1e_wphy(hw, M88E1000_PHY_SPEC_CTRL, phy_data);
+ 	if (ret_val)

@@ -1,0 +1,49 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Tue, 20 Mar 2012 03:47:47 +0000
+Subject: [PATCH 093/246] e1000e: 82579 packet drop workaround
+Origin: https://git.kernel.org/linus/36ceeb43cecaf98a488b94bb318a1f3dd5a87033
+
+In K1 mode (a MAC/PHY interconnect power mode), the 82579 device shuts down
+the Phase Lock Loop (PLL) of the interconnect to save power.  When the PLL
+starts working, the 82579 device may start to transfer the packet through
+the interconnect before it is fully functional causing packet drops.  This
+workaround disables shutting down the PLL in K1 mode for 1G link speed.
+
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Tested-by: Jeff Pieper <jeffrey.e.pieper@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/e1000e/ich8lan.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/drivers/net/ethernet/intel/e1000e/ich8lan.c b/drivers/net/ethernet/intel/e1000e/ich8lan.c
+index 14af3e2..d7fd1e8 100644
+--- a/drivers/net/ethernet/intel/e1000e/ich8lan.c
++++ b/drivers/net/ethernet/intel/e1000e/ich8lan.c
+@@ -135,6 +135,7 @@
+ 
+ /* PHY Power Management Control */
+ #define HV_PM_CTRL		PHY_REG(770, 17)
++#define HV_PM_CTRL_PLL_STOP_IN_K1_GIGA	0x100
+ 
+ /* PHY Low Power Idle Control */
+ #define I82579_LPI_CTRL				PHY_REG(772, 20)
+@@ -1708,8 +1709,18 @@ static s32 e1000_k1_workaround_lv(struct e1000_hw *hw)
+ 			return ret_val;
+ 
+ 		if (status_reg & HV_M_STATUS_SPEED_1000) {
++			u16 pm_phy_reg;
++
+ 			mac_reg |= E1000_FEXTNVM4_BEACON_DURATION_8USEC;
+ 			phy_reg &= ~I82579_LPI_CTRL_FORCE_PLL_LOCK_COUNT;
++			/* LV 1G Packet drop issue wa  */
++			ret_val = e1e_rphy(hw, HV_PM_CTRL, &pm_phy_reg);
++			if (ret_val)
++				return ret_val;
++			pm_phy_reg &= ~HV_PM_CTRL_PLL_STOP_IN_K1_GIGA;
++			ret_val = e1e_wphy(hw, HV_PM_CTRL, pm_phy_reg);
++			if (ret_val)
++				return ret_val;
+ 		} else {
+ 			mac_reg |= E1000_FEXTNVM4_BEACON_DURATION_16USEC;
+ 			phy_reg |= I82579_LPI_CTRL_FORCE_PLL_LOCK_COUNT;

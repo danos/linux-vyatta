@@ -1,0 +1,119 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Sat, 5 Jan 2013 05:08:31 +0000
+Subject: [PATCH 163/246] e1000e: do not ignore variables which get set a value
+Origin: https://git.kernel.org/linus/7dbbe5d5a5073d590790007d5b98d7fd51fd2ff5
+
+Static analysis with cppcheck has shown a few instances of a variable which
+is assigned a value that is never used.  A number of these are the return
+status of various driver function calls which should be passed back to the
+caller of the current function.
+
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Tested-by: Aaron Brown <aaron.f.brown@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/e1000e/80003es2lan.c | 5 +++++
+ drivers/net/ethernet/intel/e1000e/82571.c       | 8 +++++---
+ drivers/net/ethernet/intel/e1000e/ich8lan.c     | 5 +++--
+ drivers/net/ethernet/intel/e1000e/phy.c         | 2 +-
+ 4 files changed, 14 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/e1000e/80003es2lan.c b/drivers/net/ethernet/intel/e1000e/80003es2lan.c
+index a2b5b44..aa5e4cf 100644
+--- a/drivers/net/ethernet/intel/e1000e/80003es2lan.c
++++ b/drivers/net/ethernet/intel/e1000e/80003es2lan.c
+@@ -773,6 +773,9 @@ static s32 e1000_reset_hw_80003es2lan(struct e1000_hw *hw)
+ 	ctrl = er32(CTRL);
+ 
+ 	ret_val = e1000_acquire_phy_80003es2lan(hw);
++	if (ret_val)
++		return ret_val;
++
+ 	e_dbg("Issuing a global reset to MAC\n");
+ 	ew32(CTRL, ctrl | E1000_CTRL_RST);
+ 	e1000_release_phy_80003es2lan(hw);
+@@ -832,6 +835,8 @@ static s32 e1000_init_hw_80003es2lan(struct e1000_hw *hw)
+ 
+ 	/* Setup link and flow control */
+ 	ret_val = mac->ops.setup_link(hw);
++	if (ret_val)
++		return ret_val;
+ 
+ 	/* Disable IBIST slave mode (far-end loopback) */
+ 	e1000_read_kmrn_reg_80003es2lan(hw, E1000_KMRNCTRLSTA_INBAND_PARAM,
+diff --git a/drivers/net/ethernet/intel/e1000e/82571.c b/drivers/net/ethernet/intel/e1000e/82571.c
+index ba3cdb1..63bb086 100644
+--- a/drivers/net/ethernet/intel/e1000e/82571.c
++++ b/drivers/net/ethernet/intel/e1000e/82571.c
+@@ -554,16 +554,14 @@ static s32 e1000_get_hw_semaphore_82573(struct e1000_hw *hw)
+ 	s32 i = 0;
+ 
+ 	extcnf_ctrl = er32(EXTCNF_CTRL);
+-	extcnf_ctrl |= E1000_EXTCNF_CTRL_MDIO_SW_OWNERSHIP;
+ 	do {
++		extcnf_ctrl |= E1000_EXTCNF_CTRL_MDIO_SW_OWNERSHIP;
+ 		ew32(EXTCNF_CTRL, extcnf_ctrl);
+ 		extcnf_ctrl = er32(EXTCNF_CTRL);
+ 
+ 		if (extcnf_ctrl & E1000_EXTCNF_CTRL_MDIO_SW_OWNERSHIP)
+ 			break;
+ 
+-		extcnf_ctrl |= E1000_EXTCNF_CTRL_MDIO_SW_OWNERSHIP;
+-
+ 		usleep_range(2000, 4000);
+ 		i++;
+ 	} while (i < MDIO_OWNERSHIP_TIMEOUT);
+@@ -935,6 +933,8 @@ static s32 e1000_set_d0_lplu_state_82571(struct e1000_hw *hw, bool active)
+ 
+ 		/* When LPLU is enabled, we should disable SmartSpeed */
+ 		ret_val = e1e_rphy(hw, IGP01E1000_PHY_PORT_CONFIG, &data);
++		if (ret_val)
++			return ret_val;
+ 		data &= ~IGP01E1000_PSCFR_SMART_SPEED;
+ 		ret_val = e1e_wphy(hw, IGP01E1000_PHY_PORT_CONFIG, data);
+ 		if (ret_val)
+@@ -1797,6 +1797,8 @@ static s32 e1000_fix_nvm_checksum_82571(struct e1000_hw *hw)
+ 			if (ret_val)
+ 				return ret_val;
+ 			ret_val = e1000e_update_nvm_checksum(hw);
++			if (ret_val)
++				return ret_val;
+ 		}
+ 	}
+ 
+diff --git a/drivers/net/ethernet/intel/e1000e/ich8lan.c b/drivers/net/ethernet/intel/e1000e/ich8lan.c
+index 4a7fab5..dd0d866 100644
+--- a/drivers/net/ethernet/intel/e1000e/ich8lan.c
++++ b/drivers/net/ethernet/intel/e1000e/ich8lan.c
+@@ -2342,6 +2342,8 @@ static s32 e1000_set_d0_lplu_state_ich8lan(struct e1000_hw *hw, bool active)
+ 
+ 		/* When LPLU is enabled, we should disable SmartSpeed */
+ 		ret_val = e1e_rphy(hw, IGP01E1000_PHY_PORT_CONFIG, &data);
++		if (ret_val)
++			return ret_val;
+ 		data &= ~IGP01E1000_PSCFR_SMART_SPEED;
+ 		ret_val = e1e_wphy(hw, IGP01E1000_PHY_PORT_CONFIG, data);
+ 		if (ret_val)
+@@ -4053,8 +4055,7 @@ void e1000e_gig_downshift_workaround_ich8lan(struct e1000_hw *hw)
+ 	if (ret_val)
+ 		return;
+ 	reg_data &= ~E1000_KMRNCTRLSTA_DIAG_NELPBK;
+-	ret_val = e1000e_write_kmrn_reg(hw, E1000_KMRNCTRLSTA_DIAG_OFFSET,
+-				       reg_data);
++	e1000e_write_kmrn_reg(hw, E1000_KMRNCTRLSTA_DIAG_OFFSET, reg_data);
+ }
+ 
+ /**
+diff --git a/drivers/net/ethernet/intel/e1000e/phy.c b/drivers/net/ethernet/intel/e1000e/phy.c
+index 3b97121..b4aaf69 100644
+--- a/drivers/net/ethernet/intel/e1000e/phy.c
++++ b/drivers/net/ethernet/intel/e1000e/phy.c
+@@ -3332,7 +3332,7 @@ s32 e1000_get_cable_length_82577(struct e1000_hw *hw)
+ 	         I82577_DSTATUS_CABLE_LENGTH_SHIFT;
+ 
+ 	if (length == E1000_CABLE_LENGTH_UNDEFINED)
+-		ret_val = -E1000_ERR_PHY;
++		return -E1000_ERR_PHY;
+ 
+ 	phy->cable_length = length;
+ 
