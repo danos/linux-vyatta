@@ -1,0 +1,149 @@
+From: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Date: Fri, 20 Apr 2012 08:51:45 +0000
+Subject: [PATCH 090/246] e1000e: Fix default interrupt throttle rate not set
+ in NIC HW
+Origin: https://git.kernel.org/linus/727c356f4d799b53f94cf8fe43e19d64482348c7
+
+Based on the original patch from  Ying Cai <ycai@google.com>
+This change ensures that the itr/itr_setting adjustment logic is used,
+even for the default/compiled-in value.
+
+Context:
+  When we changed the default InterruptThrottleRate value from default
+  (3 = dynamic mode) to 8000 for example, only adapter->itr_setting
+  (which controls interrupt coalescing mode) was set to 8000, but
+  adapter->itr (which controls the value set in NIC register) was not
+  updated accordingly. So from ethtool, it seemed the interrupt
+  throttling is enabled at 8000 intr/s, but the NIC actually was
+  running in dynamic mode which has lower CPU efficiency especially
+  when throughput is not high.
+
+CC: Ying Cai <ycai@google.com>
+CC: David Decotigny <david.decotigny@google.com>
+Signed-off-by: Jeff Kirsher <jeffrey.kirsher@intel.com>
+Tested-by: Aaron Brown <aaron.f.brown@intel.com>
+[bwh: Adjust to apply after "e1000e: cleanup remaining strings split across
+ multiple lines".  The conflict was resolved by a merge upstream.]
+---
+ drivers/net/ethernet/intel/e1000e/param.c | 99 +++++++++++++++++--------------
+ 1 file changed, 53 insertions(+), 46 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/e1000e/param.c b/drivers/net/ethernet/intel/e1000e/param.c
+index 2fb5cdb..e7974a4 100644
+--- a/drivers/net/ethernet/intel/e1000e/param.c
++++ b/drivers/net/ethernet/intel/e1000e/param.c
+@@ -106,7 +106,7 @@ E1000_PARAM(RxAbsIntDelay, "Receive Absolute Interrupt Delay");
+ /*
+  * Interrupt Throttle Rate (interrupts/sec)
+  *
+- * Valid Range: 100-100000 (0=off, 1=dynamic, 3=dynamic conservative)
++ * Valid Range: 100-100000 or one of: 0=off, 1=dynamic, 3=dynamic conservative
+  */
+ E1000_PARAM(InterruptThrottleRate, "Interrupt Throttling Rate");
+ #define DEFAULT_ITR 3
+@@ -344,53 +344,60 @@ void __devinit e1000e_check_options(struct e1000_adapter *adapter)
+ 
+ 		if (num_InterruptThrottleRate > bd) {
+ 			adapter->itr = InterruptThrottleRate[bd];
+-			switch (adapter->itr) {
+-			case 0:
+-				e_info("%s turned off\n", opt.name);
+-				break;
+-			case 1:
+-				e_info("%s set to dynamic mode\n", opt.name);
+-				adapter->itr_setting = adapter->itr;
+-				adapter->itr = 20000;
+-				break;
+-			case 3:
+-				e_info("%s set to dynamic conservative mode\n",
+-					opt.name);
+-				adapter->itr_setting = adapter->itr;
+-				adapter->itr = 20000;
+-				break;
+-			case 4:
+-				e_info("%s set to simplified (2000-8000 ints) mode\n",
+-				       opt.name);
+-				adapter->itr_setting = 4;
+-				break;
+-			default:
+-				/*
+-				 * Save the setting, because the dynamic bits
+-				 * change itr.
+-				 */
+-				if (e1000_validate_option(&adapter->itr, &opt,
+-							  adapter) &&
+-				    (adapter->itr == 3)) {
+-					/*
+-					 * In case of invalid user value,
+-					 * default to conservative mode.
+-					 */
+-					adapter->itr_setting = adapter->itr;
+-					adapter->itr = 20000;
+-				} else {
+-					/*
+-					 * Clear the lower two bits because
+-					 * they are used as control.
+-					 */
+-					adapter->itr_setting =
+-						adapter->itr & ~3;
+-				}
+-				break;
+-			}
++
++			/*
++			 * Make sure a message is printed for non-special
++			 * values.  And in case of an invalid option, display
++			 * warning, use default and got through itr/itr_setting
++			 * adjustment logic below
++			 */
++			if ((adapter->itr > 4) &&
++			    e1000_validate_option(&adapter->itr, &opt, adapter))
++				adapter->itr = opt.def;
+ 		} else {
+-			adapter->itr_setting = opt.def;
++			/*
++			 * If no option specified, use default value and go
++			 * through the logic below to adjust itr/itr_setting
++			 */
++			adapter->itr = opt.def;
++
++			/*
++			 * Make sure a message is printed for non-special
++			 * default values
++			 */
++			if (adapter->itr > 40)
++				e_info("%s set to default %d\n", opt.name,
++				       adapter->itr);
++		}
++
++		adapter->itr_setting = adapter->itr;
++		switch (adapter->itr) {
++		case 0:
++			e_info("%s turned off\n", opt.name);
++			break;
++		case 1:
++			e_info("%s set to dynamic mode\n", opt.name);
++			adapter->itr = 20000;
++			break;
++		case 3:
++			e_info("%s set to dynamic conservative mode\n",
++			       opt.name);
+ 			adapter->itr = 20000;
++			break;
++		case 4:
++			e_info("%s set to simplified (2000-8000 ints) mode\n",
++			       opt.name);
++			break;
++		default:
++			/*
++			 * Save the setting, because the dynamic bits
++			 * change itr.
++			 *
++			 * Clear the lower two bits because
++			 * they are used as control.
++			 */
++			adapter->itr_setting &= ~3;
++			break;
+ 		}
+ 	}
+ 	{ /* Interrupt Mode */

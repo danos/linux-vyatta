@@ -1,0 +1,63 @@
+From: Emil Tantilov <emil.s.tantilov@intel.com>
+Date: Sat, 28 Jul 2012 05:07:48 +0000
+Subject: [PATCH 036/179] igb: fix panic while dumping packets on Tx hang with
+ IOMMU
+Origin: https://git.kernel.org/linus/b669588abaceb5c6d70699b6c009e5cedc42449b
+
+This patch resolves a "BUG: unable to handle kernel paging request at ..."
+oops while dumping packet data. The issue occurs with IOMMU enabled due to
+the address provided by phys_to_virt().
+
+This patch avoids phys_to_virt() by making using skb->data and the address
+of the pages allocated for Rx.
+
+Signed-off-by: Emil Tantilov <emil.s.tantilov@intel.com>
+Tested-by: Jeff Pieper <jeffrey.e.pieper@intel.com>
+Signed-off-by: Peter P Waskiewicz Jr <peter.p.waskiewicz.jr@intel.com>
+---
+ drivers/net/ethernet/intel/igb/igb_main.c | 19 +++++++++----------
+ 1 file changed, 9 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/igb/igb_main.c b/drivers/net/ethernet/intel/igb/igb_main.c
+index 45b71f9..b82ece2 100644
+--- a/drivers/net/ethernet/intel/igb/igb_main.c
++++ b/drivers/net/ethernet/intel/igb/igb_main.c
+@@ -462,10 +462,10 @@ static void igb_dump(struct igb_adapter *adapter)
+ 				(u64)buffer_info->time_stamp,
+ 				buffer_info->skb, next_desc);
+ 
+-			if (netif_msg_pktdata(adapter) && buffer_info->dma != 0)
++			if (netif_msg_pktdata(adapter) && buffer_info->skb)
+ 				print_hex_dump(KERN_INFO, "",
+ 					DUMP_PREFIX_ADDRESS,
+-					16, 1, phys_to_virt(buffer_info->dma),
++					16, 1, buffer_info->skb->data,
+ 					buffer_info->length, true);
+ 		}
+ 	}
+@@ -547,18 +547,17 @@ rx_ring_summary:
+ 					(u64)buffer_info->dma,
+ 					buffer_info->skb, next_desc);
+ 
+-				if (netif_msg_pktdata(adapter)) {
++				if (netif_msg_pktdata(adapter) &&
++				    buffer_info->dma && buffer_info->skb) {
+ 					print_hex_dump(KERN_INFO, "",
+-						DUMP_PREFIX_ADDRESS,
+-						16, 1,
+-						phys_to_virt(buffer_info->dma),
+-						IGB_RX_HDR_LEN, true);
++						  DUMP_PREFIX_ADDRESS,
++						  16, 1, buffer_info->skb->data,
++						  IGB_RX_HDR_LEN, true);
+ 					print_hex_dump(KERN_INFO, "",
+ 					  DUMP_PREFIX_ADDRESS,
+ 					  16, 1,
+-					  phys_to_virt(
+-					    buffer_info->page_dma +
+-					    buffer_info->page_offset),
++					  page_address(buffer_info->page) +
++						      buffer_info->page_offset,
+ 					  PAGE_SIZE/2, true);
+ 				}
+ 			}

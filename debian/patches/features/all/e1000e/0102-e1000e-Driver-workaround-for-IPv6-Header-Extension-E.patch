@@ -1,0 +1,113 @@
+From: Matthew Vick <matthew.vick@intel.com>
+Date: Wed, 25 Apr 2012 08:01:05 +0000
+Subject: [PATCH 102/246] e1000e: Driver workaround for IPv6 Header Extension
+ Erratum.
+Origin: https://git.kernel.org/linus/f6bd5577a39aed21cefd698bc46f70cfeaa0923c
+
+Previously, IPv6 extension header parsing was disabled for all devices
+supported by e1000e when using packet split mode. However, as per a
+silicon errata, only certain devices need this restriction and will need
+to disable IPv6 extension header parsing for all modes.
+
+Signed-off-by: Matthew Vick <matthew.vick@intel.com>
+Tested-by: Aaron Brown <aaron.f.brown@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/e1000e/80003es2lan.c |  8 ++++++++
+ drivers/net/ethernet/intel/e1000e/82571.c       | 10 ++++++++++
+ drivers/net/ethernet/intel/e1000e/ich8lan.c     |  7 +++++++
+ drivers/net/ethernet/intel/e1000e/netdev.c      |  9 +--------
+ 4 files changed, 26 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/e1000e/80003es2lan.c b/drivers/net/ethernet/intel/e1000e/80003es2lan.c
+index 66f9877..4dd18a1 100644
+--- a/drivers/net/ethernet/intel/e1000e/80003es2lan.c
++++ b/drivers/net/ethernet/intel/e1000e/80003es2lan.c
+@@ -944,6 +944,14 @@ static void e1000_initialize_hw_bits_80003es2lan(struct e1000_hw *hw)
+ 	else
+ 		reg |= (1 << 28);
+ 	ew32(TARC(1), reg);
++
++	/*
++	 * Disable IPv6 extension header parsing because some malformed
++	 * IPv6 headers can hang the Rx.
++	 */
++	reg = er32(RFCTL);
++	reg |= (E1000_RFCTL_IPV6_EX_DIS | E1000_RFCTL_NEW_IPV6_EXT_DIS);
++	ew32(RFCTL, reg);
+ }
+ 
+ /**
+diff --git a/drivers/net/ethernet/intel/e1000e/82571.c b/drivers/net/ethernet/intel/e1000e/82571.c
+index baf398f..5ff10d7 100644
+--- a/drivers/net/ethernet/intel/e1000e/82571.c
++++ b/drivers/net/ethernet/intel/e1000e/82571.c
+@@ -1279,6 +1279,16 @@ static void e1000_initialize_hw_bits_82571(struct e1000_hw *hw)
+ 		ew32(CTRL_EXT, reg);
+ 	}
+ 
++	/*
++	 * Disable IPv6 extension header parsing because some malformed
++	 * IPv6 headers can hang the Rx.
++	 */
++	if (hw->mac.type <= e1000_82573) {
++		reg = er32(RFCTL);
++		reg |= (E1000_RFCTL_IPV6_EX_DIS | E1000_RFCTL_NEW_IPV6_EXT_DIS);
++		ew32(RFCTL, reg);
++	}
++
+ 	/* PCI-Ex Control Registers */
+ 	switch (hw->mac.type) {
+ 	case e1000_82574:
+diff --git a/drivers/net/ethernet/intel/e1000e/ich8lan.c b/drivers/net/ethernet/intel/e1000e/ich8lan.c
+index c58ed26..dfff441 100644
+--- a/drivers/net/ethernet/intel/e1000e/ich8lan.c
++++ b/drivers/net/ethernet/intel/e1000e/ich8lan.c
+@@ -3468,6 +3468,13 @@ static void e1000_initialize_hw_bits_ich8lan(struct e1000_hw *hw)
+ 	 */
+ 	reg = er32(RFCTL);
+ 	reg |= (E1000_RFCTL_NFSW_DIS | E1000_RFCTL_NFSR_DIS);
++
++	/*
++	 * Disable IPv6 extension header parsing because some malformed
++	 * IPv6 headers can hang the Rx.
++	 */
++	if (hw->mac.type == e1000_ich8lan)
++		reg |= (E1000_RFCTL_IPV6_EX_DIS | E1000_RFCTL_NEW_IPV6_EXT_DIS);
+ 	ew32(RFCTL, reg);
+ }
+ 
+diff --git a/drivers/net/ethernet/intel/e1000e/netdev.c b/drivers/net/ethernet/intel/e1000e/netdev.c
+index e3d3b1c..369eb26 100644
+--- a/drivers/net/ethernet/intel/e1000e/netdev.c
++++ b/drivers/net/ethernet/intel/e1000e/netdev.c
+@@ -2920,6 +2920,7 @@ static void e1000_setup_rctl(struct e1000_adapter *adapter)
+ 	/* Enable Extended Status in all Receive Descriptors */
+ 	rfctl = er32(RFCTL);
+ 	rfctl |= E1000_RFCTL_EXTEN;
++	ew32(RFCTL, rfctl);
+ 
+ 	/*
+ 	 * 82571 and greater support packet-split where the protocol
+@@ -2945,13 +2946,6 @@ static void e1000_setup_rctl(struct e1000_adapter *adapter)
+ 	if (adapter->rx_ps_pages) {
+ 		u32 psrctl = 0;
+ 
+-		/*
+-		 * disable packet split support for IPv6 extension headers,
+-		 * because some malformed IPv6 headers can hang the Rx
+-		 */
+-		rfctl |= (E1000_RFCTL_IPV6_EX_DIS |
+-			  E1000_RFCTL_NEW_IPV6_EXT_DIS);
+-
+ 		/* Enable Packet split descriptors */
+ 		rctl |= E1000_RCTL_DTYP_PS;
+ 
+@@ -2974,7 +2968,6 @@ static void e1000_setup_rctl(struct e1000_adapter *adapter)
+ 		ew32(PSRCTL, psrctl);
+ 	}
+ 
+-	ew32(RFCTL, rfctl);
+ 	ew32(RCTL, rctl);
+ 	/* just started the receive unit, no need to restart */
+ 	adapter->flags &= ~FLAG_RX_RESTART_NOW;

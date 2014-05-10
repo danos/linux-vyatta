@@ -1,0 +1,51 @@
+From: Alexander Duyck <alexander.h.duyck@intel.com>
+Date: Tue, 13 Nov 2012 01:13:38 +0000
+Subject: [PATCH 081/179] igb: Do not parse past IP header on fragments beyond
+ the first
+Origin: https://git.kernel.org/linus/f2fb4ab2a647d6576812cbb3ae1979538112f6c8
+
+This change makes it so that only the first fragment in a series of fragments
+will have the L4 header pulled.  Previously we were always pulling the L4
+header as well and in the case of UDP this can harm performance since only the
+first fragment will have the header, the rest just contain data which should
+be left in the paged portion of the packet.
+
+Signed-off-by: Alexander Duyck <alexander.h.duyck@intel.com>
+Tested-by: Aaron Brown <aaron.f.brown@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/igb/igb_main.c | 11 +++++++----
+ 1 file changed, 7 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/igb/igb_main.c b/drivers/net/ethernet/intel/igb/igb_main.c
+index 86f92fc..17ec760 100644
+--- a/drivers/net/ethernet/intel/igb/igb_main.c
++++ b/drivers/net/ethernet/intel/igb/igb_main.c
+@@ -6145,20 +6145,23 @@ static unsigned int igb_get_headlen(unsigned char *data,
+ 		if (hlen < sizeof(struct iphdr))
+ 			return hdr.network - data;
+ 
+-		/* record next protocol */
+-		nexthdr = hdr.ipv4->protocol;
+-		hdr.network += hlen;
++		/* record next protocol if header is present */
++		if (!hdr.ipv4->frag_off)
++			nexthdr = hdr.ipv4->protocol;
+ 	} else if (protocol == __constant_htons(ETH_P_IPV6)) {
+ 		if ((hdr.network - data) > (max_len - sizeof(struct ipv6hdr)))
+ 			return max_len;
+ 
+ 		/* record next protocol */
+ 		nexthdr = hdr.ipv6->nexthdr;
+-		hdr.network += sizeof(struct ipv6hdr);
++		hlen = sizeof(struct ipv6hdr);
+ 	} else {
+ 		return hdr.network - data;
+ 	}
+ 
++	/* relocate pointer to start of L4 header */
++	hdr.network += hlen;
++
+ 	/* finally sort out TCP */
+ 	if (nexthdr == IPPROTO_TCP) {
+ 		if ((hdr.network - data) > (max_len - sizeof(struct tcphdr)))

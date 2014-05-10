@@ -1,0 +1,85 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Fri, 16 Dec 2011 00:46:12 +0000
+Subject: [PATCH 017/246] e1000e: use default settings for Tx Inter Packet Gap
+ timer
+Origin: https://git.kernel.org/linus/6a92f732f557401ca8cc0b16f8e8914c133cf6c6
+
+Use the default hardware values for TIPG except for 80003es2lan(*).  The
+code that is removed in this patch is either unnecessarily writing the TIPG
+register with the hardware default values for some devices (82571/2/3/4) or
+writing the wrong value for others (ICH/PCH LOMs).  The only change in
+functionality is setting the correct default TIPG for the latter devices.
+
+(*) The correct value for 80003es2lan is already set properly in
+e1000_init_hw_80003es2lan() and e1000_cfg_kmrn_{10_100|1000}_80003es2lan(),
+and the unused flag FLAG_TIPG_MEDIUM_FOR_80003ESLAN is removed.
+
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Tested-by: Aaron Brown <aaron.f.brown@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/e1000e/80003es2lan.c |  3 +--
+ drivers/net/ethernet/intel/e1000e/e1000.h       |  2 +-
+ drivers/net/ethernet/intel/e1000e/netdev.c      | 15 +--------------
+ 3 files changed, 3 insertions(+), 17 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/e1000e/80003es2lan.c b/drivers/net/ethernet/intel/e1000e/80003es2lan.c
+index e1159e5..b3a235c 100644
+--- a/drivers/net/ethernet/intel/e1000e/80003es2lan.c
++++ b/drivers/net/ethernet/intel/e1000e/80003es2lan.c
+@@ -1502,8 +1502,7 @@ const struct e1000_info e1000_es2_info = {
+ 				  | FLAG_RX_NEEDS_RESTART /* errata */
+ 				  | FLAG_TARC_SET_BIT_ZERO /* errata */
+ 				  | FLAG_APME_CHECK_PORT_B
+-				  | FLAG_DISABLE_FC_PAUSE_TIME /* errata */
+-				  | FLAG_TIPG_MEDIUM_FOR_80003ESLAN,
++				  | FLAG_DISABLE_FC_PAUSE_TIME, /* errata */
+ 	.flags2			= FLAG2_DMA_BURST,
+ 	.pba			= 38,
+ 	.max_hw_frame_size	= DEFAULT_JUMBO,
+diff --git a/drivers/net/ethernet/intel/e1000e/e1000.h b/drivers/net/ethernet/intel/e1000e/e1000.h
+index 6f50d7e..4cda78e 100644
+--- a/drivers/net/ethernet/intel/e1000e/e1000.h
++++ b/drivers/net/ethernet/intel/e1000e/e1000.h
+@@ -431,7 +431,7 @@ struct e1000_info {
+ #define FLAG_HAS_SMART_POWER_DOWN         (1 << 11)
+ #define FLAG_IS_QUAD_PORT_A               (1 << 12)
+ #define FLAG_IS_QUAD_PORT                 (1 << 13)
+-#define FLAG_TIPG_MEDIUM_FOR_80003ESLAN   (1 << 14)
++/* reserved bit14 */
+ #define FLAG_APME_IN_WUC                  (1 << 15)
+ #define FLAG_APME_IN_CTRL3                (1 << 16)
+ #define FLAG_APME_CHECK_PORT_B            (1 << 17)
+diff --git a/drivers/net/ethernet/intel/e1000e/netdev.c b/drivers/net/ethernet/intel/e1000e/netdev.c
+index 2f1d820..e8cf05d 100644
+--- a/drivers/net/ethernet/intel/e1000e/netdev.c
++++ b/drivers/net/ethernet/intel/e1000e/netdev.c
+@@ -2766,8 +2766,7 @@ static void e1000_configure_tx(struct e1000_adapter *adapter)
+ 	struct e1000_hw *hw = &adapter->hw;
+ 	struct e1000_ring *tx_ring = adapter->tx_ring;
+ 	u64 tdba;
+-	u32 tdlen, tctl, tipg, tarc;
+-	u32 ipgr1, ipgr2;
++	u32 tdlen, tctl, tarc;
+ 
+ 	/* Setup the HW Tx Head and Tail descriptor pointers */
+ 	tdba = tx_ring->dma;
+@@ -2780,18 +2779,6 @@ static void e1000_configure_tx(struct e1000_adapter *adapter)
+ 	tx_ring->head = adapter->hw.hw_addr + E1000_TDH;
+ 	tx_ring->tail = adapter->hw.hw_addr + E1000_TDT;
+ 
+-	/* Set the default values for the Tx Inter Packet Gap timer */
+-	tipg = DEFAULT_82543_TIPG_IPGT_COPPER;          /*  8  */
+-	ipgr1 = DEFAULT_82543_TIPG_IPGR1;               /*  8  */
+-	ipgr2 = DEFAULT_82543_TIPG_IPGR2;               /*  6  */
+-
+-	if (adapter->flags & FLAG_TIPG_MEDIUM_FOR_80003ESLAN)
+-		ipgr2 = DEFAULT_80003ES2LAN_TIPG_IPGR2; /*  7  */
+-
+-	tipg |= ipgr1 << E1000_TIPG_IPGR1_SHIFT;
+-	tipg |= ipgr2 << E1000_TIPG_IPGR2_SHIFT;
+-	ew32(TIPG, tipg);
+-
+ 	/* Set the Tx Interrupt Delay register */
+ 	ew32(TIDV, adapter->tx_int_delay);
+ 	/* Tx irq moderation */

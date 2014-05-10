@@ -1,0 +1,177 @@
+From: Carolyn Wyborny <carolyn.wyborny@intel.com>
+Date: Tue, 23 Oct 2012 13:04:37 +0000
+Subject: [PATCH 072/179] igb: Add function to read i211's invm version
+Origin: https://git.kernel.org/linus/09e77287e752c8fc9743d865ddadc1a0d81a4927
+
+The i211's one-time programmable (invm) version field is different than the
+other fields contained in it.  This patch adds a function to get the invm version
+of it and store it for output from ethtool.
+
+Signed-off-by: Carolyn Wyborny <carolyn.wyborny@intel.com>
+Tested-by: Aaron Brown <aaron.f.brown@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/igb/e1000_i210.c | 94 +++++++++++++++++++++++++++++
+ drivers/net/ethernet/intel/igb/e1000_i210.h | 11 ++++
+ drivers/net/ethernet/intel/igb/e1000_mac.h  |  1 +
+ drivers/net/ethernet/intel/igb/e1000_nvm.c  |  1 +
+ 4 files changed, 107 insertions(+)
+
+diff --git a/drivers/net/ethernet/intel/igb/e1000_i210.c b/drivers/net/ethernet/intel/igb/e1000_i210.c
+index 77a5f93..4147429 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_i210.c
++++ b/drivers/net/ethernet/intel/igb/e1000_i210.c
+@@ -423,6 +423,100 @@ s32 igb_read_invm_i211(struct e1000_hw *hw, u16 address, u16 *data)
+ }
+ 
+ /**
++ *  igb_read_invm_version - Reads iNVM version and image type
++ *  @hw: pointer to the HW structure
++ *  @invm_ver: version structure for the version read
++ *
++ *  Reads iNVM version and image type.
++ **/
++s32 igb_read_invm_version(struct e1000_hw *hw,
++			  struct e1000_fw_version *invm_ver) {
++	u32 *record = NULL;
++	u32 *next_record = NULL;
++	u32 i = 0;
++	u32 invm_dword = 0;
++	u32 invm_blocks = E1000_INVM_SIZE - (E1000_INVM_ULT_BYTES_SIZE /
++					     E1000_INVM_RECORD_SIZE_IN_BYTES);
++	u32 buffer[E1000_INVM_SIZE];
++	s32 status = -E1000_ERR_INVM_VALUE_NOT_FOUND;
++	u16 version = 0;
++
++	/* Read iNVM memory */
++	for (i = 0; i < E1000_INVM_SIZE; i++) {
++		invm_dword = rd32(E1000_INVM_DATA_REG(i));
++		buffer[i] = invm_dword;
++	}
++
++	/* Read version number */
++	for (i = 1; i < invm_blocks; i++) {
++		record = &buffer[invm_blocks - i];
++		next_record = &buffer[invm_blocks - i + 1];
++
++		/* Check if we have first version location used */
++		if ((i == 1) && ((*record & E1000_INVM_VER_FIELD_ONE) == 0)) {
++			version = 0;
++			status = E1000_SUCCESS;
++			break;
++		}
++		/* Check if we have second version location used */
++		else if ((i == 1) &&
++			 ((*record & E1000_INVM_VER_FIELD_TWO) == 0)) {
++			version = (*record & E1000_INVM_VER_FIELD_ONE) >> 3;
++			status = E1000_SUCCESS;
++			break;
++		}
++		/* Check if we have odd version location
++		 * used and it is the last one used
++		 */
++		else if ((((*record & E1000_INVM_VER_FIELD_ONE) == 0) &&
++			 ((*record & 0x3) == 0)) || (((*record & 0x3) != 0) &&
++			 (i != 1))) {
++			version = (*next_record & E1000_INVM_VER_FIELD_TWO)
++				  >> 13;
++			status = E1000_SUCCESS;
++			break;
++		}
++		/* Check if we have even version location
++		 * used and it is the last one used
++		 */
++		else if (((*record & E1000_INVM_VER_FIELD_TWO) == 0) &&
++			 ((*record & 0x3) == 0)) {
++			version = (*record & E1000_INVM_VER_FIELD_ONE) >> 3;
++			status = E1000_SUCCESS;
++			break;
++		}
++	}
++
++	if (status == E1000_SUCCESS) {
++		invm_ver->invm_major = (version & E1000_INVM_MAJOR_MASK)
++					>> E1000_INVM_MAJOR_SHIFT;
++		invm_ver->invm_minor = version & E1000_INVM_MINOR_MASK;
++	}
++	/* Read Image Type */
++	for (i = 1; i < invm_blocks; i++) {
++		record = &buffer[invm_blocks - i];
++		next_record = &buffer[invm_blocks - i + 1];
++
++		/* Check if we have image type in first location used */
++		if ((i == 1) && ((*record & E1000_INVM_IMGTYPE_FIELD) == 0)) {
++			invm_ver->invm_img_type = 0;
++			status = E1000_SUCCESS;
++			break;
++		}
++		/* Check if we have image type in first location used */
++		else if ((((*record & 0x3) == 0) &&
++			 ((*record & E1000_INVM_IMGTYPE_FIELD) == 0)) ||
++			 ((((*record & 0x3) != 0) && (i != 1)))) {
++			invm_ver->invm_img_type =
++				(*next_record & E1000_INVM_IMGTYPE_FIELD) >> 23;
++			status = E1000_SUCCESS;
++			break;
++		}
++	}
++	return status;
++}
++
++/**
+  *  igb_validate_nvm_checksum_i210 - Validate EEPROM checksum
+  *  @hw: pointer to the HW structure
+  *
+diff --git a/drivers/net/ethernet/intel/igb/e1000_i210.h b/drivers/net/ethernet/intel/igb/e1000_i210.h
+index 5dc2bd3..974d235 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_i210.h
++++ b/drivers/net/ethernet/intel/igb/e1000_i210.h
+@@ -43,6 +43,8 @@ extern void igb_release_nvm_i210(struct e1000_hw *hw);
+ extern s32 igb_valid_led_default_i210(struct e1000_hw *hw, u16 *data);
+ extern s32 igb_read_nvm_i211(struct e1000_hw *hw, u16 offset, u16 words,
+ 			       u16 *data);
++extern s32 igb_read_invm_version(struct e1000_hw *hw,
++				 struct e1000_fw_version *invm_ver);
+ 
+ #define E1000_STM_OPCODE		0xDB00
+ #define E1000_EEPROM_FLASH_SIZE_WORD	0x11
+@@ -65,6 +67,15 @@ enum E1000_INVM_STRUCTURE_TYPE {
+ 
+ #define E1000_INVM_RSA_KEY_SHA256_DATA_SIZE_IN_DWORDS	8
+ #define E1000_INVM_CSR_AUTOLOAD_DATA_SIZE_IN_DWORDS	1
++#define E1000_INVM_ULT_BYTES_SIZE			8
++#define E1000_INVM_RECORD_SIZE_IN_BYTES			4
++#define E1000_INVM_VER_FIELD_ONE			0x1FF8
++#define E1000_INVM_VER_FIELD_TWO			0x7FE000
++#define E1000_INVM_IMGTYPE_FIELD			0x1F800000
++
++#define E1000_INVM_MAJOR_MASK		0x3F0
++#define E1000_INVM_MINOR_MASK		0xF
++#define E1000_INVM_MAJOR_SHIFT		4
+ 
+ #define ID_LED_DEFAULT_I210		((ID_LED_OFF1_ON2  << 8) | \
+ 					 (ID_LED_OFF1_OFF2 <<  4) | \
+diff --git a/drivers/net/ethernet/intel/igb/e1000_mac.h b/drivers/net/ethernet/intel/igb/e1000_mac.h
+index cbddc4e..e2b2c4b 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_mac.h
++++ b/drivers/net/ethernet/intel/igb/e1000_mac.h
+@@ -33,6 +33,7 @@
+ #include "e1000_phy.h"
+ #include "e1000_nvm.h"
+ #include "e1000_defines.h"
++#include "e1000_i210.h"
+ 
+ /*
+  * Functions that should not be called directly from drivers but can be used
+diff --git a/drivers/net/ethernet/intel/igb/e1000_nvm.c b/drivers/net/ethernet/intel/igb/e1000_nvm.c
+index 54ff539..7db3f80 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_nvm.c
++++ b/drivers/net/ethernet/intel/igb/e1000_nvm.c
+@@ -727,6 +727,7 @@ void igb_get_fw_version(struct e1000_hw *hw, struct e1000_fw_version *fw_vers)
+ 
+ 	switch (hw->mac.type) {
+ 	case e1000_i211:
++		igb_read_invm_version(hw, fw_vers);
+ 		return;
+ 	case e1000_82575:
+ 	case e1000_82576:

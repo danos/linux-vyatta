@@ -1,0 +1,94 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Sat, 12 Jan 2013 07:25:22 +0000
+Subject: [PATCH 172/246] e1000e: adjust PM QoS request
+Origin: https://git.kernel.org/linus/3e35d9918cbbc224f88da4dd19cd90b2cd4f765e
+
+It has been found that devices other than 82579 (a.k.a. e1000_pch2lan)
+suffer from dropped transactions on platforms with deep C-states when
+jumbo frames are enabled.  For example, LOMs on ICH9- and ICH10-based
+platforms which recently had early-receive de-featured (for stability
+reasons) suffer from this.  To resolve this for all devices, when jumbo
+frames are enabled set the PM QoS DMA latency request based on the size
+of the receive packet buffer less one full frame.
+
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Tested-by: Aaron Brown <aaron.f.brown@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/e1000e/defines.h |  2 ++
+ drivers/net/ethernet/intel/e1000e/netdev.c  | 32 +++++++++++++++--------------
+ 2 files changed, 19 insertions(+), 15 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/e1000e/defines.h b/drivers/net/ethernet/intel/e1000e/defines.h
+index 1a9b5d6..5a6bcfa 100644
+--- a/drivers/net/ethernet/intel/e1000e/defines.h
++++ b/drivers/net/ethernet/intel/e1000e/defines.h
+@@ -392,6 +392,8 @@
+ #define E1000_PBA_8K  0x0008    /* 8KB */
+ #define E1000_PBA_16K 0x0010    /* 16KB */
+ 
++#define E1000_PBA_RXA_MASK	0xFFFF
++
+ #define E1000_PBS_16K E1000_PBA_16K
+ 
+ /* Uncorrectable/correctable ECC Error counts and enable bits */
+diff --git a/drivers/net/ethernet/intel/e1000e/netdev.c b/drivers/net/ethernet/intel/e1000e/netdev.c
+index 94b2c83..c9a4e59 100644
+--- a/drivers/net/ethernet/intel/e1000e/netdev.c
++++ b/drivers/net/ethernet/intel/e1000e/netdev.c
+@@ -3206,18 +3206,23 @@ static void e1000_configure_rx(struct e1000_adapter *adapter)
+ 		rxcsum &= ~E1000_RXCSUM_TUOFL;
+ 	ew32(RXCSUM, rxcsum);
+ 
+-	if (adapter->hw.mac.type == e1000_pch2lan) {
+-		/* With jumbo frames, excessive C-state transition
+-		 * latencies result in dropped transactions.
+-		 */
+-		if (adapter->netdev->mtu > ETH_DATA_LEN) {
++	/* With jumbo frames, excessive C-state transition latencies result
++	 * in dropped transactions.
++	 */
++	if (adapter->netdev->mtu > ETH_DATA_LEN) {
++		u32 lat =
++		    ((er32(PBA) & E1000_PBA_RXA_MASK) * 1024 -
++		     adapter->max_frame_size) * 8 / 1000;
++
++		if (adapter->flags & FLAG_IS_ICH) {
+ 			u32 rxdctl = er32(RXDCTL(0));
+ 			ew32(RXDCTL(0), rxdctl | 0x3);
+-			pm_qos_update_request(&adapter->netdev->pm_qos_req, 55);
+-		} else {
+-			pm_qos_update_request(&adapter->netdev->pm_qos_req,
+-					      PM_QOS_DEFAULT_VALUE);
+ 		}
++
++		pm_qos_update_request(&adapter->netdev->pm_qos_req, lat);
++	} else {
++		pm_qos_update_request(&adapter->netdev->pm_qos_req,
++				      PM_QOS_DEFAULT_VALUE);
+ 	}
+ 
+ 	/* Enable Receives */
+@@ -4245,10 +4250,8 @@ static int e1000_open(struct net_device *netdev)
+ 		e1000_update_mng_vlan(adapter);
+ 
+ 	/* DMA latency requirement to workaround jumbo issue */
+-	if (adapter->hw.mac.type == e1000_pch2lan)
+-		pm_qos_add_request(&adapter->netdev->pm_qos_req,
+-				   PM_QOS_CPU_DMA_LATENCY,
+-				   PM_QOS_DEFAULT_VALUE);
++	pm_qos_add_request(&adapter->netdev->pm_qos_req, PM_QOS_CPU_DMA_LATENCY,
++			   PM_QOS_DEFAULT_VALUE);
+ 
+ 	/* before we allocate an interrupt, we must be ready to handle it.
+ 	 * Setting DEBUG_SHIRQ in the kernel makes it fire an interrupt
+@@ -4356,8 +4359,7 @@ static int e1000_close(struct net_device *netdev)
+ 	    !test_bit(__E1000_TESTING, &adapter->state))
+ 		e1000e_release_hw_control(adapter);
+ 
+-	if (adapter->hw.mac.type == e1000_pch2lan)
+-		pm_qos_remove_request(&adapter->netdev->pm_qos_req);
++	pm_qos_remove_request(&adapter->netdev->pm_qos_req);
+ 
+ 	pm_runtime_put_sync(&pdev->dev);
+ 

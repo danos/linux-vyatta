@@ -1,0 +1,61 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Wed, 6 Mar 2013 09:02:31 +0000
+Subject: [PATCH 209/246] e1000e: additional error handling on PHY register
+ accesses
+Origin: https://git.kernel.org/linus/bb034512da74dce901f738f7c7cea332ff971608
+
+PHY reads/writes via the MDIC register could potentially return results
+from a previous PHY register access.  If that happens, the offset in the
+returned results will be that of the previous access and if that is
+different from the expected offset, log a debug message and error out.
+
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Tested-by: Aaron Brown <aaron.f.brown@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/e1000e/defines.h |  1 +
+ drivers/net/ethernet/intel/e1000e/phy.c     | 12 ++++++++++++
+ 2 files changed, 13 insertions(+)
+
+diff --git a/drivers/net/ethernet/intel/e1000e/defines.h b/drivers/net/ethernet/intel/e1000e/defines.h
+index b8c56af..6acf5ca 100644
+--- a/drivers/net/ethernet/intel/e1000e/defines.h
++++ b/drivers/net/ethernet/intel/e1000e/defines.h
+@@ -787,6 +787,7 @@
+ 	GG82563_REG(194, 18) /* Inband Control */
+ 
+ /* MDI Control */
++#define E1000_MDIC_REG_MASK	0x001F0000
+ #define E1000_MDIC_REG_SHIFT 16
+ #define E1000_MDIC_PHY_SHIFT 21
+ #define E1000_MDIC_OP_WRITE  0x04000000
+diff --git a/drivers/net/ethernet/intel/e1000e/phy.c b/drivers/net/ethernet/intel/e1000e/phy.c
+index 60dbf02..cbb310f 100644
+--- a/drivers/net/ethernet/intel/e1000e/phy.c
++++ b/drivers/net/ethernet/intel/e1000e/phy.c
+@@ -178,6 +178,12 @@ s32 e1000e_read_phy_reg_mdic(struct e1000_hw *hw, u32 offset, u16 *data)
+ 		e_dbg("MDI Error\n");
+ 		return -E1000_ERR_PHY;
+ 	}
++	if (((mdic & E1000_MDIC_REG_MASK) >> E1000_MDIC_REG_SHIFT) != offset) {
++		e_dbg("MDI Read offset error - requested %d, returned %d\n",
++		      offset,
++		      (mdic & E1000_MDIC_REG_MASK) >> E1000_MDIC_REG_SHIFT);
++		return -E1000_ERR_PHY;
++	}
+ 	*data = (u16)mdic;
+ 
+ 	/* Allow some time after each MDIC transaction to avoid
+@@ -236,6 +242,12 @@ s32 e1000e_write_phy_reg_mdic(struct e1000_hw *hw, u32 offset, u16 data)
+ 		e_dbg("MDI Error\n");
+ 		return -E1000_ERR_PHY;
+ 	}
++	if (((mdic & E1000_MDIC_REG_MASK) >> E1000_MDIC_REG_SHIFT) != offset) {
++		e_dbg("MDI Write offset error - requested %d, returned %d\n",
++		      offset,
++		      (mdic & E1000_MDIC_REG_MASK) >> E1000_MDIC_REG_SHIFT);
++		return -E1000_ERR_PHY;
++	}
+ 
+ 	/* Allow some time after each MDIC transaction to avoid
+ 	 * reading duplicate data in the next MDIC transaction.

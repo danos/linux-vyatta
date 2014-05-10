@@ -1,0 +1,148 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Wed, 20 Feb 2013 03:06:34 +0000
+Subject: [PATCH 192/246] e1000e: workaround DMA unit hang on I218
+Origin: https://git.kernel.org/linus/e08f626b33eb636dbf38b21618ab32b7fd8e1ec4
+
+At 1000Mbps link speed, one of the MAC's internal clocks can be stopped for
+up to 4us when entering K1 (a power mode of the MAC-PHY interconnect).  If
+the MAC is waiting for completion indications for 2 DMA write requests into
+Host memory (e.g. descriptor writeback or Rx packet writing) and the
+indications occur while the clock is stopped, both indications will be
+missed by the MAC causing the MAC to wait for the completion indications
+and be unable to generate further DMA write requests.  This results in an
+apparent hardware hang.
+
+Work-around the issue by disabling the de-assertion of the clock request
+when 1000Mbps link is acquired (K1 must be disabled while doing this).
+
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Tested-by: Jeff Pieper <jeffrey.e.pieper@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/e1000e/ich8lan.c | 71 ++++++++++++++++++++++++++++-
+ drivers/net/ethernet/intel/e1000e/ich8lan.h |  2 +
+ drivers/net/ethernet/intel/e1000e/regs.h    |  1 +
+ 3 files changed, 73 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/intel/e1000e/ich8lan.c b/drivers/net/ethernet/intel/e1000e/ich8lan.c
+index dff7bff..121a865 100644
+--- a/drivers/net/ethernet/intel/e1000e/ich8lan.c
++++ b/drivers/net/ethernet/intel/e1000e/ich8lan.c
+@@ -782,6 +782,59 @@ release:
+ }
+ 
+ /**
++ *  e1000_k1_workaround_lpt_lp - K1 workaround on Lynxpoint-LP
++ *  @hw:   pointer to the HW structure
++ *  @link: link up bool flag
++ *
++ *  When K1 is enabled for 1Gbps, the MAC can miss 2 DMA completion indications
++ *  preventing further DMA write requests.  Workaround the issue by disabling
++ *  the de-assertion of the clock request when in 1Gpbs mode.
++ **/
++static s32 e1000_k1_workaround_lpt_lp(struct e1000_hw *hw, bool link)
++{
++	u32 fextnvm6 = er32(FEXTNVM6);
++	s32 ret_val = 0;
++
++	if (link && (er32(STATUS) & E1000_STATUS_SPEED_1000)) {
++		u16 kmrn_reg;
++
++		ret_val = hw->phy.ops.acquire(hw);
++		if (ret_val)
++			return ret_val;
++
++		ret_val =
++		    e1000e_read_kmrn_reg_locked(hw, E1000_KMRNCTRLSTA_K1_CONFIG,
++						&kmrn_reg);
++		if (ret_val)
++			goto release;
++
++		ret_val =
++		    e1000e_write_kmrn_reg_locked(hw,
++						 E1000_KMRNCTRLSTA_K1_CONFIG,
++						 kmrn_reg &
++						 ~E1000_KMRNCTRLSTA_K1_ENABLE);
++		if (ret_val)
++			goto release;
++
++		usleep_range(10, 20);
++
++		ew32(FEXTNVM6, fextnvm6 | E1000_FEXTNVM6_REQ_PLL_CLK);
++
++		ret_val =
++		    e1000e_write_kmrn_reg_locked(hw,
++						 E1000_KMRNCTRLSTA_K1_CONFIG,
++						 kmrn_reg);
++release:
++		hw->phy.ops.release(hw);
++	} else {
++		/* clear FEXTNVM6 bit 8 on link down or 10/100 */
++		ew32(FEXTNVM6, fextnvm6 & ~E1000_FEXTNVM6_REQ_PLL_CLK);
++	}
++
++	return ret_val;
++}
++
++/**
+  *  e1000_check_for_copper_link_ich8lan - Check for link (Copper)
+  *  @hw: pointer to the HW structure
+  *
+@@ -818,6 +871,14 @@ static s32 e1000_check_for_copper_link_ich8lan(struct e1000_hw *hw)
+ 			return ret_val;
+ 	}
+ 
++	/* Work-around I218 hang issue */
++	if ((hw->adapter->pdev->device == E1000_DEV_ID_PCH_LPTLP_I218_LM) ||
++	    (hw->adapter->pdev->device == E1000_DEV_ID_PCH_LPTLP_I218_V)) {
++		ret_val = e1000_k1_workaround_lpt_lp(hw, link);
++		if (ret_val)
++			return ret_val;
++	}
++
+ 	/* Clear link partner's EEE ability */
+ 	hw->dev_spec.ich8lan.eee_lp_ability = 0;
+ 
+@@ -3954,8 +4015,16 @@ void e1000_suspend_workarounds_ich8lan(struct e1000_hw *hw)
+ 
+ 	phy_ctrl = er32(PHY_CTRL);
+ 	phy_ctrl |= E1000_PHY_CTRL_GBE_DISABLE;
++
+ 	if (hw->phy.type == e1000_phy_i217) {
+-		u16 phy_reg;
++		u16 phy_reg, device_id = hw->adapter->pdev->device;
++
++		if ((device_id == E1000_DEV_ID_PCH_LPTLP_I218_LM) ||
++		    (device_id == E1000_DEV_ID_PCH_LPTLP_I218_V)) {
++			u32 fextnvm6 = er32(FEXTNVM6);
++
++			ew32(FEXTNVM6, fextnvm6 & ~E1000_FEXTNVM6_REQ_PLL_CLK);
++		}
+ 
+ 		ret_val = hw->phy.ops.acquire(hw);
+ 		if (ret_val)
+diff --git a/drivers/net/ethernet/intel/e1000e/ich8lan.h b/drivers/net/ethernet/intel/e1000e/ich8lan.h
+index b6d3174..8bf4655 100644
+--- a/drivers/net/ethernet/intel/e1000e/ich8lan.h
++++ b/drivers/net/ethernet/intel/e1000e/ich8lan.h
+@@ -92,6 +92,8 @@
+ #define E1000_FEXTNVM4_BEACON_DURATION_8USEC	0x7
+ #define E1000_FEXTNVM4_BEACON_DURATION_16USEC	0x3
+ 
++#define E1000_FEXTNVM6_REQ_PLL_CLK	0x00000100
++
+ #define PCIE_ICH8_SNOOP_ALL	PCIE_NO_SNOOP_ALL
+ 
+ #define E1000_ICH_RAR_ENTRIES	7
+diff --git a/drivers/net/ethernet/intel/e1000e/regs.h b/drivers/net/ethernet/intel/e1000e/regs.h
+index 794fe14..a7e6a3e 100644
+--- a/drivers/net/ethernet/intel/e1000e/regs.h
++++ b/drivers/net/ethernet/intel/e1000e/regs.h
+@@ -42,6 +42,7 @@
+ #define E1000_FEXTNVM	0x00028	/* Future Extended NVM - RW */
+ #define E1000_FEXTNVM3	0x0003C	/* Future Extended NVM 3 - RW */
+ #define E1000_FEXTNVM4	0x00024	/* Future Extended NVM 4 - RW */
++#define E1000_FEXTNVM6	0x00010	/* Future Extended NVM 6 - RW */
+ #define E1000_FEXTNVM7	0x000E4	/* Future Extended NVM 7 - RW */
+ #define E1000_FCT	0x00030	/* Flow Control Type - RW */
+ #define E1000_VET	0x00038	/* VLAN Ether Type - RW */

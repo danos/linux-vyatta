@@ -1,0 +1,87 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Wed, 6 Mar 2013 09:02:36 +0000
+Subject: [PATCH 210/246] e1000e: slow performance between two 82579 connected
+ via 10Mbit hub
+Origin: https://git.kernel.org/linus/772d05c51c4f4896c120ad418b1e91144a2ac813
+
+Two 82579 LOMs connected via a 10Mb hub experience extraordinarily low
+performance.  This is because 82579 is excessively aggressive on transmit
+at 10Mb half-duplex and will not provide sufficient time for the link
+partner to transmit.  When the link partner is also 82579, the result is a
+lot of collisions (and corresponding re-transmits) that cause the poor
+performance. To work-around this issue, significantly increase the IPG in
+the MAC to allow enough gap for the link partner to transmit and reduce the
+Rx latency in the analog PHY to 0 to reduce the number of collisions.
+
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Tested-by: Jeff Pieper <jeffrey.e.pieper@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/e1000e/defines.h |  1 +
+ drivers/net/ethernet/intel/e1000e/ich8lan.c | 28 ++++++++++++++++++++++++++++
+ drivers/net/ethernet/intel/e1000e/ich8lan.h |  1 +
+ 3 files changed, 30 insertions(+)
+
+diff --git a/drivers/net/ethernet/intel/e1000e/defines.h b/drivers/net/ethernet/intel/e1000e/defines.h
+index 6acf5ca..980a3f0 100644
+--- a/drivers/net/ethernet/intel/e1000e/defines.h
++++ b/drivers/net/ethernet/intel/e1000e/defines.h
+@@ -235,6 +235,7 @@
+ #define E1000_STATUS_FUNC_SHIFT 2
+ #define E1000_STATUS_FUNC_1     0x00000004      /* Function 1 */
+ #define E1000_STATUS_TXOFF      0x00000010      /* transmission paused */
++#define E1000_STATUS_SPEED_MASK 0x000000C0
+ #define E1000_STATUS_SPEED_10   0x00000000      /* Speed 10Mb/s */
+ #define E1000_STATUS_SPEED_100  0x00000040      /* Speed 100Mb/s */
+ #define E1000_STATUS_SPEED_1000 0x00000080      /* Speed 1000Mb/s */
+diff --git a/drivers/net/ethernet/intel/e1000e/ich8lan.c b/drivers/net/ethernet/intel/e1000e/ich8lan.c
+index 1cdec5f..4f2f0f6 100644
+--- a/drivers/net/ethernet/intel/e1000e/ich8lan.c
++++ b/drivers/net/ethernet/intel/e1000e/ich8lan.c
+@@ -871,6 +871,34 @@ static s32 e1000_check_for_copper_link_ich8lan(struct e1000_hw *hw)
+ 			return ret_val;
+ 	}
+ 
++	/* When connected at 10Mbps half-duplex, 82579 parts are excessively
++	 * aggressive resulting in many collisions. To avoid this, increase
++	 * the IPG and reduce Rx latency in the PHY.
++	 */
++	if ((hw->mac.type == e1000_pch2lan) && link) {
++		u32 reg;
++		reg = er32(STATUS);
++		if (!(reg & (E1000_STATUS_FD | E1000_STATUS_SPEED_MASK))) {
++			reg = er32(TIPG);
++			reg &= ~E1000_TIPG_IPGT_MASK;
++			reg |= 0xFF;
++			ew32(TIPG, reg);
++
++			/* Reduce Rx latency in analog PHY */
++			ret_val = hw->phy.ops.acquire(hw);
++			if (ret_val)
++				return ret_val;
++
++			ret_val =
++			    e1000_write_emi_reg_locked(hw, I82579_RX_CONFIG, 0);
++
++			hw->phy.ops.release(hw);
++
++			if (ret_val)
++				return ret_val;
++		}
++	}
++
+ 	/* Work-around I218 hang issue */
+ 	if ((hw->adapter->pdev->device == E1000_DEV_ID_PCH_LPTLP_I218_LM) ||
+ 	    (hw->adapter->pdev->device == E1000_DEV_ID_PCH_LPTLP_I218_V)) {
+diff --git a/drivers/net/ethernet/intel/e1000e/ich8lan.h b/drivers/net/ethernet/intel/e1000e/ich8lan.h
+index 8bf4655..00ba6c9 100644
+--- a/drivers/net/ethernet/intel/e1000e/ich8lan.h
++++ b/drivers/net/ethernet/intel/e1000e/ich8lan.h
+@@ -211,6 +211,7 @@
+ #define I82579_MSE_THRESHOLD	0x084F	/* 82579 Mean Square Error Threshold */
+ #define I82577_MSE_THRESHOLD	0x0887	/* 82577 Mean Square Error Threshold */
+ #define I82579_MSE_LINK_DOWN	0x2411	/* MSE count before dropping link */
++#define I82579_RX_CONFIG		0x3412	/* Receive configuration */
+ #define I82579_EEE_PCS_STATUS		0x182D	/* IEEE MMD Register 3.1 >> 8 */
+ #define I82579_EEE_CAPABILITY		0x0410	/* IEEE MMD Register 3.20 */
+ #define I82579_EEE_ADVERTISEMENT	0x040E	/* IEEE MMD Register 7.60 */

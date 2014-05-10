@@ -1,0 +1,71 @@
+From: Jiang Liu <jiang.liu@huawei.com>
+Date: Mon, 20 Aug 2012 13:30:43 -0600
+Subject: [PATCH 121/246] e1000e: Use PCI Express Capability accessors
+Origin: https://git.kernel.org/linus/f8c0fcacfe2e2fd4ee3eadd790959323097004fd
+
+Use PCI Express Capability access functions to simplify e1000e driver.
+
+[bhelgaas: split e1000e and igb into separate patches]
+Signed-off-by: Jiang Liu <jiang.liu@huawei.com>
+Signed-off-by: Yijing Wang <wangyijing@huawei.com>
+Signed-off-by: Bjorn Helgaas <bhelgaas@google.com>
+Acked-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/e1000e/netdev.c | 27 ++++++++-------------------
+ 1 file changed, 8 insertions(+), 19 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/e1000e/netdev.c b/drivers/net/ethernet/intel/e1000e/netdev.c
+index bf93fe2..f8de729 100644
+--- a/drivers/net/ethernet/intel/e1000e/netdev.c
++++ b/drivers/net/ethernet/intel/e1000e/netdev.c
+@@ -5538,16 +5538,15 @@ static void e1000_complete_shutdown(struct pci_dev *pdev, bool sleep,
+ 	 */
+ 	if (adapter->flags & FLAG_IS_QUAD_PORT) {
+ 		struct pci_dev *us_dev = pdev->bus->self;
+-		int pos = pci_pcie_cap(us_dev);
+ 		u16 devctl;
+ 
+-		pci_read_config_word(us_dev, pos + PCI_EXP_DEVCTL, &devctl);
+-		pci_write_config_word(us_dev, pos + PCI_EXP_DEVCTL,
+-		                      (devctl & ~PCI_EXP_DEVCTL_CERE));
++		pcie_capability_read_word(us_dev, PCI_EXP_DEVCTL, &devctl);
++		pcie_capability_write_word(us_dev, PCI_EXP_DEVCTL,
++					   (devctl & ~PCI_EXP_DEVCTL_CERE));
+ 
+ 		e1000_power_off(pdev, sleep, wake);
+ 
+-		pci_write_config_word(us_dev, pos + PCI_EXP_DEVCTL, devctl);
++		pcie_capability_write_word(us_dev, PCI_EXP_DEVCTL, devctl);
+ 	} else {
+ 		e1000_power_off(pdev, sleep, wake);
+ 	}
+@@ -5561,25 +5560,15 @@ static void __e1000e_disable_aspm(struct pci_dev *pdev, u16 state)
+ #else
+ static void __e1000e_disable_aspm(struct pci_dev *pdev, u16 state)
+ {
+-	int pos;
+-	u16 reg16;
+-
+ 	/*
+ 	 * Both device and parent should have the same ASPM setting.
+ 	 * Disable ASPM in downstream component first and then upstream.
+ 	 */
+-	pos = pci_pcie_cap(pdev);
+-	pci_read_config_word(pdev, pos + PCI_EXP_LNKCTL, &reg16);
+-	reg16 &= ~state;
+-	pci_write_config_word(pdev, pos + PCI_EXP_LNKCTL, reg16);
+-
+-	if (!pdev->bus->self)
+-		return;
++	pcie_capability_clear_word(pdev, PCI_EXP_LNKCTL, state);
+ 
+-	pos = pci_pcie_cap(pdev->bus->self);
+-	pci_read_config_word(pdev->bus->self, pos + PCI_EXP_LNKCTL, &reg16);
+-	reg16 &= ~state;
+-	pci_write_config_word(pdev->bus->self, pos + PCI_EXP_LNKCTL, reg16);
++	if (pdev->bus->self)
++		pcie_capability_clear_word(pdev->bus->self, PCI_EXP_LNKCTL,
++					   state);
+ }
+ #endif
+ static void e1000e_disable_aspm(struct pci_dev *pdev, u16 state)

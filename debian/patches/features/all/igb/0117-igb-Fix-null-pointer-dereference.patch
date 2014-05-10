@@ -1,0 +1,47 @@
+From: Alex Williamson <alex.williamson@redhat.com>
+Date: Wed, 13 Mar 2013 15:50:24 +0000
+Subject: [PATCH 117/179] igb: Fix null pointer dereference
+Origin: https://git.kernel.org/linus/d0f63acc2ff354a525f7bc7ba90e81f49b6c2ef8
+
+The max_vfs= option has always been self limiting to the number of VFs
+supported by the device.  fa44f2f1 added SR-IOV configuration via
+sysfs, but in the process broke this self correction factor.  The
+failing path is:
+
+igb_probe
+  igb_sw_init
+    if (max_vfs > 7) {
+        adapter->vfs_allocated_count = 7;
+    ...
+    igb_probe_vfs
+    igb_enable_sriov(, max_vfs)
+      if (num_vfs > 7) {
+        err = -EPERM;
+        ...
+
+This leaves vfs_allocated_count = 7 and vf_data = NULL, so we bomb out
+when igb_probe finally calls igb_reset.  It seems like a really bad
+idea, and somewhat pointless, to set vfs_allocated_count separate from
+vf_data, but limiting max_vfs is enough to avoid the null pointer.
+
+Signed-off-by: Alex Williamson <alex.williamson@redhat.com>
+Acked-by: Greg Rose <gregory.v.rose@intel.com>
+Tested-by: Aaron Brown <aaron.f.brown@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/igb/igb_main.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/intel/igb/igb_main.c b/drivers/net/ethernet/intel/igb/igb_main.c
+index 6ddce8d..817b81b 100644
+--- a/drivers/net/ethernet/intel/igb/igb_main.c
++++ b/drivers/net/ethernet/intel/igb/igb_main.c
+@@ -2539,7 +2539,7 @@ static int igb_sw_init(struct igb_adapter *adapter)
+ 		if (max_vfs > 7) {
+ 			dev_warn(&pdev->dev,
+ 				 "Maximum of 7 VFs per PF, using max\n");
+-			adapter->vfs_allocated_count = 7;
++			max_vfs = adapter->vfs_allocated_count = 7;
+ 		} else
+ 			adapter->vfs_allocated_count = max_vfs;
+ 		break;

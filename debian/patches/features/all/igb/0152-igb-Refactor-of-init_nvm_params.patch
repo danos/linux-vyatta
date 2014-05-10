@@ -1,0 +1,265 @@
+From: Carolyn Wyborny <carolyn.wyborny@intel.com>
+Date: Tue, 16 Jul 2013 19:17:32 +0000
+Subject: [PATCH 152/179] igb: Refactor of init_nvm_params
+Origin: https://git.kernel.org/linus/5a823d8cdd0e16081bc09a03fa253b9750c4b034
+
+This patch refactors the init_nvm_params functions for 82575 and adds a new
+function for the i210/i211 devices in order to configure separately the NVM
+functionality for the i210/i211 family.
+
+Signed-off-by: Carolyn Wyborny <carolyn.wyborny@intel.com>
+Tested-by: Aaron Brown <aaron.f.brown@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/igb/e1000_82575.c   | 106 ++++++++++---------------
+ drivers/net/ethernet/intel/igb/e1000_defines.h |   1 +
+ drivers/net/ethernet/intel/igb/e1000_hw.h      |   1 +
+ drivers/net/ethernet/intel/igb/e1000_i210.c    |  47 +++++++++++
+ drivers/net/ethernet/intel/igb/e1000_i210.h    |   2 +
+ 5 files changed, 92 insertions(+), 65 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/igb/e1000_82575.c b/drivers/net/ethernet/intel/igb/e1000_82575.c
+index 9057d10..8d79fac 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_82575.c
++++ b/drivers/net/ethernet/intel/igb/e1000_82575.c
+@@ -238,6 +238,7 @@ static s32 igb_init_nvm_params_82575(struct e1000_hw *hw)
+ 
+ 	size = (u16)((eecd & E1000_EECD_SIZE_EX_MASK) >>
+ 		     E1000_EECD_SIZE_EX_SHIFT);
++
+ 	/* Added to a constant, "size" becomes the left-shift value
+ 	 * for setting word_size.
+ 	 */
+@@ -250,86 +251,52 @@ static s32 igb_init_nvm_params_82575(struct e1000_hw *hw)
+ 		size = 15;
+ 
+ 	nvm->word_size = 1 << size;
+-	if (hw->mac.type < e1000_i210) {
+-		nvm->opcode_bits = 8;
+-		nvm->delay_usec = 1;
+-
+-		switch (nvm->override) {
+-		case e1000_nvm_override_spi_large:
+-			nvm->page_size = 32;
+-			nvm->address_bits = 16;
+-			break;
+-		case e1000_nvm_override_spi_small:
+-			nvm->page_size = 8;
+-			nvm->address_bits = 8;
+-			break;
+-		default:
+-			nvm->page_size = eecd & E1000_EECD_ADDR_BITS ? 32 : 8;
+-			nvm->address_bits = eecd & E1000_EECD_ADDR_BITS ?
+-					    16 : 8;
+-			break;
+-		}
+-		if (nvm->word_size == (1 << 15))
+-			nvm->page_size = 128;
++	nvm->opcode_bits = 8;
++	nvm->delay_usec = 1;
+ 
+-		nvm->type = e1000_nvm_eeprom_spi;
+-	} else {
+-		nvm->type = e1000_nvm_flash_hw;
++	switch (nvm->override) {
++	case e1000_nvm_override_spi_large:
++		nvm->page_size = 32;
++		nvm->address_bits = 16;
++		break;
++	case e1000_nvm_override_spi_small:
++		nvm->page_size = 8;
++		nvm->address_bits = 8;
++		break;
++	default:
++		nvm->page_size = eecd & E1000_EECD_ADDR_BITS ? 32 : 8;
++		nvm->address_bits = eecd & E1000_EECD_ADDR_BITS ?
++				    16 : 8;
++		break;
+ 	}
++	if (nvm->word_size == (1 << 15))
++		nvm->page_size = 128;
++
++	nvm->type = e1000_nvm_eeprom_spi;
+ 
+ 	/* NVM Function Pointers */
++	nvm->ops.acquire = igb_acquire_nvm_82575;
++	nvm->ops.release = igb_release_nvm_82575;
++	nvm->ops.write = igb_write_nvm_spi;
++	nvm->ops.validate = igb_validate_nvm_checksum;
++	nvm->ops.update = igb_update_nvm_checksum;
++	if (nvm->word_size < (1 << 15))
++		nvm->ops.read = igb_read_nvm_eerd;
++	else
++		nvm->ops.read = igb_read_nvm_spi;
++
++	/* override generic family function pointers for specific descendants */
+ 	switch (hw->mac.type) {
+ 	case e1000_82580:
+ 		nvm->ops.validate = igb_validate_nvm_checksum_82580;
+ 		nvm->ops.update = igb_update_nvm_checksum_82580;
+-		nvm->ops.acquire = igb_acquire_nvm_82575;
+-		nvm->ops.release = igb_release_nvm_82575;
+-		if (nvm->word_size < (1 << 15))
+-			nvm->ops.read = igb_read_nvm_eerd;
+-		else
+-			nvm->ops.read = igb_read_nvm_spi;
+-		nvm->ops.write = igb_write_nvm_spi;
+ 		break;
+ 	case e1000_i354:
+ 	case e1000_i350:
+ 		nvm->ops.validate = igb_validate_nvm_checksum_i350;
+ 		nvm->ops.update = igb_update_nvm_checksum_i350;
+-		nvm->ops.acquire = igb_acquire_nvm_82575;
+-		nvm->ops.release = igb_release_nvm_82575;
+-		if (nvm->word_size < (1 << 15))
+-			nvm->ops.read = igb_read_nvm_eerd;
+-		else
+-			nvm->ops.read = igb_read_nvm_spi;
+-		nvm->ops.write = igb_write_nvm_spi;
+-		break;
+-	case e1000_i210:
+-		nvm->ops.validate = igb_validate_nvm_checksum_i210;
+-		nvm->ops.update   = igb_update_nvm_checksum_i210;
+-		nvm->ops.acquire = igb_acquire_nvm_i210;
+-		nvm->ops.release = igb_release_nvm_i210;
+-		nvm->ops.read    = igb_read_nvm_srrd_i210;
+-		nvm->ops.write   = igb_write_nvm_srwr_i210;
+-		nvm->ops.valid_led_default = igb_valid_led_default_i210;
+-		break;
+-	case e1000_i211:
+-		nvm->ops.acquire  = igb_acquire_nvm_i210;
+-		nvm->ops.release  = igb_release_nvm_i210;
+-		nvm->ops.read     = igb_read_nvm_i211;
+-		nvm->ops.valid_led_default = igb_valid_led_default_i210;
+-		nvm->ops.validate = NULL;
+-		nvm->ops.update   = NULL;
+-		nvm->ops.write    = NULL;
+ 		break;
+ 	default:
+-		nvm->ops.validate = igb_validate_nvm_checksum;
+-		nvm->ops.update = igb_update_nvm_checksum;
+-		nvm->ops.acquire = igb_acquire_nvm_82575;
+-		nvm->ops.release = igb_release_nvm_82575;
+-		if (nvm->word_size < (1 << 15))
+-			nvm->ops.read = igb_read_nvm_eerd;
+-		else
+-			nvm->ops.read = igb_read_nvm_spi;
+-		nvm->ops.write = igb_write_nvm_spi;
+ 		break;
+ 	}
+ 
+@@ -601,6 +568,15 @@ static s32 igb_get_invariants_82575(struct e1000_hw *hw)
+ 
+ 	/* NVM initialization */
+ 	ret_val = igb_init_nvm_params_82575(hw);
++	switch (hw->mac.type) {
++	case e1000_i210:
++	case e1000_i211:
++		ret_val = igb_init_nvm_params_i210(hw);
++		break;
++	default:
++		break;
++	}
++
+ 	if (ret_val)
+ 		goto out;
+ 
+diff --git a/drivers/net/ethernet/intel/igb/e1000_defines.h b/drivers/net/ethernet/intel/igb/e1000_defines.h
+index a8db43d..502bdcc 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_defines.h
++++ b/drivers/net/ethernet/intel/igb/e1000_defines.h
+@@ -618,6 +618,7 @@
+ #define E1000_EECD_SIZE_EX_SHIFT     11
+ #define E1000_EECD_FLUPD_I210		0x00800000 /* Update FLASH */
+ #define E1000_EECD_FLUDONE_I210		0x04000000 /* Update FLASH done*/
++#define E1000_EECD_FLASH_DETECTED_I210	0x00080000 /* FLASH detected */
+ #define E1000_FLUDONE_ATTEMPTS		20000
+ #define E1000_EERD_EEWR_MAX_COUNT	512 /* buffered EEPROM words rw */
+ #define E1000_I210_FIFO_SEL_RX		0x00
+diff --git a/drivers/net/ethernet/intel/igb/e1000_hw.h b/drivers/net/ethernet/intel/igb/e1000_hw.h
+index 94d7866..4329e8c 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_hw.h
++++ b/drivers/net/ethernet/intel/igb/e1000_hw.h
+@@ -110,6 +110,7 @@ enum e1000_nvm_type {
+ 	e1000_nvm_none,
+ 	e1000_nvm_eeprom_spi,
+ 	e1000_nvm_flash_hw,
++	e1000_nvm_invm,
+ 	e1000_nvm_flash_sw
+ };
+ 
+diff --git a/drivers/net/ethernet/intel/igb/e1000_i210.c b/drivers/net/ethernet/intel/igb/e1000_i210.c
+index ddb3cf5..4aebf35 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_i210.c
++++ b/drivers/net/ethernet/intel/igb/e1000_i210.c
+@@ -661,6 +661,23 @@ static s32 igb_pool_flash_update_done_i210(struct e1000_hw *hw)
+ }
+ 
+ /**
++ *  igb_get_flash_presence_i210 - Check if flash device is detected.
++ *  @hw: pointer to the HW structure
++ *
++ **/
++bool igb_get_flash_presence_i210(struct e1000_hw *hw)
++{
++	u32 eec = 0;
++	bool ret_val = false;
++
++	eec = rd32(E1000_EECD);
++	if (eec & E1000_EECD_FLASH_DETECTED_I210)
++		ret_val = true;
++
++	return ret_val;
++}
++
++/**
+  *  igb_update_flash_i210 - Commit EEPROM to the flash
+  *  @hw: pointer to the HW structure
+  *
+@@ -786,3 +803,33 @@ s32 igb_write_xmdio_reg(struct e1000_hw *hw, u16 addr, u8 dev_addr, u16 data)
+ {
+ 	return __igb_access_xmdio_reg(hw, addr, dev_addr, &data, false);
+ }
++
++/**
++ *  igb_init_nvm_params_i210 - Init NVM func ptrs.
++ *  @hw: pointer to the HW structure
++ **/
++s32 igb_init_nvm_params_i210(struct e1000_hw *hw)
++{
++	s32 ret_val = 0;
++	struct e1000_nvm_info *nvm = &hw->nvm;
++
++	nvm->ops.acquire = igb_acquire_nvm_i210;
++	nvm->ops.release = igb_release_nvm_i210;
++	nvm->ops.valid_led_default = igb_valid_led_default_i210;
++
++	/* NVM Function Pointers */
++	if (igb_get_flash_presence_i210(hw)) {
++		hw->nvm.type = e1000_nvm_flash_hw;
++		nvm->ops.read    = igb_read_nvm_srrd_i210;
++		nvm->ops.write   = igb_write_nvm_srwr_i210;
++		nvm->ops.validate = igb_validate_nvm_checksum_i210;
++		nvm->ops.update   = igb_update_nvm_checksum_i210;
++	} else {
++		hw->nvm.type = e1000_nvm_invm;
++		nvm->ops.read     = igb_read_nvm_i211;
++		nvm->ops.write    = NULL;
++		nvm->ops.validate = NULL;
++		nvm->ops.update   = NULL;
++	}
++	return ret_val;
++}
+diff --git a/drivers/net/ethernet/intel/igb/e1000_i210.h b/drivers/net/ethernet/intel/igb/e1000_i210.h
+index 5caa332..a2a1f70 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_i210.h
++++ b/drivers/net/ethernet/intel/igb/e1000_i210.h
+@@ -49,6 +49,8 @@ extern s32 igb_read_xmdio_reg(struct e1000_hw *hw, u16 addr, u8 dev_addr,
+ 			      u16 *data);
+ extern s32 igb_write_xmdio_reg(struct e1000_hw *hw, u16 addr, u8 dev_addr,
+ 			       u16 data);
++extern s32 igb_init_nvm_params_i210(struct e1000_hw *hw);
++extern bool igb_get_flash_presence_i210(struct e1000_hw *hw);
+ 
+ #define E1000_STM_OPCODE		0xDB00
+ #define E1000_EEPROM_FLASH_SIZE_WORD	0x11

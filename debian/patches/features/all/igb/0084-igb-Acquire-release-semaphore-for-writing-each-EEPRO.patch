@@ -1,0 +1,79 @@
+From: "Akeem G. Abodunrin" <akeem.g.abodunrin@intel.com>
+Date: Sat, 3 Nov 2012 03:08:41 +0000
+Subject: [PATCH 084/179] igb: Acquire, release semaphore for writing each
+ EEPROM page
+Origin: https://git.kernel.org/linus/23e0f1488f193d53d282404c1ab50112cb237341
+
+This patch allows software acquires and releases NVM resource for
+writing each EEPROM page, instead of holding semaphore for the whole
+data block which is too long and could trigger write fails on
+unpredictable addresses.
+
+Signed-off-by: Akeem G Abodunrin <akeem.g.abodunrin@intel.com>
+Tested-by: Jeff Pieper <jeffrey.e.pieper@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/igb/e1000_nvm.c | 28 ++++++++++++----------------
+ 1 file changed, 12 insertions(+), 16 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/igb/e1000_nvm.c b/drivers/net/ethernet/intel/igb/e1000_nvm.c
+index 7db3f80..fbb7604 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_nvm.c
++++ b/drivers/net/ethernet/intel/igb/e1000_nvm.c
+@@ -438,7 +438,7 @@ out:
+ s32 igb_write_nvm_spi(struct e1000_hw *hw, u16 offset, u16 words, u16 *data)
+ {
+ 	struct e1000_nvm_info *nvm = &hw->nvm;
+-	s32 ret_val;
++	s32 ret_val = -E1000_ERR_NVM;
+ 	u16 widx = 0;
+ 
+ 	/*
+@@ -448,22 +448,21 @@ s32 igb_write_nvm_spi(struct e1000_hw *hw, u16 offset, u16 words, u16 *data)
+ 	if ((offset >= nvm->word_size) || (words > (nvm->word_size - offset)) ||
+ 	    (words == 0)) {
+ 		hw_dbg("nvm parameter(s) out of bounds\n");
+-		ret_val = -E1000_ERR_NVM;
+-		goto out;
++		return ret_val;
+ 	}
+ 
+-	ret_val = hw->nvm.ops.acquire(hw);
+-	if (ret_val)
+-		goto out;
+-
+-	msleep(10);
+-
+ 	while (widx < words) {
+ 		u8 write_opcode = NVM_WRITE_OPCODE_SPI;
+ 
+-		ret_val = igb_ready_nvm_eeprom(hw);
++		ret_val = nvm->ops.acquire(hw);
+ 		if (ret_val)
+-			goto release;
++			return ret_val;
++
++		ret_val = igb_ready_nvm_eeprom(hw);
++		if (ret_val) {
++			nvm->ops.release(hw);
++			return ret_val;
++		}
+ 
+ 		igb_standby_nvm(hw);
+ 
+@@ -497,13 +496,10 @@ s32 igb_write_nvm_spi(struct e1000_hw *hw, u16 offset, u16 words, u16 *data)
+ 				break;
+ 			}
+ 		}
++		usleep_range(1000, 2000);
++		nvm->ops.release(hw);
+ 	}
+ 
+-	msleep(10);
+-release:
+-	hw->nvm.ops.release(hw);
+-
+-out:
+ 	return ret_val;
+ }
+ 

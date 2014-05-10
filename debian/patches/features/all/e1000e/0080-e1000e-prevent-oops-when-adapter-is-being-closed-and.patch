@@ -1,0 +1,62 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Wed, 21 Mar 2012 00:39:12 +0000
+Subject: [PATCH 080/246] e1000e: prevent oops when adapter is being closed and
+ reset simultaneously
+Origin: https://git.kernel.org/linus/bb9e44d0d0f45da356c39e485edacff6e14ba961
+
+When the adapter is closed while it is simultaneously going through a
+reset, it can cause a null-pointer dereference when the two different code
+paths simultaneously cleanup up the Tx/Rx resources.
+
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Tested-by: Aaron Brown <aaron.f.brown@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/e1000e/e1000.h  | 6 ++++++
+ drivers/net/ethernet/intel/e1000e/netdev.c | 9 +++++++++
+ 2 files changed, 15 insertions(+)
+
+diff --git a/drivers/net/ethernet/intel/e1000e/e1000.h b/drivers/net/ethernet/intel/e1000e/e1000.h
+index 916a995..4b0b548 100644
+--- a/drivers/net/ethernet/intel/e1000e/e1000.h
++++ b/drivers/net/ethernet/intel/e1000e/e1000.h
+@@ -161,6 +161,12 @@ struct e1000_info;
+ /* Time to wait before putting the device into D3 if there's no link (in ms). */
+ #define LINK_TIMEOUT		100
+ 
++/*
++ * Count for polling __E1000_RESET condition every 10-20msec.
++ * Experimentation has shown the reset can take approximately 210msec.
++ */
++#define E1000_CHECK_RESET_COUNT		25
++
+ #define DEFAULT_RDTR			0
+ #define DEFAULT_RADV			8
+ #define BURST_RDTR			0x20
+diff --git a/drivers/net/ethernet/intel/e1000e/netdev.c b/drivers/net/ethernet/intel/e1000e/netdev.c
+index 9912cde..aea72f0 100644
+--- a/drivers/net/ethernet/intel/e1000e/netdev.c
++++ b/drivers/net/ethernet/intel/e1000e/netdev.c
+@@ -3942,6 +3942,10 @@ static int e1000_close(struct net_device *netdev)
+ {
+ 	struct e1000_adapter *adapter = netdev_priv(netdev);
+ 	struct pci_dev *pdev = adapter->pdev;
++	int count = E1000_CHECK_RESET_COUNT;
++
++	while (test_bit(__E1000_RESETTING, &adapter->state) && count--)
++		usleep_range(10000, 20000);
+ 
+ 	WARN_ON(test_bit(__E1000_RESETTING, &adapter->state));
+ 
+@@ -5416,6 +5420,11 @@ static int __e1000_shutdown(struct pci_dev *pdev, bool *enable_wake,
+ 	netif_device_detach(netdev);
+ 
+ 	if (netif_running(netdev)) {
++		int count = E1000_CHECK_RESET_COUNT;
++
++		while (test_bit(__E1000_RESETTING, &adapter->state) && count--)
++			usleep_range(10000, 20000);
++
+ 		WARN_ON(test_bit(__E1000_RESETTING, &adapter->state));
+ 		e1000e_down(adapter);
+ 		e1000_free_irq(adapter);

@@ -1,0 +1,69 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Wed, 5 Dec 2012 06:25:36 +0000
+Subject: [PATCH 151/246] e1000e: fix ethtool offline register test for I217
+Origin: https://git.kernel.org/linus/a8fc18910b7f35a59345b5f5cd140c7f64d57d86
+
+The SHRAH[9] register on I217 has a different R/W bit-mask than RAR and
+SHRAL/H registers.  Set R/W bit-mask appropriately for SHRAH[9] when
+testing the R/W ability of the register.  Also, fix the error message log
+format so that it does not provide misleading information (i.e. the logged
+register address could be incorrect).
+
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Tested-by: Jeff Pieper <jeffrey.e.pieper@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/e1000e/ethtool.c | 25 +++++++++++++++++--------
+ 1 file changed, 17 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/e1000e/ethtool.c b/drivers/net/ethernet/intel/e1000e/ethtool.c
+index fd1744e..2903a16 100644
+--- a/drivers/net/ethernet/intel/e1000e/ethtool.c
++++ b/drivers/net/ethernet/intel/e1000e/ethtool.c
+@@ -724,8 +724,9 @@ static bool reg_pattern_test(struct e1000_adapter *adapter, u64 *data,
+ 				      (test[pat] & write));
+ 		val = E1000_READ_REG_ARRAY(&adapter->hw, reg, offset);
+ 		if (val != (test[pat] & write & mask)) {
+-			e_err("pattern test reg %04X failed: got 0x%08X expected 0x%08X\n",
+-			      reg + offset, val, (test[pat] & write & mask));
++			e_err("pattern test failed (reg 0x%05X): got 0x%08X expected 0x%08X\n",
++			      reg + (offset << 2), val,
++			      (test[pat] & write & mask));
+ 			*data = reg;
+ 			return 1;
+ 		}
+@@ -740,7 +741,7 @@ static bool reg_set_and_check(struct e1000_adapter *adapter, u64 *data,
+ 	__ew32(&adapter->hw, reg, write & mask);
+ 	val = __er32(&adapter->hw, reg);
+ 	if ((write & mask) != (val & mask)) {
+-		e_err("set/check reg %04X test failed: got 0x%08X expected 0x%08X\n",
++		e_err("set/check test failed (reg 0x%05X): got 0x%08X expected 0x%08X\n",
+ 		      reg, (val & mask), (write & mask));
+ 		*data = reg;
+ 		return 1;
+@@ -848,12 +849,20 @@ static int e1000_reg_test(struct e1000_adapter *adapter, u64 *data)
+ 		    E1000_FWSM_WLOCK_MAC_SHIFT;
+ 
+ 	for (i = 0; i < mac->rar_entry_count; i++) {
+-		/* Cannot test write-protected SHRAL[n] registers */
+-		if ((wlock_mac == 1) || (wlock_mac && (i > wlock_mac)))
+-			continue;
++		if (mac->type == e1000_pch_lpt) {
++			/* Cannot test write-protected SHRAL[n] registers */
++			if ((wlock_mac == 1) || (wlock_mac && (i > wlock_mac)))
++				continue;
++
++			/* SHRAH[9] different than the others */
++			if (i == 10)
++				mask |= (1 << 30);
++			else
++				mask &= ~(1 << 30);
++		}
+ 
+-		REG_PATTERN_TEST_ARRAY(E1000_RA, ((i << 1) + 1),
+-				       mask, 0xFFFFFFFF);
++		REG_PATTERN_TEST_ARRAY(E1000_RA, ((i << 1) + 1), mask,
++				       0xFFFFFFFF);
+ 	}
+ 
+ 	for (i = 0; i < mac->mta_reg_count; i++)

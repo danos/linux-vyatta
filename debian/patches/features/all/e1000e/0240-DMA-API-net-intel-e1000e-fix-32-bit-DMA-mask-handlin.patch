@@ -1,0 +1,67 @@
+From: Russell King <rmk+kernel@arm.linux.org.uk>
+Date: Mon, 10 Jun 2013 12:22:30 +0100
+Subject: [PATCH 240/246] DMA-API: net: intel/e1000e: fix 32-bit DMA mask
+ handling
+Origin: https://git.kernel.org/linus/718a39eb587e038f7ded076afcfd8d709879139f
+
+The fallback to 32-bit DMA mask is rather odd:
+	err = dma_set_mask(&pdev->dev, DMA_BIT_MASK(64));
+	if (!err) {
+		err = dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(64));
+		if (!err)
+			pci_using_dac = 1;
+	} else {
+		err = dma_set_mask(&pdev->dev, DMA_BIT_MASK(32));
+		if (err) {
+			err = dma_set_coherent_mask(&pdev->dev,
+						    DMA_BIT_MASK(32));
+			if (err) {
+				dev_err(&pdev->dev,
+					"No usable DMA configuration, aborting\n");
+				goto err_dma;
+			}
+		}
+	}
+This means we only set the coherent DMA mask in the fallback path if
+the DMA mask set failed, which is silly.  This fixes it to set the
+coherent DMA mask only if dma_set_mask() succeeded, and to error out
+if either fails.
+
+Acked-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+Signed-off-by: Russell King <rmk+kernel@arm.linux.org.uk>
+---
+ drivers/net/ethernet/intel/e1000e/netdev.c | 18 ++++++------------
+ 1 file changed, 6 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/e1000e/netdev.c b/drivers/net/ethernet/intel/e1000e/netdev.c
+index 7605472..fd8b898 100644
+--- a/drivers/net/ethernet/intel/e1000e/netdev.c
++++ b/drivers/net/ethernet/intel/e1000e/netdev.c
+@@ -6487,21 +6487,15 @@ static int e1000_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+ 		return err;
+ 
+ 	pci_using_dac = 0;
+-	err = dma_set_mask(&pdev->dev, DMA_BIT_MASK(64));
++	err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
+ 	if (!err) {
+-		err = dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(64));
+-		if (!err)
+-			pci_using_dac = 1;
++		pci_using_dac = 1;
+ 	} else {
+-		err = dma_set_mask(&pdev->dev, DMA_BIT_MASK(32));
++		err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
+ 		if (err) {
+-			err = dma_set_coherent_mask(&pdev->dev,
+-						    DMA_BIT_MASK(32));
+-			if (err) {
+-				dev_err(&pdev->dev,
+-					"No usable DMA configuration, aborting\n");
+-				goto err_dma;
+-			}
++			dev_err(&pdev->dev,
++				"No usable DMA configuration, aborting\n");
++			goto err_dma;
+ 		}
+ 	}
+ 

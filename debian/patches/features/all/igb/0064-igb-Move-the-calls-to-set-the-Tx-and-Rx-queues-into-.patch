@@ -1,0 +1,109 @@
+From: Alexander Duyck <alexander.h.duyck@intel.com>
+Date: Tue, 25 Sep 2012 00:31:22 +0000
+Subject: [PATCH 064/179] igb: Move the calls to set the Tx and Rx queues into
+ igb_open
+Origin: https://git.kernel.org/linus/0c2cc02e571aee1f2193a004508d4d604eff6a8f
+
+This change helps to address locking issues seen with
+netif_set_real_num_tx_queues and netif_set_real_num_rx_queues when used in
+the igb_set_interrupt_capability function.  To resolve these locking issues
+I have moved the two function calls into __igb_open so that they can be
+called while the RTNL lock is held.
+
+An added advantage to this is that the number of queues is not updated
+until the last possible moment so if there are any issues in allocating
+MSI-X interrupts or resources for the rings we have time to change the
+values prior to updating the netdev.
+
+Signed-off-by: Alexander Duyck <alexander.h.duyck@intel.com>
+Tested-by: Aaron Brown <aaron.f.brown@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/igb/igb_main.c | 31 ++++++++++++++++++-------------
+ 1 file changed, 18 insertions(+), 13 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/igb/igb_main.c b/drivers/net/ethernet/intel/igb/igb_main.c
+index a755ff6..2b0e968 100644
+--- a/drivers/net/ethernet/intel/igb/igb_main.c
++++ b/drivers/net/ethernet/intel/igb/igb_main.c
+@@ -958,7 +958,7 @@ static void igb_clear_interrupt_scheme(struct igb_adapter *adapter)
+  * Attempt to configure interrupts using the best available
+  * capabilities of the hardware and kernel.
+  **/
+-static int igb_set_interrupt_capability(struct igb_adapter *adapter)
++static void igb_set_interrupt_capability(struct igb_adapter *adapter)
+ {
+ 	int err;
+ 	int numvecs, i;
+@@ -995,7 +995,7 @@ static int igb_set_interrupt_capability(struct igb_adapter *adapter)
+ 			      adapter->msix_entries,
+ 			      numvecs);
+ 	if (err == 0)
+-		goto out;
++		return;
+ 
+ 	igb_reset_interrupt_capability(adapter);
+ 
+@@ -1025,14 +1025,6 @@ msi_only:
+ 	adapter->num_q_vectors = 1;
+ 	if (!pci_enable_msi(adapter->pdev))
+ 		adapter->flags |= IGB_FLAG_HAS_MSI;
+-out:
+-	/* Notify the stack of the (possibly) reduced queue counts. */
+-	rtnl_lock();
+-	netif_set_real_num_tx_queues(adapter->netdev, adapter->num_tx_queues);
+-	err = netif_set_real_num_rx_queues(adapter->netdev,
+-		adapter->num_rx_queues);
+-	rtnl_unlock();
+-	return err;
+ }
+ 
+ static void igb_add_ring(struct igb_ring *ring,
+@@ -1222,9 +1214,7 @@ static int igb_init_interrupt_scheme(struct igb_adapter *adapter)
+ 	struct pci_dev *pdev = adapter->pdev;
+ 	int err;
+ 
+-	err = igb_set_interrupt_capability(adapter);
+-	if (err)
+-		return err;
++	igb_set_interrupt_capability(adapter);
+ 
+ 	err = igb_alloc_q_vectors(adapter);
+ 	if (err) {
+@@ -2539,6 +2529,17 @@ static int __igb_open(struct net_device *netdev, bool resuming)
+ 	if (err)
+ 		goto err_req_irq;
+ 
++	/* Notify the stack of the actual queue counts. */
++	err = netif_set_real_num_tx_queues(adapter->netdev,
++					   adapter->num_tx_queues);
++	if (err)
++		goto err_set_queues;
++
++	err = netif_set_real_num_rx_queues(adapter->netdev,
++					   adapter->num_rx_queues);
++	if (err)
++		goto err_set_queues;
++
+ 	/* From here on the code is the same as igb_up() */
+ 	clear_bit(__IGB_DOWN, &adapter->state);
+ 
+@@ -2568,6 +2569,8 @@ static int __igb_open(struct net_device *netdev, bool resuming)
+ 
+ 	return 0;
+ 
++err_set_queues:
++	igb_free_irq(adapter);
+ err_req_irq:
+ 	igb_release_hw_control(adapter);
+ 	igb_power_down_link(adapter);
+@@ -6808,7 +6811,9 @@ static int igb_resume(struct device *dev)
+ 	wr32(E1000_WUS, ~0);
+ 
+ 	if (netdev->flags & IFF_UP) {
++		rtnl_lock();
+ 		err = __igb_open(netdev, true);
++		rtnl_unlock();
+ 		if (err)
+ 			return err;
+ 	}

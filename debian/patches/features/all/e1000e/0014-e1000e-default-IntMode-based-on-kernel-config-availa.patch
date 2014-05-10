@@ -1,0 +1,99 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Fri, 16 Dec 2011 00:45:56 +0000
+Subject: [PATCH 014/246] e1000e: default IntMode based on kernel config &
+ available hardware support
+Origin: https://git.kernel.org/linus/b6fbca2af36530ef307069cff0fe3b1f387c00a9
+
+Based on a patch from Prabhakar Kushwaha <prabhakar@freescale.com>, set
+appropriate default interrupt mode dependent on whether CONFIG_PCI_MSI
+is enabled in the kernel configuration and if the hardware supports
+MSI-X.  Set the module parameter log message accordingly.
+
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Cc: Jin Qing <b24347@freescale.com>
+Cc: Prabhakar Kushwaha <prabhakar@freescale.com>
+Cc: Jin Qing <b24347@freescale.com>
+Cc: Kumar Gala <galak@kernel.crashing.org>
+Tested-by: Aaron Brown <aaron.f.brown@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/e1000e/param.c | 48 ++++++++++++++++++++++++++-----
+ 1 file changed, 41 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/e1000e/param.c b/drivers/net/ethernet/intel/e1000e/param.c
+index 20e93b0..40664f5 100644
+--- a/drivers/net/ethernet/intel/e1000e/param.c
++++ b/drivers/net/ethernet/intel/e1000e/param.c
+@@ -113,11 +113,20 @@ E1000_PARAM(InterruptThrottleRate, "Interrupt Throttling Rate");
+ #define MAX_ITR 100000
+ #define MIN_ITR 100
+ 
+-/* IntMode (Interrupt Mode)
++/*
++ * IntMode (Interrupt Mode)
++ *
++ * Valid Range: varies depending on kernel configuration & hardware support
++ *
++ * legacy=0, MSI=1, MSI-X=2
+  *
+- * Valid Range: 0 - 2
++ * When MSI/MSI-X support is enabled in kernel-
++ *   Default Value: 2 (MSI-X) when supported by hardware, 1 (MSI) otherwise
++ * When MSI/MSI-X support is not enabled in kernel-
++ *   Default Value: 0 (legacy)
+  *
+- * Default Value: 2 (MSI-X)
++ * When a mode is specified that is not allowed/supported, it will be
++ * demoted to the most advanced interrupt mode available.
+  */
+ E1000_PARAM(IntMode, "Interrupt Mode");
+ #define MAX_INTMODE	2
+@@ -388,12 +397,33 @@ void __devinit e1000e_check_options(struct e1000_adapter *adapter)
+ 		static struct e1000_option opt = {
+ 			.type = range_option,
+ 			.name = "Interrupt Mode",
+-			.err  = "defaulting to 2 (MSI-X)",
+-			.def  = E1000E_INT_MODE_MSIX,
+-			.arg  = { .r = { .min = MIN_INTMODE,
+-					 .max = MAX_INTMODE } }
++#ifndef CONFIG_PCI_MSI
++			.err  = "defaulting to 0 (legacy)",
++			.def  = E1000E_INT_MODE_LEGACY,
++			.arg  = { .r = { .min = 0,
++					 .max = 0 } }
++#endif
+ 		};
+ 
++#ifdef CONFIG_PCI_MSI
++		if (adapter->flags & FLAG_HAS_MSIX) {
++			opt.err = kstrdup("defaulting to 2 (MSI-X)",
++					  GFP_KERNEL);
++			opt.def = E1000E_INT_MODE_MSIX;
++			opt.arg.r.max = E1000E_INT_MODE_MSIX;
++		} else {
++			opt.err = kstrdup("defaulting to 1 (MSI)", GFP_KERNEL);
++			opt.def = E1000E_INT_MODE_MSI;
++			opt.arg.r.max = E1000E_INT_MODE_MSI;
++		}
++
++		if (!opt.err) {
++			dev_err(&adapter->pdev->dev,
++				"Failed to allocate memory\n");
++			return;
++		}
++#endif
++
+ 		if (num_IntMode > bd) {
+ 			unsigned int int_mode = IntMode[bd];
+ 			e1000_validate_option(&int_mode, &opt, adapter);
+@@ -401,6 +431,10 @@ void __devinit e1000e_check_options(struct e1000_adapter *adapter)
+ 		} else {
+ 			adapter->int_mode = opt.def;
+ 		}
++
++#ifdef CONFIG_PCI_MSI
++		kfree(opt.err);
++#endif
+ 	}
+ 	{ /* Smart Power Down */
+ 		static const struct e1000_option opt = {

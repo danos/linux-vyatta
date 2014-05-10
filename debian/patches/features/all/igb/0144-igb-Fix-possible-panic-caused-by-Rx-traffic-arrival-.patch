@@ -1,0 +1,37 @@
+From: Carolyn Wyborny <carolyn.wyborny@intel.com>
+Date: Tue, 30 Apr 2013 00:21:32 +0000
+Subject: [PATCH 144/179] igb: Fix possible panic caused by Rx traffic arrival
+ while interface is down
+Origin: https://git.kernel.org/linus/41f149a285da21529bc9a0bad323df53b2f17b16
+
+This patch reorders disabling napi and irqs during igb_down.
+This is done to avoid possible panic's found in other Intel drivers
+when Rx traffic arrives while interface is going down.
+
+Signed-off-by: Carolyn Wyborny <carolyn.wyborny@intel.com>
+Tested-by: Aaron Brown <aaron.f.brown@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/igb/igb_main.c | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/igb/igb_main.c b/drivers/net/ethernet/intel/igb/igb_main.c
+index b0b2425..24737ee 100644
+--- a/drivers/net/ethernet/intel/igb/igb_main.c
++++ b/drivers/net/ethernet/intel/igb/igb_main.c
+@@ -1666,10 +1666,13 @@ void igb_down(struct igb_adapter *adapter)
+ 	wrfl();
+ 	msleep(10);
+ 
+-	for (i = 0; i < adapter->num_q_vectors; i++)
++	igb_irq_disable(adapter);
++
++	for (i = 0; i < adapter->num_q_vectors; i++) {
++		napi_synchronize(&(adapter->q_vector[i]->napi));
+ 		napi_disable(&(adapter->q_vector[i]->napi));
++	}
+ 
+-	igb_irq_disable(adapter);
+ 
+ 	del_timer_sync(&adapter->watchdog_timer);
+ 	del_timer_sync(&adapter->phy_info_timer);

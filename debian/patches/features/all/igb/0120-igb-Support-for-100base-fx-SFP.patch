@@ -1,0 +1,149 @@
+From: "Akeem G. Abodunrin" <akeem.g.abodunrin@intel.com>
+Date: Fri, 5 Apr 2013 16:49:06 +0000
+Subject: [PATCH 120/179] igb: Support for 100base-fx SFP
+Origin: https://git.kernel.org/linus/f502ef7d77dd09bad9c93ee854fcb61d6fc29815
+
+This patch adds support for 100base-fx SFP and report proper link speed/duplex
+via Ethtool.
+
+v2: fix smatch warnings
+
+CC: Dan Carpenter <dan.carpenter@oracle.com>
+Signed-off-by: Akeem G Abodunrin <akeem.g.abodunrin@intel.com>
+Tested-by: Aaron Brown <aaron.f.brown@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+[bwh: Backported to wheezy: adjust context]
+---
+ drivers/net/ethernet/intel/igb/e1000_hw.h    |  3 +-
+ drivers/net/ethernet/intel/igb/igb_ethtool.c | 48 ++++++++++++++++++++--------
+ drivers/net/ethernet/intel/igb/igb_main.c    | 18 ++++++++---
+ 3 files changed, 50 insertions(+), 19 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/igb/e1000_hw.h b/drivers/net/ethernet/intel/igb/e1000_hw.h
+index 0d5cf9c..f8cd124 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_hw.h
++++ b/drivers/net/ethernet/intel/igb/e1000_hw.h
+@@ -98,7 +98,8 @@ enum e1000_mac_type {
+ enum e1000_media_type {
+ 	e1000_media_type_unknown = 0,
+ 	e1000_media_type_copper = 1,
+-	e1000_media_type_internal_serdes = 2,
++	e1000_media_type_fiber = 2,
++	e1000_media_type_internal_serdes = 3,
+ 	e1000_num_media_types
+ };
+ 
+diff --git a/drivers/net/ethernet/intel/igb/igb_ethtool.c b/drivers/net/ethernet/intel/igb/igb_ethtool.c
+index ec18adc..961fbf1 100644
+--- a/drivers/net/ethernet/intel/igb/igb_ethtool.c
++++ b/drivers/net/ethernet/intel/igb/igb_ethtool.c
+@@ -180,27 +180,33 @@ static int igb_get_settings(struct net_device *netdev, struct ethtool_cmd *ecmd)
+ 
+ 		ecmd->port = PORT_TP;
+ 		ecmd->phy_address = hw->phy.addr;
++		ecmd->transceiver = XCVR_INTERNAL;
+ 	} else {
+ 		ecmd->supported   = (SUPPORTED_1000baseT_Full |
++				     SUPPORTED_100baseT_Full |
++				     SUPPORTED_Autoneg |
+ 				     SUPPORTED_FIBRE |
+-				     SUPPORTED_Autoneg);
++				     SUPPORTED_Pause);
+ 
+-		ecmd->advertising = (ADVERTISED_1000baseT_Full |
+-				     ADVERTISED_FIBRE |
+-				     ADVERTISED_Autoneg |
+-				     ADVERTISED_Pause);
++		ecmd->advertising = ADVERTISED_FIBRE;
++
++		if (adapter->link_speed == SPEED_100)
++			ecmd->advertising = ADVERTISED_100baseT_Full;
++		else if (adapter->link_speed == SPEED_1000)
++			ecmd->advertising = ADVERTISED_1000baseT_Full;
++
++		if (hw->mac.autoneg == 1)
++			ecmd->advertising |= ADVERTISED_Autoneg;
+ 
+ 		ecmd->port = PORT_FIBRE;
++		ecmd->transceiver = XCVR_EXTERNAL;
+ 	}
+ 
+-	ecmd->transceiver = XCVR_INTERNAL;
+-
+ 	status = rd32(E1000_STATUS);
+ 
+ 	if (status & E1000_STATUS_LU) {
+ 
+-		if ((status & E1000_STATUS_SPEED_1000) ||
+-		    hw->phy.media_type != e1000_media_type_copper)
++		if (status & E1000_STATUS_SPEED_1000)
+ 			ethtool_cmd_speed_set(ecmd, SPEED_1000);
+ 		else if (status & E1000_STATUS_SPEED_100)
+ 			ethtool_cmd_speed_set(ecmd, SPEED_100);
+@@ -217,7 +223,11 @@ static int igb_get_settings(struct net_device *netdev, struct ethtool_cmd *ecmd)
+ 		ecmd->duplex = -1;
+ 	}
+ 
+-	ecmd->autoneg = hw->mac.autoneg ? AUTONEG_ENABLE : AUTONEG_DISABLE;
++	if ((hw->phy.media_type == e1000_media_type_fiber) ||
++	    hw->mac.autoneg)
++		ecmd->autoneg = AUTONEG_ENABLE;
++	else
++		ecmd->autoneg = AUTONEG_DISABLE;
+ 	return 0;
+ }
+ 
+@@ -239,9 +249,21 @@ static int igb_set_settings(struct net_device *netdev, struct ethtool_cmd *ecmd)
+ 
+ 	if (ecmd->autoneg == AUTONEG_ENABLE) {
+ 		hw->mac.autoneg = 1;
+-		hw->phy.autoneg_advertised = ecmd->advertising |
+-					     ADVERTISED_TP |
+-					     ADVERTISED_Autoneg;
++		if (hw->phy.media_type == e1000_media_type_fiber) {
++			hw->phy.autoneg_advertised = ecmd->advertising |
++						     ADVERTISED_FIBRE |
++						     ADVERTISED_Autoneg;
++			if (adapter->link_speed == SPEED_1000)
++				hw->phy.autoneg_advertised =
++					ADVERTISED_1000baseT_Full;
++			else if (adapter->link_speed == SPEED_100)
++				hw->phy.autoneg_advertised =
++					ADVERTISED_100baseT_Full;
++		} else {
++			hw->phy.autoneg_advertised = ecmd->advertising |
++						     ADVERTISED_TP |
++						     ADVERTISED_Autoneg;
++		}
+ 		ecmd->advertising = hw->phy.autoneg_advertised;
+ 		if (adapter->fc_autoneg)
+ 			hw->fc.requested_mode = e1000_fc_default;
+diff --git a/drivers/net/ethernet/intel/igb/igb_main.c b/drivers/net/ethernet/intel/igb/igb_main.c
+index 817b81b..32c369e 100644
+--- a/drivers/net/ethernet/intel/igb/igb_main.c
++++ b/drivers/net/ethernet/intel/igb/igb_main.c
+@@ -6836,11 +6836,19 @@ int igb_set_spd_dplx(struct igb_adapter *adapter, u32 spd, u8 dplx)
+ 	if ((spd & 1) || (dplx & ~1))
+ 		goto err_inval;
+ 
+-	/* Fiber NIC's only allow 1000 Gbps Full duplex */
+-	if ((adapter->hw.phy.media_type == e1000_media_type_internal_serdes) &&
+-	    spd != SPEED_1000 &&
+-	    dplx != DUPLEX_FULL)
+-		goto err_inval;
++	/* Fiber NIC's only allow 1000 gbps Full duplex
++	 * and 100Mbps Full duplex for 100baseFx sfp
++	 */
++	if (adapter->hw.phy.media_type == e1000_media_type_internal_serdes) {
++		switch (spd + dplx) {
++		case SPEED_10 + DUPLEX_HALF:
++		case SPEED_10 + DUPLEX_FULL:
++		case SPEED_100 + DUPLEX_HALF:
++			goto err_inval;
++		default:
++			break;
++		}
++	}
+ 
+ 	switch (spd + dplx) {
+ 	case SPEED_10 + DUPLEX_HALF:
