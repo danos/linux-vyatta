@@ -1,0 +1,494 @@
+From: Carolyn Wyborny <carolyn.wyborny@intel.com>
+Date: Fri, 7 Dec 2012 03:00:30 +0000
+Subject: [PATCH 093/179] igb: Add i2c interface to igb.
+Origin: https://git.kernel.org/linus/441fc6fdb47ae739eeda625dce5b069941a54db3
+
+Some of our adapters have sensors on them accessible via i2c and a private
+interface.  This patch implements the kernel interface for i2c to those sensors.
+Subsequent patches will provide functions to export that data.
+
+Signed-off-by: Carolyn Wyborny <carolyn.wyborny@intel.com>
+Tested-by: Jeff Pieper <jeffrey.e.pieper@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+[bwh: Backported to wheezy: adjust context]
+---
+ drivers/net/ethernet/intel/Kconfig             |   2 +
+ drivers/net/ethernet/intel/igb/e1000_82575.c   |   3 +
+ drivers/net/ethernet/intel/igb/e1000_82575.h   |   6 +
+ drivers/net/ethernet/intel/igb/e1000_defines.h |   1 +
+ drivers/net/ethernet/intel/igb/e1000_hw.h      |   2 +
+ drivers/net/ethernet/intel/igb/e1000_regs.h    |   8 +
+ drivers/net/ethernet/intel/igb/igb.h           |  11 +-
+ drivers/net/ethernet/intel/igb/igb_main.c      | 269 +++++++++++++++++++++++++
+ 8 files changed, 301 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/intel/Kconfig b/drivers/net/ethernet/intel/Kconfig
+index 5a17c61..1715fd3 100644
+--- a/drivers/net/ethernet/intel/Kconfig
++++ b/drivers/net/ethernet/intel/Kconfig
+@@ -93,6 +93,8 @@ config E1000E
+ config IGB
+ 	tristate "Intel(R) 82575/82576 PCI-Express Gigabit Ethernet support"
+ 	depends on PCI
++	select I2C
++	select I2C_ALGOBIT
+ 	---help---
+ 	  This driver supports Intel(R) 82575/82576 gigabit ethernet family of
+ 	  adapters.  For more information on how to identify your adapter, go
+diff --git a/drivers/net/ethernet/intel/igb/e1000_82575.c b/drivers/net/ethernet/intel/igb/e1000_82575.c
+index fdaaf27..51e3f4f 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_82575.c
++++ b/drivers/net/ethernet/intel/igb/e1000_82575.c
+@@ -33,6 +33,7 @@
+ 
+ #include <linux/types.h>
+ #include <linux/if_ether.h>
++#include <linux/i2c.h>
+ 
+ #include "e1000_mac.h"
+ #include "e1000_82575.h"
+@@ -2314,6 +2315,8 @@ static struct e1000_phy_operations e1000_phy_ops_82575 = {
+ 	.acquire              = igb_acquire_phy_82575,
+ 	.get_cfg_done         = igb_get_cfg_done_82575,
+ 	.release              = igb_release_phy_82575,
++	.write_i2c_byte       = igb_write_i2c_byte,
++	.read_i2c_byte        = igb_read_i2c_byte,
+ };
+ 
+ static struct e1000_nvm_operations e1000_nvm_ops_82575 = {
+diff --git a/drivers/net/ethernet/intel/igb/e1000_82575.h b/drivers/net/ethernet/intel/igb/e1000_82575.h
+index 44b76b3..67bd9f9 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_82575.h
++++ b/drivers/net/ethernet/intel/igb/e1000_82575.h
+@@ -32,6 +32,10 @@ extern void igb_shutdown_serdes_link_82575(struct e1000_hw *hw);
+ extern void igb_power_up_serdes_link_82575(struct e1000_hw *hw);
+ extern void igb_power_down_phy_copper_82575(struct e1000_hw *hw);
+ extern void igb_rx_fifo_flush_82575(struct e1000_hw *hw);
++extern s32 igb_read_i2c_byte(struct e1000_hw *hw, u8 byte_offset,
++				u8 dev_addr, u8 *data);
++extern s32 igb_write_i2c_byte(struct e1000_hw *hw, u8 byte_offset,
++				 u8 dev_addr, u8 data);
+ 
+ #define ID_LED_DEFAULT_82575_SERDES ((ID_LED_DEF1_DEF2 << 12) | \
+                                      (ID_LED_DEF1_DEF2 <<  8) | \
+@@ -261,4 +265,6 @@ void igb_vmdq_set_replication_pf(struct e1000_hw *, bool);
+ u16 igb_rxpbs_adjust_82580(u32 data);
+ s32 igb_set_eee_i350(struct e1000_hw *);
+ 
++#define E1000_I2C_THERMAL_SENSOR_ADDR	0xF8
++
+ #endif
+diff --git a/drivers/net/ethernet/intel/igb/e1000_defines.h b/drivers/net/ethernet/intel/igb/e1000_defines.h
+index 34e907b..1c03432 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_defines.h
++++ b/drivers/net/ethernet/intel/igb/e1000_defines.h
+@@ -468,6 +468,7 @@
+ #define E1000_ERR_NO_SPACE          17
+ #define E1000_ERR_NVM_PBA_SECTION   18
+ #define E1000_ERR_INVM_VALUE_NOT_FOUND	19
++#define E1000_ERR_I2C               20
+ 
+ /* Loop limit on how long we wait for auto-negotiation to complete */
+ #define COPPER_LINK_UP_LIMIT              10
+diff --git a/drivers/net/ethernet/intel/igb/e1000_hw.h b/drivers/net/ethernet/intel/igb/e1000_hw.h
+index c2a51dc..75312ba 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_hw.h
++++ b/drivers/net/ethernet/intel/igb/e1000_hw.h
+@@ -342,6 +342,8 @@ struct e1000_phy_operations {
+ 	s32  (*set_d0_lplu_state)(struct e1000_hw *, bool);
+ 	s32  (*set_d3_lplu_state)(struct e1000_hw *, bool);
+ 	s32  (*write_reg)(struct e1000_hw *, u32, u16);
++	s32 (*read_i2c_byte)(struct e1000_hw *, u8, u8, u8 *);
++	s32 (*write_i2c_byte)(struct e1000_hw *, u8, u8, u8);
+ };
+ 
+ struct e1000_nvm_operations {
+diff --git a/drivers/net/ethernet/intel/igb/e1000_regs.h b/drivers/net/ethernet/intel/igb/e1000_regs.h
+index e5db485..31c3e2f 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_regs.h
++++ b/drivers/net/ethernet/intel/igb/e1000_regs.h
+@@ -75,6 +75,14 @@
+ #define E1000_FCRTL    0x02160  /* Flow Control Receive Threshold Low - RW */
+ #define E1000_FCRTH    0x02168  /* Flow Control Receive Threshold High - RW */
+ #define E1000_FCRTV    0x02460  /* Flow Control Refresh Timer Value - RW */
++#define E1000_I2CPARAMS        0x0102C /* SFPI2C Parameters Register - RW */
++#define E1000_I2CBB_EN      0x00000100  /* I2C - Bit Bang Enable */
++#define E1000_I2C_CLK_OUT   0x00000200  /* I2C- Clock */
++#define E1000_I2C_DATA_OUT  0x00000400  /* I2C- Data Out */
++#define E1000_I2C_DATA_OE_N 0x00000800  /* I2C- Data Output Enable */
++#define E1000_I2C_DATA_IN   0x00001000  /* I2C- Data In */
++#define E1000_I2C_CLK_OE_N  0x00002000  /* I2C- Clock Output Enable */
++#define E1000_I2C_CLK_IN    0x00004000  /* I2C- Clock In */
+ 
+ /* IEEE 1588 TIMESYNCH */
+ #define E1000_TSYNCRXCTL 0x0B620 /* Rx Time Sync Control register - RW */
+diff --git a/drivers/net/ethernet/intel/igb/igb.h b/drivers/net/ethernet/intel/igb/igb.h
+index 221c715..33c355f 100644
+--- a/drivers/net/ethernet/intel/igb/igb.h
++++ b/drivers/net/ethernet/intel/igb/igb.h
+@@ -41,6 +41,8 @@
+ #endif /* CONFIG_IGB_PTP */
+ #include <linux/bitops.h>
+ #include <linux/if_vlan.h>
++#include <linux/i2c.h>
++#include <linux/i2c-algo-bit.h>
+ 
+ struct igb_adapter;
+ 
+@@ -303,6 +305,11 @@ static inline int igb_desc_unused(struct igb_ring *ring)
+ 	return ring->count + ring->next_to_clean - ring->next_to_use - 1;
+ }
+ 
++struct igb_i2c_client_list {
++	struct i2c_client *client;
++	struct igb_i2c_client_list *next;
++};
++
+ /* board specific private data structure */
+ struct igb_adapter {
+ 	unsigned long active_vlans[BITS_TO_LONGS(VLAN_N_VID)];
+@@ -395,6 +402,9 @@ struct igb_adapter {
+ #endif /* CONFIG_IGB_PTP */
+ 
+ 	char fw_version[32];
++	struct i2c_algo_bit_data i2c_algo;
++	struct i2c_adapter i2c_adap;
++	struct igb_i2c_client_list *i2c_clients;
+ };
+ 
+ #define IGB_FLAG_HAS_MSI		(1 << 0)
+@@ -472,7 +482,6 @@ static inline void igb_ptp_rx_hwtstamp(struct igb_q_vector *q_vector,
+ extern int igb_ptp_hwtstamp_ioctl(struct net_device *netdev,
+ 				  struct ifreq *ifr, int cmd);
+ #endif /* CONFIG_IGB_PTP */
+-
+ static inline s32 igb_reset_phy(struct e1000_hw *hw)
+ {
+ 	if (hw->phy.ops.reset)
+diff --git a/drivers/net/ethernet/intel/igb/igb_main.c b/drivers/net/ethernet/intel/igb/igb_main.c
+index e98d837..ea7d75d 100644
+--- a/drivers/net/ethernet/intel/igb/igb_main.c
++++ b/drivers/net/ethernet/intel/igb/igb_main.c
+@@ -57,6 +57,7 @@
+ #ifdef CONFIG_IGB_DCA
+ #include <linux/dca.h>
+ #endif
++#include <linux/i2c.h>
+ #include "igb.h"
+ 
+ #define MAJ 4
+@@ -565,6 +566,91 @@ exit:
+ 	return;
+ }
+ 
++/*  igb_get_i2c_data - Reads the I2C SDA data bit
++ *  @hw: pointer to hardware structure
++ *  @i2cctl: Current value of I2CCTL register
++ *
++ *  Returns the I2C data bit value
++ */
++static int igb_get_i2c_data(void *data)
++{
++	struct igb_adapter *adapter = (struct igb_adapter *)data;
++	struct e1000_hw *hw = &adapter->hw;
++	s32 i2cctl = rd32(E1000_I2CPARAMS);
++
++	return ((i2cctl & E1000_I2C_DATA_IN) != 0);
++}
++
++/* igb_set_i2c_data - Sets the I2C data bit
++ *  @data: pointer to hardware structure
++ *  @state: I2C data value (0 or 1) to set
++ *
++ *  Sets the I2C data bit
++ */
++static void igb_set_i2c_data(void *data, int state)
++{
++	struct igb_adapter *adapter = (struct igb_adapter *)data;
++	struct e1000_hw *hw = &adapter->hw;
++	s32 i2cctl = rd32(E1000_I2CPARAMS);
++
++	if (state)
++		i2cctl |= E1000_I2C_DATA_OUT;
++	else
++		i2cctl &= ~E1000_I2C_DATA_OUT;
++
++	i2cctl &= ~E1000_I2C_DATA_OE_N;
++	i2cctl |= E1000_I2C_CLK_OE_N;
++	wr32(E1000_I2CPARAMS, i2cctl);
++	wrfl();
++
++}
++
++/* igb_set_i2c_clk - Sets the I2C SCL clock
++ *  @data: pointer to hardware structure
++ *  @state: state to set clock
++ *
++ *  Sets the I2C clock line to state
++ */
++static void igb_set_i2c_clk(void *data, int state)
++{
++	struct igb_adapter *adapter = (struct igb_adapter *)data;
++	struct e1000_hw *hw = &adapter->hw;
++	s32 i2cctl = rd32(E1000_I2CPARAMS);
++
++	if (state) {
++		i2cctl |= E1000_I2C_CLK_OUT;
++		i2cctl &= ~E1000_I2C_CLK_OE_N;
++	} else {
++		i2cctl &= ~E1000_I2C_CLK_OUT;
++		i2cctl &= ~E1000_I2C_CLK_OE_N;
++	}
++	wr32(E1000_I2CPARAMS, i2cctl);
++	wrfl();
++}
++
++/* igb_get_i2c_clk - Gets the I2C SCL clock state
++ *  @data: pointer to hardware structure
++ *
++ *  Gets the I2C clock state
++ */
++static int igb_get_i2c_clk(void *data)
++{
++	struct igb_adapter *adapter = (struct igb_adapter *)data;
++	struct e1000_hw *hw = &adapter->hw;
++	s32 i2cctl = rd32(E1000_I2CPARAMS);
++
++	return ((i2cctl & E1000_I2C_CLK_IN) != 0);
++}
++
++static const struct i2c_algo_bit_data igb_i2c_algo = {
++	.setsda		= igb_set_i2c_data,
++	.setscl		= igb_set_i2c_clk,
++	.getsda		= igb_get_i2c_data,
++	.getscl		= igb_get_i2c_clk,
++	.udelay		= 5,
++	.timeout	= 20,
++};
++
+ /**
+  * igb_get_hw_dev - return device
+  * used by hardware layer to print debugging information
+@@ -1813,6 +1899,37 @@ void igb_set_fw_version(struct igb_adapter *adapter)
+ 	return;
+ }
+ 
++static const struct i2c_board_info i350_sensor_info = {
++	I2C_BOARD_INFO("i350bb", 0Xf8),
++};
++
++/*  igb_init_i2c - Init I2C interface
++ *  @adapter: pointer to adapter structure
++ *
++ */
++static s32 igb_init_i2c(struct igb_adapter *adapter)
++{
++	s32 status = E1000_SUCCESS;
++
++	/* I2C interface supported on i350 devices */
++	if (adapter->hw.mac.type != e1000_i350)
++		return E1000_SUCCESS;
++
++	/* Initialize the i2c bus which is controlled by the registers.
++	 * This bus will use the i2c_algo_bit structue that implements
++	 * the protocol through toggling of the 4 bits in the register.
++	 */
++	adapter->i2c_adap.owner = THIS_MODULE;
++	adapter->i2c_algo = igb_i2c_algo;
++	adapter->i2c_algo.data = adapter;
++	adapter->i2c_adap.algo_data = &adapter->i2c_algo;
++	adapter->i2c_adap.dev.parent = &adapter->pdev->dev;
++	strlcpy(adapter->i2c_adap.name, "igb BB",
++		sizeof(adapter->i2c_adap.name));
++	status = i2c_bit_add_bus(&adapter->i2c_adap);
++	return status;
++}
++
+ /**
+  * igb_probe - Device Initialization Routine
+  * @pdev: PCI device information struct
+@@ -2103,6 +2220,13 @@ static int igb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+ 	/* reset the hardware with the new settings */
+ 	igb_reset(adapter);
+ 
++	/* Init the I2C interface */
++	err = igb_init_i2c(adapter);
++	if (err) {
++		dev_err(&pdev->dev, "failed to init i2c interface\n");
++		goto err_eeprom;
++	}
++
+ 	/* let the f/w know that the h/w is now under the control of the
+ 	 * driver. */
+ 	igb_get_hw_control(adapter);
+@@ -2166,6 +2290,7 @@ static int igb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+ 
+ err_register:
+ 	igb_release_hw_control(adapter);
++	memset(&adapter->i2c_adap, 0, sizeof(adapter->i2c_adap));
+ err_eeprom:
+ 	if (!igb_check_reset_block(hw))
+ 		igb_reset_phy(hw);
+@@ -2186,6 +2311,18 @@ err_dma:
+ 	return err;
+ }
+ 
++/*
++ *  igb_remove_i2c - Cleanup  I2C interface
++ *  @adapter: pointer to adapter structure
++ *
++ */
++static void igb_remove_i2c(struct igb_adapter *adapter)
++{
++
++	/* free the adapter bus structure */
++	i2c_del_adapter(&adapter->i2c_adap);
++}
++
+ /**
+  * igb_remove - Device Removal Routine
+  * @pdev: PCI device information struct
+@@ -2202,6 +2339,8 @@ static void igb_remove(struct pci_dev *pdev)
+ 	struct e1000_hw *hw = &adapter->hw;
+ 
+ 	pm_runtime_get_noresume(&pdev->dev);
++	igb_remove_i2c(adapter);
++
+ #ifdef CONFIG_IGB_PTP
+ 	igb_ptp_stop(adapter);
+ #endif /* CONFIG_IGB_PTP */
+@@ -7293,4 +7432,134 @@ static void igb_init_dmac(struct igb_adapter *adapter, u32 pba)
+ 	}
+ }
+ 
++static DEFINE_SPINLOCK(i2c_clients_lock);
++
++/*  igb_get_i2c_client - returns matching client
++ *  in adapters's client list.
++ *  @adapter: adapter struct
++ *  @dev_addr: device address of i2c needed.
++ */
++struct i2c_client *
++igb_get_i2c_client(struct igb_adapter *adapter, u8 dev_addr)
++{
++	ulong flags;
++	struct igb_i2c_client_list *client_list;
++	struct i2c_client *client = NULL;
++	struct i2c_board_info client_info = {
++		I2C_BOARD_INFO("igb", 0x00),
++	};
++
++	spin_lock_irqsave(&i2c_clients_lock, flags);
++	client_list = adapter->i2c_clients;
++
++	/* See if we already have an i2c_client */
++	while (client_list) {
++		if (client_list->client->addr == (dev_addr >> 1)) {
++			client = client_list->client;
++			goto exit;
++		} else {
++			client_list = client_list->next;
++		}
++	}
++
++	/* no client_list found, create a new one */
++	client_list = kzalloc(sizeof(*client_list), GFP_KERNEL);
++	if (client_list == NULL)
++		goto exit;
++
++	/* dev_addr passed to us is left-shifted by 1 bit
++	 * i2c_new_device call expects it to be flush to the right.
++	 */
++	client_info.addr = dev_addr >> 1;
++	client_info.platform_data = adapter;
++	client_list->client = i2c_new_device(&adapter->i2c_adap, &client_info);
++	if (client_list->client == NULL) {
++		dev_info(&adapter->pdev->dev, "Failed to create new i2c device..\n");
++		goto err_no_client;
++	}
++
++	/* insert new client at head of list */
++	client_list->next = adapter->i2c_clients;
++	adapter->i2c_clients = client_list;
++
++	spin_unlock_irqrestore(&i2c_clients_lock, flags);
++
++	client = client_list->client;
++	goto exit;
++
++err_no_client:
++	kfree(client_list);
++exit:
++	spin_unlock_irqrestore(&i2c_clients_lock, flags);
++	return client;
++}
++
++/*  igb_read_i2c_byte - Reads 8 bit word over I2C
++ *  @hw: pointer to hardware structure
++ *  @byte_offset: byte offset to read
++ *  @dev_addr: device address
++ *  @data: value read
++ *
++ *  Performs byte read operation over I2C interface at
++ *  a specified device address.
++ */
++s32 igb_read_i2c_byte(struct e1000_hw *hw, u8 byte_offset,
++				u8 dev_addr, u8 *data)
++{
++	struct igb_adapter *adapter = container_of(hw, struct igb_adapter, hw);
++	struct i2c_client *this_client = igb_get_i2c_client(adapter, dev_addr);
++	s32 status;
++	u16 swfw_mask = 0;
++
++	if (!this_client)
++		return E1000_ERR_I2C;
++
++	swfw_mask = E1000_SWFW_PHY0_SM;
++
++	if (hw->mac.ops.acquire_swfw_sync(hw, swfw_mask)
++	    != E1000_SUCCESS)
++		return E1000_ERR_SWFW_SYNC;
++
++	status = i2c_smbus_read_byte_data(this_client, byte_offset);
++	hw->mac.ops.release_swfw_sync(hw, swfw_mask);
++
++	if (status < 0)
++		return E1000_ERR_I2C;
++	else {
++		*data = status;
++		return E1000_SUCCESS;
++	}
++}
++
++/*  igb_write_i2c_byte - Writes 8 bit word over I2C
++ *  @hw: pointer to hardware structure
++ *  @byte_offset: byte offset to write
++ *  @dev_addr: device address
++ *  @data: value to write
++ *
++ *  Performs byte write operation over I2C interface at
++ *  a specified device address.
++ */
++s32 igb_write_i2c_byte(struct e1000_hw *hw, u8 byte_offset,
++				 u8 dev_addr, u8 data)
++{
++	struct igb_adapter *adapter = container_of(hw, struct igb_adapter, hw);
++	struct i2c_client *this_client = igb_get_i2c_client(adapter, dev_addr);
++	s32 status;
++	u16 swfw_mask = E1000_SWFW_PHY0_SM;
++
++	if (!this_client)
++		return E1000_ERR_I2C;
++
++	if (hw->mac.ops.acquire_swfw_sync(hw, swfw_mask) != E1000_SUCCESS)
++		return E1000_ERR_SWFW_SYNC;
++	status = i2c_smbus_write_byte_data(this_client, byte_offset, data);
++	hw->mac.ops.release_swfw_sync(hw, swfw_mask);
++
++	if (status)
++		return E1000_ERR_I2C;
++	else
++		return E1000_SUCCESS;
++
++}
+ /* igb_main.c */

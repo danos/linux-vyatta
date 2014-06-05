@@ -1,0 +1,58 @@
+From: Matthew Vick <matthew.vick@intel.com>
+Date: Wed, 24 Apr 2013 07:42:06 +0000
+Subject: [PATCH 140/179] igb: Add update to last_rx_timestamp in Rx rings
+Origin: https://git.kernel.org/linus/20a48412281732ddb75e0ac7d9e0b5406f1b6669
+
+In order to support a more accurate check for a PTP Rx hang where the
+device can no longer timestamp received packets, we need to update, per
+ring, when the last Rx timestamp was. Because of how the PTP Rx hang logic
+works, the current logic is valid, but properly updating the ring variable
+increases the accuracy of the check.
+
+Signed-off-by: Matthew Vick <matthew.vick@intel.com>
+Tested-by: Aaron Brown <aaron.f.brown@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+[bwh: Backported to wheezy: adjust context]
+---
+ drivers/net/ethernet/intel/igb/igb.h      | 9 +++++++--
+ drivers/net/ethernet/intel/igb/igb_main.c | 2 +-
+ 2 files changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/igb/igb.h b/drivers/net/ethernet/intel/igb/igb.h
+index 83e87c3..df5822b 100644
+--- a/drivers/net/ethernet/intel/igb/igb.h
++++ b/drivers/net/ethernet/intel/igb/igb.h
+@@ -511,13 +511,18 @@ extern void igb_ptp_rx_rgtstamp(struct igb_q_vector *q_vector,
+ extern void igb_ptp_rx_pktstamp(struct igb_q_vector *q_vector,
+ 				unsigned char *va,
+ 				struct sk_buff *skb);
+-static inline void igb_ptp_rx_hwtstamp(struct igb_q_vector *q_vector,
++static inline void igb_ptp_rx_hwtstamp(struct igb_ring *rx_ring,
+ 				       union e1000_adv_rx_desc *rx_desc,
+ 				       struct sk_buff *skb)
+ {
+ 	if (igb_test_staterr(rx_desc, E1000_RXDADV_STAT_TS) &&
+ 	    !igb_test_staterr(rx_desc, E1000_RXDADV_STAT_TSIP))
+-		igb_ptp_rx_rgtstamp(q_vector, skb);
++		igb_ptp_rx_rgtstamp(rx_ring->q_vector, skb);
++
++	/* Update the last_rx_timestamp timer in order to enable watchdog check
++	 * for error case of latched timestamp on a dropped packet.
++	 */
++	rx_ring->last_rx_timestamp = jiffies;
+ }
+ 
+ extern int igb_ptp_hwtstamp_ioctl(struct net_device *netdev,
+diff --git a/drivers/net/ethernet/intel/igb/igb_main.c b/drivers/net/ethernet/intel/igb/igb_main.c
+index 04250cf..b0b2425 100644
+--- a/drivers/net/ethernet/intel/igb/igb_main.c
++++ b/drivers/net/ethernet/intel/igb/igb_main.c
+@@ -6590,7 +6590,7 @@ static void igb_process_skb_fields(struct igb_ring *rx_ring,
+ 	igb_rx_checksum(rx_ring, rx_desc, skb);
+ 
+ #ifdef CONFIG_IGB_PTP
+-	igb_ptp_rx_hwtstamp(rx_ring->q_vector, rx_desc, skb);
++	igb_ptp_rx_hwtstamp(rx_ring, rx_desc, skb);
+ #endif /* CONFIG_IGB_PTP */
+ 
+ 	if ((dev->features & NETIF_F_HW_VLAN_RX) &&

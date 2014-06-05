@@ -1,0 +1,44 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Sat, 29 Jun 2013 07:42:25 +0000
+Subject: [PATCH 231/246] e1000e: do not resume device from RPM suspend to read
+ PHY status registers
+Origin: https://git.kernel.org/linus/97390ab86b2bcc53c124a1541c86ea0eba1a051f
+
+When the device is runtime suspended (e.g. when there is no link), do not
+wake it from D3 to read the PHY status; just set the values to typical
+power-on defaults as is done when runtime PM is not enabled and there is no
+link.
+
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Tested-by: Aaron Brown <aaron.f.brown@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/e1000e/netdev.c | 5 ++---
+ 1 file changed, 2 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/e1000e/netdev.c b/drivers/net/ethernet/intel/e1000e/netdev.c
+index 60a000a..6a62421 100644
+--- a/drivers/net/ethernet/intel/e1000e/netdev.c
++++ b/drivers/net/ethernet/intel/e1000e/netdev.c
+@@ -4644,11 +4644,11 @@ static void e1000_phy_read_status(struct e1000_adapter *adapter)
+ 	struct e1000_hw *hw = &adapter->hw;
+ 	struct e1000_phy_regs *phy = &adapter->phy_regs;
+ 
+-	if ((er32(STATUS) & E1000_STATUS_LU) &&
++	if (!pm_runtime_suspended((&adapter->pdev->dev)->parent) &&
++	    (er32(STATUS) & E1000_STATUS_LU) &&
+ 	    (adapter->hw.phy.media_type == e1000_media_type_copper)) {
+ 		int ret_val;
+ 
+-		pm_runtime_get_sync(&adapter->pdev->dev);
+ 		ret_val = e1e_rphy(hw, MII_BMCR, &phy->bmcr);
+ 		ret_val |= e1e_rphy(hw, MII_BMSR, &phy->bmsr);
+ 		ret_val |= e1e_rphy(hw, MII_ADVERTISE, &phy->advertise);
+@@ -4659,7 +4659,6 @@ static void e1000_phy_read_status(struct e1000_adapter *adapter)
+ 		ret_val |= e1e_rphy(hw, MII_ESTATUS, &phy->estatus);
+ 		if (ret_val)
+ 			e_warn("Error reading PHY register\n");
+-		pm_runtime_put_sync(&adapter->pdev->dev);
+ 	} else {
+ 		/* Do not read PHY registers if link is not up
+ 		 * Set values to typical power-on defaults

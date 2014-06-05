@@ -1,0 +1,137 @@
+From: Giuseppe CAVALLARO <peppe.cavallaro@st.com>
+Date: Wed, 27 Jun 2012 21:14:38 +0000
+Subject: [PATCH 4/6] phy: add the EEE support and the way to access to the MMD
+ registers.
+Origin: https://git.kernel.org/linus/ a59a4d1921664da63d801ba477950114c71c88c9
+
+This patch adds the support for the Energy-Efficient Ethernet (EEE)
+to the Physical Abstraction Layer.
+To support the EEE we have to access to the MMD registers 3.20 and
+7.60/61. So two new functions have been added to read/write the MMD
+registers (clause 45).
+
+An Ethernet driver (I tested the stmmac) can invoke the phy_init_eee to properly
+check if the EEE is supported by the PHYs and it can also set the clock
+stop enable bit in the 3.0 register.
+The phy_get_eee_err can be used for reporting the number of time where
+the PHY failed to complete its normal wake sequence.
+
+In the end, this patch also adds the EEE ethtool support implementing:
+ o phy_ethtool_set_eee
+ o phy_ethtool_get_eee
+
+v1: initial patch
+v2: fixed some errors especially on naming convention
+v3: renamed again the mmd read/write functions thank to Ben's feedback
+v4: moved file to phy.c and added the ethtool support.
+v5: fixed phy_adv_to_eee, phy_eee_to_supported, phy_eee_to_adv return
+    values according to ethtool API (thanks to Ben's feedback).
+    Renamed some macros to avoid too long names.
+v6: fixed kernel-doc comments to be properly parsed.
+    Fixed the phy_init_eee function: we need to check which link mode
+    was autonegotiated and then the corresponding bits in 7.60 and 7.61
+    registers.
+v7: reviewed the way to get the negotiated settings.
+v8: fixed a problem in the phy_init_eee return value erroneously added
+    when included the phy_read_status call.
+v9: do not remove the MDIO_AN_EEE_ADV_100TX and MDIO_AN_EEE_ADV_1000T
+    and fixed the eee_{cap,lp,adv} declaration as "int" instead of u16.
+
+Signed-off-by: Giuseppe Cavallaro <peppe.cavallaro@st.com>
+Reviewed-by: Ben Hutchings <bhutchings@solarflare.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+[bwh: Restricted to include/linux/{mdio,mii}.h i.e. no new functions
+ are included]
+---
+ include/linux/mdio.h | 28 ++++++++++++++++++++++++----
+ include/linux/mii.h  |  9 +++++++++
+ 2 files changed, 33 insertions(+), 4 deletions(-)
+
+diff --git a/include/linux/mdio.h b/include/linux/mdio.h
+index b1494ac..b19aa79 100644
+--- a/include/linux/mdio.h
++++ b/include/linux/mdio.h
+@@ -42,7 +42,11 @@
+ #define MDIO_PKGID2		15
+ #define MDIO_AN_ADVERTISE	16	/* AN advertising (base page) */
+ #define MDIO_AN_LPA		19	/* AN LP abilities (base page) */
++#define MDIO_PCS_EEE_ABLE	20	/* EEE Capability register */
++#define MDIO_PCS_EEE_WK_ERR	22	/* EEE wake error counter */
+ #define MDIO_PHYXS_LNSTAT	24	/* PHY XGXS lane state */
++#define MDIO_AN_EEE_ADV		60	/* EEE advertisement */
++#define MDIO_AN_EEE_LPABLE	61	/* EEE link partner ability */
+ 
+ /* Media-dependent registers. */
+ #define MDIO_PMA_10GBT_SWAPPOL	130	/* 10GBASE-T pair swap & polarity */
+@@ -55,7 +59,6 @@
+ #define MDIO_PCS_10GBRT_STAT2	33	/* 10GBASE-R/-T PCS status 2 */
+ #define MDIO_AN_10GBT_CTRL	32	/* 10GBASE-T auto-negotiation control */
+ #define MDIO_AN_10GBT_STAT	33	/* 10GBASE-T auto-negotiation status */
+-#define MDIO_AN_EEE_ADV		60	/* EEE advertisement */
+ 
+ /* LASI (Link Alarm Status Interrupt) registers, defined by XENPAK MSA. */
+ #define MDIO_PMA_LASI_RXCTRL	0x9000	/* RX_ALARM control */
+@@ -81,6 +84,7 @@
+ #define MDIO_AN_CTRL1_RESTART		BMCR_ANRESTART
+ #define MDIO_AN_CTRL1_ENABLE		BMCR_ANENABLE
+ #define MDIO_AN_CTRL1_XNP		0x2000	/* Enable extended next page */
++#define MDIO_PCS_CTRL1_CLKSTOP_EN	0x400	/* Stop the clock during LPI */
+ 
+ /* 10 Gb/s */
+ #define MDIO_CTRL1_SPEED10G		(MDIO_CTRL1_SPEEDSELEXT | 0x00)
+@@ -236,9 +240,25 @@
+ #define MDIO_AN_10GBT_STAT_MS		0x4000	/* Master/slave config */
+ #define MDIO_AN_10GBT_STAT_MSFLT	0x8000	/* Master/slave config fault */
+ 
+-/* AN EEE Advertisement register. */
+-#define MDIO_AN_EEE_ADV_100TX		0x0002	/* Advertise 100TX EEE cap */
+-#define MDIO_AN_EEE_ADV_1000T		0x0004	/* Advertise 1000T EEE cap */
++/* EEE Supported/Advertisement/LP Advertisement registers.
++ *
++ * EEE capability Register (3.20), Advertisement (7.60) and
++ * Link partner ability (7.61) registers have and can use the same identical
++ * bit masks.
++ */
++#define MDIO_AN_EEE_ADV_100TX	0x0002	/* Advertise 100TX EEE cap */
++#define MDIO_AN_EEE_ADV_1000T	0x0004	/* Advertise 1000T EEE cap */
++/* Note: the two defines above can be potentially used by the user-land
++ * and cannot remove them now.
++ * So, we define the new generic MDIO_EEE_100TX and MDIO_EEE_1000T macros
++ * using the previous ones (that can be considered obsolete).
++ */
++#define MDIO_EEE_100TX		MDIO_AN_EEE_ADV_100TX	/* 100TX EEE cap */
++#define MDIO_EEE_1000T		MDIO_AN_EEE_ADV_1000T	/* 1000T EEE cap */
++#define MDIO_EEE_10GT		0x0008	/* 10GT EEE cap */
++#define MDIO_EEE_1000KX		0x0010	/* 1000KX EEE cap */
++#define MDIO_EEE_10GKX4		0x0020	/* 10G KX4 EEE cap */
++#define MDIO_EEE_10GKR		0x0040	/* 10G KR EEE cap */
+ 
+ /* LASI RX_ALARM control/status registers. */
+ #define MDIO_PMA_LASI_RX_PHYXSLFLT	0x0001	/* PHY XS RX local fault */
+diff --git a/include/linux/mii.h b/include/linux/mii.h
+index 2774823..4212186 100644
+--- a/include/linux/mii.h
++++ b/include/linux/mii.h
+@@ -20,6 +20,8 @@
+ #define MII_EXPANSION		0x06	/* Expansion register          */
+ #define MII_CTRL1000		0x09	/* 1000BASE-T control          */
+ #define MII_STAT1000		0x0a	/* 1000BASE-T status           */
++#define	MII_MMD_CTRL		0x0d	/* MMD Access Control Register */
++#define	MII_MMD_DATA		0x0e	/* MMD Access Data Register */
+ #define MII_ESTATUS		0x0f	/* Extended Status             */
+ #define MII_DCOUNTER		0x12	/* Disconnect counter          */
+ #define MII_FCSCOUNTER		0x13	/* False carrier counter       */
+@@ -140,6 +142,13 @@
+ #define FLOW_CTRL_TX		0x01
+ #define FLOW_CTRL_RX		0x02
+ 
++/* MMD Access Control register fields */
++#define MII_MMD_CTRL_DEVAD_MASK	0x1f	/* Mask MMD DEVAD*/
++#define MII_MMD_CTRL_ADDR	0x0000	/* Address */
++#define MII_MMD_CTRL_NOINCR	0x4000	/* no post increment */
++#define MII_MMD_CTRL_INCR_RDWT	0x8000	/* post increment on reads & writes */
++#define MII_MMD_CTRL_INCR_ON_WT	0xC000	/* post increment on writes only */
++
+ /* This structure is used in all SIOCxMIIxxx ioctl calls */
+ struct mii_ioctl_data {
+ 	__u16		phy_id;

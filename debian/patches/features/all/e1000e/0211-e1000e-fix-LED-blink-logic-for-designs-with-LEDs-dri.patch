@@ -1,0 +1,57 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Wed, 6 Mar 2013 09:02:41 +0000
+Subject: [PATCH 211/246] e1000e: fix LED blink logic for designs with LEDs
+ driven by cathode
+Origin: https://git.kernel.org/linus/86a80eab8ced2454bae954b681797c692afe2ea2
+
+When the LEDs are driven by cathode, the bit logic is reversed.  Use the
+LED Invert bit to invert the logic.  Cleanup use of a magic number and
+change the for loop increment to reduce the number of shifts.
+
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Tested-by: Jeff Pieper <jeffrey.e.pieper@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/e1000e/mac.c | 27 ++++++++++++++++++++-------
+ 1 file changed, 20 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/e1000e/mac.c b/drivers/net/ethernet/intel/e1000e/mac.c
+index b25cc43..2480c10 100644
+--- a/drivers/net/ethernet/intel/e1000e/mac.c
++++ b/drivers/net/ethernet/intel/e1000e/mac.c
+@@ -1600,15 +1600,28 @@ s32 e1000e_blink_led_generic(struct e1000_hw *hw)
+ 		ledctl_blink = E1000_LEDCTL_LED0_BLINK |
+ 		    (E1000_LEDCTL_MODE_LED_ON << E1000_LEDCTL_LED0_MODE_SHIFT);
+ 	} else {
+-		/* set the blink bit for each LED that's "on" (0x0E)
+-		 * in ledctl_mode2
++		/* Set the blink bit for each LED that's "on" (0x0E)
++		 * (or "off" if inverted) in ledctl_mode2.  The blink
++		 * logic in hardware only works when mode is set to "on"
++		 * so it must be changed accordingly when the mode is
++		 * "off" and inverted.
+ 		 */
+ 		ledctl_blink = hw->mac.ledctl_mode2;
+-		for (i = 0; i < 4; i++)
+-			if (((hw->mac.ledctl_mode2 >> (i * 8)) & 0xFF) ==
+-			    E1000_LEDCTL_MODE_LED_ON)
+-				ledctl_blink |= (E1000_LEDCTL_LED0_BLINK <<
+-						 (i * 8));
++		for (i = 0; i < 32; i += 8) {
++			u32 mode = (hw->mac.ledctl_mode2 >> i) &
++			    E1000_LEDCTL_LED0_MODE_MASK;
++			u32 led_default = hw->mac.ledctl_default >> i;
++
++			if ((!(led_default & E1000_LEDCTL_LED0_IVRT) &&
++			     (mode == E1000_LEDCTL_MODE_LED_ON)) ||
++			    ((led_default & E1000_LEDCTL_LED0_IVRT) &&
++			     (mode == E1000_LEDCTL_MODE_LED_OFF))) {
++				ledctl_blink &=
++				    ~(E1000_LEDCTL_LED0_MODE_MASK << i);
++				ledctl_blink |= (E1000_LEDCTL_LED0_BLINK |
++						 E1000_LEDCTL_MODE_LED_ON) << i;
++			}
++		}
+ 	}
+ 
+ 	ew32(LEDCTL, ledctl_blink);

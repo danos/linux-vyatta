@@ -1,0 +1,723 @@
+From: Carolyn Wyborny <carolyn.wyborny@intel.com>
+Date: Thu, 18 Apr 2013 22:21:30 +0000
+Subject: [PATCH 130/179] igb: Add support for i354 devices
+Origin: https://git.kernel.org/linus/ceb5f13b70cd6e7afa87ba1b13eb900a766a28e4
+
+This patch adds base support for new i354 devices.  Loopback test is
+unsupported for this release.
+
+Signed-off-by: Carolyn Wyborny <carolyn.wyborny@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+[bwh: Backported to wheezy: drop inapplicable change to igb_get_ts_info()]
+---
+ drivers/net/ethernet/intel/igb/e1000_82575.c   | 122 ++++++++++++++++++++++++-
+ drivers/net/ethernet/intel/igb/e1000_82575.h   |   1 +
+ drivers/net/ethernet/intel/igb/e1000_defines.h |  16 ++++
+ drivers/net/ethernet/intel/igb/e1000_hw.h      |   4 +
+ drivers/net/ethernet/intel/igb/e1000_mac.c     |  13 ++-
+ drivers/net/ethernet/intel/igb/e1000_nvm.c     |   2 +
+ drivers/net/ethernet/intel/igb/e1000_phy.c     |   1 +
+ drivers/net/ethernet/intel/igb/e1000_regs.h    |   4 +
+ drivers/net/ethernet/intel/igb/igb.h           |   4 +-
+ drivers/net/ethernet/intel/igb/igb_ethtool.c   |  66 +++++++++----
+ drivers/net/ethernet/intel/igb/igb_main.c      |  49 +++++++---
+ drivers/net/ethernet/intel/igb/igb_ptp.c       |   4 +
+ 12 files changed, 250 insertions(+), 36 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/igb/e1000_82575.c b/drivers/net/ethernet/intel/igb/e1000_82575.c
+index 8ff938d..c9bba39d5 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_82575.c
++++ b/drivers/net/ethernet/intel/igb/e1000_82575.c
+@@ -100,6 +100,7 @@ static bool igb_sgmii_uses_mdio_82575(struct e1000_hw *hw)
+ 		break;
+ 	case e1000_82580:
+ 	case e1000_i350:
++	case e1000_i354:
+ 	case e1000_i210:
+ 	case e1000_i211:
+ 		reg = rd32(E1000_MDICNFG);
+@@ -149,6 +150,7 @@ static s32 igb_init_phy_params_82575(struct e1000_hw *hw)
+ 		switch (hw->mac.type) {
+ 		case e1000_82580:
+ 		case e1000_i350:
++		case e1000_i354:
+ 			phy->ops.read_reg = igb_read_phy_reg_82580;
+ 			phy->ops.write_reg = igb_write_phy_reg_82580;
+ 			break;
+@@ -174,13 +176,14 @@ static s32 igb_init_phy_params_82575(struct e1000_hw *hw)
+ 
+ 	/* Verify phy id and set remaining function pointers */
+ 	switch (phy->id) {
++	case M88E1545_E_PHY_ID:
+ 	case I347AT4_E_PHY_ID:
+ 	case M88E1112_E_PHY_ID:
+ 	case M88E1111_I_PHY_ID:
+ 		phy->type		= e1000_phy_m88;
++		phy->ops.check_polarity	= igb_check_polarity_m88;
+ 		phy->ops.get_phy_info	= igb_get_phy_info_m88;
+-		if (phy->id == I347AT4_E_PHY_ID ||
+-		    phy->id == M88E1112_E_PHY_ID)
++		if (phy->id != M88E1111_I_PHY_ID)
+ 			phy->ops.get_cable_length =
+ 					 igb_get_cable_length_m88_gen2;
+ 		else
+@@ -287,6 +290,7 @@ static s32 igb_init_nvm_params_82575(struct e1000_hw *hw)
+ 			nvm->ops.read = igb_read_nvm_spi;
+ 		nvm->ops.write = igb_write_nvm_spi;
+ 		break;
++	case e1000_i354:
+ 	case e1000_i350:
+ 		nvm->ops.validate = igb_validate_nvm_checksum_i350;
+ 		nvm->ops.update = igb_update_nvm_checksum_i350;
+@@ -352,6 +356,7 @@ static s32 igb_init_mac_params_82575(struct e1000_hw *hw)
+ 		mac->rar_entry_count = E1000_RAR_ENTRIES_82580;
+ 		break;
+ 	case e1000_i350:
++	case e1000_i354:
+ 		mac->rar_entry_count = E1000_RAR_ENTRIES_I350;
+ 		break;
+ 	default:
+@@ -445,6 +450,11 @@ static s32 igb_get_invariants_82575(struct e1000_hw *hw)
+ 	case E1000_DEV_ID_I211_COPPER:
+ 		mac->type = e1000_i211;
+ 		break;
++	case E1000_DEV_ID_I354_BACKPLANE_1GBPS:
++	case E1000_DEV_ID_I354_SGMII:
++	case E1000_DEV_ID_I354_BACKPLANE_2_5GBPS:
++		mac->type = e1000_i354;
++		break;
+ 	default:
+ 		return -E1000_ERR_MAC_INIT;
+ 		break;
+@@ -642,6 +652,7 @@ static s32 igb_get_phy_id_82575(struct e1000_hw *hw)
+ 			break;
+ 		case e1000_82580:
+ 		case e1000_i350:
++		case e1000_i354:
+ 		case e1000_i210:
+ 		case e1000_i211:
+ 			mdic = rd32(E1000_MDICNFG);
+@@ -1272,7 +1283,7 @@ static s32 igb_init_hw_82575(struct e1000_hw *hw)
+ 
+ 	/* Disabling VLAN filtering */
+ 	hw_dbg("Initializing the IEEE VLAN\n");
+-	if (hw->mac.type == e1000_i350)
++	if ((hw->mac.type == e1000_i350) || (hw->mac.type == e1000_i354))
+ 		igb_clear_vfta_i350(hw);
+ 	else
+ 		igb_clear_vfta(hw);
+@@ -1348,6 +1359,7 @@ static s32 igb_setup_copper_link_82575(struct e1000_hw *hw)
+ 		switch (hw->phy.id) {
+ 		case I347AT4_E_PHY_ID:
+ 		case M88E1112_E_PHY_ID:
++		case M88E1545_E_PHY_ID:
+ 		case I210_I_PHY_ID:
+ 			ret_val = igb_copper_link_setup_m88_gen2(hw);
+ 			break;
+@@ -1804,6 +1816,7 @@ void igb_vmdq_set_anti_spoofing_pf(struct e1000_hw *hw, bool enable, int pf)
+ 		reg_offset = E1000_DTXSWC;
+ 		break;
+ 	case e1000_i350:
++	case e1000_i354:
+ 		reg_offset = E1000_TXSWC;
+ 		break;
+ 	default:
+@@ -1845,6 +1858,7 @@ void igb_vmdq_set_loopback_pf(struct e1000_hw *hw, bool enable)
+ 			dtxswc &= ~E1000_DTXSWC_VMDQ_LOOPBACK_EN;
+ 		wr32(E1000_DTXSWC, dtxswc);
+ 		break;
++	case e1000_i354:
+ 	case e1000_i350:
+ 		dtxswc = rd32(E1000_TXSWC);
+ 		if (enable)
+@@ -2365,6 +2379,108 @@ out:
+ 	return ret_val;
+ }
+ 
++/**
++ *  igb_set_eee_i354 - Enable/disable EEE support
++ *  @hw: pointer to the HW structure
++ *
++ *  Enable/disable EEE legacy mode based on setting in dev_spec structure.
++ *
++ **/
++s32 igb_set_eee_i354(struct e1000_hw *hw)
++{
++	struct e1000_phy_info *phy = &hw->phy;
++	s32 ret_val = 0;
++	u16 phy_data;
++
++	if ((hw->phy.media_type != e1000_media_type_copper) ||
++	    (phy->id != M88E1545_E_PHY_ID))
++		goto out;
++
++	if (!hw->dev_spec._82575.eee_disable) {
++		/* Switch to PHY page 18. */
++		ret_val = phy->ops.write_reg(hw, E1000_M88E1545_PAGE_ADDR, 18);
++		if (ret_val)
++			goto out;
++
++		ret_val = phy->ops.read_reg(hw, E1000_M88E1545_EEE_CTRL_1,
++					    &phy_data);
++		if (ret_val)
++			goto out;
++
++		phy_data |= E1000_M88E1545_EEE_CTRL_1_MS;
++		ret_val = phy->ops.write_reg(hw, E1000_M88E1545_EEE_CTRL_1,
++					     phy_data);
++		if (ret_val)
++			goto out;
++
++		/* Return the PHY to page 0. */
++		ret_val = phy->ops.write_reg(hw, E1000_M88E1545_PAGE_ADDR, 0);
++		if (ret_val)
++			goto out;
++
++		/* Turn on EEE advertisement. */
++		ret_val = igb_read_xmdio_reg(hw, E1000_EEE_ADV_ADDR_I354,
++					     E1000_EEE_ADV_DEV_I354,
++					     &phy_data);
++		if (ret_val)
++			goto out;
++
++		phy_data |= E1000_EEE_ADV_100_SUPPORTED |
++			    E1000_EEE_ADV_1000_SUPPORTED;
++		ret_val = igb_write_xmdio_reg(hw, E1000_EEE_ADV_ADDR_I354,
++						E1000_EEE_ADV_DEV_I354,
++						phy_data);
++	} else {
++		/* Turn off EEE advertisement. */
++		ret_val = igb_read_xmdio_reg(hw, E1000_EEE_ADV_ADDR_I354,
++					     E1000_EEE_ADV_DEV_I354,
++					     &phy_data);
++		if (ret_val)
++			goto out;
++
++		phy_data &= ~(E1000_EEE_ADV_100_SUPPORTED |
++			      E1000_EEE_ADV_1000_SUPPORTED);
++		ret_val = igb_write_xmdio_reg(hw, E1000_EEE_ADV_ADDR_I354,
++					      E1000_EEE_ADV_DEV_I354,
++					      phy_data);
++	}
++
++out:
++	return ret_val;
++}
++
++/**
++ *  igb_get_eee_status_i354 - Get EEE status
++ *  @hw: pointer to the HW structure
++ *  @status: EEE status
++ *
++ *  Get EEE status by guessing based on whether Tx or Rx LPI indications have
++ *  been received.
++ **/
++s32 igb_get_eee_status_i354(struct e1000_hw *hw, bool *status)
++{
++	struct e1000_phy_info *phy = &hw->phy;
++	s32 ret_val = 0;
++	u16 phy_data;
++
++	/* Check if EEE is supported on this device. */
++	if ((hw->phy.media_type != e1000_media_type_copper) ||
++	    (phy->id != M88E1545_E_PHY_ID))
++		goto out;
++
++	ret_val = igb_read_xmdio_reg(hw, E1000_PCS_STATUS_ADDR_I354,
++				     E1000_PCS_STATUS_DEV_I354,
++				     &phy_data);
++	if (ret_val)
++		goto out;
++
++	*status = phy_data & (E1000_PCS_STATUS_TX_LPI_RCVD |
++			      E1000_PCS_STATUS_RX_LPI_RCVD) ? true : false;
++
++out:
++	return ret_val;
++}
++
+ static const u8 e1000_emc_temp_data[4] = {
+ 	E1000_EMC_INTERNAL_DATA,
+ 	E1000_EMC_DIODE1_DATA,
+diff --git a/drivers/net/ethernet/intel/igb/e1000_82575.h b/drivers/net/ethernet/intel/igb/e1000_82575.h
+index 0d318ac..74a1506 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_82575.h
++++ b/drivers/net/ethernet/intel/igb/e1000_82575.h
+@@ -265,6 +265,7 @@ void igb_vmdq_set_replication_pf(struct e1000_hw *, bool);
+ u16 igb_rxpbs_adjust_82580(u32 data);
+ s32 igb_read_emi_reg(struct e1000_hw *, u16 addr, u16 *data);
+ s32 igb_set_eee_i350(struct e1000_hw *);
++s32 igb_set_eee_i354(struct e1000_hw *);
+ s32 igb_init_thermal_sensor_thresh_generic(struct e1000_hw *);
+ s32 igb_get_thermal_sensor_data_generic(struct e1000_hw *hw);
+ 
+diff --git a/drivers/net/ethernet/intel/igb/e1000_defines.h b/drivers/net/ethernet/intel/igb/e1000_defines.h
+index 325a2f8..158617d 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_defines.h
++++ b/drivers/net/ethernet/intel/igb/e1000_defines.h
+@@ -234,11 +234,14 @@
+ #define E1000_STATUS_GIO_MASTER_ENABLE 0x00080000
+ /* BMC external code execution disabled */
+ 
++#define E1000_STATUS_2P5_SKU		0x00001000 /* Val of 2.5GBE SKU strap */
++#define E1000_STATUS_2P5_SKU_OVER	0x00002000 /* Val of 2.5GBE SKU Over */
+ /* Constants used to intrepret the masked PCI-X bus speed. */
+ 
+ #define SPEED_10    10
+ #define SPEED_100   100
+ #define SPEED_1000  1000
++#define SPEED_2500  2500
+ #define HALF_DUPLEX 1
+ #define FULL_DUPLEX 2
+ 
+@@ -766,6 +769,7 @@
+ #define I350_I_PHY_ID        0x015403B0
+ #define M88_VENDOR           0x0141
+ #define I210_I_PHY_ID        0x01410C00
++#define M88E1545_E_PHY_ID    0x01410EA0
+ 
+ /* M88E1000 Specific Registers */
+ #define M88E1000_PHY_SPEC_CTRL     0x10  /* PHY Specific Control Register */
+@@ -886,6 +890,18 @@
+ #define E1000_EEE_LP_ADV_DEV_I210    7           /* EEE LP Adv Device */
+ #define E1000_EEE_LP_ADV_ADDR_I210   61          /* EEE LP Adv Register */
+ #define E1000_MMDAC_FUNC_DATA        0x4000      /* Data, no post increment */
++#define E1000_M88E1545_PAGE_ADDR	0x16       /* Page Offset Register */
++#define E1000_M88E1545_EEE_CTRL_1	0x0
++#define E1000_M88E1545_EEE_CTRL_1_MS	0x0001     /* EEE Master/Slave */
++#define E1000_EEE_ADV_DEV_I354		7
++#define E1000_EEE_ADV_ADDR_I354		60
++#define E1000_EEE_ADV_100_SUPPORTED	(1 << 1)   /* 100BaseTx EEE Supported */
++#define E1000_EEE_ADV_1000_SUPPORTED	(1 << 2)   /* 1000BaseT EEE Supported */
++#define E1000_PCS_STATUS_DEV_I354	3
++#define E1000_PCS_STATUS_ADDR_I354	1
++#define E1000_PCS_STATUS_TX_LPI_IND	0x0200     /* Tx in LPI state */
++#define E1000_PCS_STATUS_RX_LPI_RCVD	0x0400
++#define E1000_PCS_STATUS_TX_LPI_RCVD	0x0800
+ 
+ /* SerDes Control */
+ #define E1000_GEN_CTL_READY             0x80000000
+diff --git a/drivers/net/ethernet/intel/igb/e1000_hw.h b/drivers/net/ethernet/intel/igb/e1000_hw.h
+index 84df815..1138cca 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_hw.h
++++ b/drivers/net/ethernet/intel/igb/e1000_hw.h
+@@ -70,6 +70,9 @@ struct e1000_hw;
+ #define E1000_DEV_ID_I210_SERDES		0x1537
+ #define E1000_DEV_ID_I210_SGMII			0x1538
+ #define E1000_DEV_ID_I211_COPPER		0x1539
++#define E1000_DEV_ID_I354_BACKPLANE_1GBPS	0x1F40
++#define E1000_DEV_ID_I354_SGMII			0x1F41
++#define E1000_DEV_ID_I354_BACKPLANE_2_5GBPS	0x1F45
+ 
+ #define E1000_REVISION_2 2
+ #define E1000_REVISION_4 4
+@@ -90,6 +93,7 @@ enum e1000_mac_type {
+ 	e1000_82576,
+ 	e1000_82580,
+ 	e1000_i350,
++	e1000_i354,
+ 	e1000_i210,
+ 	e1000_i211,
+ 	e1000_num_macs  /* List is 1-based, so subtract 1 for true count. */
+diff --git a/drivers/net/ethernet/intel/igb/e1000_mac.c b/drivers/net/ethernet/intel/igb/e1000_mac.c
+index afbab05..2559d70 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_mac.c
++++ b/drivers/net/ethernet/intel/igb/e1000_mac.c
+@@ -214,7 +214,7 @@ s32 igb_vfta_set(struct e1000_hw *hw, u32 vid, bool add)
+ 		else
+ 			vfta &= ~mask;
+ 	}
+-	if (hw->mac.type == e1000_i350)
++	if ((hw->mac.type == e1000_i350) || (hw->mac.type == e1000_i354))
+ 		igb_write_vfta_i350(hw, index, vfta);
+ 	else
+ 		igb_write_vfta(hw, index, vfta);
+@@ -1171,6 +1171,17 @@ s32 igb_get_speed_and_duplex_copper(struct e1000_hw *hw, u16 *speed,
+ 		hw_dbg("Half Duplex\n");
+ 	}
+ 
++	/* Check if it is an I354 2.5Gb backplane connection. */
++	if (hw->mac.type == e1000_i354) {
++		if ((status & E1000_STATUS_2P5_SKU) &&
++		    !(status & E1000_STATUS_2P5_SKU_OVER)) {
++			*speed = SPEED_2500;
++			*duplex = FULL_DUPLEX;
++			hw_dbg("2500 Mbs, ");
++			hw_dbg("Full Duplex\n");
++		}
++	}
++
+ 	return 0;
+ }
+ 
+diff --git a/drivers/net/ethernet/intel/igb/e1000_nvm.c b/drivers/net/ethernet/intel/igb/e1000_nvm.c
+index 5e0dd0a..7f9cd7c 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_nvm.c
++++ b/drivers/net/ethernet/intel/igb/e1000_nvm.c
+@@ -721,6 +721,7 @@ void igb_get_fw_version(struct e1000_hw *hw, struct e1000_fw_version *fw_vers)
+ 	case e1000_82575:
+ 	case e1000_82576:
+ 	case e1000_82580:
++	case e1000_i354:
+ 	case e1000_i350:
+ 	case e1000_i210:
+ 		break;
+@@ -739,6 +740,7 @@ void igb_get_fw_version(struct e1000_hw *hw, struct e1000_fw_version *fw_vers)
+ 
+ 	switch (hw->mac.type) {
+ 	case e1000_i210:
++	case e1000_i354:
+ 	case e1000_i350:
+ 		/* find combo image version */
+ 		hw->nvm.ops.read(hw, NVM_COMB_VER_PTR, 1, &comb_offset);
+diff --git a/drivers/net/ethernet/intel/igb/e1000_phy.c b/drivers/net/ethernet/intel/igb/e1000_phy.c
+index 72a4409..fd46add 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_phy.c
++++ b/drivers/net/ethernet/intel/igb/e1000_phy.c
+@@ -1682,6 +1682,7 @@ s32 igb_get_cable_length_m88_gen2(struct e1000_hw *hw)
+ 		phy->max_cable_length = phy_data / (is_cm ? 100 : 1);
+ 		phy->cable_length = phy_data / (is_cm ? 100 : 1);
+ 		break;
++	case M88E1545_E_PHY_ID:
+ 	case I347AT4_E_PHY_ID:
+ 		/* Remember the original page select and set it to 7 */
+ 		ret_val = phy->ops.read_reg(hw, I347AT4_PAGE_SELECT,
+diff --git a/drivers/net/ethernet/intel/igb/e1000_regs.h b/drivers/net/ethernet/intel/igb/e1000_regs.h
+index bdfc040..82632c6 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_regs.h
++++ b/drivers/net/ethernet/intel/igb/e1000_regs.h
+@@ -65,6 +65,7 @@
+ #define E1000_TIPG     0x00410  /* TX Inter-packet gap -RW */
+ #define E1000_AIT      0x00458  /* Adaptive Interframe Spacing Throttle - RW */
+ #define E1000_LEDCTL   0x00E00  /* LED Control - RW */
++#define E1000_LEDMUX   0x08130  /* LED MUX Control */
+ #define E1000_PBA      0x01000  /* Packet Buffer Allocation - RW */
+ #define E1000_PBS      0x01008  /* Packet Buffer Size */
+ #define E1000_EEMNGCTL 0x01010  /* MNG EEprom Control */
+@@ -83,6 +84,9 @@
+ #define E1000_I2C_DATA_IN   0x00001000  /* I2C- Data In */
+ #define E1000_I2C_CLK_OE_N  0x00002000  /* I2C- Clock Output Enable */
+ #define E1000_I2C_CLK_IN    0x00004000  /* I2C- Clock In */
++#define E1000_MPHY_ADDR_CTRL	0x0024 /* GbE MPHY Address Control */
++#define E1000_MPHY_DATA		0x0E10 /* GBE MPHY Data */
++#define E1000_MPHY_STAT		0x0E0C /* GBE MPHY Statistics */
+ 
+ /* IEEE 1588 TIMESYNCH */
+ #define E1000_TSYNCRXCTL 0x0B620 /* Rx Time Sync Control register - RW */
+diff --git a/drivers/net/ethernet/intel/igb/igb.h b/drivers/net/ethernet/intel/igb/igb.h
+index a62f499..83e87c3 100644
+--- a/drivers/net/ethernet/intel/igb/igb.h
++++ b/drivers/net/ethernet/intel/igb/igb.h
+@@ -124,9 +124,9 @@ struct vf_data_storage {
+  *           descriptors until either it has this many to write back, or the
+  *           ITR timer expires.
+  */
+-#define IGB_RX_PTHRESH	8
++#define IGB_RX_PTHRESH	((hw->mac.type == e1000_i354) ? 12 : 8)
+ #define IGB_RX_HTHRESH	8
+-#define IGB_TX_PTHRESH	8
++#define IGB_TX_PTHRESH	((hw->mac.type == e1000_i354) ? 20 : 8)
+ #define IGB_TX_HTHRESH	1
+ #define IGB_RX_WTHRESH	((hw->mac.type == e1000_82576 && \
+ 			  adapter->msix_entries) ? 1 : 4)
+diff --git a/drivers/net/ethernet/intel/igb/igb_ethtool.c b/drivers/net/ethernet/intel/igb/igb_ethtool.c
+index a7796ed..1aac697 100644
+--- a/drivers/net/ethernet/intel/igb/igb_ethtool.c
++++ b/drivers/net/ethernet/intel/igb/igb_ethtool.c
+@@ -182,18 +182,29 @@ static int igb_get_settings(struct net_device *netdev, struct ethtool_cmd *ecmd)
+ 		ecmd->phy_address = hw->phy.addr;
+ 		ecmd->transceiver = XCVR_INTERNAL;
+ 	} else {
+-		ecmd->supported   = (SUPPORTED_1000baseT_Full |
+-				     SUPPORTED_100baseT_Full |
+-				     SUPPORTED_Autoneg |
+-				     SUPPORTED_FIBRE |
+-				     SUPPORTED_Pause);
++		ecmd->supported = (SUPPORTED_1000baseT_Full |
++				   SUPPORTED_100baseT_Full |
++				   SUPPORTED_FIBRE |
++				   SUPPORTED_Autoneg |
++				   SUPPORTED_Pause);
++		if (hw->mac.type == e1000_i354)
++				ecmd->supported |= SUPPORTED_2500baseX_Full;
+ 
+ 		ecmd->advertising = ADVERTISED_FIBRE;
+ 
+-		if (adapter->link_speed == SPEED_100)
+-			ecmd->advertising = ADVERTISED_100baseT_Full;
+-		else if (adapter->link_speed == SPEED_1000)
++		switch (adapter->link_speed) {
++		case SPEED_2500:
++			ecmd->advertising = ADVERTISED_2500baseX_Full;
++			break;
++		case SPEED_1000:
+ 			ecmd->advertising = ADVERTISED_1000baseT_Full;
++			break;
++		case SPEED_100:
++			ecmd->advertising = ADVERTISED_100baseT_Full;
++			break;
++		default:
++			break;
++		}
+ 
+ 		if (hw->mac.autoneg == 1)
+ 			ecmd->advertising |= ADVERTISED_Autoneg;
+@@ -205,21 +216,23 @@ static int igb_get_settings(struct net_device *netdev, struct ethtool_cmd *ecmd)
+ 	status = rd32(E1000_STATUS);
+ 
+ 	if (status & E1000_STATUS_LU) {
+-
+-		if (status & E1000_STATUS_SPEED_1000)
+-			ethtool_cmd_speed_set(ecmd, SPEED_1000);
++		if ((hw->mac.type == e1000_i354) &&
++		    (status & E1000_STATUS_2P5_SKU) &&
++		    !(status & E1000_STATUS_2P5_SKU_OVER))
++			ecmd->speed = SPEED_2500;
++		else if (status & E1000_STATUS_SPEED_1000)
++			ecmd->speed = SPEED_1000;
+ 		else if (status & E1000_STATUS_SPEED_100)
+-			ethtool_cmd_speed_set(ecmd, SPEED_100);
++			ecmd->speed = SPEED_100;
+ 		else
+-			ethtool_cmd_speed_set(ecmd, SPEED_10);
+-
++			ecmd->speed = SPEED_10;
+ 		if ((status & E1000_STATUS_FD) ||
+ 		    hw->phy.media_type != e1000_media_type_copper)
+ 			ecmd->duplex = DUPLEX_FULL;
+ 		else
+ 			ecmd->duplex = DUPLEX_HALF;
+ 	} else {
+-		ethtool_cmd_speed_set(ecmd, -1);
++		ecmd->speed = -1;
+ 		ecmd->duplex = -1;
+ 	}
+ 
+@@ -254,12 +267,22 @@ static int igb_set_settings(struct net_device *netdev, struct ethtool_cmd *ecmd)
+ 			hw->phy.autoneg_advertised = ecmd->advertising |
+ 						     ADVERTISED_FIBRE |
+ 						     ADVERTISED_Autoneg;
+-			if (adapter->link_speed == SPEED_1000)
++			switch (adapter->link_speed) {
++			case SPEED_2500:
++				hw->phy.autoneg_advertised =
++					ADVERTISED_2500baseX_Full;
++				break;
++			case SPEED_1000:
+ 				hw->phy.autoneg_advertised =
+ 					ADVERTISED_1000baseT_Full;
+-			else if (adapter->link_speed == SPEED_100)
++				break;
++			case SPEED_100:
+ 				hw->phy.autoneg_advertised =
+ 					ADVERTISED_100baseT_Full;
++				break;
++			default:
++				break;
++			}
+ 		} else {
+ 			hw->phy.autoneg_advertised = ecmd->advertising |
+ 						     ADVERTISED_TP |
+@@ -1186,6 +1209,7 @@ static int igb_reg_test(struct igb_adapter *adapter, u64 *data)
+ 
+ 	switch (adapter->hw.mac.type) {
+ 	case e1000_i350:
++	case e1000_i354:
+ 		test = reg_test_i350;
+ 		toggle = 0x7FEFF3FF;
+ 		break;
+@@ -1348,6 +1372,7 @@ static int igb_intr_test(struct igb_adapter *adapter, u64 *data)
+ 		ics_mask = 0x77DCFED5;
+ 		break;
+ 	case e1000_i350:
++	case e1000_i354:
+ 	case e1000_i210:
+ 	case e1000_i211:
+ 		ics_mask = 0x77DCFED5;
+@@ -1842,6 +1867,13 @@ static int igb_loopback_test(struct igb_adapter *adapter, u64 *data)
+ 		*data = 0;
+ 		goto out;
+ 	}
++
++	if (adapter->hw.mac.type == e1000_i354) {
++		dev_info(&adapter->pdev->dev,
++			"Loopback test not supported on i354.\n");
++		*data = 0;
++		goto out;
++	}
+ 	*data = igb_setup_desc_rings(adapter);
+ 	if (*data)
+ 		goto out;
+diff --git a/drivers/net/ethernet/intel/igb/igb_main.c b/drivers/net/ethernet/intel/igb/igb_main.c
+index 1b5614c..ccad82c 100644
+--- a/drivers/net/ethernet/intel/igb/igb_main.c
++++ b/drivers/net/ethernet/intel/igb/igb_main.c
+@@ -77,6 +77,9 @@ static const struct e1000_info *igb_info_tbl[] = {
+ };
+ 
+ static DEFINE_PCI_DEVICE_TABLE(igb_pci_tbl) = {
++	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_I354_BACKPLANE_1GBPS) },
++	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_I354_SGMII) },
++	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_I354_BACKPLANE_2_5GBPS) },
+ 	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_I211_COPPER), board_82575 },
+ 	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_I210_COPPER), board_82575 },
+ 	{ PCI_VDEVICE(INTEL, E1000_DEV_ID_I210_FIBER), board_82575 },
+@@ -733,6 +736,7 @@ static void igb_cache_ring_register(struct igb_adapter *adapter)
+ 	case e1000_82575:
+ 	case e1000_82580:
+ 	case e1000_i350:
++	case e1000_i354:
+ 	case e1000_i210:
+ 	case e1000_i211:
+ 	default:
+@@ -818,6 +822,7 @@ static void igb_assign_vector(struct igb_q_vector *q_vector, int msix_vector)
+ 		break;
+ 	case e1000_82580:
+ 	case e1000_i350:
++	case e1000_i354:
+ 	case e1000_i210:
+ 	case e1000_i211:
+ 		/* On 82580 and newer adapters the scheme is similar to 82576
+@@ -885,6 +890,7 @@ static void igb_configure_msix(struct igb_adapter *adapter)
+ 	case e1000_82576:
+ 	case e1000_82580:
+ 	case e1000_i350:
++	case e1000_i354:
+ 	case e1000_i210:
+ 	case e1000_i211:
+ 		/* Turn on MSI-X capability first, or our settings
+@@ -1236,7 +1242,8 @@ static int igb_alloc_q_vector(struct igb_adapter *adapter,
+ 		if (adapter->hw.mac.type >= e1000_82576)
+ 			set_bit(IGB_RING_FLAG_RX_SCTP_CSUM, &ring->flags);
+ 
+-		/* On i350, i210, and i211, loopback VLAN packets
++		/*
++		 * On i350, i354, i210, and i211, loopback VLAN packets
+ 		 * have the tag byte-swapped.
+ 		 */
+ 		if (adapter->hw.mac.type >= e1000_i350)
+@@ -1711,6 +1718,7 @@ void igb_reset(struct igb_adapter *adapter)
+ 	 */
+ 	switch (mac->type) {
+ 	case e1000_i350:
++	case e1000_i354:
+ 	case e1000_82580:
+ 		pba = rd32(E1000_RXPBS);
+ 		pba = igb_rxpbs_adjust_82580(pba);
+@@ -2306,17 +2314,20 @@ static int igb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+ #endif /* CONFIG_IGB_PTP */
+ 
+ 	dev_info(&pdev->dev, "Intel(R) Gigabit Ethernet Network Connection\n");
+-	/* print bus type/speed/width info */
+-	dev_info(&pdev->dev, "%s: (PCIe:%s:%s) %pM\n",
+-		 netdev->name,
+-		 ((hw->bus.speed == e1000_bus_speed_2500) ? "2.5Gb/s" :
+-		  (hw->bus.speed == e1000_bus_speed_5000) ? "5.0Gb/s" :
+-		   "unknown"),
+-		 ((hw->bus.width == e1000_bus_width_pcie_x4) ? "Width x4" :
+-		  (hw->bus.width == e1000_bus_width_pcie_x2) ? "Width x2" :
+-		  (hw->bus.width == e1000_bus_width_pcie_x1) ? "Width x1" :
+-		   "unknown"),
+-		 netdev->dev_addr);
++	/* print bus type/speed/width info, not applicable to i354 */
++	if (hw->mac.type != e1000_i354) {
++		dev_info(&pdev->dev, "%s: (PCIe:%s:%s) %pM\n",
++			 netdev->name,
++			 ((hw->bus.speed == e1000_bus_speed_2500) ? "2.5Gb/s" :
++			  (hw->bus.speed == e1000_bus_speed_5000) ? "5.0Gb/s" :
++			   "unknown"),
++			 ((hw->bus.width == e1000_bus_width_pcie_x4) ?
++			  "Width x4" :
++			  (hw->bus.width == e1000_bus_width_pcie_x2) ?
++			  "Width x2" :
++			  (hw->bus.width == e1000_bus_width_pcie_x1) ?
++			  "Width x1" : "unknown"), netdev->dev_addr);
++	}
+ 
+ 	ret_val = igb_read_part_string(hw, part_str, E1000_PBANUM_LENGTH);
+ 	if (ret_val)
+@@ -2333,6 +2344,13 @@ static int igb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+ 	case e1000_i211:
+ 		igb_set_eee_i350(hw);
+ 		break;
++	case e1000_i354:
++		if (hw->phy.media_type == e1000_media_type_copper) {
++			if ((rd32(E1000_CTRL_EXT) &
++			    E1000_CTRL_EXT_LINK_MODE_SGMII))
++				igb_set_eee_i354(hw);
++		}
++		break;
+ 	default:
+ 		break;
+ 	}
+@@ -2592,6 +2610,7 @@ static int igb_sw_init(struct igb_adapter *adapter)
+ 		}
+ 		/* fall through */
+ 	case e1000_82580:
++	case e1000_i354:
+ 	default:
+ 		max_rss_queues = IGB_MAX_RX_QUEUES;
+ 		break;
+@@ -2616,6 +2635,7 @@ static int igb_sw_init(struct igb_adapter *adapter)
+ 		/* fall through */
+ 	case e1000_82580:
+ 	case e1000_i350:
++	case e1000_i354:
+ 	case e1000_i210:
+ 	default:
+ 		/* If rss_queues > half of max_rss_queues, pair the queues in
+@@ -7404,6 +7424,7 @@ static void igb_vmm_control(struct igb_adapter *adapter)
+ 	case e1000_82575:
+ 	case e1000_i210:
+ 	case e1000_i211:
++	case e1000_i354:
+ 	default:
+ 		/* replication is not supported for 82575 */
+ 		return;
+@@ -7477,7 +7498,9 @@ static void igb_init_dmac(struct igb_adapter *adapter, u32 pba)
+ 			reg |= (1000 >> 5);
+ 
+ 			/* Disable BMC-to-OS Watchdog Enable */
+-			reg &= ~E1000_DMACR_DC_BMC2OSW_EN;
++			if (hw->mac.type != e1000_i354)
++				reg &= ~E1000_DMACR_DC_BMC2OSW_EN;
++
+ 			wr32(E1000_DMACR, reg);
+ 
+ 			/* no lower threshold to disable
+diff --git a/drivers/net/ethernet/intel/igb/igb_ptp.c b/drivers/net/ethernet/intel/igb/igb_ptp.c
+index aa29e4e..e6c0363 100644
+--- a/drivers/net/ethernet/intel/igb/igb_ptp.c
++++ b/drivers/net/ethernet/intel/igb/igb_ptp.c
+@@ -171,6 +171,7 @@ static void igb_ptp_systim_to_hwtstamp(struct igb_adapter *adapter,
+ 	switch (adapter->hw.mac.type) {
+ 	case e1000_82576:
+ 	case e1000_82580:
++	case e1000_i354:
+ 	case e1000_i350:
+ 		spin_lock_irqsave(&adapter->tmreg_lock, flags);
+ 
+@@ -735,6 +736,7 @@ void igb_ptp_init(struct igb_adapter *adapter)
+ 		wr32(E1000_TIMINCA, INCPERIOD_82576 | INCVALUE_82576);
+ 		break;
+ 	case e1000_82580:
++	case e1000_i354:
+ 	case e1000_i350:
+ 		snprintf(adapter->ptp_caps.name, 16, "%pm", netdev->dev_addr);
+ 		adapter->ptp_caps.owner = THIS_MODULE;
+@@ -822,6 +824,7 @@ void igb_ptp_stop(struct igb_adapter *adapter)
+ 	switch (adapter->hw.mac.type) {
+ 	case e1000_82576:
+ 	case e1000_82580:
++	case e1000_i354:
+ 	case e1000_i350:
+ 		cancel_delayed_work_sync(&adapter->ptp_overflow_work);
+ 		break;
+@@ -866,6 +869,7 @@ void igb_ptp_reset(struct igb_adapter *adapter)
+ 		wr32(E1000_TIMINCA, INCPERIOD_82576 | INCVALUE_82576);
+ 		break;
+ 	case e1000_82580:
++	case e1000_i354:
+ 	case e1000_i350:
+ 	case e1000_i210:
+ 	case e1000_i211:

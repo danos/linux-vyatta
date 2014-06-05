@@ -1,0 +1,90 @@
+From: Akeem G Abodunrin <akeem.g.abodunrin@intel.com>
+Date: Wed, 28 Aug 2013 02:23:04 +0000
+Subject: [PATCH 163/179] igb: Support to get 2_5G link status for appropriate
+ media type
+Origin: https://git.kernel.org/linus/f1b4d6214b04caed45f0938a1d769b0d8fe79a3b
+
+Since i354 2.5Gb devices are not Copper media type but SerDes, so this
+patch changes the way we detect speed/duplex link info for this device.
+
+Signed-off-by: Akeem G Abodunrin <akeem.g.abodunrin@intel.com>
+Tested-by: Aaron Brown <aaron.f.brown@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/igb/e1000_82575.c | 25 ++++++++++++++++++-------
+ drivers/net/ethernet/intel/igb/e1000_mac.c   | 11 -----------
+ 2 files changed, 18 insertions(+), 18 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/igb/e1000_82575.c b/drivers/net/ethernet/intel/igb/e1000_82575.c
+index d796e29..68dd7c8 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_82575.c
++++ b/drivers/net/ethernet/intel/igb/e1000_82575.c
+@@ -1217,7 +1217,7 @@ static s32 igb_get_pcs_speed_and_duplex_82575(struct e1000_hw *hw, u16 *speed,
+ 						u16 *duplex)
+ {
+ 	struct e1000_mac_info *mac = &hw->mac;
+-	u32 pcs;
++	u32 pcs, status;
+ 
+ 	/* Set up defaults for the return values of this function */
+ 	mac->serdes_has_link = false;
+@@ -1238,20 +1238,31 @@ static s32 igb_get_pcs_speed_and_duplex_82575(struct e1000_hw *hw, u16 *speed,
+ 		mac->serdes_has_link = true;
+ 
+ 		/* Detect and store PCS speed */
+-		if (pcs & E1000_PCS_LSTS_SPEED_1000) {
++		if (pcs & E1000_PCS_LSTS_SPEED_1000)
+ 			*speed = SPEED_1000;
+-		} else if (pcs & E1000_PCS_LSTS_SPEED_100) {
++		else if (pcs & E1000_PCS_LSTS_SPEED_100)
+ 			*speed = SPEED_100;
+-		} else {
++		else
+ 			*speed = SPEED_10;
+-		}
+ 
+ 		/* Detect and store PCS duplex */
+-		if (pcs & E1000_PCS_LSTS_DUPLEX_FULL) {
++		if (pcs & E1000_PCS_LSTS_DUPLEX_FULL)
+ 			*duplex = FULL_DUPLEX;
+-		} else {
++		else
+ 			*duplex = HALF_DUPLEX;
++
++	/* Check if it is an I354 2.5Gb backplane connection. */
++		if (mac->type == e1000_i354) {
++			status = rd32(E1000_STATUS);
++			if ((status & E1000_STATUS_2P5_SKU) &&
++			    !(status & E1000_STATUS_2P5_SKU_OVER)) {
++				*speed = SPEED_2500;
++				*duplex = FULL_DUPLEX;
++				hw_dbg("2500 Mbs, ");
++				hw_dbg("Full Duplex\n");
++			}
+ 		}
++
+ 	}
+ 
+ 	return 0;
+diff --git a/drivers/net/ethernet/intel/igb/e1000_mac.c b/drivers/net/ethernet/intel/igb/e1000_mac.c
+index bab556a..f0dfd41 100644
+--- a/drivers/net/ethernet/intel/igb/e1000_mac.c
++++ b/drivers/net/ethernet/intel/igb/e1000_mac.c
+@@ -1171,17 +1171,6 @@ s32 igb_get_speed_and_duplex_copper(struct e1000_hw *hw, u16 *speed,
+ 		hw_dbg("Half Duplex\n");
+ 	}
+ 
+-	/* Check if it is an I354 2.5Gb backplane connection. */
+-	if (hw->mac.type == e1000_i354) {
+-		if ((status & E1000_STATUS_2P5_SKU) &&
+-		    !(status & E1000_STATUS_2P5_SKU_OVER)) {
+-			*speed = SPEED_2500;
+-			*duplex = FULL_DUPLEX;
+-			hw_dbg("2500 Mbs, ");
+-			hw_dbg("Full Duplex\n");
+-		}
+-	}
+-
+ 	return 0;
+ }
+ 

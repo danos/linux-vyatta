@@ -1,0 +1,135 @@
+From: Bruce Allan <bruce.w.allan@intel.com>
+Date: Wed, 5 Dec 2012 08:40:59 +0000
+Subject: [PATCH 148/246] e1000e: add ethtool .get_eee/.set_eee
+Origin: https://git.kernel.org/linus/203e41514a557b71c4c42b4bb2912b56fa0c2fdc
+
+Add the ability to query and set Energy Efficient Ethernet parameters via
+ethtool for applicable devices.
+
+Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
+Tested-by: Jeff Pieper <jeffrey.e.pieper@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+[bwh: Backported to wheezy: The ethtool operations don't exist so don't
+ add an implementation, but do make the related changes to definitions so
+ that further patches will apply cleanly.]
+---
+ drivers/net/ethernet/intel/e1000e/defines.h | 30 +++++++++++++++++++++++++++++
+ drivers/net/ethernet/intel/e1000e/e1000.h   |  1 +
+ drivers/net/ethernet/intel/e1000e/hw.h      |  1 +
+ drivers/net/ethernet/intel/e1000e/ich8lan.c | 24 +----------------------
+ 4 files changed, 33 insertions(+), 23 deletions(-)
+
+diff --git a/drivers/net/ethernet/intel/e1000e/defines.h b/drivers/net/ethernet/intel/e1000e/defines.h
+index a8e6e51..9001453 100644
+--- a/drivers/net/ethernet/intel/e1000e/defines.h
++++ b/drivers/net/ethernet/intel/e1000e/defines.h
+@@ -382,6 +382,9 @@
+ 
+ #define E1000_KABGTXD_BGSQLBIAS           0x00050000
+ 
++/* Low Power IDLE Control */
++#define E1000_LPIC_LPIET_SHIFT		24	/* Low Power Idle Entry Time */
++
+ /* PBA constants */
+ #define E1000_PBA_8K  0x0008    /* 8KB */
+ #define E1000_PBA_16K 0x0010    /* 16KB */
+@@ -798,6 +801,33 @@
+ /* BME1000 PHY Specific Control Register */
+ #define BME1000_PSCR_ENABLE_DOWNSHIFT   0x0800 /* 1 = enable downshift */
+ 
++/* PHY Low Power Idle Control */
++#define I82579_LPI_CTRL				PHY_REG(772, 20)
++#define I82579_LPI_CTRL_100_ENABLE		0x2000
++#define I82579_LPI_CTRL_1000_ENABLE		0x4000
++#define I82579_LPI_CTRL_ENABLE_MASK		0x6000
++#define I82579_LPI_CTRL_FORCE_PLL_LOCK_COUNT	0x80
++
++/* Extended Management Interface (EMI) Registers */
++#define I82579_EMI_ADDR		0x10
++#define I82579_EMI_DATA		0x11
++#define I82579_LPI_UPDATE_TIMER	0x4805	/* in 40ns units + 40 ns base value */
++#define I82579_MSE_THRESHOLD	0x084F	/* 82579 Mean Square Error Threshold */
++#define I82577_MSE_THRESHOLD	0x0887	/* 82577 Mean Square Error Threshold */
++#define I82579_MSE_LINK_DOWN	0x2411	/* MSE count before dropping link */
++#define I82579_EEE_PCS_STATUS	0x182D	/* IEEE MMD Register 3.1 >> 8 */
++#define I82579_EEE_CAPABILITY	0x0410	/* IEEE MMD Register 3.20 */
++#define I82579_EEE_ADVERTISEMENT	0x040E	/* IEEE MMD Register 7.60 */
++#define I82579_EEE_LP_ABILITY		0x040F	/* IEEE MMD Register 7.61 */
++#define I82579_EEE_100_SUPPORTED	(1 << 1) /* 100BaseTx EEE supported */
++#define I82579_EEE_1000_SUPPORTED	(1 << 2) /* 1000BaseTx EEE supported */
++#define I217_EEE_PCS_STATUS	0x9401	/* IEEE MMD Register 3.1 */
++#define I217_EEE_CAPABILITY	0x8000	/* IEEE MMD Register 3.20 */
++#define I217_EEE_ADVERTISEMENT	0x8001	/* IEEE MMD Register 7.60 */
++#define I217_EEE_LP_ABILITY	0x8002	/* IEEE MMD Register 7.61 */
++
++#define E1000_EEE_RX_LPI_RCVD	0x0400	/* Tx LP idle received */
++#define E1000_EEE_TX_LPI_RCVD	0x0800	/* Rx LP idle received */
+ 
+ #define PHY_PAGE_SHIFT 5
+ #define PHY_REG(page, reg) (((page) << PHY_PAGE_SHIFT) | \
+diff --git a/drivers/net/ethernet/intel/e1000e/e1000.h b/drivers/net/ethernet/intel/e1000e/e1000.h
+index 052d0d7..f19e9f4 100644
+--- a/drivers/net/ethernet/intel/e1000e/e1000.h
++++ b/drivers/net/ethernet/intel/e1000e/e1000.h
+@@ -658,6 +658,7 @@ extern s32 e1000_check_polarity_ife(struct e1000_hw *hw);
+ extern s32 e1000_phy_force_speed_duplex_ife(struct e1000_hw *hw);
+ extern s32 e1000_check_polarity_igp(struct e1000_hw *hw);
+ extern bool e1000_check_phy_82574(struct e1000_hw *hw);
++extern s32 e1000_read_emi_reg_locked(struct e1000_hw *hw, u16 addr, u16 *data);
+ 
+ static inline s32 e1000_phy_hw_reset(struct e1000_hw *hw)
+ {
+diff --git a/drivers/net/ethernet/intel/e1000e/hw.h b/drivers/net/ethernet/intel/e1000e/hw.h
+index 06239fe..81afad5 100644
+--- a/drivers/net/ethernet/intel/e1000e/hw.h
++++ b/drivers/net/ethernet/intel/e1000e/hw.h
+@@ -62,6 +62,7 @@ enum e1e_registers {
+ 	E1000_IVAR     = 0x000E4, /* Interrupt Vector Allocation - RW */
+ 	E1000_EITR_82574_BASE = 0x000E8, /* Interrupt Throttling - RW */
+ #define E1000_EITR_82574(_n) (E1000_EITR_82574_BASE + (_n << 2))
++	E1000_LPIC     = 0x000FC, /* Low Power Idle Control - RW */
+ 	E1000_RCTL     = 0x00100, /* Rx Control - RW */
+ 	E1000_FCTTV    = 0x00170, /* Flow Control Transmit Timer Value - RW */
+ 	E1000_TXCW     = 0x00178, /* Tx Configuration Word - RW */
+diff --git a/drivers/net/ethernet/intel/e1000e/ich8lan.c b/drivers/net/ethernet/intel/e1000e/ich8lan.c
+index 051dfda..3829f7f 100644
+--- a/drivers/net/ethernet/intel/e1000e/ich8lan.c
++++ b/drivers/net/ethernet/intel/e1000e/ich8lan.c
+@@ -148,28 +148,6 @@
+ #define HV_PM_CTRL		PHY_REG(770, 17)
+ #define HV_PM_CTRL_PLL_STOP_IN_K1_GIGA	0x100
+ 
+-/* PHY Low Power Idle Control */
+-#define I82579_LPI_CTRL				PHY_REG(772, 20)
+-#define I82579_LPI_CTRL_100_ENABLE		0x2000
+-#define I82579_LPI_CTRL_1000_ENABLE		0x4000
+-#define I82579_LPI_CTRL_ENABLE_MASK		0x6000
+-#define I82579_LPI_CTRL_FORCE_PLL_LOCK_COUNT	0x80
+-
+-/* Extended Management Interface (EMI) Registers */
+-#define I82579_EMI_ADDR         0x10
+-#define I82579_EMI_DATA         0x11
+-#define I82579_LPI_UPDATE_TIMER 0x4805	/* in 40ns units + 40 ns base value */
+-#define I82579_MSE_THRESHOLD    0x084F	/* 82579 Mean Square Error Threshold */
+-#define I82577_MSE_THRESHOLD    0x0887	/* 82577 Mean Square Error Threshold */
+-#define I82579_MSE_LINK_DOWN    0x2411	/* MSE count before dropping link */
+-#define I82579_EEE_PCS_STATUS	0x182D	/* IEEE MMD Register 3.1 >> 8 */
+-#define I82579_EEE_LP_ABILITY	0x040F	/* IEEE MMD Register 7.61 */
+-#define I82579_EEE_100_SUPPORTED	(1 << 1) /* 100BaseTx EEE supported */
+-#define I82579_EEE_1000_SUPPORTED	(1 << 2) /* 1000BaseTx EEE supported */
+-#define I217_EEE_PCS_STATUS	0x9401	/* IEEE MMD Register 3.1 */
+-#define I217_EEE_ADVERTISEMENT  0x8001	/* IEEE MMD Register 7.60 */
+-#define I217_EEE_LP_ABILITY     0x8002	/* IEEE MMD Register 7.61 */
+-
+ /* Intel Rapid Start Technology Support */
+ #define I217_PROXY_CTRL                 BM_PHY_REG(BM_WUC_PAGE, 70)
+ #define I217_PROXY_CTRL_AUTO_DISABLE    0x0080
+@@ -829,7 +807,7 @@ static s32 __e1000_access_emi_reg_locked(struct e1000_hw *hw, u16 address,
+  *
+  *  Assumes the SW/FW/HW Semaphore is already acquired.
+  **/
+-static s32 e1000_read_emi_reg_locked(struct e1000_hw *hw, u16 addr, u16 *data)
++s32 e1000_read_emi_reg_locked(struct e1000_hw *hw, u16 addr, u16 *data)
+ {
+ 	return __e1000_access_emi_reg_locked(hw, addr, data, true);
+ }
