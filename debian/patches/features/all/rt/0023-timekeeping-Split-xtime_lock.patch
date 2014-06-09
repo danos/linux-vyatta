@@ -1,7 +1,7 @@
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Thu, 1 Mar 2012 15:14:06 +0100
-Subject: [PATCH 023/341] timekeeping: Split xtime_lock
-Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=78cd6848ba856b200f0c9a487736e46555cf226b
+Subject: [PATCH 023/343] timekeeping: Split xtime_lock
+Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=72cfb346d4e9f13ad5363ee681607997f19d85d4
 
 xtime_lock is going to be split apart in mainline, so we can shorten
 the seqcount protected regions and avoid updating seqcount in some
@@ -18,6 +18,8 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  kernel/time/timekeeping.c   | 90 ++++++++++++++++++++++++++-------------------
  6 files changed, 89 insertions(+), 57 deletions(-)
 
+diff --git a/kernel/time/jiffies.c b/kernel/time/jiffies.c
+index 955560e..c84f1ce 100644
 --- a/kernel/time/jiffies.c
 +++ b/kernel/time/jiffies.c
 @@ -80,9 +80,9 @@ u64 get_jiffies_64(void)
@@ -32,6 +34,8 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	return ret;
  }
  EXPORT_SYMBOL(get_jiffies_64);
+diff --git a/kernel/time/ntp.c b/kernel/time/ntp.c
+index f1eb182..09079b7 100644
 --- a/kernel/time/ntp.c
 +++ b/kernel/time/ntp.c
 @@ -362,6 +362,9 @@ int second_overflow(unsigned long secs)
@@ -73,7 +77,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	txc->time.tv_sec = ts.tv_sec;
  	txc->time.tv_usec = ts.tv_nsec;
-@@ -863,7 +870,8 @@ void hardpps(const struct timespec *phas
+@@ -863,7 +870,8 @@ void hardpps(const struct timespec *phase_ts, const struct timespec *raw_ts)
  
  	pts_norm = pps_normalize_ts(*phase_ts);
  
@@ -83,7 +87,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	/* clear the error bits, they will be set again if needed */
  	time_status &= ~(STA_PPSJITTER | STA_PPSWANDER | STA_PPSERROR);
-@@ -876,7 +884,8 @@ void hardpps(const struct timespec *phas
+@@ -876,7 +884,8 @@ void hardpps(const struct timespec *phase_ts, const struct timespec *raw_ts)
  	 * just start the frequency interval */
  	if (unlikely(pps_fbase.tv_sec == 0)) {
  		pps_fbase = *raw_ts;
@@ -93,7 +97,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  		return;
  	}
  
-@@ -891,7 +900,8 @@ void hardpps(const struct timespec *phas
+@@ -891,7 +900,8 @@ void hardpps(const struct timespec *phase_ts, const struct timespec *raw_ts)
  		time_status |= STA_PPSJITTER;
  		/* restart the frequency calibration interval */
  		pps_fbase = *raw_ts;
@@ -103,7 +107,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  		pr_err("hardpps: PPSJITTER: bad pulse\n");
  		return;
  	}
-@@ -908,7 +918,8 @@ void hardpps(const struct timespec *phas
+@@ -908,7 +918,8 @@ void hardpps(const struct timespec *phase_ts, const struct timespec *raw_ts)
  
  	hardpps_update_phase(pts_norm.nsec);
  
@@ -113,6 +117,8 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  }
  EXPORT_SYMBOL(hardpps);
  
+diff --git a/kernel/time/tick-common.c b/kernel/time/tick-common.c
+index ead79bc..538d45a 100644
 --- a/kernel/time/tick-common.c
 +++ b/kernel/time/tick-common.c
 @@ -63,13 +63,15 @@ int tick_is_oneshot_available(void)
@@ -133,7 +139,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	}
  
  	update_process_times(user_mode(get_irq_regs()));
-@@ -130,9 +132,9 @@ void tick_setup_periodic(struct clock_ev
+@@ -130,9 +132,9 @@ void tick_setup_periodic(struct clock_event_device *dev, int broadcast)
  		ktime_t next;
  
  		do {
@@ -145,18 +151,22 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  		clockevents_set_mode(dev, CLOCK_EVT_MODE_ONESHOT);
  
+diff --git a/kernel/time/tick-internal.h b/kernel/time/tick-internal.h
+index 4e265b9..c91100d 100644
 --- a/kernel/time/tick-internal.h
 +++ b/kernel/time/tick-internal.h
-@@ -141,4 +141,5 @@ static inline int tick_device_is_functio
+@@ -141,4 +141,5 @@ static inline int tick_device_is_functional(struct clock_event_device *dev)
  #endif
  
  extern void do_timer(unsigned long ticks);
 -extern seqlock_t xtime_lock;
 +extern raw_spinlock_t xtime_lock;
 +extern seqcount_t xtime_seq;
+diff --git a/kernel/time/tick-sched.c b/kernel/time/tick-sched.c
+index e9a45f1..9fb9c29 100644
 --- a/kernel/time/tick-sched.c
 +++ b/kernel/time/tick-sched.c
-@@ -56,7 +56,8 @@ static void tick_do_update_jiffies64(kti
+@@ -56,7 +56,8 @@ static void tick_do_update_jiffies64(ktime_t now)
  		return;
  
  	/* Reevalute with xtime_lock held */
@@ -166,7 +176,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	delta = ktime_sub(now, last_jiffies_update);
  	if (delta.tv64 >= tick_period.tv64) {
-@@ -79,7 +80,8 @@ static void tick_do_update_jiffies64(kti
+@@ -79,7 +80,8 @@ static void tick_do_update_jiffies64(ktime_t now)
  		/* Keep the tick_next_period variable up to date */
  		tick_next_period = ktime_add(last_jiffies_update, tick_period);
  	}
@@ -176,7 +186,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  }
  
  /*
-@@ -89,12 +91,14 @@ static ktime_t tick_init_jiffy_update(vo
+@@ -89,12 +91,14 @@ static ktime_t tick_init_jiffy_update(void)
  {
  	ktime_t period;
  
@@ -193,7 +203,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	return period;
  }
  
-@@ -345,11 +349,11 @@ void tick_nohz_stop_sched_tick(int inidl
+@@ -345,11 +349,11 @@ void tick_nohz_stop_sched_tick(int inidle)
  	ts->idle_calls++;
  	/* Read jiffies and the time when jiffies were updated last */
  	do {
@@ -207,9 +217,11 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	if (rcu_needs_cpu(cpu) || printk_needs_cpu(cpu) ||
  	    arch_needs_cpu(cpu)) {
+diff --git a/kernel/time/timekeeping.c b/kernel/time/timekeeping.c
+index 068c092..d00be1d 100644
 --- a/kernel/time/timekeeping.c
 +++ b/kernel/time/timekeeping.c
-@@ -139,8 +139,8 @@ static inline s64 timekeeping_get_ns_raw
+@@ -139,8 +139,8 @@ static inline s64 timekeeping_get_ns_raw(void)
   * This read-write spinlock protects us from races in SMP while
   * playing with xtime.
   */
@@ -272,7 +284,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	set_normalized_timespec(ts, ts->tv_sec + tomono.tv_sec,
  				ts->tv_nsec + tomono.tv_nsec + nsecs);
-@@ -333,7 +333,7 @@ void getnstime_raw_and_real(struct times
+@@ -333,7 +333,7 @@ void getnstime_raw_and_real(struct timespec *ts_raw, struct timespec *ts_real)
  	do {
  		u32 arch_offset;
  
@@ -281,7 +293,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  		*ts_raw = raw_time;
  		*ts_real = xtime;
-@@ -346,7 +346,7 @@ void getnstime_raw_and_real(struct times
+@@ -346,7 +346,7 @@ void getnstime_raw_and_real(struct timespec *ts_raw, struct timespec *ts_real)
  		nsecs_raw += arch_offset;
  		nsecs_real += arch_offset;
  
@@ -290,7 +302,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	timespec_add_ns(ts_raw, nsecs_raw);
  	timespec_add_ns(ts_real, nsecs_real);
-@@ -385,7 +385,8 @@ int do_settimeofday(const struct timespe
+@@ -385,7 +385,8 @@ int do_settimeofday(const struct timespec *tv)
  	if (!timespec_valid_strict(tv))
  		return -EINVAL;
  
@@ -300,7 +312,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	timekeeping_forward_now();
  
-@@ -397,7 +398,8 @@ int do_settimeofday(const struct timespe
+@@ -397,7 +398,8 @@ int do_settimeofday(const struct timespec *tv)
  
  	timekeeping_update(true);
  
@@ -310,7 +322,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	/* signal hrtimers about time change */
  	clock_was_set();
-@@ -423,7 +425,8 @@ int timekeeping_inject_offset(struct tim
+@@ -423,7 +425,8 @@ int timekeeping_inject_offset(struct timespec *ts)
  	if ((unsigned long)ts->tv_nsec >= NSEC_PER_SEC)
  		return -EINVAL;
  
@@ -320,7 +332,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	timekeeping_forward_now();
  
-@@ -439,7 +442,8 @@ int timekeeping_inject_offset(struct tim
+@@ -439,7 +442,8 @@ int timekeeping_inject_offset(struct timespec *ts)
  error: /* even if we error out, we forwarded the time, so call update */
  	timekeeping_update(true);
  
@@ -330,7 +342,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	/* signal hrtimers about time change */
  	clock_was_set();
-@@ -511,11 +515,11 @@ void getrawmonotonic(struct timespec *ts
+@@ -511,11 +515,11 @@ void getrawmonotonic(struct timespec *ts)
  	s64 nsecs;
  
  	do {
@@ -378,7 +390,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  }
  
  /* time in seconds when suspend began */
-@@ -681,14 +687,16 @@ void timekeeping_inject_sleeptime(struct
+@@ -681,14 +687,16 @@ void timekeeping_inject_sleeptime(struct timespec *delta)
  	if (!(ts.tv_sec == 0 && ts.tv_nsec == 0))
  		return;
  
@@ -437,7 +449,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	clockevents_notify(CLOCK_EVT_NOTIFY_SUSPEND, NULL);
  	clocksource_suspend();
-@@ -1152,13 +1164,13 @@ void get_monotonic_boottime(struct times
+@@ -1152,13 +1164,13 @@ void get_monotonic_boottime(struct timespec *ts)
  	WARN_ON(timekeeping_suspended);
  
  	do {
@@ -453,7 +465,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	set_normalized_timespec(ts, ts->tv_sec + tomono.tv_sec + sleep.tv_sec,
  		(s64)ts->tv_nsec + tomono.tv_nsec + sleep.tv_nsec + nsecs);
-@@ -1209,10 +1221,10 @@ struct timespec current_kernel_time(void
+@@ -1209,10 +1221,10 @@ struct timespec current_kernel_time(void)
  	unsigned long seq;
  
  	do {
@@ -466,7 +478,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	return now;
  }
-@@ -1224,11 +1236,11 @@ struct timespec get_monotonic_coarse(voi
+@@ -1224,11 +1236,11 @@ struct timespec get_monotonic_coarse(void)
  	unsigned long seq;
  
  	do {
@@ -480,7 +492,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	set_normalized_timespec(&now, now.tv_sec + mono.tv_sec,
  				now.tv_nsec + mono.tv_nsec);
-@@ -1260,11 +1272,11 @@ void get_xtime_and_monotonic_and_sleep_o
+@@ -1260,11 +1272,11 @@ void get_xtime_and_monotonic_and_sleep_offset(struct timespec *xtim,
  	unsigned long seq;
  
  	do {
