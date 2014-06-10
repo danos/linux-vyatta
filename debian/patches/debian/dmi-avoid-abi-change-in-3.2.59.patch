@@ -1,0 +1,105 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Mon, 09 Jun 2014 23:13:21 +0100
+Subject: dmi: Avoid ABI change in 3.2.59
+Forwarded: not-needed
+
+struct dmi_strmatch was changed to reassign an unused bit of 'slot'
+as 'exact_match'.  This is binary backward-compatible in the sense
+that old modules continue to work with the new kernel, but new
+modules that set this flag will cause an array overrun in an old
+kernel because 'slot' is not bounds-checked.
+
+Hide the structure change from genksyms, but rename the exported
+functions using this structure so that new modules will depend on
+them and cannot be loaded against an old kernel.
+
+--- a/drivers/firmware/dmi_scan.c
++++ b/drivers/firmware/dmi_scan.c
+@@ -558,6 +558,10 @@ static bool dmi_is_end_of_table(const st
+ 	return dmi->matches[0].slot == DMI_NONE;
+ }
+ 
++/* bwh: See comment in <linux/dmi.h> */
++#undef dmi_check_system
++#undef dmi_first_match
++
+ /**
+  *	dmi_check_system - check system DMI data
+  *	@list: array of dmi_system_id structures to match against
+@@ -573,6 +577,12 @@ static bool dmi_is_end_of_table(const st
+  */
+ int dmi_check_system(const struct dmi_system_id *list)
+ {
++	return dmi_check_system_2(list);
++}
++EXPORT_SYMBOL(dmi_check_system);
++
++int dmi_check_system_2(const struct dmi_system_id *list)
++{
+ 	int count = 0;
+ 	const struct dmi_system_id *d;
+ 
+@@ -585,7 +595,7 @@ int dmi_check_system(const struct dmi_sy
+ 
+ 	return count;
+ }
+-EXPORT_SYMBOL(dmi_check_system);
++EXPORT_SYMBOL(dmi_check_system_2);
+ 
+ /**
+  *	dmi_first_match - find dmi_system_id structure matching system DMI data
+@@ -601,6 +611,12 @@ EXPORT_SYMBOL(dmi_check_system);
+  */
+ const struct dmi_system_id *dmi_first_match(const struct dmi_system_id *list)
+ {
++	return dmi_first_match_2(list);
++}
++EXPORT_SYMBOL(dmi_first_match);
++
++const struct dmi_system_id *dmi_first_match_2(const struct dmi_system_id *list)
++{
+ 	const struct dmi_system_id *d;
+ 
+ 	for (d = list; !dmi_is_end_of_table(d); d++)
+@@ -609,7 +625,7 @@ const struct dmi_system_id *dmi_first_ma
+ 
+ 	return NULL;
+ }
+-EXPORT_SYMBOL(dmi_first_match);
++EXPORT_SYMBOL(dmi_first_match_2);
+ 
+ /**
+  *	dmi_get_system_info - return DMI data value
+--- a/include/linux/dmi.h
++++ b/include/linux/dmi.h
+@@ -93,6 +93,14 @@ struct dmi_dev_onboard {
+ 	int devfn;
+ };
+ 
++/*
++ * bwh: These functions are renamed so that modules won't load on an
++ * older kernel version where setting the 'exact_match' flag would
++ * result in an array overrun.
++ */
++#define dmi_check_system dmi_check_system_2
++#define dmi_first_match dmi_first_match_2
++
+ extern int dmi_check_system(const struct dmi_system_id *list);
+ const struct dmi_system_id *dmi_first_match(const struct dmi_system_id *list);
+ extern const char * dmi_get_system_info(int field);
+--- a/include/linux/mod_devicetable.h
++++ b/include/linux/mod_devicetable.h
+@@ -461,8 +461,13 @@ enum dmi_field {
+ };
+ 
+ struct dmi_strmatch {
++#ifndef __GENKSYMS__
++	/* Layout supported by dmi_check_system_2() and dmi_first_match_2() */
+ 	unsigned char slot:7;
+ 	unsigned char exact_match:1;
++#else
++	unsigned char slot;
++#endif
+ 	char substr[79];
+ };
+ 
