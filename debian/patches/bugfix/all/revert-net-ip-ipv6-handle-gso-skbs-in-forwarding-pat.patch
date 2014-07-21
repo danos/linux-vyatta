@@ -1,0 +1,164 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Sat, 12 Jul 2014 21:00:54 +0100
+Subject: Revert "net: ip, ipv6: handle gso skbs in forwarding path"
+
+This reverts commit caa5344994778a2b4725b2d75c74430f76925e4a, which
+was commit fe6cc55f3a9a053482a76f5a6b2257cee51b4663 upstream.  In 3.2,
+the transport header length is not calculated in the forwarding path,
+so skb_gso_network_seglen() returns an incorrect result.  We also have
+problems due to the local_df flag not being set correctly.
+
+There isn't a Debian bug report for this, but it needed a further
+fix ("net: ipv4: ip_forward: fix inverted local_df test") which in
+turn caused more obvious regressions (#754173).
+---
+ include/linux/skbuff.h | 17 -------------
+ net/ipv4/ip_forward.c  | 68 ++------------------------------------------------
+ net/ipv6/ip6_output.c  | 13 +---------
+ 3 files changed, 3 insertions(+), 95 deletions(-)
+
+--- a/include/linux/skbuff.h
++++ b/include/linux/skbuff.h
+@@ -2588,22 +2588,5 @@ static inline bool skb_is_recycleable(co
+ 
+ 	return true;
+ }
+-
+-/**
+- * skb_gso_network_seglen - Return length of individual segments of a gso packet
+- *
+- * @skb: GSO skb
+- *
+- * skb_gso_network_seglen is used to determine the real size of the
+- * individual segments, including Layer3 (IP, IPv6) and L4 headers (TCP/UDP).
+- *
+- * The MAC/L2 header is not accounted for.
+- */
+-static inline unsigned int skb_gso_network_seglen(const struct sk_buff *skb)
+-{
+-	unsigned int hdr_len = skb_transport_header(skb) -
+-			       skb_network_header(skb);
+-	return hdr_len + skb_gso_transport_seglen(skb);
+-}
+ #endif	/* __KERNEL__ */
+ #endif	/* _LINUX_SKBUFF_H */
+--- a/net/ipv4/ip_forward.c
++++ b/net/ipv4/ip_forward.c
+@@ -39,68 +39,6 @@
+ #include <net/route.h>
+ #include <net/xfrm.h>
+ 
+-static bool ip_may_fragment(const struct sk_buff *skb)
+-{
+-	return unlikely((ip_hdr(skb)->frag_off & htons(IP_DF)) == 0) ||
+-	       !skb->local_df;
+-}
+-
+-static bool ip_exceeds_mtu(const struct sk_buff *skb, unsigned int mtu)
+-{
+-	if (skb->len <= mtu || skb->local_df)
+-		return false;
+-
+-	if (skb_is_gso(skb) && skb_gso_network_seglen(skb) <= mtu)
+-		return false;
+-
+-	return true;
+-}
+-
+-static bool ip_gso_exceeds_dst_mtu(const struct sk_buff *skb)
+-{
+-	unsigned int mtu;
+-
+-	if (skb->local_df || !skb_is_gso(skb))
+-		return false;
+-
+-	mtu = dst_mtu(skb_dst(skb));
+-
+-	/* if seglen > mtu, do software segmentation for IP fragmentation on
+-	 * output.  DF bit cannot be set since ip_forward would have sent
+-	 * icmp error.
+-	 */
+-	return skb_gso_network_seglen(skb) > mtu;
+-}
+-
+-/* called if GSO skb needs to be fragmented on forward */
+-static int ip_forward_finish_gso(struct sk_buff *skb)
+-{
+-	struct sk_buff *segs;
+-	int ret = 0;
+-
+-	segs = skb_gso_segment(skb, 0);
+-	if (IS_ERR(segs)) {
+-		kfree_skb(skb);
+-		return -ENOMEM;
+-	}
+-
+-	consume_skb(skb);
+-
+-	do {
+-		struct sk_buff *nskb = segs->next;
+-		int err;
+-
+-		segs->next = NULL;
+-		err = dst_output(segs);
+-
+-		if (err && ret == 0)
+-			ret = err;
+-		segs = nskb;
+-	} while (segs);
+-
+-	return ret;
+-}
+-
+ static int ip_forward_finish(struct sk_buff *skb)
+ {
+ 	struct ip_options * opt	= &(IPCB(skb)->opt);
+@@ -110,9 +48,6 @@ static int ip_forward_finish(struct sk_b
+ 	if (unlikely(opt->optlen))
+ 		ip_forward_options(skb);
+ 
+-	if (ip_gso_exceeds_dst_mtu(skb))
+-		return ip_forward_finish_gso(skb);
+-
+ 	return dst_output(skb);
+ }
+ 
+@@ -152,7 +87,8 @@ int ip_forward(struct sk_buff *skb)
+ 	if (opt->is_strictroute && opt->nexthop != rt->rt_gateway)
+ 		goto sr_failed;
+ 
+-	if (!ip_may_fragment(skb) && ip_exceeds_mtu(skb, dst_mtu(&rt->dst))) {
++	if (unlikely(skb->len > dst_mtu(&rt->dst) && !skb_is_gso(skb) &&
++		     (ip_hdr(skb)->frag_off & htons(IP_DF))) && !skb->local_df) {
+ 		IP_INC_STATS(dev_net(rt->dst.dev), IPSTATS_MIB_FRAGFAILS);
+ 		icmp_send(skb, ICMP_DEST_UNREACH, ICMP_FRAG_NEEDED,
+ 			  htonl(dst_mtu(&rt->dst)));
+--- a/net/ipv6/ip6_output.c
++++ b/net/ipv6/ip6_output.c
+@@ -381,17 +381,6 @@ static inline int ip6_forward_finish(str
+ 	return dst_output(skb);
+ }
+ 
+-static bool ip6_pkt_too_big(const struct sk_buff *skb, unsigned int mtu)
+-{
+-	if (skb->len <= mtu || skb->local_df)
+-		return false;
+-
+-	if (skb_is_gso(skb) && skb_gso_network_seglen(skb) <= mtu)
+-		return false;
+-
+-	return true;
+-}
+-
+ int ip6_forward(struct sk_buff *skb)
+ {
+ 	struct dst_entry *dst = skb_dst(skb);
+@@ -515,7 +504,7 @@ int ip6_forward(struct sk_buff *skb)
+ 	if (mtu < IPV6_MIN_MTU)
+ 		mtu = IPV6_MIN_MTU;
+ 
+-	if (ip6_pkt_too_big(skb, mtu)) {
++	if (skb->len > mtu && !skb_is_gso(skb)) {
+ 		/* Again, force OUTPUT device used as source address */
+ 		skb->dev = dst->dev;
+ 		icmpv6_send(skb, ICMPV6_PKT_TOOBIG, 0, mtu);
