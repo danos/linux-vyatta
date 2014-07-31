@@ -1,0 +1,44 @@
+From: Naoya Horiguchi <n-horiguchi@ah.jp.nec.com>
+Date: Fri, 6 Jun 2014 10:00:01 -0400
+Subject: mm: add !pte_present() check on existing hugetlb_entry callbacks
+Origin: https://git.kernel.org/linus/d4c54919ed86302094c0ca7d48a8cbd4ee753e92
+
+The age table walker doesn't check non-present hugetlb entry in common
+path, so hugetlb_entry() callbacks must check it.  The reason for this
+behavior is that some callers want to handle it in its own way.
+
+[ I think that reason is bogus, btw - it should just do what the regular
+  code does, which is to call the "pte_hole()" function for such hugetlb
+  entries  - Linus]
+
+However, some callers don't check it now, which causes unpredictable
+result, for example when we have a race between migrating hugepage and
+reading /proc/pid/numa_maps.  This patch fixes it by adding !pte_present
+checks on buggy callbacks.
+
+This bug exists for years and got visible by introducing hugepage
+migration.
+
+ChangeLog v2:
+- fix if condition (check !pte_present() instead of pte_present())
+
+Reported-by: Sasha Levin <sasha.levin@oracle.com>
+Signed-off-by: Naoya Horiguchi <n-horiguchi@ah.jp.nec.com>
+Cc: Rik van Riel <riel@redhat.com>
+Cc: <stable@vger.kernel.org> [3.12+]
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+[ Backported to 3.15.  Signed-off-by: Josh Boyer <jwboyer@fedoraproject.org> ]
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+[bwh: Backported to 3.2: mm/mempolicy.c doesn't have a hugetlb_entry callback]
+---
+--- a/fs/proc/task_mmu.c
++++ b/fs/proc/task_mmu.c
+@@ -988,7 +988,7 @@ static int gather_hugetbl_stats(pte_t *p
+ 	struct numa_maps *md;
+ 	struct page *page;
+ 
+-	if (pte_none(*pte))
++	if (!pte_present(*pte))
+ 		return 0;
+ 
+ 	page = pte_page(*pte);

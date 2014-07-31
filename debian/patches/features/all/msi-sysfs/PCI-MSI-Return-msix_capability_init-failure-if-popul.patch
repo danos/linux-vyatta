@@ -1,0 +1,59 @@
+From: Alexander Gordeev <agordeev@redhat.com>
+Date: Mon, 16 Dec 2013 09:34:56 +0100
+Subject: PCI/MSI: Return msix_capability_init() failure if
+ populate_msi_sysfs() fails
+Origin: https://git.kernel.org/linus/2adc7907bac2c72535894732c4b41f9210f9e577
+Bug-Debian: https://bugs.debian.org/748595
+
+If populate_msi_sysfs() function failed msix_capability_init() must return
+the error code, but it returns the success instead.  This update fixes the
+described misbehaviour.
+
+Signed-off-by: Alexander Gordeev <agordeev@redhat.com>
+Signed-off-by: Bjorn Helgaas <bhelgaas@google.com>
+Reviewed-by: Tejun Heo <tj@kernel.org>
+---
+ drivers/pci/msi.c | 11 +++++------
+ 1 file changed, 5 insertions(+), 6 deletions(-)
+
+--- a/drivers/pci/msi.c
++++ b/drivers/pci/msi.c
+@@ -684,7 +684,7 @@ static int msix_capability_init(struct p
+ 
+ 	ret = arch_setup_msi_irqs(dev, nvec, PCI_CAP_ID_MSIX);
+ 	if (ret)
+-		goto error;
++		goto out_avail;
+ 
+ 	/*
+ 	 * Some devices require MSI-X to be enabled before we can touch the
+@@ -697,10 +697,8 @@ static int msix_capability_init(struct p
+ 	msix_program_entries(dev, entries);
+ 
+ 	ret = populate_msi_sysfs(dev);
+-	if (ret) {
+-		ret = 0;
+-		goto error;
+-	}
++	if (ret)
++		goto out_free;
+ 
+ 	/* Set MSI-X enabled bits and unmask the function */
+ 	pci_intx_for_msi(dev, 0);
+@@ -711,7 +709,7 @@ static int msix_capability_init(struct p
+ 
+ 	return 0;
+ 
+-error:
++out_avail:
+ 	if (ret < 0) {
+ 		/*
+ 		 * If we had some success, report the number of irqs
+@@ -728,6 +726,7 @@ error:
+ 			ret = avail;
+ 	}
+ 
++out_free:
+ 	free_msi_irqs(dev);
+ 
+ 	return ret;

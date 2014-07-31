@@ -1,0 +1,38 @@
+From: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+Date: Thu, 13 Feb 2014 10:47:20 -0700
+Subject: PCI/MSI: Check kmalloc() return value, fix leak of name
+Origin: https://git.kernel.org/linus/86bb4f697a964ab5e50f1159e04c6a5d5acde2d4
+Bug-Debian: https://bugs.debian.org/748595
+
+Coverity reported that I forgot to check the return value of kmalloc() when
+creating the MSI attribute name, so fix that up and properly free it if
+there is an error when allocating the msi_dev_attr variable.
+
+Found by Coverity (CID 1163315 and 1163316).
+
+Fixes: 1c51b50c2995 ("PCI/MSI: Export MSI mode using attributes, not kobjects")
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+Signed-off-by: Bjorn Helgaas <bhelgaas@google.com>
+---
+ drivers/pci/msi.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+--- a/drivers/pci/msi.c
++++ b/drivers/pci/msi.c
+@@ -478,9 +478,15 @@ static int populate_msi_sysfs(struct pci
+ 		return -ENOMEM;
+ 	list_for_each_entry(entry, &pdev->msi_list, list) {
+ 		char *name = kmalloc(20, GFP_KERNEL);
++		if (!name)
++			goto error_attrs;
++
+ 		msi_dev_attr = kzalloc(sizeof(*msi_dev_attr), GFP_KERNEL);
+-		if (!msi_dev_attr)
++		if (!msi_dev_attr) {
++			kfree(name);
+ 			goto error_attrs;
++		}
++
+ 		sprintf(name, "%d", entry->irq);
+ 		sysfs_attr_init(&msi_dev_attr->attr);
+ 		msi_dev_attr->attr.name = name;
