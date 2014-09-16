@@ -11,12 +11,12 @@ To avoid deadlocks, use mempools to allocate struct storvsc_cmd_request.
 Signed-off-by: K. Y. Srinivasan <kys@microsoft.com>
 Signed-off-by: Haiyang Zhang <haiyangz@microsoft.com>
 Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+[bwh: Adjusted to apply after backported commit 56b26e69c828
+ 'Drivers: scsi: storvsc: Implement a eh_timed_out handler'
 ---
  drivers/staging/hv/storvsc_drv.c |   30 +++++++++++++++++++++++++-----
  1 file changed, 25 insertions(+), 5 deletions(-)
 
-diff --git a/drivers/staging/hv/storvsc_drv.c b/drivers/staging/hv/storvsc_drv.c
-index ae8c33e..6a255e9 100644
 --- a/drivers/staging/hv/storvsc_drv.c
 +++ b/drivers/staging/hv/storvsc_drv.c
 @@ -32,6 +32,7 @@
@@ -24,10 +24,10 @@ index ae8c33e..6a255e9 100644
  #include <linux/device.h>
  #include <linux/hyperv.h>
 +#include <linux/mempool.h>
+ #include <linux/blkdev.h>
  #include <scsi/scsi.h>
  #include <scsi/scsi_cmnd.h>
- #include <scsi/scsi_host.h>
-@@ -42,6 +43,7 @@
+@@ -43,6 +44,7 @@
  #include <scsi/scsi_dbg.h>
  
  
@@ -35,7 +35,7 @@ index ae8c33e..6a255e9 100644
  #define STORVSC_RING_BUFFER_SIZE			(20*PAGE_SIZE)
  static int storvsc_ringbuffer_size = STORVSC_RING_BUFFER_SIZE;
  
-@@ -287,6 +289,7 @@ struct storvsc_device {
+@@ -288,6 +290,7 @@ struct storvsc_device {
  struct hv_host_device {
  	struct hv_device *dev;
  	struct kmem_cache *request_pool;
@@ -43,7 +43,7 @@ index ae8c33e..6a255e9 100644
  	unsigned int port;
  	unsigned char path;
  	unsigned char target;
-@@ -974,8 +977,10 @@ static int storvsc_remove(struct hv_device *dev)
+@@ -976,8 +979,10 @@ static int storvsc_remove(struct hv_devi
  
  	storvsc_dev_remove(dev);
  	if (host_dev->request_pool) {
@@ -54,7 +54,7 @@ index ae8c33e..6a255e9 100644
  	}
  	return 0;
  }
-@@ -1120,7 +1125,7 @@ static void storvsc_command_completion(struct hv_storvsc_request *request)
+@@ -1127,7 +1132,7 @@ static void storvsc_command_completion(s
  
  	scsi_done_fn(scmnd);
  
@@ -62,8 +62,8 @@ index ae8c33e..6a255e9 100644
 +	mempool_free(cmd_request, host_dev->request_mempool);
  }
  
- static bool storvsc_check_scsi_cmd(struct scsi_cmnd *scmnd)
-@@ -1176,12 +1181,13 @@ static int storvsc_queuecommand_lck(struct scsi_cmnd *scmnd,
+ /*
+@@ -1193,12 +1198,13 @@ static int storvsc_queuecommand_lck(stru
  
  	request_size = sizeof(struct storvsc_cmd_request);
  
@@ -78,7 +78,7 @@ index ae8c33e..6a255e9 100644
  
  	/* Setup the cmd request */
  	cmd_request->bounce_sgl_count = 0;
-@@ -1235,8 +1241,8 @@ static int storvsc_queuecommand_lck(struct scsi_cmnd *scmnd,
+@@ -1252,8 +1258,8 @@ static int storvsc_queuecommand_lck(stru
  			if (!cmd_request->bounce_sgl) {
  				scmnd->scsi_done = NULL;
  				scmnd->host_scribble = NULL;
@@ -89,7 +89,7 @@ index ae8c33e..6a255e9 100644
  
  				return SCSI_MLQUEUE_HOST_BUSY;
  			}
-@@ -1278,7 +1284,7 @@ retry_request:
+@@ -1295,7 +1301,7 @@ retry_request:
  			destroy_bounce_buffer(cmd_request->bounce_sgl,
  					cmd_request->bounce_sgl_count);
  
@@ -98,7 +98,7 @@ index ae8c33e..6a255e9 100644
  
  		scmnd->scsi_done = NULL;
  		scmnd->host_scribble = NULL;
-@@ -1348,6 +1354,7 @@ static int storvsc_probe(struct hv_device *device,
+@@ -1366,6 +1372,7 @@ static int storvsc_probe(struct hv_devic
  			const struct hv_vmbus_device_id *dev_id)
  {
  	int ret;
@@ -106,7 +106,7 @@ index ae8c33e..6a255e9 100644
  	struct Scsi_Host *host;
  	struct hv_host_device *host_dev;
  	bool dev_is_ide = ((dev_id->driver_data == IDE_GUID) ? true : false);
-@@ -1376,8 +1383,19 @@ static int storvsc_probe(struct hv_device *device,
+@@ -1394,8 +1401,19 @@ static int storvsc_probe(struct hv_devic
  		return -ENOMEM;
  	}
  
@@ -126,7 +126,7 @@ index ae8c33e..6a255e9 100644
  		kmem_cache_destroy(host_dev->request_pool);
  		scsi_host_put(host);
  		return -ENOMEM;
-@@ -1392,6 +1410,7 @@ static int storvsc_probe(struct hv_device *device,
+@@ -1410,6 +1428,7 @@ static int storvsc_probe(struct hv_devic
  	stor_device->port_number = host->host_no;
  	ret = storvsc_connect_to_vsp(device, storvsc_ringbuffer_size);
  	if (ret) {
@@ -134,7 +134,7 @@ index ae8c33e..6a255e9 100644
  		kmem_cache_destroy(host_dev->request_pool);
  		scsi_host_put(host);
  		kfree(stor_device);
-@@ -1431,6 +1450,7 @@ static int storvsc_probe(struct hv_device *device,
+@@ -1449,6 +1468,7 @@ static int storvsc_probe(struct hv_devic
  
  err_out:
  	storvsc_dev_remove(device);
@@ -142,6 +142,3 @@ index ae8c33e..6a255e9 100644
  	kmem_cache_destroy(host_dev->request_pool);
  	scsi_host_put(host);
  	return -ENODEV;
--- 
-1.7.9.5
-
