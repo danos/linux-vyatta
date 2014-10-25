@@ -21,7 +21,8 @@ Acked-by: James Bottomley <JBottomley@Parallels.com>
 Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
 [bwh: Adjusted to apply after backported commits 5c1b10ab7f93
  '[SCSI] storvsc: Account for in-transit packets in the RESET path' and
- 9d2696e658ef '[SCSI] storvsc: Initialize the sglist']
+ 9d2696e658ef '[SCSI] storvsc: Initialize the sglist' and 56b26e69c828
+ 'Drivers: scsi: storvsc: Implement a eh_timed_out handler']
 ---
 --- a/drivers/scsi/Kconfig
 +++ b/drivers/scsi/Kconfig
@@ -60,7 +61,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
  sd_mod-objs	:= sd.o
 --- /dev/null
 +++ b/drivers/scsi/storvsc_drv.c
-@@ -0,0 +1,1554 @@
+@@ -0,0 +1,1566 @@
 +/*
 + * Copyright (c) 2009, Microsoft Corporation.
 + *
@@ -96,6 +97,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
 +#include <linux/device.h>
 +#include <linux/hyperv.h>
 +#include <linux/mempool.h>
++#include <linux/blkdev.h>
 +#include <scsi/scsi.h>
 +#include <scsi/scsi_cmnd.h>
 +#include <scsi/scsi_host.h>
@@ -1285,6 +1287,16 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
 +	return SUCCESS;
 +}
 +
++/*
++ * The host guarantees to respond to each command, although I/O latencies might
++ * be unbounded on Azure.  Reset the timer unconditionally to give the host a
++ * chance to perform EH.
++ */
++static enum blk_eh_timer_return storvsc_eh_timed_out(struct scsi_cmnd *scmnd)
++{
++	return BLK_EH_RESET_TIMER;
++}
++
 +static bool storvsc_scsi_cmd_ok(struct scsi_cmnd *scmnd)
 +{
 +	bool allowed = true;
@@ -1442,6 +1454,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
 +	.bios_param =		storvsc_get_chs,
 +	.queuecommand =		storvsc_queuecommand,
 +	.eh_host_reset_handler =	storvsc_host_reset_handler,
++	.eh_timed_out =		storvsc_eh_timed_out,
 +	.slave_alloc =		storvsc_device_alloc,
 +	.slave_destroy =	storvsc_device_destroy,
 +	.slave_configure =	storvsc_device_configure,
@@ -1660,7 +1673,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
 -Haiyang Zhang <haiyangz@microsoft.com>, and K. Y. Srinivasan <kys@microsoft.com>
 --- a/drivers/staging/hv/storvsc_drv.c
 +++ /dev/null
-@@ -1,1554 +0,0 @@
+@@ -1,1566 +0,0 @@
 -/*
 - * Copyright (c) 2009, Microsoft Corporation.
 - *
@@ -1696,6 +1709,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
 -#include <linux/device.h>
 -#include <linux/hyperv.h>
 -#include <linux/mempool.h>
+-#include <linux/blkdev.h>
 -#include <scsi/scsi.h>
 -#include <scsi/scsi_cmnd.h>
 -#include <scsi/scsi_host.h>
@@ -2885,6 +2899,16 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
 -	return SUCCESS;
 -}
 -
+-/*
+- * The host guarantees to respond to each command, although I/O latencies might
+- * be unbounded on Azure.  Reset the timer unconditionally to give the host a
+- * chance to perform EH.
+- */
+-static enum blk_eh_timer_return storvsc_eh_timed_out(struct scsi_cmnd *scmnd)
+-{
+-	return BLK_EH_RESET_TIMER;
+-}
+-
 -static bool storvsc_scsi_cmd_ok(struct scsi_cmnd *scmnd)
 -{
 -	bool allowed = true;
@@ -3042,6 +3066,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
 -	.bios_param =		storvsc_get_chs,
 -	.queuecommand =		storvsc_queuecommand,
 -	.eh_host_reset_handler =	storvsc_host_reset_handler,
+-	.eh_timed_out =		storvsc_eh_timed_out,
 -	.slave_alloc =		storvsc_device_alloc,
 -	.slave_destroy =	storvsc_device_destroy,
 -	.slave_configure =	storvsc_device_configure,

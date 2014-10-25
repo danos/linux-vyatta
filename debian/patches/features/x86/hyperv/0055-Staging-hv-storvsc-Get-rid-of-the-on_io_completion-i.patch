@@ -10,15 +10,17 @@ relocate the bounce buffer handling code (to avoid having forward declarations).
 
 Signed-off-by: K. Y. Srinivasan <kys@microsoft.com>
 Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
-[bwh: Adjusted to apply after backported commit 9d2696e658ef
- '[SCSI] storvsc: Initialize the sglist']
+[bwh: Adjusted to apply after backported commits 9d2696e658ef
+ '[SCSI] storvsc: Initialize the sglist' and 56b26e69c828
+ 'Drivers: scsi: storvsc: Implement a eh_timed_out handler']
+
 ---
  drivers/staging/hv/storvsc_drv.c |  630 +++++++++++++++++++-------------------
  1 file changed, 313 insertions(+), 317 deletions(-)
 
 --- a/drivers/staging/hv/storvsc_drv.c
 +++ b/drivers/staging/hv/storvsc_drv.c
-@@ -276,7 +276,6 @@ struct hv_storvsc_request {
+@@ -277,7 +277,6 @@ struct hv_storvsc_request {
  
  	unsigned char *sense_buffer;
  	void *context;
@@ -26,7 +28,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
  	struct hv_multipage_buffer data_buffer;
  
  	struct vstor_packet vstor_packet;
-@@ -436,6 +435,228 @@ get_in_err:
+@@ -437,6 +436,228 @@ get_in_err:
  
  }
  
@@ -255,7 +257,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
  static int storvsc_channel_init(struct hv_device *device)
  {
  	struct storvsc_device *stor_device;
-@@ -562,23 +783,100 @@ cleanup:
+@@ -563,23 +784,100 @@ cleanup:
  	return ret;
  }
  
@@ -369,7 +371,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
  	 * We do this so we can distinguish truly fatal failues
  	 * (srb status == 0x4) and off-line the device in that case.
  	 */
-@@ -625,7 +923,7 @@ static void storvsc_on_io_completion(str
+@@ -626,7 +924,7 @@ static void storvsc_on_io_completion(str
  	stor_pkt->vm_srb.data_transfer_length =
  	vstor_packet->vm_srb.data_transfer_length;
  
@@ -378,7 +380,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
  
  	if (atomic_dec_and_test(&stor_device->num_outstanding_req) &&
  		stor_device->drain_notify)
-@@ -875,230 +1173,6 @@ static int storvsc_device_configure(stru
+@@ -876,230 +1174,6 @@ static int storvsc_device_configure(stru
  	return 0;
  }
  
@@ -609,7 +611,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
  static int storvsc_get_chs(struct scsi_device *sdev, struct block_device * bdev,
  			   sector_t capacity, int *info)
  {
-@@ -1172,83 +1246,6 @@ static int storvsc_host_reset_handler(st
+@@ -1173,83 +1247,6 @@ static int storvsc_host_reset_handler(st
  	return SUCCESS;
  }
  
@@ -690,10 +692,10 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
 -	mempool_free(cmd_request, memp->request_mempool);
 -}
 -
- static bool storvsc_scsi_cmd_ok(struct scsi_cmnd *scmnd)
- {
- 	bool allowed = true;
-@@ -1324,7 +1321,6 @@ static int storvsc_queuecommand(struct S
+ /*
+  * The host guarantees to respond to each command, although I/O latencies might
+  * be unbounded on Azure.  Reset the timer unconditionally to give the host a
+@@ -1335,7 +1332,6 @@ static int storvsc_queuecommand(struct S
  		break;
  	}
  
