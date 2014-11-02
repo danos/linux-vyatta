@@ -2156,7 +2156,7 @@ index 11788f7..b3abf70 100644
 +}
 +EXPORT_SYMBOL(drm_format_num_planes);
 diff --git a/drivers/gpu/drm/drm_drv.c b/drivers/gpu/drm/drm_drv.c
-index acfe567..e9f1ef5 100644
+index 0731d43..e9f1ef5 100644
 --- a/drivers/gpu/drm/drm_drv.c
 +++ b/drivers/gpu/drm/drm_drv.c
 @@ -61,14 +61,14 @@ static int drm_version(struct drm_device *dev, void *data,
@@ -2226,6 +2226,17 @@ index acfe567..e9f1ef5 100644
  	atomic_inc(&dev->ioctl_count);
  	atomic_inc(&dev->counts[_DRM_STAT_IOCTLS]);
  	++file_priv->ioctl_count;
+@@ -456,9 +468,8 @@ long drm_ioctl(struct file *filp,
+ 				retcode = -EFAULT;
+ 				goto err_i1;
+ 			}
+-		} else if (cmd & IOC_OUT) {
++		} else
+ 			memset(kdata, 0, usize);
+-		}
+ 
+ 		if (ioctl->flags & DRM_UNLOCKED)
+ 			retcode = func(dev, kdata, file_priv);
 diff --git a/drivers/gpu/drm/drm_edid.c b/drivers/gpu/drm/drm_edid.c
 index 72f460e..d75dccb 100644
 --- a/drivers/gpu/drm/drm_edid.c
@@ -45455,7 +45466,7 @@ index ead5d00..21a8271 100644
  		return ret;
  
 diff --git a/drivers/gpu/drm/i915/i915_gem_execbuffer.c b/drivers/gpu/drm/i915/i915_gem_execbuffer.c
-index b1bb734..e97ed61 100644
+index a0b69ae..e97ed61 100644
 --- a/drivers/gpu/drm/i915/i915_gem_execbuffer.c
 +++ b/drivers/gpu/drm/i915/i915_gem_execbuffer.c
 @@ -203,9 +203,9 @@ i915_gem_object_set_to_gpu_domain(struct drm_i915_gem_object *obj,
@@ -45470,62 +45481,18 @@ index b1bb734..e97ed61 100644
  }
  
  struct eb_objects {
-@@ -287,14 +287,14 @@ i915_gem_execbuffer_relocate_entry(struct drm_i915_gem_object *obj,
- 	 * exec_object list, so it should have a GTT space bound by now.
- 	 */
- 	if (unlikely(target_offset == 0)) {
--		DRM_ERROR("No GTT space found for object %d\n",
-+		DRM_DEBUG("No GTT space found for object %d\n",
- 			  reloc->target_handle);
- 		return ret;
- 	}
- 
- 	/* Validate that the target is in a valid r/w GPU domain */
- 	if (unlikely(reloc->write_domain & (reloc->write_domain - 1))) {
--		DRM_ERROR("reloc with multiple write domains: "
-+		DRM_DEBUG("reloc with multiple write domains: "
- 			  "obj %p target %d offset %d "
- 			  "read %08x write %08x",
- 			  obj, reloc->target_handle,
 @@ -303,8 +303,9 @@ i915_gem_execbuffer_relocate_entry(struct drm_i915_gem_object *obj,
  			  reloc->write_domain);
  		return ret;
  	}
 -	if (unlikely((reloc->write_domain | reloc->read_domains) & I915_GEM_DOMAIN_CPU)) {
--		DRM_ERROR("reloc with read/write CPU domains: "
+-		DRM_DEBUG("reloc with read/write CPU domains: "
 +	if (unlikely((reloc->write_domain | reloc->read_domains)
 +		     & ~I915_GEM_GPU_DOMAINS)) {
 +		DRM_DEBUG("reloc with read/write non-GPU domains: "
  			  "obj %p target %d offset %d "
  			  "read %08x write %08x",
  			  obj, reloc->target_handle,
-@@ -315,7 +316,7 @@ i915_gem_execbuffer_relocate_entry(struct drm_i915_gem_object *obj,
- 	}
- 	if (unlikely(reloc->write_domain && target_obj->pending_write_domain &&
- 		     reloc->write_domain != target_obj->pending_write_domain)) {
--		DRM_ERROR("Write domain conflict: "
-+		DRM_DEBUG("Write domain conflict: "
- 			  "obj %p target %d offset %d "
- 			  "new %08x old %08x\n",
- 			  obj, reloc->target_handle,
-@@ -336,7 +337,7 @@ i915_gem_execbuffer_relocate_entry(struct drm_i915_gem_object *obj,
- 
- 	/* Check that the relocation address is valid... */
- 	if (unlikely(reloc->offset > obj->base.size - 4)) {
--		DRM_ERROR("Relocation beyond object bounds: "
-+		DRM_DEBUG("Relocation beyond object bounds: "
- 			  "obj %p target %d offset %d size %d.\n",
- 			  obj, reloc->target_handle,
- 			  (int) reloc->offset,
-@@ -344,7 +345,7 @@ i915_gem_execbuffer_relocate_entry(struct drm_i915_gem_object *obj,
- 		return ret;
- 	}
- 	if (unlikely(reloc->offset & 3)) {
--		DRM_ERROR("Relocation not 4-byte aligned: "
-+		DRM_DEBUG("Relocation not 4-byte aligned: "
- 			  "obj %p target %d offset %d.\n",
- 			  obj, reloc->target_handle,
- 			  (int) reloc->offset);
 @@ -461,11 +462,60 @@ i915_gem_execbuffer_relocate(struct drm_device *dev,
  	return ret;
  }
@@ -45703,13 +45670,13 @@ index b1bb734..e97ed61 100644
 -			i915_gem_object_unpin(obj);
 +	list_for_each_entry_continue_reverse(obj, objects, exec_list) {
 +		struct drm_i915_gem_exec_object2 *entry;
-+
-+		if (!obj->gtt_space)
-+			continue;
  
 -		obj = list_entry(obj->exec_list.prev,
 -				 struct drm_i915_gem_object,
 -				 exec_list);
++		if (!obj->gtt_space)
++			continue;
++
 +		entry = obj->exec_entry;
 +		if (entry->flags & __EXEC_OBJECT_HAS_FENCE) {
 +			i915_gem_object_unpin_fence(obj);
@@ -45720,15 +45687,19 @@ index b1bb734..e97ed61 100644
  	}
  
  	return ret;
-@@ -704,7 +754,7 @@ i915_gem_execbuffer_relocate_slow(struct drm_device *dev,
- 		obj = to_intel_bo(drm_gem_object_lookup(dev, file,
- 							exec[i].handle));
- 		if (&obj->base == NULL) {
--			DRM_ERROR("Invalid object handle %d at index %d\n",
-+			DRM_DEBUG("Invalid object handle %d at index %d\n",
- 				   exec[i].handle, i);
- 			ret = -ENOENT;
- 			goto err;
+@@ -679,9 +729,9 @@ i915_gem_execbuffer_relocate_slow(struct drm_device *dev,
+ 		 * relocations were valid.
+ 		 */
+ 		for (j = 0; j < exec[i].relocation_count; j++) {
+-			if (__copy_to_user(&user_relocs[j].presumed_offset,
+-					   &invalid_offset,
+-					   sizeof(invalid_offset))) {
++			if (copy_to_user(&user_relocs[j].presumed_offset,
++					 &invalid_offset,
++					 sizeof(invalid_offset))) {
+ 				ret = -EFAULT;
+ 				mutex_lock(&dev->struct_mutex);
+ 				goto err;
 @@ -998,6 +1048,31 @@ i915_gem_execbuffer_retire_commands(struct drm_device *dev,
  }
  
@@ -45761,88 +45732,6 @@ index b1bb734..e97ed61 100644
  i915_gem_do_execbuffer(struct drm_device *dev, void *data,
  		       struct drm_file *file,
  		       struct drm_i915_gem_execbuffer2 *args,
-@@ -1015,7 +1090,7 @@ i915_gem_do_execbuffer(struct drm_device *dev, void *data,
- 	int ret, mode, i;
- 
- 	if (!i915_gem_check_execbuffer(args)) {
--		DRM_ERROR("execbuf with invalid offset/length\n");
-+		DRM_DEBUG("execbuf with invalid offset/length\n");
- 		return -EINVAL;
- 	}
- 
-@@ -1030,20 +1105,20 @@ i915_gem_do_execbuffer(struct drm_device *dev, void *data,
- 		break;
- 	case I915_EXEC_BSD:
- 		if (!HAS_BSD(dev)) {
--			DRM_ERROR("execbuf with invalid ring (BSD)\n");
-+			DRM_DEBUG("execbuf with invalid ring (BSD)\n");
- 			return -EINVAL;
- 		}
- 		ring = &dev_priv->ring[VCS];
- 		break;
- 	case I915_EXEC_BLT:
- 		if (!HAS_BLT(dev)) {
--			DRM_ERROR("execbuf with invalid ring (BLT)\n");
-+			DRM_DEBUG("execbuf with invalid ring (BLT)\n");
- 			return -EINVAL;
- 		}
- 		ring = &dev_priv->ring[BCS];
- 		break;
- 	default:
--		DRM_ERROR("execbuf with unknown ring: %d\n",
-+		DRM_DEBUG("execbuf with unknown ring: %d\n",
- 			  (int)(args->flags & I915_EXEC_RING_MASK));
- 		return -EINVAL;
- 	}
-@@ -1069,18 +1144,18 @@ i915_gem_do_execbuffer(struct drm_device *dev, void *data,
- 		}
- 		break;
- 	default:
--		DRM_ERROR("execbuf with unknown constants: %d\n", mode);
-+		DRM_DEBUG("execbuf with unknown constants: %d\n", mode);
- 		return -EINVAL;
- 	}
- 
- 	if (args->buffer_count < 1) {
--		DRM_ERROR("execbuf with %d buffers\n", args->buffer_count);
-+		DRM_DEBUG("execbuf with %d buffers\n", args->buffer_count);
- 		return -EINVAL;
- 	}
- 
- 	if (args->num_cliprects != 0) {
- 		if (ring != &dev_priv->ring[RCS]) {
--			DRM_ERROR("clip rectangles are only valid with the render ring\n");
-+			DRM_DEBUG("clip rectangles are only valid with the render ring\n");
- 			return -EINVAL;
- 		}
- 
-@@ -1130,7 +1205,7 @@ i915_gem_do_execbuffer(struct drm_device *dev, void *data,
- 		obj = to_intel_bo(drm_gem_object_lookup(dev, file,
- 							exec[i].handle));
- 		if (&obj->base == NULL) {
--			DRM_ERROR("Invalid object handle %d at index %d\n",
-+			DRM_DEBUG("Invalid object handle %d at index %d\n",
- 				   exec[i].handle, i);
- 			/* prevent error path from reading uninitialized data */
- 			ret = -ENOENT;
-@@ -1138,7 +1213,7 @@ i915_gem_do_execbuffer(struct drm_device *dev, void *data,
- 		}
- 
- 		if (!list_empty(&obj->exec_list)) {
--			DRM_ERROR("Object %p [handle %d, index %d] appears more than once in object list\n",
-+			DRM_DEBUG("Object %p [handle %d, index %d] appears more than once in object list\n",
- 				   obj, exec[i].handle, i);
- 			ret = -EINVAL;
- 			goto err;
-@@ -1176,7 +1251,7 @@ i915_gem_do_execbuffer(struct drm_device *dev, void *data,
- 
- 	/* Set the pending read domains for the batch buffer to COMMAND */
- 	if (batch_obj->base.pending_write_domain) {
--		DRM_ERROR("Attempting to use self-modifying batch buffer\n");
-+		DRM_DEBUG("Attempting to use self-modifying batch buffer\n");
- 		ret = -EINVAL;
- 		goto err;
- 	}
 @@ -1193,7 +1268,7 @@ i915_gem_do_execbuffer(struct drm_device *dev, void *data,
  			 * so every billion or so execbuffers, we need to stall
  			 * the GPU in order to reset the counters.
@@ -45865,78 +45754,71 @@ index b1bb734..e97ed61 100644
  	trace_i915_gem_ring_dispatch(ring, seqno);
  
  	exec_start = batch_obj->gtt_offset + args->batch_start_offset;
-@@ -1275,7 +1356,7 @@ i915_gem_execbuffer(struct drm_device *dev, void *data,
- 	int ret, i;
+@@ -1325,21 +1406,19 @@ i915_gem_execbuffer(struct drm_device *dev, void *data,
  
- 	if (args->buffer_count < 1) {
--		DRM_ERROR("execbuf with %d buffers\n", args->buffer_count);
-+		DRM_DEBUG("execbuf with %d buffers\n", args->buffer_count);
- 		return -EINVAL;
- 	}
- 
-@@ -1283,7 +1364,7 @@ i915_gem_execbuffer(struct drm_device *dev, void *data,
- 	exec_list = drm_malloc_ab(sizeof(*exec_list), args->buffer_count);
- 	exec2_list = drm_malloc_ab(sizeof(*exec2_list), args->buffer_count);
- 	if (exec_list == NULL || exec2_list == NULL) {
--		DRM_ERROR("Failed to allocate exec list for %d buffers\n",
-+		DRM_DEBUG("Failed to allocate exec list for %d buffers\n",
- 			  args->buffer_count);
- 		drm_free_large(exec_list);
- 		drm_free_large(exec2_list);
-@@ -1294,7 +1375,7 @@ i915_gem_execbuffer(struct drm_device *dev, void *data,
- 			     (uintptr_t) args->buffers_ptr,
- 			     sizeof(*exec_list) * args->buffer_count);
- 	if (ret != 0) {
--		DRM_ERROR("copy %d exec entries failed %d\n",
-+		DRM_DEBUG("copy %d exec entries failed %d\n",
- 			  args->buffer_count, ret);
- 		drm_free_large(exec_list);
- 		drm_free_large(exec2_list);
-@@ -1335,7 +1416,7 @@ i915_gem_execbuffer(struct drm_device *dev, void *data,
- 				   sizeof(*exec_list) * args->buffer_count);
- 		if (ret) {
- 			ret = -EFAULT;
--			DRM_ERROR("failed to copy %d exec entries "
+ 	ret = i915_gem_do_execbuffer(dev, data, file, &exec2, exec2_list);
+ 	if (!ret) {
+-		struct drm_i915_gem_exec_object __user *user_exec_list =
+-			(void __user *)(uintptr_t)args->buffers_ptr;
+-
+ 		/* Copy the new buffer offsets back to the user's exec list. */
+-		for (i = 0; i < args->buffer_count; i++) {
+-			ret = __copy_to_user(&user_exec_list[i].offset,
+-					     &exec2_list[i].offset,
+-					     sizeof(user_exec_list[i].offset));
+-			if (ret) {
+-				ret = -EFAULT;
+-				DRM_DEBUG("failed to copy %d exec entries "
+-					  "back to user (%d)\n",
+-					  args->buffer_count, ret);
+-				break;
+-			}
++		for (i = 0; i < args->buffer_count; i++)
++			exec_list[i].offset = exec2_list[i].offset;
++		/* ... and back out to userspace */
++		ret = copy_to_user((struct drm_i915_relocation_entry __user *)
++				   (uintptr_t) args->buffers_ptr,
++				   exec_list,
++				   sizeof(*exec_list) * args->buffer_count);
++		if (ret) {
++			ret = -EFAULT;
 +			DRM_DEBUG("failed to copy %d exec entries "
- 				  "back to user (%d)\n",
- 				  args->buffer_count, ret);
++				  "back to user (%d)\n",
++				  args->buffer_count, ret);
  		}
-@@ -1356,7 +1437,7 @@ i915_gem_execbuffer2(struct drm_device *dev, void *data,
- 
- 	if (args->buffer_count < 1 ||
- 	    args->buffer_count > UINT_MAX / sizeof(*exec2_list)) {
--		DRM_ERROR("execbuf2 with %d buffers\n", args->buffer_count);
-+		DRM_DEBUG("execbuf2 with %d buffers\n", args->buffer_count);
- 		return -EINVAL;
  	}
  
-@@ -1366,7 +1447,7 @@ i915_gem_execbuffer2(struct drm_device *dev, void *data,
- 		exec2_list = drm_malloc_ab(sizeof(*exec2_list),
- 					   args->buffer_count);
- 	if (exec2_list == NULL) {
--		DRM_ERROR("Failed to allocate exec list for %d buffers\n",
-+		DRM_DEBUG("Failed to allocate exec list for %d buffers\n",
- 			  args->buffer_count);
- 		return -ENOMEM;
- 	}
-@@ -1375,7 +1456,7 @@ i915_gem_execbuffer2(struct drm_device *dev, void *data,
- 			     (uintptr_t) args->buffers_ptr,
- 			     sizeof(*exec2_list) * args->buffer_count);
- 	if (ret != 0) {
--		DRM_ERROR("copy %d exec entries failed %d\n",
-+		DRM_DEBUG("copy %d exec entries failed %d\n",
- 			  args->buffer_count, ret);
- 		drm_free_large(exec2_list);
- 		return -EFAULT;
-@@ -1390,7 +1471,7 @@ i915_gem_execbuffer2(struct drm_device *dev, void *data,
- 				   sizeof(*exec2_list) * args->buffer_count);
- 		if (ret) {
- 			ret = -EFAULT;
--			DRM_ERROR("failed to copy %d exec entries "
+@@ -1386,21 +1465,15 @@ i915_gem_execbuffer2(struct drm_device *dev, void *data,
+ 	ret = i915_gem_do_execbuffer(dev, data, file, args, exec2_list);
+ 	if (!ret) {
+ 		/* Copy the new buffer offsets back to the user's exec list. */
+-		struct drm_i915_gem_exec_object2 __user *user_exec_list =
+-			(void __user *)(uintptr_t)args->buffers_ptr;
+-		int i;
+-
+-		for (i = 0; i < args->buffer_count; i++) {
+-			ret = __copy_to_user(&user_exec_list[i].offset,
+-					     &exec2_list[i].offset,
+-					     sizeof(user_exec_list[i].offset));
+-			if (ret) {
+-				ret = -EFAULT;
+-				DRM_DEBUG("failed to copy %d exec entries "
+-					  "back to user\n",
+-					  args->buffer_count);
+-				break;
+-			}
++		ret = copy_to_user((struct drm_i915_relocation_entry __user *)
++				   (uintptr_t) args->buffers_ptr,
++				   exec2_list,
++				   sizeof(*exec2_list) * args->buffer_count);
++		if (ret) {
++			ret = -EFAULT;
 +			DRM_DEBUG("failed to copy %d exec entries "
- 				  "back to user (%d)\n",
- 				  args->buffer_count, ret);
++				  "back to user (%d)\n",
++				  args->buffer_count, ret);
  		}
+ 	}
+ 
 diff --git a/drivers/gpu/drm/i915/i915_gem_gtt.c b/drivers/gpu/drm/i915/i915_gem_gtt.c
 index 6042c5e..99a7855 100644
 --- a/drivers/gpu/drm/i915/i915_gem_gtt.c
@@ -67890,7 +67772,7 @@ index 2a4b6dc..e6b2288 100644
  	shl b32 $r14 8
  	sub b32 $r15 $r14 $r15
 diff --git a/drivers/gpu/drm/nouveau/nvc0_graph.h b/drivers/gpu/drm/nouveau/nvc0_graph.h
-index 636fe98..91d44ea 100644
+index 636fe98..91d44ea6 100644
 --- a/drivers/gpu/drm/nouveau/nvc0_graph.h
 +++ b/drivers/gpu/drm/nouveau/nvc0_graph.h
 @@ -87,6 +87,7 @@ nvc0_graph_class(struct drm_device *dev)
@@ -71874,7 +71756,7 @@ index 4760466..4b04ba3 100644
  
  
 diff --git a/drivers/gpu/drm/radeon/atombios_crtc.c b/drivers/gpu/drm/radeon/atombios_crtc.c
-index cd98c06..dc612ef 100644
+index 927d170..d51c08d 100644
 --- a/drivers/gpu/drm/radeon/atombios_crtc.c
 +++ b/drivers/gpu/drm/radeon/atombios_crtc.c
 @@ -231,6 +231,22 @@ static void atombios_blank_crtc(struct drm_crtc *crtc, int state)
@@ -72073,7 +71955,7 @@ index cd98c06..dc612ef 100644
  			break;
  		default:
  			DRM_ERROR("Unknown table version %d %d\n", frev, crev);
-@@ -935,7 +968,9 @@ static void atombios_crtc_set_pll(struct drm_crtc *crtc, struct drm_display_mode
+@@ -939,7 +972,9 @@ static void atombios_crtc_set_pll(struct drm_crtc *crtc, struct drm_display_mode
  		struct radeon_connector_atom_dig *dig_connector =
  			radeon_connector->con_priv;
  		int dp_clock;
@@ -72084,7 +71966,7 @@ index cd98c06..dc612ef 100644
  
  		switch (encoder_mode) {
  		case ATOM_ENCODER_MODE_DP_MST:
-@@ -956,13 +991,10 @@ static void atombios_crtc_set_pll(struct drm_crtc *crtc, struct drm_display_mode
+@@ -960,13 +995,10 @@ static void atombios_crtc_set_pll(struct drm_crtc *crtc, struct drm_display_mode
  						ss_enabled =
  							radeon_atombios_get_ppll_ss_info(rdev, &ss,
  											 ATOM_DP_SS_ID1);
@@ -72099,7 +71981,7 @@ index cd98c06..dc612ef 100644
  			}
  			break;
  		case ATOM_ENCODER_MODE_LVDS:
-@@ -1007,7 +1039,7 @@ static void atombios_crtc_set_pll(struct drm_crtc *crtc, struct drm_display_mode
+@@ -1011,7 +1043,7 @@ static void atombios_crtc_set_pll(struct drm_crtc *crtc, struct drm_display_mode
  		radeon_compute_pll_legacy(pll, adjusted_clock, &pll_clock, &fb_div, &frac_fb_div,
  					  &ref_div, &post_div);
  
@@ -72108,7 +71990,7 @@ index cd98c06..dc612ef 100644
  
  	atombios_crtc_program_pll(crtc, radeon_crtc->crtc_id, radeon_crtc->pll_id,
  				  encoder_mode, radeon_encoder->encoder_id, mode->clock,
-@@ -1030,7 +1062,7 @@ static void atombios_crtc_set_pll(struct drm_crtc *crtc, struct drm_display_mode
+@@ -1034,7 +1066,7 @@ static void atombios_crtc_set_pll(struct drm_crtc *crtc, struct drm_display_mode
  			ss.step = step_size;
  		}
  
@@ -72117,7 +71999,7 @@ index cd98c06..dc612ef 100644
  	}
  }
  
-@@ -1047,6 +1079,7 @@ static int dce4_crtc_do_set_base(struct drm_crtc *crtc,
+@@ -1051,6 +1083,7 @@ static int dce4_crtc_do_set_base(struct drm_crtc *crtc,
  	struct radeon_bo *rbo;
  	uint64_t fb_location;
  	uint32_t fb_format, fb_pitch_pixels, tiling_flags;
@@ -72125,7 +72007,7 @@ index cd98c06..dc612ef 100644
  	u32 fb_swap = EVERGREEN_GRPH_ENDIAN_SWAP(EVERGREEN_GRPH_ENDIAN_NONE);
  	u32 tmp, viewport_w, viewport_h;
  	int r;
-@@ -1137,20 +1170,13 @@ static int dce4_crtc_do_set_base(struct drm_crtc *crtc,
+@@ -1141,20 +1174,13 @@ static int dce4_crtc_do_set_base(struct drm_crtc *crtc,
  			break;
  		}
  
@@ -72152,7 +72034,7 @@ index cd98c06..dc612ef 100644
  	} else if (tiling_flags & RADEON_TILING_MICRO)
  		fb_format |= EVERGREEN_GRPH_ARRAY_MODE(EVERGREEN_GRPH_ARRAY_1D_TILED_THIN1);
  
-@@ -1195,7 +1221,7 @@ static int dce4_crtc_do_set_base(struct drm_crtc *crtc,
+@@ -1199,7 +1225,7 @@ static int dce4_crtc_do_set_base(struct drm_crtc *crtc,
  	WREG32(EVERGREEN_GRPH_X_END + radeon_crtc->crtc_offset, target_fb->width);
  	WREG32(EVERGREEN_GRPH_Y_END + radeon_crtc->crtc_offset, target_fb->height);
  
@@ -72161,7 +72043,7 @@ index cd98c06..dc612ef 100644
  	WREG32(EVERGREEN_GRPH_PITCH + radeon_crtc->crtc_offset, fb_pitch_pixels);
  	WREG32(EVERGREEN_GRPH_ENABLE + radeon_crtc->crtc_offset, 1);
  
-@@ -1364,7 +1390,7 @@ static int avivo_crtc_do_set_base(struct drm_crtc *crtc,
+@@ -1368,7 +1394,7 @@ static int avivo_crtc_do_set_base(struct drm_crtc *crtc,
  	WREG32(AVIVO_D1GRPH_X_END + radeon_crtc->crtc_offset, target_fb->width);
  	WREG32(AVIVO_D1GRPH_Y_END + radeon_crtc->crtc_offset, target_fb->height);
  
@@ -72170,7 +72052,7 @@ index cd98c06..dc612ef 100644
  	WREG32(AVIVO_D1GRPH_PITCH + radeon_crtc->crtc_offset, fb_pitch_pixels);
  	WREG32(AVIVO_D1GRPH_ENABLE + radeon_crtc->crtc_offset, 1);
  
-@@ -1466,7 +1492,36 @@ static int radeon_atom_pick_pll(struct drm_crtc *crtc)
+@@ -1470,7 +1496,36 @@ static int radeon_atom_pick_pll(struct drm_crtc *crtc)
  	struct drm_crtc *test_crtc;
  	uint32_t pll_in_use = 0;
  
@@ -72208,7 +72090,7 @@ index cd98c06..dc612ef 100644
  		list_for_each_entry(test_encoder, &dev->mode_config.encoder_list, head) {
  			if (test_encoder->crtc && (test_encoder->crtc == crtc)) {
  				/* in DP mode, the DP ref clock can come from PPLL, DCPLL, or ext clock,
-@@ -1481,6 +1536,8 @@ static int radeon_atom_pick_pll(struct drm_crtc *crtc)
+@@ -1485,6 +1540,8 @@ static int radeon_atom_pick_pll(struct drm_crtc *crtc)
  				if (ENCODER_MODE_IS_DP(atombios_get_encoder_mode(test_encoder))) {
  					if (rdev->clock.dp_extclk)
  						return ATOM_PPLL_INVALID;
@@ -72217,7 +72099,7 @@ index cd98c06..dc612ef 100644
  					else if (ASIC_IS_DCE5(rdev))
  						return ATOM_DCPLL;
  				}
-@@ -1507,6 +1564,26 @@ static int radeon_atom_pick_pll(struct drm_crtc *crtc)
+@@ -1511,6 +1568,26 @@ static int radeon_atom_pick_pll(struct drm_crtc *crtc)
  
  }
  
@@ -72244,7 +72126,7 @@ index cd98c06..dc612ef 100644
  int atombios_crtc_mode_set(struct drm_crtc *crtc,
  			   struct drm_display_mode *mode,
  			   struct drm_display_mode *adjusted_mode,
-@@ -1528,19 +1605,6 @@ int atombios_crtc_mode_set(struct drm_crtc *crtc,
+@@ -1532,19 +1609,6 @@ int atombios_crtc_mode_set(struct drm_crtc *crtc,
  		}
  	}
  
@@ -72264,7 +72146,7 @@ index cd98c06..dc612ef 100644
  	atombios_crtc_set_pll(crtc, adjusted_mode);
  
  	if (ASIC_IS_DCE4(rdev))
-@@ -1574,18 +1638,28 @@ static bool atombios_crtc_mode_fixup(struct drm_crtc *crtc,
+@@ -1578,18 +1642,28 @@ static bool atombios_crtc_mode_fixup(struct drm_crtc *crtc,
  static void atombios_crtc_prepare(struct drm_crtc *crtc)
  {
  	struct radeon_crtc *radeon_crtc = to_radeon_crtc(crtc);
@@ -72293,7 +72175,7 @@ index cd98c06..dc612ef 100644
  }
  
  static void atombios_crtc_disable(struct drm_crtc *crtc)
-@@ -1597,6 +1671,8 @@ static void atombios_crtc_disable(struct drm_crtc *crtc)
+@@ -1601,6 +1675,8 @@ static void atombios_crtc_disable(struct drm_crtc *crtc)
  	int i;
  
  	atombios_crtc_dpms(crtc, DRM_MODE_DPMS_OFF);
@@ -72302,7 +72184,7 @@ index cd98c06..dc612ef 100644
  
  	for (i = 0; i < rdev->num_crtc; i++) {
  		if (rdev->mode_info.crtcs[i] &&
-@@ -1617,6 +1693,12 @@ static void atombios_crtc_disable(struct drm_crtc *crtc)
+@@ -1621,6 +1697,12 @@ static void atombios_crtc_disable(struct drm_crtc *crtc)
  		atombios_crtc_program_pll(crtc, radeon_crtc->crtc_id, radeon_crtc->pll_id,
  					  0, 0, ATOM_DISABLE, 0, 0, 0, 0, 0, false, &ss);
  		break;
@@ -72316,7 +72198,7 @@ index cd98c06..dc612ef 100644
  		break;
  	}
 diff --git a/drivers/gpu/drm/radeon/atombios_dp.c b/drivers/gpu/drm/radeon/atombios_dp.c
-index 3254d51e..8d1724c 100644
+index e8a3c31..8d1724c 100644
 --- a/drivers/gpu/drm/radeon/atombios_dp.c
 +++ b/drivers/gpu/drm/radeon/atombios_dp.c
 @@ -45,6 +45,41 @@ static char *pre_emph_names[] = {
@@ -72378,6 +72260,15 @@ index 3254d51e..8d1724c 100644
  	args.v1.ucDataOutLen = 0;
  	args.v1.ucChannelID = chan->rec.i2c_id;
  	args.v1.ucDelay = delay / 10;
+@@ -89,7 +124,7 @@ static int radeon_process_aux_ch(struct radeon_i2c_chan *chan,
+ 	/* flags not zero */
+ 	if (args.v1.ucReplyStatus == 2) {
+ 		DRM_DEBUG_KMS("dp_aux_ch flags not zero\n");
+-		return -EIO;
++		return -EBUSY;
+ 	}
+ 
+ 	/* error */
 @@ -103,7 +138,7 @@ static int radeon_process_aux_ch(struct radeon_i2c_chan *chan,
  		recv_bytes = recv_size;
  
@@ -72412,7 +72303,7 @@ index 3254d51e..8d1724c 100644
  	radeon_write_dpcd_reg(dp_info->radeon_connector, DP_LANE_COUNT_SET, tmp);
  
 diff --git a/drivers/gpu/drm/radeon/atombios_encoders.c b/drivers/gpu/drm/radeon/atombios_encoders.c
-index 475a275..072229d 100644
+index 286f1fa..dd5c14e 100644
 --- a/drivers/gpu/drm/radeon/atombios_encoders.c
 +++ b/drivers/gpu/drm/radeon/atombios_encoders.c
 @@ -57,22 +57,6 @@ static inline bool radeon_encoder_is_digital(struct drm_encoder *encoder)
@@ -72834,7 +72725,7 @@ index 475a275..072229d 100644
  			atombios_external_encoder_setup(encoder, ext_encoder,
  							EXTERNAL_ENCODER_ACTION_V3_ENCODER_BLANKING);
  			atombios_external_encoder_setup(encoder, ext_encoder,
-@@ -1738,13 +1778,34 @@ static int radeon_atom_pick_dig_encoder(struct drm_encoder *encoder)
+@@ -1741,13 +1781,34 @@ static int radeon_atom_pick_dig_encoder(struct drm_encoder *encoder)
  	struct radeon_crtc *radeon_crtc = to_radeon_crtc(encoder->crtc);
  	struct radeon_encoder *radeon_encoder = to_radeon_encoder(encoder);
  	struct drm_encoder *test_encoder;
@@ -72874,7 +72765,7 @@ index 475a275..072229d 100644
  			/* ontario follows DCE4 */
  			if (rdev->family == CHIP_PALM) {
  				if (dig->linkb)
-@@ -1832,7 +1893,7 @@ radeon_atom_encoder_init(struct radeon_device *rdev)
+@@ -1835,7 +1896,7 @@ radeon_atom_encoder_init(struct radeon_device *rdev)
  			break;
  		}
  
@@ -73043,7 +72934,7 @@ index 7b4eeb7..19a0114 100644
  #include <linux/kernel.h>
  
 diff --git a/drivers/gpu/drm/radeon/evergreen.c b/drivers/gpu/drm/radeon/evergreen.c
-index 5efba47..df62c39 100644
+index 9b3f787..df62c39 100644
 --- a/drivers/gpu/drm/radeon/evergreen.c
 +++ b/drivers/gpu/drm/radeon/evergreen.c
 @@ -50,6 +50,39 @@ static const u32 crtc_offsets[6] =
@@ -73581,7 +73472,15 @@ index 5efba47..df62c39 100644
  	WREG32(GRBM_INT_CNTL, grbm_int_cntl);
  
  	WREG32(INT_MASK + EVERGREEN_CRTC0_REGISTER_OFFSET, crtc1);
-@@ -3014,11 +3166,24 @@ restart_ih:
+@@ -2765,7 +2917,6 @@ static u32 evergreen_get_ih_wptr(struct radeon_device *rdev)
+ 		tmp = RREG32(IH_RB_CNTL);
+ 		tmp |= IH_WPTR_OVERFLOW_CLEAR;
+ 		WREG32(IH_RB_CNTL, tmp);
+-		wptr &= ~RB_OVERFLOW;
+ 	}
+ 	return (wptr & rdev->ih.ptr_mask);
+ }
+@@ -3015,11 +3166,24 @@ restart_ih:
  		case 177: /* CP_INT in IB1 */
  		case 178: /* CP_INT in IB2 */
  			DRM_DEBUG("IH: CP int: 0x%08x\n", src_data);
@@ -73608,7 +73507,7 @@ index 5efba47..df62c39 100644
  			break;
  		case 233: /* GUI IDLE */
  			DRM_DEBUG("IH: GUI idle\n");
-@@ -3048,6 +3213,7 @@ restart_ih:
+@@ -3049,6 +3213,7 @@ restart_ih:
  
  static int evergreen_startup(struct radeon_device *rdev)
  {
@@ -73616,7 +73515,7 @@ index 5efba47..df62c39 100644
  	int r;
  
  	/* enable pcie gen2 link */
-@@ -3094,7 +3260,7 @@ static int evergreen_startup(struct radeon_device *rdev)
+@@ -3095,7 +3260,7 @@ static int evergreen_startup(struct radeon_device *rdev)
  	r = evergreen_blit_init(rdev);
  	if (r) {
  		r600_blit_fini(rdev);
@@ -73625,7 +73524,7 @@ index 5efba47..df62c39 100644
  		dev_warn(rdev->dev, "failed blitter (%d) falling back to memcpy\n", r);
  	}
  
-@@ -3103,6 +3269,12 @@ static int evergreen_startup(struct radeon_device *rdev)
+@@ -3104,6 +3269,12 @@ static int evergreen_startup(struct radeon_device *rdev)
  	if (r)
  		return r;
  
@@ -73638,7 +73537,7 @@ index 5efba47..df62c39 100644
  	/* Enable IRQ */
  	if (!rdev->irq.installed) {
  		r = radeon_irq_kms_init(rdev);
-@@ -3118,7 +3290,9 @@ static int evergreen_startup(struct radeon_device *rdev)
+@@ -3119,7 +3290,9 @@ static int evergreen_startup(struct radeon_device *rdev)
  	}
  	evergreen_irq_set(rdev);
  
@@ -73649,7 +73548,7 @@ index 5efba47..df62c39 100644
  	if (r)
  		return r;
  	r = evergreen_cp_load_microcode(rdev);
-@@ -3128,6 +3302,23 @@ static int evergreen_startup(struct radeon_device *rdev)
+@@ -3129,6 +3302,23 @@ static int evergreen_startup(struct radeon_device *rdev)
  	if (r)
  		return r;
  
@@ -73673,7 +73572,7 @@ index 5efba47..df62c39 100644
  	return 0;
  }
  
-@@ -3147,15 +3338,11 @@ int evergreen_resume(struct radeon_device *rdev)
+@@ -3148,15 +3338,11 @@ int evergreen_resume(struct radeon_device *rdev)
  	/* post card */
  	atom_asic_init(rdev->mode_info.atom_context);
  
@@ -73691,7 +73590,7 @@ index 5efba47..df62c39 100644
  		return r;
  	}
  
-@@ -3165,13 +3352,17 @@ int evergreen_resume(struct radeon_device *rdev)
+@@ -3166,13 +3352,17 @@ int evergreen_resume(struct radeon_device *rdev)
  
  int evergreen_suspend(struct radeon_device *rdev)
  {
@@ -73711,7 +73610,7 @@ index 5efba47..df62c39 100644
  
  	return 0;
  }
-@@ -3242,8 +3433,8 @@ int evergreen_init(struct radeon_device *rdev)
+@@ -3243,8 +3433,8 @@ int evergreen_init(struct radeon_device *rdev)
  	if (r)
  		return r;
  
@@ -73722,7 +73621,7 @@ index 5efba47..df62c39 100644
  
  	rdev->ih.ring_obj = NULL;
  	r600_ih_ring_init(rdev, 64 * 1024);
-@@ -3252,29 +3443,24 @@ int evergreen_init(struct radeon_device *rdev)
+@@ -3253,29 +3443,24 @@ int evergreen_init(struct radeon_device *rdev)
  	if (r)
  		return r;
  
@@ -73759,7 +73658,7 @@ index 5efba47..df62c39 100644
  
  	/* Don't start up if the MC ucode is missing on BTC parts.
  	 * The default clocks and voltages before the MC ucode
-@@ -3292,15 +3478,17 @@ int evergreen_init(struct radeon_device *rdev)
+@@ -3293,15 +3478,17 @@ int evergreen_init(struct radeon_device *rdev)
  
  void evergreen_fini(struct radeon_device *rdev)
  {
@@ -79258,7 +79157,7 @@ index f36a5c9..57be784 100644
  	if (r) {
  		/* Somethings want wront with the accel init stop accel */
 diff --git a/drivers/gpu/drm/radeon/r600.c b/drivers/gpu/drm/radeon/r600.c
-index f7e3cc0..1555cd6 100644
+index ab46a99..1555cd6 100644
 --- a/drivers/gpu/drm/radeon/r600.c
 +++ b/drivers/gpu/drm/radeon/r600.c
 @@ -49,6 +49,7 @@
@@ -79900,7 +79799,15 @@ index f7e3cc0..1555cd6 100644
  		DRM_DEBUG("r600_irq_set: sw int\n");
  		cp_int_cntl |= RB_INT_ENABLE;
  		cp_int_cntl |= TIME_STAMP_INT_ENABLE;
-@@ -3465,11 +3493,11 @@ restart_ih:
+@@ -3280,7 +3308,6 @@ static u32 r600_get_ih_wptr(struct radeon_device *rdev)
+ 		tmp = RREG32(IH_RB_CNTL);
+ 		tmp |= IH_WPTR_OVERFLOW_CLEAR;
+ 		WREG32(IH_RB_CNTL, tmp);
+-		wptr &= ~RB_OVERFLOW;
+ 	}
+ 	return (wptr & rdev->ih.ptr_mask);
+ }
+@@ -3466,11 +3493,11 @@ restart_ih:
  		case 177: /* CP_INT in IB1 */
  		case 178: /* CP_INT in IB2 */
  			DRM_DEBUG("IH: CP int: 0x%08x\n", src_data);
@@ -79914,7 +79821,7 @@ index f7e3cc0..1555cd6 100644
  			break;
  		case 233: /* GUI IDLE */
  			DRM_DEBUG("IH: GUI idle\n");
-@@ -3502,30 +3530,6 @@ restart_ih:
+@@ -3503,30 +3530,6 @@ restart_ih:
   */
  #if defined(CONFIG_DEBUG_FS)
  
@@ -79945,7 +79852,7 @@ index f7e3cc0..1555cd6 100644
  static int r600_debugfs_mc_info(struct seq_file *m, void *data)
  {
  	struct drm_info_node *node = (struct drm_info_node *) m->private;
-@@ -3539,7 +3543,6 @@ static int r600_debugfs_mc_info(struct seq_file *m, void *data)
+@@ -3540,7 +3543,6 @@ static int r600_debugfs_mc_info(struct seq_file *m, void *data)
  
  static struct drm_info_list r600_mc_info_list[] = {
  	{"r600_mc_info", r600_debugfs_mc_info, 0, NULL},
@@ -85425,7 +85332,7 @@ index 5aa6670..917e49c 100644
  
  #endif
 diff --git a/drivers/gpu/drm/radeon/radeon_atombios.c b/drivers/gpu/drm/radeon/radeon_atombios.c
-index e4e455e..6d0c32b 100644
+index 6d9c32b..6d0c32b 100644
 --- a/drivers/gpu/drm/radeon/radeon_atombios.c
 +++ b/drivers/gpu/drm/radeon/radeon_atombios.c
 @@ -56,6 +56,10 @@ extern void
@@ -85450,6 +85357,24 @@ index e4e455e..6d0c32b 100644
  		reg = EVERGREEN_DC_GPIO_HPD_A;
  	else
  		reg = AVIVO_DC_GPIO_HPD_A;
+@@ -1873,7 +1879,7 @@ static const char *thermal_controller_names[] = {
+ 	"adm1032",
+ 	"adm1030",
+ 	"max6649",
+-	"lm63", /* lm64 */
++	"lm64",
+ 	"f75375",
+ 	"asc7xxx",
+ };
+@@ -1884,7 +1890,7 @@ static const char *pp_lib_thermal_controller_names[] = {
+ 	"adm1032",
+ 	"adm1030",
+ 	"max6649",
+-	"lm63", /* lm64 */
++	"lm64",
+ 	"f75375",
+ 	"RV6xx",
+ 	"RV770",
 @@ -1895,6 +1901,8 @@ static const char *pp_lib_thermal_controller_names[] = {
  	"emc2103",
  	"Sumo",
@@ -86004,7 +85929,7 @@ index 8115557..cf5dd63 100644
  					break;
  				default:
 diff --git a/drivers/gpu/drm/radeon/radeon_connectors.c b/drivers/gpu/drm/radeon/radeon_connectors.c
-index b101843..1334dbd 100644
+index 683cede..9184bbe 100644
 --- a/drivers/gpu/drm/radeon/radeon_connectors.c
 +++ b/drivers/gpu/drm/radeon/radeon_connectors.c
 @@ -846,6 +846,27 @@ static int radeon_dvi_get_modes(struct drm_connector *connector)
@@ -86827,7 +86752,7 @@ index 8cde84b..2f555d7 100644
  }
  #endif
 diff --git a/drivers/gpu/drm/radeon/radeon_display.c b/drivers/gpu/drm/radeon/radeon_display.c
-index 3291ab8..60404f4 100644
+index ad5d774..adc9bfd 100644
 --- a/drivers/gpu/drm/radeon/radeon_display.c
 +++ b/drivers/gpu/drm/radeon/radeon_display.c
 @@ -303,8 +303,17 @@ void radeon_crtc_handle_flip(struct radeon_device *rdev, int crtc_id)
@@ -86887,7 +86812,7 @@ index 3291ab8..60404f4 100644
  };
  
  static const char *connector_names[15] = {
-@@ -1084,29 +1096,36 @@ static const struct drm_framebuffer_funcs radeon_fb_funcs = {
+@@ -1089,29 +1101,36 @@ static const struct drm_framebuffer_funcs radeon_fb_funcs = {
  	.create_handle = radeon_user_framebuffer_create_handle,
  };
  
@@ -86930,7 +86855,7 @@ index 3291ab8..60404f4 100644
  		return ERR_PTR(-ENOENT);
  	}
  
-@@ -1116,7 +1135,12 @@ radeon_user_framebuffer_create(struct drm_device *dev,
+@@ -1121,7 +1140,12 @@ radeon_user_framebuffer_create(struct drm_device *dev,
  		return ERR_PTR(-ENOMEM);
  	}
  
@@ -86944,7 +86869,7 @@ index 3291ab8..60404f4 100644
  
  	return &radeon_fb->base;
  }
-@@ -1132,11 +1156,6 @@ static const struct drm_mode_config_funcs radeon_mode_funcs = {
+@@ -1137,11 +1161,6 @@ static const struct drm_mode_config_funcs radeon_mode_funcs = {
  	.output_poll_changed = radeon_output_poll_changed
  };
  
@@ -86956,7 +86881,7 @@ index 3291ab8..60404f4 100644
  static struct drm_prop_enum_list radeon_tmds_pll_enum_list[] =
  {	{ 0, "driver" },
  	{ 1, "bios" },
-@@ -1161,86 +1180,53 @@ static struct drm_prop_enum_list radeon_underscan_enum_list[] =
+@@ -1166,86 +1185,53 @@ static struct drm_prop_enum_list radeon_underscan_enum_list[] =
  
  static int radeon_modeset_create_props(struct radeon_device *rdev)
  {
@@ -87059,7 +86984,7 @@ index 3291ab8..60404f4 100644
  
  	return 0;
  }
-@@ -1286,6 +1272,9 @@ int radeon_modeset_init(struct radeon_device *rdev)
+@@ -1291,6 +1277,9 @@ int radeon_modeset_init(struct radeon_device *rdev)
  		rdev->ddev->mode_config.max_height = 4096;
  	}
  
@@ -87069,7 +86994,7 @@ index 3291ab8..60404f4 100644
  	rdev->ddev->mode_config.fb_base = rdev->mc.aper_base;
  
  	ret = radeon_modeset_create_props(rdev);
-@@ -1313,9 +1302,11 @@ int radeon_modeset_init(struct radeon_device *rdev)
+@@ -1318,9 +1307,11 @@ int radeon_modeset_init(struct radeon_device *rdev)
  		return ret;
  	}
  
@@ -91633,7 +91558,7 @@ index c087434..b367d1d 100644
  	if (r) {
  		/* Somethings want wront with the accel init stop accel */
 diff --git a/drivers/gpu/drm/radeon/rs600.c b/drivers/gpu/drm/radeon/rs600.c
-index cea482a..5248001 100644
+index dc00155..739eb0d 100644
 --- a/drivers/gpu/drm/radeon/rs600.c
 +++ b/drivers/gpu/drm/radeon/rs600.c
 @@ -46,6 +46,25 @@
@@ -91698,7 +91623,23 @@ index cea482a..5248001 100644
  	/* reset GA+VAP */
  	WREG32(R_0000F0_RBBM_SOFT_RESET, S_0000F0_SOFT_RESET_VAP(1) |
  					S_0000F0_SOFT_RESET_GA(1));
-@@ -549,7 +559,7 @@ int rs600_irq_set(struct radeon_device *rdev)
+@@ -529,11 +539,10 @@ int rs600_gart_set_page(struct radeon_device *rdev, int i, uint64_t addr)
+ 		return -EINVAL;
+ 	}
+ 	addr = addr & 0xFFFFFFFFFFFFF000ULL;
+-	if (addr == rdev->dummy_page.addr)
+-		addr |= R600_PTE_SYSTEM | R600_PTE_SNOOPED;
+-	else
+-		addr |= (R600_PTE_VALID | R600_PTE_SYSTEM | R600_PTE_SNOOPED |
+-			 R600_PTE_READABLE | R600_PTE_WRITEABLE);
++	if (addr != rdev->dummy_page.addr)
++		addr |= R600_PTE_VALID | R600_PTE_READABLE |
++			R600_PTE_WRITEABLE;
++	addr |= R600_PTE_SYSTEM | R600_PTE_SNOOPED;
+ 	writeq(addr, ptr + (i * 8));
+ 	return 0;
+ }
+@@ -552,7 +561,7 @@ int rs600_irq_set(struct radeon_device *rdev)
  		WREG32(R_000040_GEN_INT_CNTL, 0);
  		return -EINVAL;
  	}
@@ -91707,7 +91648,7 @@ index cea482a..5248001 100644
  		tmp |= S_000040_SW_INT_EN(1);
  	}
  	if (rdev->irq.gui_idle) {
-@@ -642,7 +652,7 @@ int rs600_irq_process(struct radeon_device *rdev)
+@@ -645,7 +654,7 @@ int rs600_irq_process(struct radeon_device *rdev)
  	while (status || rdev->irq.stat_regs.r500.disp_int) {
  		/* SW interrupt */
  		if (G_000044_SW_INT(status)) {
@@ -91716,7 +91657,7 @@ index cea482a..5248001 100644
  		}
  		/* GUI idle */
  		if (G_000040_GUI_IDLE(status)) {
-@@ -847,6 +857,12 @@ static int rs600_startup(struct radeon_device *rdev)
+@@ -850,6 +859,12 @@ static int rs600_startup(struct radeon_device *rdev)
  	if (r)
  		return r;
  
@@ -91729,7 +91670,7 @@ index cea482a..5248001 100644
  	/* Enable IRQ */
  	if (!rdev->irq.installed) {
  		r = radeon_irq_kms_init(rdev);
-@@ -862,15 +878,21 @@ static int rs600_startup(struct radeon_device *rdev)
+@@ -865,15 +880,21 @@ static int rs600_startup(struct radeon_device *rdev)
  		dev_err(rdev->dev, "failed initializing CP (%d).\n", r);
  		return r;
  	}
@@ -91755,7 +91696,7 @@ index cea482a..5248001 100644
  		return r;
  	}
  
-@@ -879,6 +901,8 @@ static int rs600_startup(struct radeon_device *rdev)
+@@ -882,6 +903,8 @@ static int rs600_startup(struct radeon_device *rdev)
  
  int rs600_resume(struct radeon_device *rdev)
  {
@@ -91764,7 +91705,7 @@ index cea482a..5248001 100644
  	/* Make sur GART are not working */
  	rs600_gart_disable(rdev);
  	/* Resume clock before doing reset */
-@@ -895,11 +919,18 @@ int rs600_resume(struct radeon_device *rdev)
+@@ -898,11 +921,18 @@ int rs600_resume(struct radeon_device *rdev)
  	rv515_clock_startup(rdev);
  	/* Initialize surface registers */
  	radeon_surface_init(rdev);
@@ -91784,7 +91725,7 @@ index cea482a..5248001 100644
  	r600_audio_fini(rdev);
  	r100_cp_disable(rdev);
  	radeon_wb_disable(rdev);
-@@ -977,7 +1008,14 @@ int rs600_init(struct radeon_device *rdev)
+@@ -980,7 +1010,14 @@ int rs600_init(struct radeon_device *rdev)
  	if (r)
  		return r;
  	rs600_set_safe_registers(rdev);
@@ -99055,7 +98996,7 @@ index 93577f2..68daca4 100644
  		return NULL;
  	}
 diff --git a/drivers/gpu/drm/ttm/ttm_page_alloc.c b/drivers/gpu/drm/ttm/ttm_page_alloc.c
-index 9e4313e..578207e 100644
+index 508c64c..578207e 100644
 --- a/drivers/gpu/drm/ttm/ttm_page_alloc.c
 +++ b/drivers/gpu/drm/ttm/ttm_page_alloc.c
 @@ -30,6 +30,9 @@
@@ -99110,7 +99051,38 @@ index 9e4313e..578207e 100644
  		return 0;
  	}
  
-@@ -438,16 +434,12 @@ static int ttm_set_pages_caching(struct page **pages,
+@@ -398,18 +394,13 @@ static int ttm_pool_get_num_unused_pages(void)
+ static int ttm_pool_mm_shrink(struct shrinker *shrink,
+ 			      struct shrink_control *sc)
+ {
+-	static DEFINE_MUTEX(lock);
+-	static unsigned start_pool;
++	static atomic_t start_pool = ATOMIC_INIT(0);
+ 	unsigned i;
+-	unsigned pool_offset;
++	unsigned pool_offset = atomic_add_return(1, &start_pool);
+ 	struct ttm_page_pool *pool;
+ 	int shrink_pages = sc->nr_to_scan;
+ 
+-	if (shrink_pages == 0)
+-		goto out;
+-	if (!mutex_trylock(&lock))
+-		return -1;
+-	pool_offset = ++start_pool % NUM_POOLS;
++	pool_offset = pool_offset % NUM_POOLS;
+ 	/* select start pool in round robin fashion */
+ 	for (i = 0; i < NUM_POOLS; ++i) {
+ 		unsigned nr_free = shrink_pages;
+@@ -418,8 +409,6 @@ static int ttm_pool_mm_shrink(struct shrinker *shrink,
+ 		pool = &_manager->pools[(i + pool_offset)%NUM_POOLS];
+ 		shrink_pages = ttm_page_pool_free(pool, nr_free);
+ 	}
+-	mutex_unlock(&lock);
+-out:
+ 	/* return estimated number of unused pages in pool */
+ 	return ttm_pool_get_num_unused_pages();
+ }
+@@ -445,16 +434,12 @@ static int ttm_set_pages_caching(struct page **pages,
  	case tt_uncached:
  		r = set_pages_array_uc(pages, cpages);
  		if (r)
@@ -99129,7 +99101,7 @@ index 9e4313e..578207e 100644
  		break;
  	default:
  		break;
-@@ -492,8 +484,7 @@ static int ttm_alloc_new_pages(struct list_head *pages, gfp_t gfp_flags,
+@@ -499,8 +484,7 @@ static int ttm_alloc_new_pages(struct list_head *pages, gfp_t gfp_flags,
  	caching_array = kmalloc(max_cpages*sizeof(struct page *), GFP_KERNEL);
  
  	if (!caching_array) {
@@ -99139,7 +99111,7 @@ index 9e4313e..578207e 100644
  		return -ENOMEM;
  	}
  
-@@ -501,7 +492,7 @@ static int ttm_alloc_new_pages(struct list_head *pages, gfp_t gfp_flags,
+@@ -508,7 +492,7 @@ static int ttm_alloc_new_pages(struct list_head *pages, gfp_t gfp_flags,
  		p = alloc_page(gfp_flags);
  
  		if (!p) {
@@ -99148,7 +99120,7 @@ index 9e4313e..578207e 100644
  
  			/* store already allocated pages in the pool after
  			 * setting the caching state */
-@@ -599,8 +590,7 @@ static void ttm_page_pool_fill_locked(struct ttm_page_pool *pool,
+@@ -606,8 +590,7 @@ static void ttm_page_pool_fill_locked(struct ttm_page_pool *pool,
  			++pool->nrefills;
  			pool->npages += alloc_size;
  		} else {
@@ -99158,7 +99130,7 @@ index 9e4313e..578207e 100644
  			/* If we have any pages left put them to the pool. */
  			list_for_each_entry(p, &pool->list, lru) {
  				++cpages;
-@@ -619,8 +609,10 @@ static void ttm_page_pool_fill_locked(struct ttm_page_pool *pool,
+@@ -626,8 +609,10 @@ static void ttm_page_pool_fill_locked(struct ttm_page_pool *pool,
   * @return count of pages still required to fulfill the request.
   */
  static unsigned ttm_page_pool_get_pages(struct ttm_page_pool *pool,
@@ -99171,7 +99143,7 @@ index 9e4313e..578207e 100644
  {
  	unsigned long irq_flags;
  	struct list_head *p;
-@@ -660,17 +652,63 @@ out:
+@@ -667,17 +652,63 @@ out:
  	return count;
  }
  
@@ -99238,7 +99210,7 @@ index 9e4313e..578207e 100644
  	int r;
  
  	/* set zero flag for page allocation if required */
-@@ -684,30 +722,33 @@ int ttm_get_pages(struct list_head *pages, int flags,
+@@ -691,30 +722,33 @@ int ttm_get_pages(struct list_head *pages, int flags,
  		else
  			gfp_flags |= GFP_HIGHUSER;
  
@@ -99279,7 +99251,7 @@ index 9e4313e..578207e 100644
  			if (PageHighMem(p))
  				clear_highpage(p);
  			else
-@@ -716,67 +757,27 @@ int ttm_get_pages(struct list_head *pages, int flags,
+@@ -723,67 +757,27 @@ int ttm_get_pages(struct list_head *pages, int flags,
  	}
  
  	/* If pool didn't have enough pages allocate new one. */
@@ -99355,7 +99327,7 @@ index 9e4313e..578207e 100644
  static void ttm_page_pool_init_locked(struct ttm_page_pool *pool, int flags,
  		char *name)
  {
-@@ -794,7 +795,7 @@ int ttm_page_alloc_init(struct ttm_mem_global *glob, unsigned max_pages)
+@@ -801,7 +795,7 @@ int ttm_page_alloc_init(struct ttm_mem_global *glob, unsigned max_pages)
  
  	WARN_ON(_manager);
  
@@ -99364,7 +99336,7 @@ index 9e4313e..578207e 100644
  
  	_manager = kzalloc(sizeof(*_manager), GFP_KERNEL);
  
-@@ -829,7 +830,7 @@ void ttm_page_alloc_fini(void)
+@@ -836,7 +830,7 @@ void ttm_page_alloc_fini(void)
  {
  	int i;
  
@@ -99373,7 +99345,7 @@ index 9e4313e..578207e 100644
  	ttm_pool_mm_shrink_fini(_manager);
  
  	for (i = 0; i < NUM_POOLS; ++i)
-@@ -839,6 +840,62 @@ void ttm_page_alloc_fini(void)
+@@ -846,6 +840,62 @@ void ttm_page_alloc_fini(void)
  	_manager = NULL;
  }
  
@@ -104327,10 +104299,10 @@ index 84ba033..4acced4 100644
  	if (unlikely(ret != 0))
  		goto out_unlock;
 diff --git a/drivers/gpu/drm/vmwgfx/vmwgfx_fb.c b/drivers/gpu/drm/vmwgfx/vmwgfx_fb.c
-index 907c26f..6651cb3 100644
+index 7f16ff2..7fc3dc7 100644
 --- a/drivers/gpu/drm/vmwgfx/vmwgfx_fb.c
 +++ b/drivers/gpu/drm/vmwgfx/vmwgfx_fb.c
-@@ -417,10 +417,6 @@ int vmw_fb_init(struct vmw_private *vmw_priv)
+@@ -416,10 +416,6 @@ int vmw_fb_init(struct vmw_private *vmw_priv)
  	unsigned fb_bpp, fb_depth, fb_offset, fb_pitch, fb_size;
  	int ret;
  
@@ -104341,7 +104313,7 @@ index 907c26f..6651cb3 100644
  	fb_bpp = 32;
  	fb_depth = 24;
  
-@@ -428,8 +424,8 @@ int vmw_fb_init(struct vmw_private *vmw_priv)
+@@ -427,8 +423,8 @@ int vmw_fb_init(struct vmw_private *vmw_priv)
  	fb_width = min(vmw_priv->fb_max_width, (unsigned)2048);
  	fb_height = min(vmw_priv->fb_max_height, (unsigned)2048);
  
@@ -104352,7 +104324,7 @@ index 907c26f..6651cb3 100644
  
  	fb_pitch = fb_width * fb_bpp / 8;
  	fb_size = fb_pitch * fb_height;
-@@ -518,19 +514,7 @@ int vmw_fb_init(struct vmw_private *vmw_priv)
+@@ -517,19 +513,7 @@ int vmw_fb_init(struct vmw_private *vmw_priv)
  	info->var.xres = initial_width;
  	info->var.yres = initial_height;
  
