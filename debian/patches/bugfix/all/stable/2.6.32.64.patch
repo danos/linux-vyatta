@@ -1,0 +1,3018 @@
+diff --git a/Documentation/lzo.txt b/Documentation/lzo.txt
+new file mode 100644
+index 0000000..ea45dd3
+--- /dev/null
++++ b/Documentation/lzo.txt
+@@ -0,0 +1,164 @@
++
++LZO stream format as understood by Linux's LZO decompressor
++===========================================================
++
++Introduction
++
++  This is not a specification. No specification seems to be publicly available
++  for the LZO stream format. This document describes what input format the LZO
++  decompressor as implemented in the Linux kernel understands. The file subject
++  of this analysis is lib/lzo/lzo1x_decompress_safe.c. No analysis was made on
++  the compressor nor on any other implementations though it seems likely that
++  the format matches the standard one. The purpose of this document is to
++  better understand what the code does in order to propose more efficient fixes
++  for future bug reports.
++
++Description
++
++  The stream is composed of a series of instructions, operands, and data. The
++  instructions consist in a few bits representing an opcode, and bits forming
++  the operands for the instruction, whose size and position depend on the
++  opcode and on the number of literals copied by previous instruction. The
++  operands are used to indicate :
++
++    - a distance when copying data from the dictionary (past output buffer)
++    - a length (number of bytes to copy from dictionary)
++    - the number of literals to copy, which is retained in variable "state"
++      as a piece of information for next instructions.
++
++  Optionally depending on the opcode and operands, extra data may follow. These
++  extra data can be a complement for the operand (eg: a length or a distance
++  encoded on larger values), or a literal to be copied to the output buffer.
++
++  The first byte of the block follows a different encoding from other bytes, it
++  seems to be optimized for literal use only, since there is no dictionary yet
++  prior to that byte.
++
++  Lengths are always encoded on a variable size starting with a small number
++  of bits in the operand. If the number of bits isn't enough to represent the
++  length, up to 255 may be added in increments by consuming more bytes with a
++  rate of at most 255 per extra byte (thus the compression ratio cannot exceed
++  around 255:1). The variable length encoding using #bits is always the same :
++
++       length = byte & ((1 << #bits) - 1)
++       if (!length) {
++               length = ((1 << #bits) - 1)
++               length += 255*(number of zero bytes)
++               length += first-non-zero-byte
++       }
++       length += constant (generally 2 or 3)
++
++  For references to the dictionary, distances are relative to the output
++  pointer. Distances are encoded using very few bits belonging to certain
++  ranges, resulting in multiple copy instructions using different encodings.
++  Certain encodings involve one extra byte, others involve two extra bytes
++  forming a little-endian 16-bit quantity (marked LE16 below).
++
++  After any instruction except the large literal copy, 0, 1, 2 or 3 literals
++  are copied before starting the next instruction. The number of literals that
++  were copied may change the meaning and behaviour of the next instruction. In
++  practice, only one instruction needs to know whether 0, less than 4, or more
++  literals were copied. This is the information stored in the <state> variable
++  in this implementation. This number of immediate literals to be copied is
++  generally encoded in the last two bits of the instruction but may also be
++  taken from the last two bits of an extra operand (eg: distance).
++
++  End of stream is declared when a block copy of distance 0 is seen. Only one
++  instruction may encode this distance (0001HLLL), it takes one LE16 operand
++  for the distance, thus requiring 3 bytes.
++
++  IMPORTANT NOTE : in the code some length checks are missing because certain
++  instructions are called under the assumption that a certain number of bytes
++  follow because it has already been garanteed before parsing the instructions.
++  They just have to "refill" this credit if they consume extra bytes. This is
++  an implementation design choice independant on the algorithm or encoding.
++
++Byte sequences
++
++  First byte encoding :
++
++      0..17   : follow regular instruction encoding, see below. It is worth
++                noting that codes 16 and 17 will represent a block copy from
++                the dictionary which is empty, and that they will always be
++                invalid at this place.
++
++      18..21  : copy 0..3 literals
++                state = (byte - 17) = 0..3  [ copy <state> literals ]
++                skip byte
++
++      22..255 : copy literal string
++                length = (byte - 17) = 4..238
++                state = 4 [ don't copy extra literals ]
++                skip byte
++
++  Instruction encoding :
++
++      0 0 0 0 X X X X  (0..15)
++        Depends on the number of literals copied by the last instruction.
++        If last instruction did not copy any literal (state == 0), this
++        encoding will be a copy of 4 or more literal, and must be interpreted
++        like this :
++
++           0 0 0 0 L L L L  (0..15)  : copy long literal string
++           length = 3 + (L ?: 15 + (zero_bytes * 255) + non_zero_byte)
++           state = 4  (no extra literals are copied)
++
++        If last instruction used to copy between 1 to 3 literals (encoded in
++        the instruction's opcode or distance), the instruction is a copy of a
++        2-byte block from the dictionary within a 1kB distance. It is worth
++        noting that this instruction provides little savings since it uses 2
++        bytes to encode a copy of 2 other bytes but it encodes the number of
++        following literals for free. It must be interpreted like this :
++
++           0 0 0 0 D D S S  (0..15)  : copy 2 bytes from <= 1kB distance
++           length = 2
++           state = S (copy S literals after this block)
++         Always followed by exactly one byte : H H H H H H H H
++           distance = (H << 2) + D + 1
++
++        If last instruction used to copy 4 or more literals (as detected by
++        state == 4), the instruction becomes a copy of a 3-byte block from the
++        dictionary from a 2..3kB distance, and must be interpreted like this :
++
++           0 0 0 0 D D S S  (0..15)  : copy 3 bytes from 2..3 kB distance
++           length = 3
++           state = S (copy S literals after this block)
++         Always followed by exactly one byte : H H H H H H H H
++           distance = (H << 2) + D + 2049
++
++      0 0 0 1 H L L L  (16..31)
++           Copy of a block within 16..48kB distance (preferably less than 10B)
++           length = 2 + (L ?: 7 + (zero_bytes * 255) + non_zero_byte)
++        Always followed by exactly one LE16 :  D D D D D D D D : D D D D D D S S
++           distance = 16384 + (H << 14) + D
++           state = S (copy S literals after this block)
++           End of stream is reached if distance == 16384
++
++      0 0 1 L L L L L  (32..63)
++           Copy of small block within 16kB distance (preferably less than 34B)
++           length = 2 + (L ?: 31 + (zero_bytes * 255) + non_zero_byte)
++        Always followed by exactly one LE16 :  D D D D D D D D : D D D D D D S S
++           distance = D + 1
++           state = S (copy S literals after this block)
++
++      0 1 L D D D S S  (64..127)
++           Copy 3-4 bytes from block within 2kB distance
++           state = S (copy S literals after this block)
++           length = 3 + L
++         Always followed by exactly one byte : H H H H H H H H
++           distance = (H << 3) + D + 1
++
++      1 L L D D D S S  (128..255)
++           Copy 5-8 bytes from block within 2kB distance
++           state = S (copy S literals after this block)
++           length = 5 + L
++         Always followed by exactly one byte : H H H H H H H H
++           distance = (H << 3) + D + 1
++
++Authors
++
++  This document was written by Willy Tarreau <w@1wt.eu> on 2014/07/19 during an
++  analysis of the decompression code available in Linux 3.16-rc5. The code is
++  tricky, it is possible that this document contains mistakes or that a few
++  corner cases were overlooked. In any case, please report any doubt, fix, or
++  proposed updates to the author(s) so that the document can be updated.
+diff --git a/Makefile b/Makefile
+index 0e35b32..852578d 100644
+diff --git a/arch/arm/lib/memset.S b/arch/arm/lib/memset.S
+index 650d5923..94b0650 100644
+--- a/arch/arm/lib/memset.S
++++ b/arch/arm/lib/memset.S
+@@ -14,27 +14,15 @@
+ 
+ 	.text
+ 	.align	5
+-	.word	0
+-
+-1:	subs	r2, r2, #4		@ 1 do we have enough
+-	blt	5f			@ 1 bytes to align with?
+-	cmp	r3, #2			@ 1
+-	strltb	r1, [r0], #1		@ 1
+-	strleb	r1, [r0], #1		@ 1
+-	strb	r1, [r0], #1		@ 1
+-	add	r2, r2, r3		@ 1 (r2 = r2 - (4 - r3))
+-/*
+- * The pointer is now aligned and the length is adjusted.  Try doing the
+- * memset again.
+- */
+ 
+ ENTRY(memset)
+ 	ands	r3, r0, #3		@ 1 unaligned?
+-	bne	1b			@ 1
++	mov	ip, r0			@ preserve r0 as return value
++	bne	6f			@ 1
+ /*
+- * we know that the pointer in r0 is aligned to a word boundary.
++ * we know that the pointer in ip is aligned to a word boundary.
+  */
+-	orr	r1, r1, r1, lsl #8
++1:	orr	r1, r1, r1, lsl #8
+ 	orr	r1, r1, r1, lsl #16
+ 	mov	r3, r1
+ 	cmp	r2, #16
+@@ -43,29 +31,28 @@ ENTRY(memset)
+ #if ! CALGN(1)+0
+ 
+ /*
+- * We need an extra register for this loop - save the return address and
+- * use the LR
++ * We need 2 extra registers for this loop - use r8 and the LR
+  */
+-	str	lr, [sp, #-4]!
+-	mov	ip, r1
++	stmfd	sp!, {r8, lr}
++	mov	r8, r1
+ 	mov	lr, r1
+ 
+ 2:	subs	r2, r2, #64
+-	stmgeia	r0!, {r1, r3, ip, lr}	@ 64 bytes at a time.
+-	stmgeia	r0!, {r1, r3, ip, lr}
+-	stmgeia	r0!, {r1, r3, ip, lr}
+-	stmgeia	r0!, {r1, r3, ip, lr}
++	stmgeia	ip!, {r1, r3, r8, lr}	@ 64 bytes at a time.
++	stmgeia	ip!, {r1, r3, r8, lr}
++	stmgeia	ip!, {r1, r3, r8, lr}
++	stmgeia	ip!, {r1, r3, r8, lr}
+ 	bgt	2b
+-	ldmeqfd	sp!, {pc}		@ Now <64 bytes to go.
++	ldmeqfd	sp!, {r8, pc}		@ Now <64 bytes to go.
+ /*
+  * No need to correct the count; we're only testing bits from now on
+  */
+ 	tst	r2, #32
+-	stmneia	r0!, {r1, r3, ip, lr}
+-	stmneia	r0!, {r1, r3, ip, lr}
++	stmneia	ip!, {r1, r3, r8, lr}
++	stmneia	ip!, {r1, r3, r8, lr}
+ 	tst	r2, #16
+-	stmneia	r0!, {r1, r3, ip, lr}
+-	ldr	lr, [sp], #4
++	stmneia	ip!, {r1, r3, r8, lr}
++	ldmfd	sp!, {r8, lr}
+ 
+ #else
+ 
+@@ -74,54 +61,63 @@ ENTRY(memset)
+  * whole cache lines at once.
+  */
+ 
+-	stmfd	sp!, {r4-r7, lr}
++	stmfd	sp!, {r4-r8, lr}
+ 	mov	r4, r1
+ 	mov	r5, r1
+ 	mov	r6, r1
+ 	mov	r7, r1
+-	mov	ip, r1
++	mov	r8, r1
+ 	mov	lr, r1
+ 
+ 	cmp	r2, #96
+-	tstgt	r0, #31
++	tstgt	ip, #31
+ 	ble	3f
+ 
+-	and	ip, r0, #31
+-	rsb	ip, ip, #32
+-	sub	r2, r2, ip
+-	movs	ip, ip, lsl #(32 - 4)
+-	stmcsia	r0!, {r4, r5, r6, r7}
+-	stmmiia	r0!, {r4, r5}
+-	tst	ip, #(1 << 30)
+-	mov	ip, r1
+-	strne	r1, [r0], #4
++	and	r8, ip, #31
++	rsb	r8, r8, #32
++	sub	r2, r2, r8
++	movs	r8, r8, lsl #(32 - 4)
++	stmcsia	ip!, {r4, r5, r6, r7}
++	stmmiia	ip!, {r4, r5}
++	tst	r8, #(1 << 30)
++	mov	r8, r1
++	strne	r1, [ip], #4
+ 
+ 3:	subs	r2, r2, #64
+-	stmgeia	r0!, {r1, r3-r7, ip, lr}
+-	stmgeia	r0!, {r1, r3-r7, ip, lr}
++	stmgeia	ip!, {r1, r3-r8, lr}
++	stmgeia	ip!, {r1, r3-r8, lr}
+ 	bgt	3b
+-	ldmeqfd	sp!, {r4-r7, pc}
++	ldmeqfd	sp!, {r4-r8, pc}
+ 
+ 	tst	r2, #32
+-	stmneia	r0!, {r1, r3-r7, ip, lr}
++	stmneia	ip!, {r1, r3-r8, lr}
+ 	tst	r2, #16
+-	stmneia	r0!, {r4-r7}
+-	ldmfd	sp!, {r4-r7, lr}
++	stmneia	ip!, {r4-r7}
++	ldmfd	sp!, {r4-r8, lr}
+ 
+ #endif
+ 
+ 4:	tst	r2, #8
+-	stmneia	r0!, {r1, r3}
++	stmneia	ip!, {r1, r3}
+ 	tst	r2, #4
+-	strne	r1, [r0], #4
++	strne	r1, [ip], #4
+ /*
+  * When we get here, we've got less than 4 bytes to zero.  We
+  * may have an unaligned pointer as well.
+  */
+ 5:	tst	r2, #2
+-	strneb	r1, [r0], #1
+-	strneb	r1, [r0], #1
++	strneb	r1, [ip], #1
++	strneb	r1, [ip], #1
+ 	tst	r2, #1
+-	strneb	r1, [r0], #1
++	strneb	r1, [ip], #1
+ 	mov	pc, lr
++
++6:	subs	r2, r2, #4		@ 1 do we have enough
++	blt	5b			@ 1 bytes to align with?
++	cmp	r3, #2			@ 1
++	strltb	r1, [ip], #1		@ 1
++	strleb	r1, [ip], #1		@ 1
++	strb	r1, [ip], #1		@ 1
++	add	r2, r2, r3		@ 1 (r2 = r2 - (4 - r3))
++	b	1b
+ ENDPROC(memset)
+diff --git a/arch/mips/include/asm/thread_info.h b/arch/mips/include/asm/thread_info.h
+index 0e50757..b0e25eb 100644
+--- a/arch/mips/include/asm/thread_info.h
++++ b/arch/mips/include/asm/thread_info.h
+@@ -145,6 +145,9 @@ register struct thread_info *__current_thread_info __asm__("$28");
+ #define _TIF_FPUBOUND		(1<<TIF_FPUBOUND)
+ #define _TIF_LOAD_WATCH		(1<<TIF_LOAD_WATCH)
+ 
++#define _TIF_WORK_SYSCALL_ENTRY	(_TIF_SYSCALL_TRACE | \
++				 _TIF_SYSCALL_AUDIT | _TIF_SECCOMP)
++
+ /* work to do on interrupt/exception return */
+ #define _TIF_WORK_MASK		(0x0000ffef & ~_TIF_SECCOMP)
+ /* work to do on any return to u-space */
+diff --git a/arch/mips/kernel/scall32-o32.S b/arch/mips/kernel/scall32-o32.S
+index fd2a9bb..b72c554 100644
+--- a/arch/mips/kernel/scall32-o32.S
++++ b/arch/mips/kernel/scall32-o32.S
+@@ -52,7 +52,7 @@ NESTED(handle_sys, PT_SIZE, sp)
+ 
+ stack_done:
+ 	lw	t0, TI_FLAGS($28)	# syscall tracing enabled?
+-	li	t1, _TIF_SYSCALL_TRACE | _TIF_SYSCALL_AUDIT
++	li	t1, _TIF_WORK_SYSCALL_ENTRY
+ 	and	t0, t1
+ 	bnez	t0, syscall_trace_entry	# -> yes
+ 
+diff --git a/arch/mips/kernel/scall64-64.S b/arch/mips/kernel/scall64-64.S
+index 18bf7f3..eaa345b 100644
+--- a/arch/mips/kernel/scall64-64.S
++++ b/arch/mips/kernel/scall64-64.S
+@@ -54,7 +54,7 @@ NESTED(handle_sys64, PT_SIZE, sp)
+ 
+ 	sd	a3, PT_R26(sp)		# save a3 for syscall restarting
+ 
+-	li	t1, _TIF_SYSCALL_TRACE | _TIF_SYSCALL_AUDIT
++	li	t1, _TIF_WORK_SYSCALL_ENTRY
+ 	LONG_L	t0, TI_FLAGS($28)	# syscall tracing enabled?
+ 	and	t0, t1, t0
+ 	bnez	t0, syscall_trace_entry
+diff --git a/arch/mips/kernel/scall64-n32.S b/arch/mips/kernel/scall64-n32.S
+index 6ebc079..0a51c3d 100644
+--- a/arch/mips/kernel/scall64-n32.S
++++ b/arch/mips/kernel/scall64-n32.S
+@@ -53,7 +53,7 @@ NESTED(handle_sysn32, PT_SIZE, sp)
+ 
+ 	sd	a3, PT_R26(sp)		# save a3 for syscall restarting
+ 
+-	li	t1, _TIF_SYSCALL_TRACE | _TIF_SYSCALL_AUDIT
++	li	t1, _TIF_WORK_SYSCALL_ENTRY
+ 	LONG_L	t0, TI_FLAGS($28)	# syscall tracing enabled?
+ 	and	t0, t1, t0
+ 	bnez	t0, n32_syscall_trace_entry
+diff --git a/arch/mips/kernel/scall64-o32.S b/arch/mips/kernel/scall64-o32.S
+index 14dde4c..33ed571 100644
+--- a/arch/mips/kernel/scall64-o32.S
++++ b/arch/mips/kernel/scall64-o32.S
+@@ -81,7 +81,7 @@ NESTED(handle_sys, PT_SIZE, sp)
+ 	PTR	4b, bad_stack
+ 	.previous
+ 
+-	li	t1, _TIF_SYSCALL_TRACE | _TIF_SYSCALL_AUDIT
++	li	t1, _TIF_WORK_SYSCALL_ENTRY
+ 	LONG_L	t0, TI_FLAGS($28)	# syscall tracing enabled?
+ 	and	t0, t1, t0
+ 	bnez	t0, trace_a_syscall
+diff --git a/arch/x86/include/asm/ptrace.h b/arch/x86/include/asm/ptrace.h
+index 1ec926d..a2f3597 100644
+--- a/arch/x86/include/asm/ptrace.h
++++ b/arch/x86/include/asm/ptrace.h
+@@ -227,6 +227,22 @@ extern void user_enable_block_step(struct task_struct *);
+ #define arch_has_block_step()	(boot_cpu_data.x86 >= 6)
+ #endif
+ 
++/*
++ * When hitting ptrace_stop(), we cannot return using SYSRET because
++ * that does not restore the full CPU state, only a minimal set.  The
++ * ptracer can change arbitrary register values, which is usually okay
++ * because the usual ptrace stops run off the signal delivery path which
++ * forces IRET; however, ptrace_event() stops happen in arbitrary places
++ * in the kernel and don't force IRET path.
++ *
++ * So force IRET path after a ptrace stop.
++ */
++#define arch_ptrace_stop_needed(code, info)                            \
++({                                                                     \
++       set_thread_flag(TIF_NOTIFY_RESUME);                             \
++       false;                                                          \
++})
++
+ struct user_desc;
+ extern int do_get_thread_area(struct task_struct *p, int idx,
+ 			      struct user_desc __user *info);
+diff --git a/arch/x86/kernel/entry_32.S b/arch/x86/kernel/entry_32.S
+index c097e7d..8b5370c 100644
+--- a/arch/x86/kernel/entry_32.S
++++ b/arch/x86/kernel/entry_32.S
+@@ -445,8 +445,9 @@ sysenter_past_esp:
+ 	jnz sysenter_audit
+ sysenter_do_call:
+ 	cmpl $(nr_syscalls), %eax
+-	jae syscall_badsys
++	jae sysenter_badsys
+ 	call *sys_call_table(,%eax,4)
++sysenter_after_call:
+ 	movl %eax,PT_EAX(%esp)
+ 	LOCKDEP_SYS_EXIT
+ 	DISABLE_INTERRUPTS(CLBR_ANY)
+@@ -527,6 +528,7 @@ ENTRY(system_call)
+ 	jae syscall_badsys
+ syscall_call:
+ 	call *sys_call_table(,%eax,4)
++syscall_after_call:
+ 	movl %eax,PT_EAX(%esp)		# store the return value
+ syscall_exit:
+ 	LOCKDEP_SYS_EXIT
+@@ -701,9 +703,14 @@ syscall_fault:
+ END(syscall_fault)
+ 
+ syscall_badsys:
+-	movl $-ENOSYS,PT_EAX(%esp)
+-	jmp resume_userspace
++	movl $-ENOSYS,%eax
++	jmp syscall_after_call
+ END(syscall_badsys)
++
++sysenter_badsys:
++	movl $-ENOSYS,%eax
++	jmp sysenter_after_call
++END(sysenter_badsys)
+ 	CFI_ENDPROC
+ 
+ /*
+diff --git a/drivers/char/tty_io.c b/drivers/char/tty_io.c
+index 123cedf..cbdd169 100644
+--- a/drivers/char/tty_io.c
++++ b/drivers/char/tty_io.c
+@@ -1482,6 +1482,7 @@ void tty_release_dev(struct file *filp)
+ 	int	devpts;
+ 	int	idx;
+ 	char	buf[64];
++	long	timeout = 0;
+ 	struct 	inode *inode;
+ 
+ 	inode = filp->f_path.dentry->d_inode;
+@@ -1602,7 +1603,11 @@ void tty_release_dev(struct file *filp)
+ 		printk(KERN_WARNING "tty_release_dev: %s: read/write wait queue "
+ 				    "active!\n", tty_name(tty, buf));
+ 		mutex_unlock(&tty_mutex);
+-		schedule();
++		schedule_timeout_killable(timeout);
++		if (timeout < 120 * HZ)
++			timeout = 2 * timeout + 1;
++		else
++			timeout = MAX_SCHEDULE_TIMEOUT;
+ 	}
+ 
+ 	/*
+diff --git a/drivers/md/dm-crypt.c b/drivers/md/dm-crypt.c
+index 959d6d1..a44a908 100644
+--- a/drivers/md/dm-crypt.c
++++ b/drivers/md/dm-crypt.c
+@@ -998,6 +998,7 @@ static int crypt_ctr(struct dm_target *ti, unsigned int argc, char **argv)
+ 	char *ivopts;
+ 	unsigned int key_size;
+ 	unsigned long long tmpll;
++	size_t iv_size_padding;
+ 
+ 	if (argc != 5) {
+ 		ti->error = "Not enough arguments";
+@@ -1106,12 +1107,23 @@ static int crypt_ctr(struct dm_target *ti, unsigned int argc, char **argv)
+ 
+ 	cc->dmreq_start = sizeof(struct ablkcipher_request);
+ 	cc->dmreq_start += crypto_ablkcipher_reqsize(tfm);
+-	cc->dmreq_start = ALIGN(cc->dmreq_start, crypto_tfm_ctx_alignment());
+-	cc->dmreq_start += crypto_ablkcipher_alignmask(tfm) &
+-			   ~(crypto_tfm_ctx_alignment() - 1);
++	cc->dmreq_start = ALIGN(cc->dmreq_start, __alignof__(struct dm_crypt_request));
++
++	if (crypto_ablkcipher_alignmask(tfm) < CRYPTO_MINALIGN) {
++		/* Allocate the padding exactly */
++		iv_size_padding = -(cc->dmreq_start + sizeof(struct dm_crypt_request))
++				& crypto_ablkcipher_alignmask(tfm);
++	} else {
++		/*
++		 * If the cipher requires greater alignment than kmalloc
++		 * alignment, we don't know the exact position of the
++		 * initialization vector. We must assume worst case.
++		 */
++		iv_size_padding = crypto_ablkcipher_alignmask(tfm);
++	}
+ 
+ 	cc->req_pool = mempool_create_kmalloc_pool(MIN_IOS, cc->dmreq_start +
+-			sizeof(struct dm_crypt_request) + cc->iv_size);
++			sizeof(struct dm_crypt_request) + iv_size_padding + cc->iv_size);
+ 	if (!cc->req_pool) {
+ 		ti->error = "Cannot allocate crypt request mempool";
+ 		goto bad_req_pool;
+diff --git a/drivers/md/raid5.c b/drivers/md/raid5.c
+index 883215d..013e598 100644
+--- a/drivers/md/raid5.c
++++ b/drivers/md/raid5.c
+@@ -3091,6 +3091,8 @@ static void handle_stripe5(struct stripe_head *sh)
+ 				set_bit(R5_Wantwrite, &dev->flags);
+ 				if (prexor)
+ 					continue;
++				if (s.failed > 1)
++					continue;
+ 				if (!test_bit(R5_Insync, &dev->flags) ||
+ 				    (i == sh->pd_idx && s.failed == 0))
+ 					set_bit(STRIPE_INSYNC, &sh->state);
+diff --git a/drivers/net/gianfar.c b/drivers/net/gianfar.c
+index 8aa2cf6..afdcb41 100644
+--- a/drivers/net/gianfar.c
++++ b/drivers/net/gianfar.c
+@@ -1115,7 +1115,6 @@ int startup_gfar(struct net_device *dev)
+ 	/* keep vlan related bits if it's enabled */
+ 	if (priv->vlgrp) {
+ 		rctrl |= RCTRL_VLEX | RCTRL_PRSDEP_INIT;
+-		tctrl |= TCTRL_VLINS;
+ 	}
+ 
+ 	/* Init rctrl based on our settings */
+@@ -1456,11 +1455,6 @@ static void gfar_vlan_rx_register(struct net_device *dev,
+ 		tempval |= (RCTRL_VLEX | RCTRL_PRSDEP_INIT);
+ 		gfar_write(&priv->regs->rctrl, tempval);
+ 	} else {
+-		/* Disable VLAN tag insertion */
+-		tempval = gfar_read(&priv->regs->tctrl);
+-		tempval &= ~TCTRL_VLINS;
+-		gfar_write(&priv->regs->tctrl, tempval);
+-
+ 		/* Disable VLAN tag extraction */
+ 		tempval = gfar_read(&priv->regs->rctrl);
+ 		tempval &= ~RCTRL_VLEX;
+diff --git a/drivers/net/macvlan.c b/drivers/net/macvlan.c
+index 2490aa3..47ff740 100644
+--- a/drivers/net/macvlan.c
++++ b/drivers/net/macvlan.c
+@@ -360,6 +360,7 @@ static int macvlan_init(struct net_device *dev)
+ 	dev->state		= (dev->state & ~MACVLAN_STATE_MASK) |
+ 				  (lowerdev->state & MACVLAN_STATE_MASK);
+ 	dev->features 		= lowerdev->features & MACVLAN_FEATURES;
++	dev->vlan_features	= lowerdev->vlan_features & MACVLAN_FEATURES;
+ 	dev->gso_max_size	= lowerdev->gso_max_size;
+ 	dev->iflink		= lowerdev->ifindex;
+ 	dev->hard_header_len	= lowerdev->hard_header_len;
+diff --git a/drivers/net/ppp_generic.c b/drivers/net/ppp_generic.c
+index 965adb6..5e9156a 100644
+--- a/drivers/net/ppp_generic.c
++++ b/drivers/net/ppp_generic.c
+@@ -590,7 +590,7 @@ static long ppp_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+ 			if (file == ppp->owner)
+ 				ppp_shutdown_interface(ppp);
+ 		}
+-		if (atomic_long_read(&file->f_count) <= 2) {
++		if (atomic_long_read(&file->f_count) < 2) {
+ 			ppp_release(NULL, file);
+ 			err = 0;
+ 		} else
+diff --git a/drivers/net/pppoe.c b/drivers/net/pppoe.c
+index 343fd1e..bb693b4 100644
+--- a/drivers/net/pppoe.c
++++ b/drivers/net/pppoe.c
+@@ -688,7 +688,7 @@ static int pppoe_connect(struct socket *sock, struct sockaddr *uservaddr,
+ 		po->chan.hdrlen = (sizeof(struct pppoe_hdr) +
+ 				   dev->hard_header_len);
+ 
+-		po->chan.mtu = dev->mtu - sizeof(struct pppoe_hdr);
++		po->chan.mtu = dev->mtu - sizeof(struct pppoe_hdr) - 2;
+ 		po->chan.private = sk;
+ 		po->chan.ops = &pppoe_chan_ops;
+ 
+diff --git a/drivers/net/sunvnet.c b/drivers/net/sunvnet.c
+index b6d0348..667c674 100644
+--- a/drivers/net/sunvnet.c
++++ b/drivers/net/sunvnet.c
+@@ -1096,6 +1096,24 @@ static struct vnet * __devinit vnet_find_or_create(const u64 *local_mac)
+ 	return vp;
+ }
+ 
++static void vnet_cleanup(void)
++{
++	struct vnet *vp;
++	struct net_device *dev;
++
++	mutex_lock(&vnet_list_mutex);
++	while (!list_empty(&vnet_list)) {
++		vp = list_first_entry(&vnet_list, struct vnet, list);
++		list_del(&vp->list);
++		dev = vp->dev;
++		/* vio_unregister_driver() should have cleaned up port_list */
++		BUG_ON(!list_empty(&vp->port_list));
++		unregister_netdev(dev);
++		free_netdev(dev);
++	}
++	mutex_unlock(&vnet_list_mutex);
++}
++
+ static const char *local_mac_prop = "local-mac-address";
+ 
+ static struct vnet * __devinit vnet_find_parent(struct mdesc_handle *hp,
+@@ -1261,7 +1279,6 @@ static int vnet_port_remove(struct vio_dev *vdev)
+ 
+ 		kfree(port);
+ 
+-		unregister_netdev(vp->dev);
+ 	}
+ 	return 0;
+ }
+@@ -1292,6 +1309,7 @@ static int __init vnet_init(void)
+ static void __exit vnet_exit(void)
+ {
+ 	vio_unregister_driver(&vnet_port_driver);
++	vnet_cleanup();
+ }
+ 
+ module_init(vnet_init);
+diff --git a/drivers/scsi/sym53c8xx_2/sym_hipd.c b/drivers/scsi/sym53c8xx_2/sym_hipd.c
+index 297deb8..3bbc10b 100644
+--- a/drivers/scsi/sym53c8xx_2/sym_hipd.c
++++ b/drivers/scsi/sym53c8xx_2/sym_hipd.c
+@@ -3003,7 +3003,11 @@ sym_dequeue_from_squeue(struct sym_hcb *np, int i, int target, int lun, int task
+ 		if ((target == -1 || cp->target == target) &&
+ 		    (lun    == -1 || cp->lun    == lun)    &&
+ 		    (task   == -1 || cp->tag    == task)) {
++#ifdef SYM_OPT_HANDLE_DEVICE_QUEUEING
+ 			sym_set_cam_status(cp->cmd, DID_SOFT_ERROR);
++#else
++			sym_set_cam_status(cp->cmd, DID_REQUEUE);
++#endif
+ 			sym_remque(&cp->link_ccbq);
+ 			sym_insque_tail(&cp->link_ccbq, &np->comp_ccbq);
+ 		}
+diff --git a/drivers/usb/serial/kobil_sct.c b/drivers/usb/serial/kobil_sct.c
+index 929ceb1..935f6e31 100644
+--- a/drivers/usb/serial/kobil_sct.c
++++ b/drivers/usb/serial/kobil_sct.c
+@@ -464,7 +464,7 @@ static int kobil_write(struct tty_struct *tty, struct usb_serial_port *port,
+ 			);
+ 
+ 			priv->cur_pos = priv->cur_pos + length;
+-			result = usb_submit_urb(port->write_urb, GFP_NOIO);
++			result = usb_submit_urb(port->write_urb, GFP_ATOMIC);
+ 			dbg("%s - port %d Send write URB returns: %i",
+ 					__func__, port->number, result);
+ 			todo = priv->filled - priv->cur_pos;
+@@ -488,7 +488,7 @@ static int kobil_write(struct tty_struct *tty, struct usb_serial_port *port,
+ 			port->interrupt_in_urb->dev = port->serial->dev;
+ 
+ 			result = usb_submit_urb(port->interrupt_in_urb,
+-								GFP_NOIO);
++								GFP_ATOMIC);
+ 			dbg("%s - port %d Send read URB returns: %i",
+ 					__func__, port->number, result);
+ 		}
+diff --git a/drivers/usb/serial/option.c b/drivers/usb/serial/option.c
+index 76f91ba..2beca03 100644
+--- a/drivers/usb/serial/option.c
++++ b/drivers/usb/serial/option.c
+@@ -658,6 +658,18 @@ static struct usb_device_id option_ids[] = {
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0083, 0xff, 0xff, 0xff) },
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0086, 0xff, 0xff, 0xff) },
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0087, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0088, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0089, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0090, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0091, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0092, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0093, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0094, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0095, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0096, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0097, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0098, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0099, 0xff, 0xff, 0xff) },
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0104, 0xff, 0xff, 0xff) },
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0105, 0xff, 0xff, 0xff) },
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0106, 0xff, 0xff, 0xff) },
+@@ -684,7 +696,6 @@ static struct usb_device_id option_ids[] = {
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0151, 0xff, 0xff, 0xff) },
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0152, 0xff, 0xff, 0xff) },
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0153, 0xff, 0xff, 0xff) },
+-	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0154, 0xff, 0xff, 0xff) },
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0155, 0xff, 0xff, 0xff) },
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0156, 0xff, 0xff, 0xff) },
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0157, 0xff, 0xff, 0xff) },
+@@ -693,6 +704,12 @@ static struct usb_device_id option_ids[] = {
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0160, 0xff, 0xff, 0xff) },
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0161, 0xff, 0xff, 0xff) },
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0162, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0164, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0165, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0168, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0170, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0176, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0178, 0xff, 0xff, 0xff) },
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1008, 0xff, 0xff, 0xff) },
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1010, 0xff, 0xff, 0xff) },
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1012, 0xff, 0xff, 0xff) },
+@@ -867,6 +884,116 @@ static struct usb_device_id option_ids[] = {
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1298, 0xff, 0xff, 0xff) },
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1299, 0xff, 0xff, 0xff) },
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1300, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1401, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1402, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1403, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1404, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1405, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1406, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1407, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1408, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1409, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1410, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1411, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1412, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1413, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1414, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1415, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1416, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1417, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1418, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1419, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1420, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1421, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1422, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1423, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1424, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1425, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1426, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1427, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1428, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1429, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1430, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1431, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1432, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1433, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1434, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1435, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1436, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1437, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1438, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1439, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1440, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1441, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1442, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1443, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1444, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1445, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1446, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1447, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1448, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1449, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1450, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1451, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1452, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1453, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1454, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1455, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1456, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1457, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1458, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1459, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1460, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1461, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1462, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1463, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1464, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1465, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1466, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1467, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1468, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1469, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1470, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1471, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1472, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1473, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1474, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1475, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1476, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1477, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1478, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1479, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1480, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1481, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1482, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1483, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1484, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1485, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1486, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1487, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1488, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1489, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1490, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1491, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1492, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1493, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1494, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1495, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1496, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1497, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1498, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1499, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1500, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1501, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1502, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1503, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1504, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1505, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1506, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1507, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1508, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1509, 0xff, 0xff, 0xff) },
++	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x1510, 0xff, 0xff, 0xff) },
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0014, 0xff, 0xff, 0xff) }, /* ZTE CDMA products */
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0027, 0xff, 0xff, 0xff) },
+ 	{ USB_DEVICE_AND_INTERFACE_INFO(ZTE_VENDOR_ID, 0x0059, 0xff, 0xff, 0xff) },
+diff --git a/fs/isofs/inode.c b/fs/isofs/inode.c
+index 6b4dcd4..f080dd7 100644
+--- a/fs/isofs/inode.c
++++ b/fs/isofs/inode.c
+@@ -56,7 +56,7 @@ static void isofs_put_super(struct super_block *sb)
+ 	return;
+ }
+ 
+-static int isofs_read_inode(struct inode *);
++static int isofs_read_inode(struct inode *, int relocated);
+ static int isofs_statfs (struct dentry *, struct kstatfs *);
+ 
+ static struct kmem_cache *isofs_inode_cachep;
+@@ -1210,7 +1210,7 @@ out_toomany:
+ 	goto out;
+ }
+ 
+-static int isofs_read_inode(struct inode *inode)
++static int isofs_read_inode(struct inode *inode, int relocated)
+ {
+ 	struct super_block *sb = inode->i_sb;
+ 	struct isofs_sb_info *sbi = ISOFS_SB(sb);
+@@ -1355,7 +1355,7 @@ static int isofs_read_inode(struct inode *inode)
+ 	 */
+ 
+ 	if (!high_sierra) {
+-		parse_rock_ridge_inode(de, inode);
++		parse_rock_ridge_inode(de, inode, relocated);
+ 		/* if we want uid/gid set, override the rock ridge setting */
+ 		if (sbi->s_uid_set)
+ 			inode->i_uid = sbi->s_uid;
+@@ -1434,9 +1434,10 @@ static int isofs_iget5_set(struct inode *ino, void *data)
+  * offset that point to the underlying meta-data for the inode.  The
+  * code below is otherwise similar to the iget() code in
+  * include/linux/fs.h */
+-struct inode *isofs_iget(struct super_block *sb,
+-			 unsigned long block,
+-			 unsigned long offset)
++struct inode *__isofs_iget(struct super_block *sb,
++			   unsigned long block,
++			   unsigned long offset,
++			   int relocated)
+ {
+ 	unsigned long hashval;
+ 	struct inode *inode;
+@@ -1458,7 +1459,7 @@ struct inode *isofs_iget(struct super_block *sb,
+ 		return ERR_PTR(-ENOMEM);
+ 
+ 	if (inode->i_state & I_NEW) {
+-		ret = isofs_read_inode(inode);
++		ret = isofs_read_inode(inode, relocated);
+ 		if (ret < 0) {
+ 			iget_failed(inode);
+ 			inode = ERR_PTR(ret);
+diff --git a/fs/isofs/isofs.h b/fs/isofs/isofs.h
+index 7d33de8..f9c9793 100644
+--- a/fs/isofs/isofs.h
++++ b/fs/isofs/isofs.h
+@@ -107,7 +107,7 @@ extern int iso_date(char *, int);
+ 
+ struct inode;		/* To make gcc happy */
+ 
+-extern int parse_rock_ridge_inode(struct iso_directory_record *, struct inode *);
++extern int parse_rock_ridge_inode(struct iso_directory_record *, struct inode *, int relocated);
+ extern int get_rock_ridge_filename(struct iso_directory_record *, char *, struct inode *);
+ extern int isofs_name_translate(struct iso_directory_record *, char *, struct inode *);
+ 
+@@ -118,9 +118,24 @@ extern struct dentry *isofs_lookup(struct inode *, struct dentry *, struct namei
+ extern struct buffer_head *isofs_bread(struct inode *, sector_t);
+ extern int isofs_get_blocks(struct inode *, sector_t, struct buffer_head **, unsigned long);
+ 
+-extern struct inode *isofs_iget(struct super_block *sb,
+-                                unsigned long block,
+-                                unsigned long offset);
++struct inode *__isofs_iget(struct super_block *sb,
++			   unsigned long block,
++			   unsigned long offset,
++			   int relocated);
++
++static inline struct inode *isofs_iget(struct super_block *sb,
++				       unsigned long block,
++				       unsigned long offset)
++{
++	return __isofs_iget(sb, block, offset, 0);
++}
++
++static inline struct inode *isofs_iget_reloc(struct super_block *sb,
++					     unsigned long block,
++					     unsigned long offset)
++{
++	return __isofs_iget(sb, block, offset, 1);
++}
+ 
+ /* Because the inode number is no longer relevant to finding the
+  * underlying meta-data for an inode, we are free to choose a more
+diff --git a/fs/isofs/rock.c b/fs/isofs/rock.c
+index c2fb2dd..6fa4a86 100644
+--- a/fs/isofs/rock.c
++++ b/fs/isofs/rock.c
+@@ -289,12 +289,16 @@ eio:
+ 	goto out;
+ }
+ 
++#define RR_REGARD_XA 1
++#define RR_RELOC_DE 2
++
+ static int
+ parse_rock_ridge_inode_internal(struct iso_directory_record *de,
+-				struct inode *inode, int regard_xa)
++				struct inode *inode, int flags)
+ {
+ 	int symlink_len = 0;
+ 	int cnt, sig;
++	unsigned int reloc_block;
+ 	struct inode *reloc;
+ 	struct rock_ridge *rr;
+ 	int rootflag;
+@@ -306,7 +310,7 @@ parse_rock_ridge_inode_internal(struct iso_directory_record *de,
+ 
+ 	init_rock_state(&rs, inode);
+ 	setup_rock_ridge(de, inode, &rs);
+-	if (regard_xa) {
++	if (flags & RR_REGARD_XA) {
+ 		rs.chr += 14;
+ 		rs.len -= 14;
+ 		if (rs.len < 0)
+@@ -486,12 +490,22 @@ repeat:
+ 					"relocated directory\n");
+ 			goto out;
+ 		case SIG('C', 'L'):
+-			ISOFS_I(inode)->i_first_extent =
+-			    isonum_733(rr->u.CL.location);
+-			reloc =
+-			    isofs_iget(inode->i_sb,
+-				       ISOFS_I(inode)->i_first_extent,
+-				       0);
++			if (flags & RR_RELOC_DE) {
++				printk(KERN_ERR
++				       "ISOFS: Recursive directory relocation "
++				       "is not supported\n");
++				goto eio;
++			}
++			reloc_block = isonum_733(rr->u.CL.location);
++			if (reloc_block == ISOFS_I(inode)->i_iget5_block &&
++			    ISOFS_I(inode)->i_iget5_offset == 0) {
++				printk(KERN_ERR
++				       "ISOFS: Directory relocation points to "
++				       "itself\n");
++				goto eio;
++			}
++			ISOFS_I(inode)->i_first_extent = reloc_block;
++			reloc = isofs_iget_reloc(inode->i_sb, reloc_block, 0);
+ 			if (IS_ERR(reloc)) {
+ 				ret = PTR_ERR(reloc);
+ 				goto out;
+@@ -639,9 +653,11 @@ static char *get_symlink_chunk(char *rpnt, struct rock_ridge *rr, char *plimit)
+ 	return rpnt;
+ }
+ 
+-int parse_rock_ridge_inode(struct iso_directory_record *de, struct inode *inode)
++int parse_rock_ridge_inode(struct iso_directory_record *de, struct inode *inode,
++			   int relocated)
+ {
+-	int result = parse_rock_ridge_inode_internal(de, inode, 0);
++	int flags = relocated ? RR_RELOC_DE : 0;
++	int result = parse_rock_ridge_inode_internal(de, inode, flags);
+ 
+ 	/*
+ 	 * if rockridge flag was reset and we didn't look for attributes
+@@ -649,7 +665,8 @@ int parse_rock_ridge_inode(struct iso_directory_record *de, struct inode *inode)
+ 	 */
+ 	if ((ISOFS_SB(inode->i_sb)->s_rock_offset == -1)
+ 	    && (ISOFS_SB(inode->i_sb)->s_rock == 2)) {
+-		result = parse_rock_ridge_inode_internal(de, inode, 14);
++		result = parse_rock_ridge_inode_internal(de, inode,
++							 flags | RR_REGARD_XA);
+ 	}
+ 	return result;
+ }
+diff --git a/fs/namei.c b/fs/namei.c
+index b0afbd4..0d766d2 100644
+--- a/fs/namei.c
++++ b/fs/namei.c
+@@ -635,6 +635,7 @@ static __always_inline int __do_follow_link(struct path *path, struct nameidata
+ 		dget(dentry);
+ 	}
+ 	mntget(path->mnt);
++	nd->last_type = LAST_BIND;
+ 	cookie = dentry->d_inode->i_op->follow_link(dentry, nd);
+ 	error = PTR_ERR(cookie);
+ 	if (!IS_ERR(cookie)) {
+diff --git a/fs/nfsd/nfs4xdr.c b/fs/nfsd/nfs4xdr.c
+index ab87b05..05990b6 100644
+--- a/fs/nfsd/nfs4xdr.c
++++ b/fs/nfsd/nfs4xdr.c
+@@ -323,8 +323,8 @@ nfsd4_decode_fattr(struct nfsd4_compoundargs *argp, u32 *bmval,
+ 		READ_BUF(dummy32);
+ 		len += (XDR_QUADLEN(dummy32) << 2);
+ 		READMEM(buf, dummy32);
+-		if ((status = nfsd_map_name_to_uid(argp->rqstp, buf, dummy32, &iattr->ia_uid)))
+-			return status;
++		if ((host_err = nfsd_map_name_to_uid(argp->rqstp, buf, dummy32, &iattr->ia_uid)))
++			goto out_nfserr;
+ 		iattr->ia_valid |= ATTR_UID;
+ 	}
+ 	if (bmval[1] & FATTR4_WORD1_OWNER_GROUP) {
+@@ -334,8 +334,8 @@ nfsd4_decode_fattr(struct nfsd4_compoundargs *argp, u32 *bmval,
+ 		READ_BUF(dummy32);
+ 		len += (XDR_QUADLEN(dummy32) << 2);
+ 		READMEM(buf, dummy32);
+-		if ((status = nfsd_map_name_to_gid(argp->rqstp, buf, dummy32, &iattr->ia_gid)))
+-			return status;
++		if ((host_err = nfsd_map_name_to_gid(argp->rqstp, buf, dummy32, &iattr->ia_gid)))
++			goto out_nfserr;
+ 		iattr->ia_valid |= ATTR_GID;
+ 	}
+ 	if (bmval[1] & FATTR4_WORD1_TIME_ACCESS_SET) {
+diff --git a/fs/proc/base.c b/fs/proc/base.c
+index 67f7dc0..c75c5cd 100644
+--- a/fs/proc/base.c
++++ b/fs/proc/base.c
+@@ -1381,7 +1381,6 @@ static void *proc_pid_follow_link(struct dentry *dentry, struct nameidata *nd)
+ 		goto out;
+ 
+ 	error = PROC_I(inode)->op.proc_get_link(inode, &nd->path);
+-	nd->last_type = LAST_BIND;
+ out:
+ 	return ERR_PTR(error);
+ }
+diff --git a/include/linux/lzo.h b/include/linux/lzo.h
+index d793497..a0848d9 100644
+--- a/include/linux/lzo.h
++++ b/include/linux/lzo.h
+@@ -4,28 +4,28 @@
+  *  LZO Public Kernel Interface
+  *  A mini subset of the LZO real-time data compression library
+  *
+- *  Copyright (C) 1996-2005 Markus F.X.J. Oberhumer <markus@oberhumer.com>
++ *  Copyright (C) 1996-2012 Markus F.X.J. Oberhumer <markus@oberhumer.com>
+  *
+  *  The full LZO package can be found at:
+  *  http://www.oberhumer.com/opensource/lzo/
+  *
+- *  Changed for kernel use by:
++ *  Changed for Linux kernel use by:
+  *  Nitin Gupta <nitingupta910@gmail.com>
+  *  Richard Purdie <rpurdie@openedhand.com>
+  */
+ 
+-#define LZO1X_MEM_COMPRESS	(16384 * sizeof(unsigned char *))
+-#define LZO1X_1_MEM_COMPRESS	LZO1X_MEM_COMPRESS
++#define LZO1X_1_MEM_COMPRESS	(8192 * sizeof(unsigned short))
++#define LZO1X_MEM_COMPRESS	LZO1X_1_MEM_COMPRESS
+ 
+ #define lzo1x_worst_compress(x) ((x) + ((x) / 16) + 64 + 3)
+ 
+-/* This requires 'workmem' of size LZO1X_1_MEM_COMPRESS */
++/* This requires 'wrkmem' of size LZO1X_1_MEM_COMPRESS */
+ int lzo1x_1_compress(const unsigned char *src, size_t src_len,
+-			unsigned char *dst, size_t *dst_len, void *wrkmem);
++		     unsigned char *dst, size_t *dst_len, void *wrkmem);
+ 
+ /* safe decompression with overrun testing */
+ int lzo1x_decompress_safe(const unsigned char *src, size_t src_len,
+-			unsigned char *dst, size_t *dst_len);
++			  unsigned char *dst, size_t *dst_len);
+ 
+ /*
+  * Return values (< 0 = Error)
+@@ -40,5 +40,6 @@ int lzo1x_decompress_safe(const unsigned char *src, size_t src_len,
+ #define LZO_E_EOF_NOT_FOUND		(-7)
+ #define LZO_E_INPUT_NOT_CONSUMED	(-8)
+ #define LZO_E_NOT_YET_IMPLEMENTED	(-9)
++#define LZO_E_INVALID_ARGUMENT		(-10)
+ 
+ #endif
+diff --git a/include/linux/ptrace.h b/include/linux/ptrace.h
+index 7456d7d..486d27f 100644
+--- a/include/linux/ptrace.h
++++ b/include/linux/ptrace.h
+@@ -292,6 +292,9 @@ static inline void user_enable_block_step(struct task_struct *task)
+  * calling arch_ptrace_stop() when it would be superfluous.  For example,
+  * if the thread has not been back to user mode since the last stop, the
+  * thread state might indicate that nothing needs to be done.
++ *
++ * This is guaranteed to be invoked once before a task stops for ptrace and
++ * may include arch-specific operations necessary prior to a ptrace stop.
+  */
+ #define arch_ptrace_stop_needed(code, info)	(0)
+ #endif
+diff --git a/include/net/sctp/sm.h b/include/net/sctp/sm.h
+index 76abe6c..85844ce 100644
+--- a/include/net/sctp/sm.h
++++ b/include/net/sctp/sm.h
+@@ -251,9 +251,9 @@ struct sctp_chunk *sctp_make_asconf_update_ip(struct sctp_association *,
+ 					      int, __be16);
+ struct sctp_chunk *sctp_make_asconf_set_prim(struct sctp_association *asoc,
+ 					     union sctp_addr *addr);
+-int sctp_verify_asconf(const struct sctp_association *asoc,
+-		       struct sctp_paramhdr *param_hdr, void *chunk_end,
+-		       struct sctp_paramhdr **errp);
++bool sctp_verify_asconf(const struct sctp_association *asoc,
++			struct sctp_chunk *chunk, bool addr_param_needed,
++			struct sctp_paramhdr **errp);
+ struct sctp_chunk *sctp_process_asconf(struct sctp_association *asoc,
+ 				       struct sctp_chunk *asconf);
+ int sctp_process_asconf_ack(struct sctp_association *asoc,
+diff --git a/include/sound/core.h b/include/sound/core.h
+index a61499c..3ad641c 100644
+--- a/include/sound/core.h
++++ b/include/sound/core.h
+@@ -120,6 +120,8 @@ struct snd_card {
+ 	int user_ctl_count;		/* count of all user controls */
+ 	struct list_head controls;	/* all controls for this card */
+ 	struct list_head ctl_files;	/* active control files */
++	struct mutex user_ctl_lock;	/* protects user controls against
++					   concurrent access */
+ 
+ 	struct snd_info_entry *proc_root;	/* root for soundcard specific files */
+ 	struct snd_info_entry *proc_id;	/* the card id */
+diff --git a/kernel/futex.c b/kernel/futex.c
+index 55dd3d2..1e092d3 100644
+--- a/kernel/futex.c
++++ b/kernel/futex.c
+@@ -2414,6 +2414,7 @@ static int futex_wait_requeue_pi(u32 __user *uaddr, int fshared,
+ 	 * shared futexes. We need to compare the keys:
+ 	 */
+ 	if (match_futex(&q.key, &key2)) {
++		queue_unlock(&q, hb);
+ 		ret = -EINVAL;
+ 		goto out_put_keys;
+ 	}
+diff --git a/kernel/trace/ring_buffer.c b/kernel/trace/ring_buffer.c
+index 6024960..a10ee12 100644
+--- a/kernel/trace/ring_buffer.c
++++ b/kernel/trace/ring_buffer.c
+@@ -2710,15 +2710,9 @@ static void rb_iter_reset(struct ring_buffer_iter *iter)
+ 	struct ring_buffer_per_cpu *cpu_buffer = iter->cpu_buffer;
+ 
+ 	/* Iterator usage is expected to have record disabled */
+-	if (list_empty(&cpu_buffer->reader_page->list)) {
+-		iter->head_page = rb_set_head_page(cpu_buffer);
+-		if (unlikely(!iter->head_page))
+-			return;
+-		iter->head = iter->head_page->read;
+-	} else {
+-		iter->head_page = cpu_buffer->reader_page;
+-		iter->head = cpu_buffer->reader_page->read;
+-	}
++	iter->head_page = cpu_buffer->reader_page;
++	iter->head = cpu_buffer->reader_page->read;
++
+ 	if (iter->head)
+ 		iter->read_stamp = cpu_buffer->read_stamp;
+ 	else
+diff --git a/lib/lzo/lzo1x_compress.c b/lib/lzo/lzo1x_compress.c
+index a604099..236eb21 100644
+--- a/lib/lzo/lzo1x_compress.c
++++ b/lib/lzo/lzo1x_compress.c
+@@ -1,194 +1,243 @@
+ /*
+- *  LZO1X Compressor from MiniLZO
++ *  LZO1X Compressor from LZO
+  *
+- *  Copyright (C) 1996-2005 Markus F.X.J. Oberhumer <markus@oberhumer.com>
++ *  Copyright (C) 1996-2012 Markus F.X.J. Oberhumer <markus@oberhumer.com>
+  *
+  *  The full LZO package can be found at:
+  *  http://www.oberhumer.com/opensource/lzo/
+  *
+- *  Changed for kernel use by:
++ *  Changed for Linux kernel use by:
+  *  Nitin Gupta <nitingupta910@gmail.com>
+  *  Richard Purdie <rpurdie@openedhand.com>
+  */
+ 
+ #include <linux/module.h>
+ #include <linux/kernel.h>
+-#include <linux/lzo.h>
+ #include <asm/unaligned.h>
++#include <linux/lzo.h>
+ #include "lzodefs.h"
+ 
+ static noinline size_t
+-_lzo1x_1_do_compress(const unsigned char *in, size_t in_len,
+-		unsigned char *out, size_t *out_len, void *wrkmem)
++lzo1x_1_do_compress(const unsigned char *in, size_t in_len,
++		    unsigned char *out, size_t *out_len,
++		    size_t ti, void *wrkmem)
+ {
++	const unsigned char *ip;
++	unsigned char *op;
+ 	const unsigned char * const in_end = in + in_len;
+-	const unsigned char * const ip_end = in + in_len - M2_MAX_LEN - 5;
+-	const unsigned char ** const dict = wrkmem;
+-	const unsigned char *ip = in, *ii = ip;
+-	const unsigned char *end, *m, *m_pos;
+-	size_t m_off, m_len, dindex;
+-	unsigned char *op = out;
++	const unsigned char * const ip_end = in + in_len - 20;
++	const unsigned char *ii;
++	lzo_dict_t * const dict = (lzo_dict_t *) wrkmem;
+ 
+-	ip += 4;
++	op = out;
++	ip = in;
++	ii = ip;
++	ip += ti < 4 ? 4 - ti : 0;
+ 
+ 	for (;;) {
+-		dindex = ((size_t)(0x21 * DX3(ip, 5, 5, 6)) >> 5) & D_MASK;
+-		m_pos = dict[dindex];
+-
+-		if (m_pos < in)
+-			goto literal;
+-
+-		if (ip == m_pos || ((size_t)(ip - m_pos) > M4_MAX_OFFSET))
+-			goto literal;
+-
+-		m_off = ip - m_pos;
+-		if (m_off <= M2_MAX_OFFSET || m_pos[3] == ip[3])
+-			goto try_match;
+-
+-		dindex = (dindex & (D_MASK & 0x7ff)) ^ (D_HIGH | 0x1f);
+-		m_pos = dict[dindex];
+-
+-		if (m_pos < in)
+-			goto literal;
+-
+-		if (ip == m_pos || ((size_t)(ip - m_pos) > M4_MAX_OFFSET))
+-			goto literal;
+-
+-		m_off = ip - m_pos;
+-		if (m_off <= M2_MAX_OFFSET || m_pos[3] == ip[3])
+-			goto try_match;
+-
+-		goto literal;
+-
+-try_match:
+-		if (get_unaligned((const unsigned short *)m_pos)
+-				== get_unaligned((const unsigned short *)ip)) {
+-			if (likely(m_pos[2] == ip[2]))
+-					goto match;
+-		}
+-
++		const unsigned char *m_pos;
++		size_t t, m_len, m_off;
++		u32 dv;
+ literal:
+-		dict[dindex] = ip;
+-		++ip;
++		ip += 1 + ((ip - ii) >> 5);
++next:
+ 		if (unlikely(ip >= ip_end))
+ 			break;
+-		continue;
+-
+-match:
+-		dict[dindex] = ip;
+-		if (ip != ii) {
+-			size_t t = ip - ii;
++		dv = get_unaligned_le32(ip);
++		t = ((dv * 0x1824429d) >> (32 - D_BITS)) & D_MASK;
++		m_pos = in + dict[t];
++		dict[t] = (lzo_dict_t) (ip - in);
++		if (unlikely(dv != get_unaligned_le32(m_pos)))
++			goto literal;
+ 
++		ii -= ti;
++		ti = 0;
++		t = ip - ii;
++		if (t != 0) {
+ 			if (t <= 3) {
+ 				op[-2] |= t;
+-			} else if (t <= 18) {
++				COPY4(op, ii);
++				op += t;
++			} else if (t <= 16) {
+ 				*op++ = (t - 3);
++				COPY8(op, ii);
++				COPY8(op + 8, ii + 8);
++				op += t;
+ 			} else {
+-				size_t tt = t - 18;
+-
+-				*op++ = 0;
+-				while (tt > 255) {
+-					tt -= 255;
++				if (t <= 18) {
++					*op++ = (t - 3);
++				} else {
++					size_t tt = t - 18;
+ 					*op++ = 0;
++					while (unlikely(tt > 255)) {
++						tt -= 255;
++						*op++ = 0;
++					}
++					*op++ = tt;
+ 				}
+-				*op++ = tt;
++				do {
++					COPY8(op, ii);
++					COPY8(op + 8, ii + 8);
++					op += 16;
++					ii += 16;
++					t -= 16;
++				} while (t >= 16);
++				if (t > 0) do {
++					*op++ = *ii++;
++				} while (--t > 0);
+ 			}
+-			do {
+-				*op++ = *ii++;
+-			} while (--t > 0);
+ 		}
+ 
+-		ip += 3;
+-		if (m_pos[3] != *ip++ || m_pos[4] != *ip++
+-				|| m_pos[5] != *ip++ || m_pos[6] != *ip++
+-				|| m_pos[7] != *ip++ || m_pos[8] != *ip++) {
+-			--ip;
+-			m_len = ip - ii;
++		m_len = 4;
++		{
++#if defined(CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS) && defined(LZO_USE_CTZ64)
++		u64 v;
++		v = get_unaligned((const u64 *) (ip + m_len)) ^
++		    get_unaligned((const u64 *) (m_pos + m_len));
++		if (unlikely(v == 0)) {
++			do {
++				m_len += 8;
++				v = get_unaligned((const u64 *) (ip + m_len)) ^
++				    get_unaligned((const u64 *) (m_pos + m_len));
++				if (unlikely(ip + m_len >= ip_end))
++					goto m_len_done;
++			} while (v == 0);
++		}
++#  if defined(__LITTLE_ENDIAN)
++		m_len += (unsigned) __builtin_ctzll(v) / 8;
++#  elif defined(__BIG_ENDIAN)
++		m_len += (unsigned) __builtin_clzll(v) / 8;
++#  else
++#    error "missing endian definition"
++#  endif
++#elif defined(CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS) && defined(LZO_USE_CTZ32)
++		u32 v;
++		v = get_unaligned((const u32 *) (ip + m_len)) ^
++		    get_unaligned((const u32 *) (m_pos + m_len));
++		if (unlikely(v == 0)) {
++			do {
++				m_len += 4;
++				v = get_unaligned((const u32 *) (ip + m_len)) ^
++				    get_unaligned((const u32 *) (m_pos + m_len));
++				if (v != 0)
++					break;
++				m_len += 4;
++				v = get_unaligned((const u32 *) (ip + m_len)) ^
++				    get_unaligned((const u32 *) (m_pos + m_len));
++				if (unlikely(ip + m_len >= ip_end))
++					goto m_len_done;
++			} while (v == 0);
++		}
++#  if defined(__LITTLE_ENDIAN)
++		m_len += (unsigned) __builtin_ctz(v) / 8;
++#  elif defined(__BIG_ENDIAN)
++		m_len += (unsigned) __builtin_clz(v) / 8;
++#  else
++#    error "missing endian definition"
++#  endif
++#else
++		if (unlikely(ip[m_len] == m_pos[m_len])) {
++			do {
++				m_len += 1;
++				if (ip[m_len] != m_pos[m_len])
++					break;
++				m_len += 1;
++				if (ip[m_len] != m_pos[m_len])
++					break;
++				m_len += 1;
++				if (ip[m_len] != m_pos[m_len])
++					break;
++				m_len += 1;
++				if (ip[m_len] != m_pos[m_len])
++					break;
++				m_len += 1;
++				if (ip[m_len] != m_pos[m_len])
++					break;
++				m_len += 1;
++				if (ip[m_len] != m_pos[m_len])
++					break;
++				m_len += 1;
++				if (ip[m_len] != m_pos[m_len])
++					break;
++				m_len += 1;
++				if (unlikely(ip + m_len >= ip_end))
++					goto m_len_done;
++			} while (ip[m_len] == m_pos[m_len]);
++		}
++#endif
++		}
++m_len_done:
+ 
+-			if (m_off <= M2_MAX_OFFSET) {
+-				m_off -= 1;
+-				*op++ = (((m_len - 1) << 5)
+-						| ((m_off & 7) << 2));
+-				*op++ = (m_off >> 3);
+-			} else if (m_off <= M3_MAX_OFFSET) {
+-				m_off -= 1;
++		m_off = ip - m_pos;
++		ip += m_len;
++		ii = ip;
++		if (m_len <= M2_MAX_LEN && m_off <= M2_MAX_OFFSET) {
++			m_off -= 1;
++			*op++ = (((m_len - 1) << 5) | ((m_off & 7) << 2));
++			*op++ = (m_off >> 3);
++		} else if (m_off <= M3_MAX_OFFSET) {
++			m_off -= 1;
++			if (m_len <= M3_MAX_LEN)
+ 				*op++ = (M3_MARKER | (m_len - 2));
+-				goto m3_m4_offset;
+-			} else {
+-				m_off -= 0x4000;
+-
+-				*op++ = (M4_MARKER | ((m_off & 0x4000) >> 11)
+-						| (m_len - 2));
+-				goto m3_m4_offset;
++			else {
++				m_len -= M3_MAX_LEN;
++				*op++ = M3_MARKER | 0;
++				while (unlikely(m_len > 255)) {
++					m_len -= 255;
++					*op++ = 0;
++				}
++				*op++ = (m_len);
+ 			}
++			*op++ = (m_off << 2);
++			*op++ = (m_off >> 6);
+ 		} else {
+-			end = in_end;
+-			m = m_pos + M2_MAX_LEN + 1;
+-
+-			while (ip < end && *m == *ip) {
+-				m++;
+-				ip++;
+-			}
+-			m_len = ip - ii;
+-
+-			if (m_off <= M3_MAX_OFFSET) {
+-				m_off -= 1;
+-				if (m_len <= 33) {
+-					*op++ = (M3_MARKER | (m_len - 2));
+-				} else {
+-					m_len -= 33;
+-					*op++ = M3_MARKER | 0;
+-					goto m3_m4_len;
+-				}
+-			} else {
+-				m_off -= 0x4000;
+-				if (m_len <= M4_MAX_LEN) {
+-					*op++ = (M4_MARKER
+-						| ((m_off & 0x4000) >> 11)
++			m_off -= 0x4000;
++			if (m_len <= M4_MAX_LEN)
++				*op++ = (M4_MARKER | ((m_off >> 11) & 8)
+ 						| (m_len - 2));
+-				} else {
+-					m_len -= M4_MAX_LEN;
+-					*op++ = (M4_MARKER
+-						| ((m_off & 0x4000) >> 11));
+-m3_m4_len:
+-					while (m_len > 255) {
+-						m_len -= 255;
+-						*op++ = 0;
+-					}
+-
+-					*op++ = (m_len);
++			else {
++				m_len -= M4_MAX_LEN;
++				*op++ = (M4_MARKER | ((m_off >> 11) & 8));
++				while (unlikely(m_len > 255)) {
++					m_len -= 255;
++					*op++ = 0;
+ 				}
++				*op++ = (m_len);
+ 			}
+-m3_m4_offset:
+-			*op++ = ((m_off & 63) << 2);
++			*op++ = (m_off << 2);
+ 			*op++ = (m_off >> 6);
+ 		}
+-
+-		ii = ip;
+-		if (unlikely(ip >= ip_end))
+-			break;
++		goto next;
+ 	}
+-
+ 	*out_len = op - out;
+-	return in_end - ii;
++	return in_end - (ii - ti);
+ }
+ 
+-int lzo1x_1_compress(const unsigned char *in, size_t in_len, unsigned char *out,
+-			size_t *out_len, void *wrkmem)
++int lzo1x_1_compress(const unsigned char *in, size_t in_len,
++		     unsigned char *out, size_t *out_len,
++		     void *wrkmem)
+ {
+-	const unsigned char *ii;
++	const unsigned char *ip = in;
+ 	unsigned char *op = out;
+-	size_t t;
++	size_t l = in_len;
++	size_t t = 0;
+ 
+-	if (unlikely(in_len <= M2_MAX_LEN + 5)) {
+-		t = in_len;
+-	} else {
+-		t = _lzo1x_1_do_compress(in, in_len, op, out_len, wrkmem);
++	while (l > 20) {
++		size_t ll = l <= (M4_MAX_OFFSET + 1) ? l : (M4_MAX_OFFSET + 1);
++		uintptr_t ll_end = (uintptr_t) ip + ll;
++		if ((ll_end + ((t + ll) >> 5)) <= ll_end)
++			break;
++		BUILD_BUG_ON(D_SIZE * sizeof(lzo_dict_t) > LZO1X_1_MEM_COMPRESS);
++		memset(wrkmem, 0, D_SIZE * sizeof(lzo_dict_t));
++		t = lzo1x_1_do_compress(ip, ll, op, out_len, t, wrkmem);
++		ip += ll;
+ 		op += *out_len;
++		l  -= ll;
+ 	}
++	t += l;
+ 
+ 	if (t > 0) {
+-		ii = in + in_len - t;
++		const unsigned char *ii = in + in_len - t;
+ 
+ 		if (op == out && t <= 238) {
+ 			*op++ = (17 + t);
+@@ -198,16 +247,21 @@ int lzo1x_1_compress(const unsigned char *in, size_t in_len, unsigned char *out,
+ 			*op++ = (t - 3);
+ 		} else {
+ 			size_t tt = t - 18;
+-
+ 			*op++ = 0;
+ 			while (tt > 255) {
+ 				tt -= 255;
+ 				*op++ = 0;
+ 			}
+-
+ 			*op++ = tt;
+ 		}
+-		do {
++		if (t >= 16) do {
++			COPY8(op, ii);
++			COPY8(op + 8, ii + 8);
++			op += 16;
++			ii += 16;
++			t -= 16;
++		} while (t >= 16);
++		if (t > 0) do {
+ 			*op++ = *ii++;
+ 		} while (--t > 0);
+ 	}
+@@ -223,4 +277,3 @@ EXPORT_SYMBOL_GPL(lzo1x_1_compress);
+ 
+ MODULE_LICENSE("GPL");
+ MODULE_DESCRIPTION("LZO1X-1 Compressor");
+-
+diff --git a/lib/lzo/lzo1x_decompress.c b/lib/lzo/lzo1x_decompress.c
+index 5dc6b29..eabee8f 100644
+--- a/lib/lzo/lzo1x_decompress.c
++++ b/lib/lzo/lzo1x_decompress.c
+@@ -1,12 +1,12 @@
+ /*
+- *  LZO1X Decompressor from MiniLZO
++ *  LZO1X Decompressor from LZO
+  *
+- *  Copyright (C) 1996-2005 Markus F.X.J. Oberhumer <markus@oberhumer.com>
++ *  Copyright (C) 1996-2012 Markus F.X.J. Oberhumer <markus@oberhumer.com>
+  *
+  *  The full LZO package can be found at:
+  *  http://www.oberhumer.com/opensource/lzo/
+  *
+- *  Changed for kernel use by:
++ *  Changed for Linux kernel use by:
+  *  Nitin Gupta <nitingupta910@gmail.com>
+  *  Richard Purdie <rpurdie@openedhand.com>
+  */
+@@ -18,220 +18,234 @@
+ #include <asm/unaligned.h>
+ #include "lzodefs.h"
+ 
+-#define HAVE_IP(x, ip_end, ip) ((size_t)(ip_end - ip) < (x))
+-#define HAVE_OP(x, op_end, op) ((size_t)(op_end - op) < (x))
+-#define HAVE_LB(m_pos, out, op) (m_pos < out || m_pos >= op)
++#define HAVE_IP(x)      ((size_t)(ip_end - ip) >= (size_t)(x))
++#define HAVE_OP(x)      ((size_t)(op_end - op) >= (size_t)(x))
++#define NEED_IP(x)      if (!HAVE_IP(x)) goto input_overrun
++#define NEED_OP(x)      if (!HAVE_OP(x)) goto output_overrun
++#define TEST_LB(m_pos)  if ((m_pos) < out) goto lookbehind_overrun
+ 
+-#define COPY4(dst, src)	\
+-		put_unaligned(get_unaligned((const u32 *)(src)), (u32 *)(dst))
++/* This MAX_255_COUNT is the maximum number of times we can add 255 to a base
++ * count without overflowing an integer. The multiply will overflow when
++ * multiplying 255 by more than MAXINT/255. The sum will overflow earlier
++ * depending on the base count. Since the base count is taken from a u8
++ * and a few bits, it is safe to assume that it will always be lower than
++ * or equal to 2*255, thus we can always prevent any overflow by accepting
++ * two less 255 steps. See Documentation/lzo.txt for more information.
++ */
++#define MAX_255_COUNT      ((((size_t)~0) / 255) - 2)
+ 
+ int lzo1x_decompress_safe(const unsigned char *in, size_t in_len,
+-			unsigned char *out, size_t *out_len)
++			  unsigned char *out, size_t *out_len)
+ {
++	unsigned char *op;
++	const unsigned char *ip;
++	size_t t, next;
++	size_t state = 0;
++	const unsigned char *m_pos;
+ 	const unsigned char * const ip_end = in + in_len;
+ 	unsigned char * const op_end = out + *out_len;
+-	const unsigned char *ip = in, *m_pos;
+-	unsigned char *op = out;
+-	size_t t;
+ 
+-	*out_len = 0;
++	op = out;
++	ip = in;
+ 
++	if (unlikely(in_len < 3))
++		goto input_overrun;
+ 	if (*ip > 17) {
+ 		t = *ip++ - 17;
+-		if (t < 4)
++		if (t < 4) {
++			next = t;
+ 			goto match_next;
+-		if (HAVE_OP(t, op_end, op))
+-			goto output_overrun;
+-		if (HAVE_IP(t + 1, ip_end, ip))
+-			goto input_overrun;
+-		do {
+-			*op++ = *ip++;
+-		} while (--t > 0);
+-		goto first_literal_run;
++		}
++		goto copy_literal_run;
+ 	}
+ 
+-	while ((ip < ip_end)) {
++	for (;;) {
+ 		t = *ip++;
+-		if (t >= 16)
+-			goto match;
+-		if (t == 0) {
+-			if (HAVE_IP(1, ip_end, ip))
+-				goto input_overrun;
+-			while (*ip == 0) {
+-				t += 255;
+-				ip++;
+-				if (HAVE_IP(1, ip_end, ip))
+-					goto input_overrun;
+-			}
+-			t += 15 + *ip++;
+-		}
+-		if (HAVE_OP(t + 3, op_end, op))
+-			goto output_overrun;
+-		if (HAVE_IP(t + 4, ip_end, ip))
+-			goto input_overrun;
+-
+-		COPY4(op, ip);
+-		op += 4;
+-		ip += 4;
+-		if (--t > 0) {
+-			if (t >= 4) {
+-				do {
+-					COPY4(op, ip);
+-					op += 4;
+-					ip += 4;
+-					t -= 4;
+-				} while (t >= 4);
+-				if (t > 0) {
+-					do {
+-						*op++ = *ip++;
+-					} while (--t > 0);
+-				}
+-			} else {
+-				do {
+-					*op++ = *ip++;
+-				} while (--t > 0);
+-			}
+-		}
++		if (t < 16) {
++			if (likely(state == 0)) {
++				if (unlikely(t == 0)) {
++					size_t offset;
++					const unsigned char *ip_last = ip;
+ 
+-first_literal_run:
+-		t = *ip++;
+-		if (t >= 16)
+-			goto match;
+-		m_pos = op - (1 + M2_MAX_OFFSET);
+-		m_pos -= t >> 2;
+-		m_pos -= *ip++ << 2;
+-
+-		if (HAVE_LB(m_pos, out, op))
+-			goto lookbehind_overrun;
+-
+-		if (HAVE_OP(3, op_end, op))
+-			goto output_overrun;
+-		*op++ = *m_pos++;
+-		*op++ = *m_pos++;
+-		*op++ = *m_pos;
+-
+-		goto match_done;
+-
+-		do {
+-match:
+-			if (t >= 64) {
+-				m_pos = op - 1;
+-				m_pos -= (t >> 2) & 7;
+-				m_pos -= *ip++ << 3;
+-				t = (t >> 5) - 1;
+-				if (HAVE_LB(m_pos, out, op))
+-					goto lookbehind_overrun;
+-				if (HAVE_OP(t + 3 - 1, op_end, op))
+-					goto output_overrun;
+-				goto copy_match;
+-			} else if (t >= 32) {
+-				t &= 31;
+-				if (t == 0) {
+-					if (HAVE_IP(1, ip_end, ip))
+-						goto input_overrun;
+-					while (*ip == 0) {
+-						t += 255;
++					while (unlikely(*ip == 0)) {
+ 						ip++;
+-						if (HAVE_IP(1, ip_end, ip))
+-							goto input_overrun;
++						NEED_IP(1);
+ 					}
+-					t += 31 + *ip++;
++					offset = ip - ip_last;
++					if (unlikely(offset > MAX_255_COUNT))
++						return LZO_E_ERROR;
++
++					offset = (offset << 8) - offset;
++					t += offset + 15 + *ip++;
+ 				}
+-				m_pos = op - 1;
+-				m_pos -= get_unaligned_le16(ip) >> 2;
+-				ip += 2;
+-			} else if (t >= 16) {
+-				m_pos = op;
+-				m_pos -= (t & 8) << 11;
+-
+-				t &= 7;
+-				if (t == 0) {
+-					if (HAVE_IP(1, ip_end, ip))
+-						goto input_overrun;
+-					while (*ip == 0) {
+-						t += 255;
+-						ip++;
+-						if (HAVE_IP(1, ip_end, ip))
+-							goto input_overrun;
+-					}
+-					t += 7 + *ip++;
++				t += 3;
++copy_literal_run:
++#if defined(CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS)
++				if (likely(HAVE_IP(t + 15) && HAVE_OP(t + 15))) {
++					const unsigned char *ie = ip + t;
++					unsigned char *oe = op + t;
++					do {
++						COPY8(op, ip);
++						op += 8;
++						ip += 8;
++						COPY8(op, ip);
++						op += 8;
++						ip += 8;
++					} while (ip < ie);
++					ip = ie;
++					op = oe;
++				} else
++#endif
++				{
++					NEED_OP(t);
++					NEED_IP(t + 3);
++					do {
++						*op++ = *ip++;
++					} while (--t > 0);
+ 				}
+-				m_pos -= get_unaligned_le16(ip) >> 2;
+-				ip += 2;
+-				if (m_pos == op)
+-					goto eof_found;
+-				m_pos -= 0x4000;
+-			} else {
++				state = 4;
++				continue;
++			} else if (state != 4) {
++				next = t & 3;
+ 				m_pos = op - 1;
+ 				m_pos -= t >> 2;
+ 				m_pos -= *ip++ << 2;
++				TEST_LB(m_pos);
++				NEED_OP(2);
++				op[0] = m_pos[0];
++				op[1] = m_pos[1];
++				op += 2;
++				goto match_next;
++			} else {
++				next = t & 3;
++				m_pos = op - (1 + M2_MAX_OFFSET);
++				m_pos -= t >> 2;
++				m_pos -= *ip++ << 2;
++				t = 3;
++			}
++		} else if (t >= 64) {
++			next = t & 3;
++			m_pos = op - 1;
++			m_pos -= (t >> 2) & 7;
++			m_pos -= *ip++ << 3;
++			t = (t >> 5) - 1 + (3 - 1);
++		} else if (t >= 32) {
++			t = (t & 31) + (3 - 1);
++			if (unlikely(t == 2)) {
++				size_t offset;
++				const unsigned char *ip_last = ip;
+ 
+-				if (HAVE_LB(m_pos, out, op))
+-					goto lookbehind_overrun;
+-				if (HAVE_OP(2, op_end, op))
+-					goto output_overrun;
++				while (unlikely(*ip == 0)) {
++					ip++;
++					NEED_IP(1);
++				}
++				offset = ip - ip_last;
++				if (unlikely(offset > MAX_255_COUNT))
++					return LZO_E_ERROR;
+ 
+-				*op++ = *m_pos++;
+-				*op++ = *m_pos;
+-				goto match_done;
++				offset = (offset << 8) - offset;
++				t += offset + 31 + *ip++;
++				NEED_IP(2);
+ 			}
++			m_pos = op - 1;
++			next = get_unaligned_le16(ip);
++			ip += 2;
++			m_pos -= next >> 2;
++			next &= 3;
++		} else {
++			m_pos = op;
++			m_pos -= (t & 8) << 11;
++			t = (t & 7) + (3 - 1);
++			if (unlikely(t == 2)) {
++				size_t offset;
++				const unsigned char *ip_last = ip;
+ 
+-			if (HAVE_LB(m_pos, out, op))
+-				goto lookbehind_overrun;
+-			if (HAVE_OP(t + 3 - 1, op_end, op))
+-				goto output_overrun;
++				while (unlikely(*ip == 0)) {
++					ip++;
++					NEED_IP(1);
++				}
++				offset = ip - ip_last;
++				if (unlikely(offset > MAX_255_COUNT))
++					return LZO_E_ERROR;
+ 
+-			if (t >= 2 * 4 - (3 - 1) && (op - m_pos) >= 4) {
+-				COPY4(op, m_pos);
+-				op += 4;
+-				m_pos += 4;
+-				t -= 4 - (3 - 1);
++				offset = (offset << 8) - offset;
++				t += offset + 7 + *ip++;
++				NEED_IP(2);
++			}
++			next = get_unaligned_le16(ip);
++			ip += 2;
++			m_pos -= next >> 2;
++			next &= 3;
++			if (m_pos == op)
++				goto eof_found;
++			m_pos -= 0x4000;
++		}
++		TEST_LB(m_pos);
++#if defined(CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS)
++		if (op - m_pos >= 8) {
++			unsigned char *oe = op + t;
++			if (likely(HAVE_OP(t + 15))) {
+ 				do {
+-					COPY4(op, m_pos);
+-					op += 4;
+-					m_pos += 4;
+-					t -= 4;
+-				} while (t >= 4);
+-				if (t > 0)
+-					do {
+-						*op++ = *m_pos++;
+-					} while (--t > 0);
++					COPY8(op, m_pos);
++					op += 8;
++					m_pos += 8;
++					COPY8(op, m_pos);
++					op += 8;
++					m_pos += 8;
++				} while (op < oe);
++				op = oe;
++				if (HAVE_IP(6)) {
++					state = next;
++					COPY4(op, ip);
++					op += next;
++					ip += next;
++					continue;
++				}
+ 			} else {
+-copy_match:
+-				*op++ = *m_pos++;
+-				*op++ = *m_pos++;
++				NEED_OP(t);
+ 				do {
+ 					*op++ = *m_pos++;
+-				} while (--t > 0);
++				} while (op < oe);
+ 			}
+-match_done:
+-			t = ip[-2] & 3;
+-			if (t == 0)
+-				break;
++		} else
++#endif
++		{
++			unsigned char *oe = op + t;
++			NEED_OP(t);
++			op[0] = m_pos[0];
++			op[1] = m_pos[1];
++			op += 2;
++			m_pos += 2;
++			do {
++				*op++ = *m_pos++;
++			} while (op < oe);
++		}
+ match_next:
+-			if (HAVE_OP(t, op_end, op))
+-				goto output_overrun;
+-			if (HAVE_IP(t + 1, ip_end, ip))
+-				goto input_overrun;
+-
+-			*op++ = *ip++;
+-			if (t > 1) {
++		state = next;
++		t = next;
++#if defined(CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS)
++		if (likely(HAVE_IP(6) && HAVE_OP(4))) {
++			COPY4(op, ip);
++			op += t;
++			ip += t;
++		} else
++#endif
++		{
++			NEED_IP(t + 3);
++			NEED_OP(t);
++			while (t > 0) {
+ 				*op++ = *ip++;
+-				if (t > 2)
+-					*op++ = *ip++;
++				t--;
+ 			}
+-
+-			t = *ip++;
+-		} while (ip < ip_end);
++		}
+ 	}
+ 
+-	*out_len = op - out;
+-	return LZO_E_EOF_NOT_FOUND;
+-
+ eof_found:
+ 	*out_len = op - out;
+-	return (ip == ip_end ? LZO_E_OK :
+-		(ip < ip_end ? LZO_E_INPUT_NOT_CONSUMED : LZO_E_INPUT_OVERRUN));
++	return (t != 3       ? LZO_E_ERROR :
++		ip == ip_end ? LZO_E_OK :
++		ip <  ip_end ? LZO_E_INPUT_NOT_CONSUMED : LZO_E_INPUT_OVERRUN);
++
+ input_overrun:
+ 	*out_len = op - out;
+ 	return LZO_E_INPUT_OVERRUN;
+diff --git a/lib/lzo/lzodefs.h b/lib/lzo/lzodefs.h
+index b6d482c..6710b83 100644
+--- a/lib/lzo/lzodefs.h
++++ b/lib/lzo/lzodefs.h
+@@ -1,19 +1,37 @@
+ /*
+  *  lzodefs.h -- architecture, OS and compiler specific defines
+  *
+- *  Copyright (C) 1996-2005 Markus F.X.J. Oberhumer <markus@oberhumer.com>
++ *  Copyright (C) 1996-2012 Markus F.X.J. Oberhumer <markus@oberhumer.com>
+  *
+  *  The full LZO package can be found at:
+  *  http://www.oberhumer.com/opensource/lzo/
+  *
+- *  Changed for kernel use by:
++ *  Changed for Linux kernel use by:
+  *  Nitin Gupta <nitingupta910@gmail.com>
+  *  Richard Purdie <rpurdie@openedhand.com>
+  */
+ 
+-#define LZO_VERSION		0x2020
+-#define LZO_VERSION_STRING	"2.02"
+-#define LZO_VERSION_DATE	"Oct 17 2005"
++
++#define COPY4(dst, src)	\
++		put_unaligned(get_unaligned((const u32 *)(src)), (u32 *)(dst))
++#if defined(__x86_64__)
++#define COPY8(dst, src)	\
++		put_unaligned(get_unaligned((const u64 *)(src)), (u64 *)(dst))
++#else
++#define COPY8(dst, src)	\
++		COPY4(dst, src); COPY4((dst) + 4, (src) + 4)
++#endif
++
++#if defined(__BIG_ENDIAN) && defined(__LITTLE_ENDIAN)
++#error "conflicting endian definitions"
++#elif defined(__x86_64__)
++#define LZO_USE_CTZ64	1
++#define LZO_USE_CTZ32	1
++#elif defined(__i386__) || defined(__powerpc__)
++#define LZO_USE_CTZ32	1
++#elif defined(__arm__) && (__LINUX_ARM_ARCH__ >= 5)
++#define LZO_USE_CTZ32	1
++#endif
+ 
+ #define M1_MAX_OFFSET	0x0400
+ #define M2_MAX_OFFSET	0x0800
+@@ -34,10 +52,8 @@
+ #define M3_MARKER	32
+ #define M4_MARKER	16
+ 
+-#define D_BITS		14
+-#define D_MASK		((1u << D_BITS) - 1)
++#define lzo_dict_t      unsigned short
++#define D_BITS		13
++#define D_SIZE		(1u << D_BITS)
++#define D_MASK		(D_SIZE - 1)
+ #define D_HIGH		((D_MASK >> 1) + 1)
+-
+-#define DX2(p, s1, s2)	(((((size_t)((p)[2]) << (s2)) ^ (p)[1]) \
+-							<< (s1)) ^ (p)[0])
+-#define DX3(p, s1, s2, s3)	((DX2((p)+1, s2, s3) << (s1)) ^ (p)[0])
+diff --git a/mm/mlock.c b/mm/mlock.c
+index 2d846cf..4db29b3 100644
+--- a/mm/mlock.c
++++ b/mm/mlock.c
+@@ -78,6 +78,7 @@ void __clear_page_mlock(struct page *page)
+  */
+ void mlock_vma_page(struct page *page)
+ {
++	/* Serialize with page migration */
+ 	BUG_ON(!PageLocked(page));
+ 
+ 	if (!TestSetPageMlocked(page)) {
+@@ -108,6 +109,7 @@ void mlock_vma_page(struct page *page)
+  */
+ void munlock_vma_page(struct page *page)
+ {
++	/* For try_to_munlock() and to serialize with page migration */
+ 	BUG_ON(!PageLocked(page));
+ 
+ 	if (TestClearPageMlocked(page)) {
+diff --git a/mm/rmap.c b/mm/rmap.c
+index dd43373..cedeae8 100644
+--- a/mm/rmap.c
++++ b/mm/rmap.c
+@@ -944,9 +944,19 @@ static int try_to_unmap_cluster(unsigned long cursor, unsigned int *mapcount,
+ 		BUG_ON(!page || PageAnon(page));
+ 
+ 		if (locked_vma) {
+-			mlock_vma_page(page);   /* no-op if already mlocked */
+-			if (page == check_page)
++			if (page == check_page) {
++				/* we know we have check_page locked */
++				mlock_vma_page(page);
+ 				ret = SWAP_MLOCK;
++			} else if (trylock_page(page)) {
++				/*
++				 * If we can lock the page, perform mlock.
++				 * Otherwise leave the page alone, it will be
++				 * eventually encountered again later.
++				 */
++				mlock_vma_page(page);
++				unlock_page(page);
++			}
+ 			continue;	/* don't unmap */
+ 		}
+ 
+diff --git a/net/appletalk/ddp.c b/net/appletalk/ddp.c
+index 5eae360..d44ac8d 100644
+--- a/net/appletalk/ddp.c
++++ b/net/appletalk/ddp.c
+@@ -1469,8 +1469,6 @@ static int atalk_rcv(struct sk_buff *skb, struct net_device *dev,
+ 		goto drop;
+ 
+ 	/* Queue packet (standard) */
+-	skb->sk = sock;
+-
+ 	if (sock_queue_rcv_skb(sock, skb) < 0)
+ 		goto drop;
+ 
+@@ -1616,7 +1614,6 @@ static int atalk_sendmsg(struct kiocb *iocb, struct socket *sock, struct msghdr
+ 	if (!skb)
+ 		return err;
+ 
+-	skb->sk = sk;
+ 	skb_reserve(skb, ddp_dl->header_length);
+ 	skb_reserve(skb, dev->hard_header_len);
+ 	skb->dev = dev;
+diff --git a/net/compat.c b/net/compat.c
+index e9672c8..71ed839 100644
+--- a/net/compat.c
++++ b/net/compat.c
+@@ -83,7 +83,7 @@ int verify_compat_iovec(struct msghdr *kern_msg, struct iovec *kern_iov,
+ {
+ 	int tot_len;
+ 
+-	if (kern_msg->msg_namelen) {
++	if (kern_msg->msg_namelen && kern_msg->msg_namelen) {
+ 		if (mode==VERIFY_READ) {
+ 			int err = move_addr_to_kernel(kern_msg->msg_name,
+ 						      kern_msg->msg_namelen,
+@@ -91,10 +91,11 @@ int verify_compat_iovec(struct msghdr *kern_msg, struct iovec *kern_iov,
+ 			if (err < 0)
+ 				return err;
+ 		}
+-		if (kern_msg->msg_name)
+-			kern_msg->msg_name = kern_address;
+-	} else
++		kern_msg->msg_name = kern_address;
++	} else {
+ 		kern_msg->msg_name = NULL;
++		kern_msg->msg_namelen = 0;
++	}
+ 
+ 	tot_len = iov_from_user_compat_to_kern(kern_iov,
+ 					  (struct compat_iovec __user *)kern_msg->msg_iov,
+diff --git a/net/core/filter.c b/net/core/filter.c
+index d162169..a2dcdb9 100644
+--- a/net/core/filter.c
++++ b/net/core/filter.c
+@@ -316,6 +316,9 @@ load_b:
+ 
+ 			if (skb_is_nonlinear(skb))
+ 				return 0;
++			if (skb->len < sizeof(struct nlattr))
++				return 0;
++
+ 			if (A > skb->len - sizeof(struct nlattr))
+ 				return 0;
+ 
+@@ -332,11 +335,14 @@ load_b:
+ 
+ 			if (skb_is_nonlinear(skb))
+ 				return 0;
++			if (skb->len < sizeof(struct nlattr))
++				return 0;
++
+ 			if (A > skb->len - sizeof(struct nlattr))
+ 				return 0;
+ 
+ 			nla = (struct nlattr *)&skb->data[A];
+-			if (nla->nla_len > A - skb->len)
++			if (nla->nla_len > skb->len - A)
+ 				return 0;
+ 
+ 			nla = nla_find_nested(nla, X);
+diff --git a/net/core/iovec.c b/net/core/iovec.c
+index 39369e9..5ca2fa8 100644
+--- a/net/core/iovec.c
++++ b/net/core/iovec.c
+@@ -40,17 +40,17 @@ int verify_iovec(struct msghdr *m, struct iovec *iov, struct sockaddr *address,
+ {
+ 	int size, ct, err;
+ 
+-	if (m->msg_namelen) {
++	if (m->msg_name && m->msg_namelen) {
+ 		if (mode == VERIFY_READ) {
+ 			err = move_addr_to_kernel(m->msg_name, m->msg_namelen,
+ 						  address);
+ 			if (err < 0)
+ 				return err;
+ 		}
+-		if (m->msg_name)
+-			m->msg_name = address;
++		m->msg_name = address;
+ 	} else {
+ 		m->msg_name = NULL;
++		m->msg_namelen = 0;
+ 	}
+ 
+ 	size = m->msg_iovlen * sizeof(struct iovec);
+@@ -153,6 +153,10 @@ int memcpy_fromiovec(unsigned char *kdata, struct iovec *iov, int len)
+ int memcpy_fromiovecend(unsigned char *kdata, const struct iovec *iov,
+ 			int offset, int len)
+ {
++	/* No data? Done! */
++	if (len == 0)
++		return 0;
++
+ 	/* Skip over the finished iovecs */
+ 	while (offset >= iov->iov_len) {
+ 		offset -= iov->iov_len;
+diff --git a/net/core/skbuff.c b/net/core/skbuff.c
+index 72ff527..b6707b8 100644
+--- a/net/core/skbuff.c
++++ b/net/core/skbuff.c
+@@ -2573,7 +2573,6 @@ struct sk_buff *skb_segment(struct sk_buff *skb, int features)
+ 		tail = nskb;
+ 
+ 		__copy_skb_header(nskb, skb);
+-		nskb->mac_len = skb->mac_len;
+ 
+ 		/* nskb and skb might have different headroom */
+ 		if (nskb->ip_summed == CHECKSUM_PARTIAL)
+@@ -2583,6 +2582,7 @@ struct sk_buff *skb_segment(struct sk_buff *skb, int features)
+ 		skb_set_network_header(nskb, skb->mac_len);
+ 		nskb->transport_header = (nskb->network_header +
+ 					  skb_network_header_len(skb));
++		nskb->mac_len = nskb->network_header - nskb->mac_header;
+ 		skb_copy_from_linear_data(skb, nskb->data, doffset);
+ 
+ 		if (fskb != skb_shinfo(skb)->frag_list)
+diff --git a/net/ipv4/igmp.c b/net/ipv4/igmp.c
+index c07be7c..04d40ab 100644
+--- a/net/ipv4/igmp.c
++++ b/net/ipv4/igmp.c
+@@ -1841,6 +1841,10 @@ int ip_mc_leave_group(struct sock *sk, struct ip_mreqn *imr)
+ 
+ 	rtnl_lock();
+ 	in_dev = ip_mc_find_dev(net, imr);
++	if (!in_dev) {
++		ret = -ENODEV;
++		goto out;
++	}
+ 	ifindex = imr->imr_ifindex;
+ 	for (imlp = &inet->mc_list; (iml = *imlp) != NULL; imlp = &iml->next) {
+ 		if (iml->multi.imr_multiaddr.s_addr != group)
+@@ -1856,14 +1860,12 @@ int ip_mc_leave_group(struct sock *sk, struct ip_mreqn *imr)
+ 
+ 		*imlp = iml->next;
+ 
+-		if (in_dev)
+-			ip_mc_dec_group(in_dev, group);
++		ip_mc_dec_group(in_dev, group);
+ 		rtnl_unlock();
+ 		sock_kfree_s(sk, iml, sizeof(*iml));
+ 		return 0;
+ 	}
+-	if (!in_dev)
+-		ret = -ENODEV;
++ out:
+ 	rtnl_unlock();
+ 	return ret;
+ }
+diff --git a/net/ipv4/ip_options.c b/net/ipv4/ip_options.c
+index 8a95972..9107486 100644
+--- a/net/ipv4/ip_options.c
++++ b/net/ipv4/ip_options.c
+@@ -276,6 +276,10 @@ int ip_options_compile(struct net *net,
+ 			optptr++;
+ 			continue;
+ 		}
++		if (unlikely(l < 2)) {
++			pp_ptr = optptr;
++			goto error;
++		}
+ 		optlen = optptr[1];
+ 		if (optlen<2 || optlen>l) {
+ 			pp_ptr = optptr;
+diff --git a/net/ipv4/tcp_input.c b/net/ipv4/tcp_input.c
+index db755c4..c821218 100644
+--- a/net/ipv4/tcp_input.c
++++ b/net/ipv4/tcp_input.c
+@@ -1280,7 +1280,7 @@ static int tcp_match_skb_to_sack(struct sock *sk, struct sk_buff *skb,
+ 			unsigned int new_len = (pkt_len / mss) * mss;
+ 			if (!in_sack && new_len < pkt_len) {
+ 				new_len += mss;
+-				if (new_len > skb->len)
++				if (new_len >= skb->len)
+ 					return 0;
+ 			}
+ 			pkt_len = new_len;
+diff --git a/net/ipv4/tcp_vegas.c b/net/ipv4/tcp_vegas.c
+index c6743ee..3044e40 100644
+--- a/net/ipv4/tcp_vegas.c
++++ b/net/ipv4/tcp_vegas.c
+@@ -218,7 +218,8 @@ static void tcp_vegas_cong_avoid(struct sock *sk, u32 ack, u32 in_flight)
+ 			 * This is:
+ 			 *     (actual rate in segments) * baseRTT
+ 			 */
+-			target_cwnd = tp->snd_cwnd * vegas->baseRTT / rtt;
++			target_cwnd = (u64)tp->snd_cwnd * vegas->baseRTT;
++			do_div(target_cwnd, rtt);
+ 
+ 			/* Calculate the difference between the window we had,
+ 			 * and the window we would like to have. This quantity
+diff --git a/net/ipv4/tcp_veno.c b/net/ipv4/tcp_veno.c
+index e9bbff7..8d395a3 100644
+--- a/net/ipv4/tcp_veno.c
++++ b/net/ipv4/tcp_veno.c
+@@ -144,7 +144,7 @@ static void tcp_veno_cong_avoid(struct sock *sk, u32 ack, u32 in_flight)
+ 
+ 		rtt = veno->minrtt;
+ 
+-		target_cwnd = (tp->snd_cwnd * veno->basertt);
++		target_cwnd = (u64)tp->snd_cwnd * veno->basertt;
+ 		target_cwnd <<= V_PARAM_SHIFT;
+ 		do_div(target_cwnd, rtt);
+ 
+diff --git a/net/netfilter/nfnetlink_log.c b/net/netfilter/nfnetlink_log.c
+index f900dc3..ebcbf07 100644
+--- a/net/netfilter/nfnetlink_log.c
++++ b/net/netfilter/nfnetlink_log.c
+@@ -41,7 +41,8 @@
+ #define NFULNL_NLBUFSIZ_DEFAULT	NLMSG_GOODSIZE
+ #define NFULNL_TIMEOUT_DEFAULT 	100	/* every second */
+ #define NFULNL_QTHRESH_DEFAULT 	100	/* 100 packets */
+-#define NFULNL_COPY_RANGE_MAX	0xFFFF	/* max packet size is limited by 16-bit struct nfattr nfa_len field */
++/* max packet size is limited by 16-bit struct nfattr nfa_len field */
++#define NFULNL_COPY_RANGE_MAX	(0xFFFF - NLA_HDRLEN)
+ 
+ #define PRINTR(x, args...)	do { if (net_ratelimit()) \
+ 				     printk(x, ## args); } while (0);
+@@ -221,6 +222,8 @@ nfulnl_set_mode(struct nfulnl_instance *inst, u_int8_t mode,
+ 
+ 	case NFULNL_COPY_PACKET:
+ 		inst->copy_mode = mode;
++		if (range == 0)
++			range = NFULNL_COPY_RANGE_MAX;
+ 		inst->copy_range = min_t(unsigned int,
+ 					 range, NFULNL_COPY_RANGE_MAX);
+ 		break;
+@@ -579,7 +582,8 @@ nfulnl_log_packet(u_int8_t pf,
+ 		+ nla_total_size(sizeof(u_int32_t))	/* gid */
+ 		+ nla_total_size(plen)			/* prefix */
+ 		+ nla_total_size(sizeof(struct nfulnl_msg_packet_hw))
+-		+ nla_total_size(sizeof(struct nfulnl_msg_packet_timestamp));
++		+ nla_total_size(sizeof(struct nfulnl_msg_packet_timestamp))
++		+ nla_total_size(sizeof(struct nfgenmsg));	/* NLMSG_DONE */
+ 
+ 	if (in && skb_mac_header_was_set(skb)) {
+ 		size +=   nla_total_size(skb->dev->hard_header_len)
+@@ -608,8 +612,7 @@ nfulnl_log_packet(u_int8_t pf,
+ 		break;
+ 
+ 	case NFULNL_COPY_PACKET:
+-		if (inst->copy_range == 0
+-		    || inst->copy_range > skb->len)
++		if (inst->copy_range > skb->len)
+ 			data_len = skb->len;
+ 		else
+ 			data_len = inst->copy_range;
+@@ -621,8 +624,7 @@ nfulnl_log_packet(u_int8_t pf,
+ 		goto unlock_and_release;
+ 	}
+ 
+-	if (inst->skb &&
+-	    size > skb_tailroom(inst->skb) - sizeof(struct nfgenmsg)) {
++	if (inst->skb && size > skb_tailroom(inst->skb)) {
+ 		/* either the queue len is too high or we don't have
+ 		 * enough room in the skb left. flush to userspace. */
+ 		__nfulnl_flush(inst);
+diff --git a/net/sctp/associola.c b/net/sctp/associola.c
+index 7eed77a..12137d3 100644
+--- a/net/sctp/associola.c
++++ b/net/sctp/associola.c
+@@ -380,7 +380,7 @@ void sctp_association_free(struct sctp_association *asoc)
+ 	/* Only real associations count against the endpoint, so
+ 	 * don't bother for if this is a temporary association.
+ 	 */
+-	if (!asoc->temp) {
++	if (!list_empty(&asoc->asocs)) {
+ 		list_del(&asoc->asocs);
+ 
+ 		/* Decrement the backlog value for a TCP-style listening
+@@ -824,6 +824,7 @@ void sctp_assoc_control_transport(struct sctp_association *asoc,
+ 	struct sctp_ulpevent *event;
+ 	struct sockaddr_storage addr;
+ 	int spc_state = 0;
++	bool ulp_notify = true;
+ 
+ 	/* Record the transition on the transport.  */
+ 	switch (command) {
+@@ -850,6 +851,7 @@ void sctp_assoc_control_transport(struct sctp_association *asoc,
+ 		else {
+ 			dst_release(transport->dst);
+ 			transport->dst = NULL;
++			ulp_notify = false;
+ 		}
+ 
+ 		spc_state = SCTP_ADDR_UNREACHABLE;
+@@ -862,12 +864,14 @@ void sctp_assoc_control_transport(struct sctp_association *asoc,
+ 	/* Generate and send a SCTP_PEER_ADDR_CHANGE notification to the
+ 	 * user.
+ 	 */
+-	memset(&addr, 0, sizeof(struct sockaddr_storage));
+-	memcpy(&addr, &transport->ipaddr, transport->af_specific->sockaddr_len);
+-	event = sctp_ulpevent_make_peer_addr_change(asoc, &addr,
++	if (ulp_notify) {
++		memset(&addr, 0, sizeof(struct sockaddr_storage));
++		memcpy(&addr, &transport->ipaddr, transport->af_specific->sockaddr_len);
++		event = sctp_ulpevent_make_peer_addr_change(asoc, &addr,
+ 				0, spc_state, error, GFP_ATOMIC);
+-	if (event)
+-		sctp_ulpq_tail_event(&asoc->ulpq, event);
++		if (event)
++			sctp_ulpq_tail_event(&asoc->ulpq, event);
++	}
+ 
+ 	/* Select new active and retran paths. */
+ 
+@@ -1174,6 +1178,7 @@ void sctp_assoc_update(struct sctp_association *asoc,
+ 	asoc->c = new->c;
+ 	asoc->peer.rwnd = new->peer.rwnd;
+ 	asoc->peer.sack_needed = new->peer.sack_needed;
++	asoc->peer.auth_capable = new->peer.auth_capable;
+ 	asoc->peer.i = new->peer.i;
+ 	sctp_tsnmap_init(&asoc->peer.tsn_map, SCTP_TSN_MAP_INITIAL,
+ 			 asoc->peer.i.initial_tsn, GFP_ATOMIC);
+diff --git a/net/sctp/output.c b/net/sctp/output.c
+index 54bc011..432361b 100644
+--- a/net/sctp/output.c
++++ b/net/sctp/output.c
+@@ -580,7 +580,7 @@ out:
+ 	return err;
+ no_route:
+ 	kfree_skb(nskb);
+-	IP_INC_STATS_BH(&init_net, IPSTATS_MIB_OUTNOROUTES);
++	IP_INC_STATS(&init_net, IPSTATS_MIB_OUTNOROUTES);
+ 
+ 	/* FIXME: Returning the 'err' will effect all the associations
+ 	 * associated with a socket, although only one of the paths of the
+diff --git a/net/sctp/sm_make_chunk.c b/net/sctp/sm_make_chunk.c
+index 22d4ed8..5f2dc3f 100644
+--- a/net/sctp/sm_make_chunk.c
++++ b/net/sctp/sm_make_chunk.c
+@@ -3023,50 +3023,63 @@ static __be16 sctp_process_asconf_param(struct sctp_association *asoc,
+ 	return SCTP_ERROR_NO_ERROR;
+ }
+ 
+-/* Verify the ASCONF packet before we process it.  */
+-int sctp_verify_asconf(const struct sctp_association *asoc,
+-		       struct sctp_paramhdr *param_hdr, void *chunk_end,
+-		       struct sctp_paramhdr **errp) {
+-	sctp_addip_param_t *asconf_param;
++/* Verify the ASCONF packet before we process it. */
++bool sctp_verify_asconf(const struct sctp_association *asoc,
++			struct sctp_chunk *chunk, bool addr_param_needed,
++			struct sctp_paramhdr **errp)
++{
++	sctp_addip_chunk_t *addip = (sctp_addip_chunk_t *) chunk->chunk_hdr;
+ 	union sctp_params param;
+-	int length, plen;
+-
+-	param.v = (sctp_paramhdr_t *) param_hdr;
+-	while (param.v <= chunk_end - sizeof(sctp_paramhdr_t)) {
+-		length = ntohs(param.p->length);
+-		*errp = param.p;
++	bool addr_param_seen = false;
+ 
+-		if (param.v > chunk_end - length ||
+-		    length < sizeof(sctp_paramhdr_t))
+-			return 0;
++	sctp_walk_params(param, addip, addip_hdr.params) {
++		size_t length = ntohs(param.p->length);
+ 
++		*errp = param.p;
+ 		switch (param.p->type) {
++		case SCTP_PARAM_ERR_CAUSE:
++			break;
++		case SCTP_PARAM_IPV4_ADDRESS:
++			if (length != sizeof(sctp_ipv4addr_param_t))
++				return false;
++			addr_param_seen = true;
++			break;
++		case SCTP_PARAM_IPV6_ADDRESS:
++			if (length != sizeof(sctp_ipv6addr_param_t))
++				return false;
++			addr_param_seen = true;
++			break;
+ 		case SCTP_PARAM_ADD_IP:
+ 		case SCTP_PARAM_DEL_IP:
+ 		case SCTP_PARAM_SET_PRIMARY:
+-			asconf_param = (sctp_addip_param_t *)param.v;
+-			plen = ntohs(asconf_param->param_hdr.length);
+-			if (plen < sizeof(sctp_addip_param_t) +
+-			    sizeof(sctp_paramhdr_t))
+-				return 0;
++			/* In ASCONF chunks, these need to be first. */
++			if (addr_param_needed && !addr_param_seen)
++				return false;
++			length = ntohs(param.addip->param_hdr.length);
++			if (length < sizeof(sctp_addip_param_t) +
++				     sizeof(sctp_paramhdr_t))
++				return false;
+ 			break;
+ 		case SCTP_PARAM_SUCCESS_REPORT:
+ 		case SCTP_PARAM_ADAPTATION_LAYER_IND:
+ 			if (length != sizeof(sctp_addip_param_t))
+-				return 0;
+-
++				return false;
+ 			break;
+ 		default:
+-			break;
++			/* This is unkown to us, reject! */
++			return false;
+ 		}
+-
+-		param.v += WORD_ROUND(length);
+ 	}
+ 
+-	if (param.v != chunk_end)
+-		return 0;
++	/* Remaining sanity checks. */
++	if (addr_param_needed && !addr_param_seen)
++		return false;
++	if (!addr_param_needed && addr_param_seen)
++		return false;
++	if (param.v != chunk->chunk_end)
++		return false;
+ 
+-	return 1;
++	return true;
+ }
+ 
+ /* Process an incoming ASCONF chunk with the next expected serial no. and
+@@ -3075,16 +3088,17 @@ int sctp_verify_asconf(const struct sctp_association *asoc,
+ struct sctp_chunk *sctp_process_asconf(struct sctp_association *asoc,
+ 				       struct sctp_chunk *asconf)
+ {
++	sctp_addip_chunk_t *addip = (sctp_addip_chunk_t *) asconf->chunk_hdr;
++	bool all_param_pass = true;
++	union sctp_params param;
+ 	sctp_addiphdr_t		*hdr;
+ 	union sctp_addr_param	*addr_param;
+ 	sctp_addip_param_t	*asconf_param;
+ 	struct sctp_chunk	*asconf_ack;
+-
+ 	__be16	err_code;
+ 	int	length = 0;
+ 	int	chunk_len;
+ 	__u32	serial;
+-	int	all_param_pass = 1;
+ 
+ 	chunk_len = ntohs(asconf->chunk_hdr->length) - sizeof(sctp_chunkhdr_t);
+ 	hdr = (sctp_addiphdr_t *)asconf->skb->data;
+@@ -3112,9 +3126,14 @@ struct sctp_chunk *sctp_process_asconf(struct sctp_association *asoc,
+ 		goto done;
+ 
+ 	/* Process the TLVs contained within the ASCONF chunk. */
+-	while (chunk_len > 0) {
++	sctp_walk_params(param, addip, addip_hdr.params) {
++		/* Skip preceeding address parameters. */
++		if (param.p->type == SCTP_PARAM_IPV4_ADDRESS ||
++		    param.p->type == SCTP_PARAM_IPV6_ADDRESS)
++			continue;
++
+ 		err_code = sctp_process_asconf_param(asoc, asconf,
+-						     asconf_param);
++						     param.addip);
+ 		/* ADDIP 4.1 A7)
+ 		 * If an error response is received for a TLV parameter,
+ 		 * all TLVs with no response before the failed TLV are
+@@ -3122,29 +3141,20 @@ struct sctp_chunk *sctp_process_asconf(struct sctp_association *asoc,
+ 		 * the failed response are considered unsuccessful unless
+ 		 * a specific success indication is present for the parameter.
+ 		 */
+-		if (SCTP_ERROR_NO_ERROR != err_code)
+-			all_param_pass = 0;
+-
++		if (err_code != SCTP_ERROR_NO_ERROR)
++			all_param_pass = false;
+ 		if (!all_param_pass)
+-			sctp_add_asconf_response(asconf_ack,
+-						 asconf_param->crr_id, err_code,
+-						 asconf_param);
++			sctp_add_asconf_response(asconf_ack, param.addip->crr_id,
++						 err_code, param.addip);
+ 
+ 		/* ADDIP 4.3 D11) When an endpoint receiving an ASCONF to add
+ 		 * an IP address sends an 'Out of Resource' in its response, it
+ 		 * MUST also fail any subsequent add or delete requests bundled
+ 		 * in the ASCONF.
+ 		 */
+-		if (SCTP_ERROR_RSRC_LOW == err_code)
++		if (err_code == SCTP_ERROR_RSRC_LOW)
+ 			goto done;
+-
+-		/* Move to the next ASCONF param. */
+-		length = ntohs(asconf_param->param_hdr.length);
+-		asconf_param = (sctp_addip_param_t *)((void *)asconf_param +
+-						      length);
+-		chunk_len -= length;
+ 	}
+-
+ done:
+ 	asoc->peer.addip_serial++;
+ 
+diff --git a/net/sctp/sm_statefuns.c b/net/sctp/sm_statefuns.c
+index 6da0171..ac98a1e 100644
+--- a/net/sctp/sm_statefuns.c
++++ b/net/sctp/sm_statefuns.c
+@@ -3481,9 +3481,7 @@ sctp_disposition_t sctp_sf_do_asconf(const struct sctp_endpoint *ep,
+ 	struct sctp_chunk	*asconf_ack = NULL;
+ 	struct sctp_paramhdr	*err_param = NULL;
+ 	sctp_addiphdr_t		*hdr;
+-	union sctp_addr_param	*addr_param;
+ 	__u32			serial;
+-	int			length;
+ 
+ 	if (!sctp_vtag_verify(chunk, asoc)) {
+ 		sctp_add_cmd_sf(commands, SCTP_CMD_REPORT_BAD_TAG,
+@@ -3508,17 +3506,8 @@ sctp_disposition_t sctp_sf_do_asconf(const struct sctp_endpoint *ep,
+ 	hdr = (sctp_addiphdr_t *)chunk->skb->data;
+ 	serial = ntohl(hdr->serial);
+ 
+-	addr_param = (union sctp_addr_param *)hdr->params;
+-	length = ntohs(addr_param->p.length);
+-	if (length < sizeof(sctp_paramhdr_t))
+-		return sctp_sf_violation_paramlen(ep, asoc, type, arg,
+-			   (void *)addr_param, commands);
+-
+ 	/* Verify the ASCONF chunk before processing it. */
+-	if (!sctp_verify_asconf(asoc,
+-			    (sctp_paramhdr_t *)((void *)addr_param + length),
+-			    (void *)chunk->chunk_end,
+-			    &err_param))
++	if (!sctp_verify_asconf(asoc, chunk, true, &err_param))
+ 		return sctp_sf_violation_paramlen(ep, asoc, type, arg,
+ 						  (void *)err_param, commands);
+ 
+@@ -3630,10 +3619,7 @@ sctp_disposition_t sctp_sf_do_asconf_ack(const struct sctp_endpoint *ep,
+ 	rcvd_serial = ntohl(addip_hdr->serial);
+ 
+ 	/* Verify the ASCONF-ACK chunk before processing it. */
+-	if (!sctp_verify_asconf(asoc,
+-	    (sctp_paramhdr_t *)addip_hdr->params,
+-	    (void *)asconf_ack->chunk_end,
+-	    &err_param))
++	if (!sctp_verify_asconf(asoc, asconf_ack, false, &err_param))
+ 		return sctp_sf_violation_paramlen(ep, asoc, type, arg,
+ 			   (void *)err_param, commands);
+ 
+diff --git a/net/sctp/ulpevent.c b/net/sctp/ulpevent.c
+index 8b3560f..826b945 100644
+--- a/net/sctp/ulpevent.c
++++ b/net/sctp/ulpevent.c
+@@ -372,9 +372,10 @@ fail:
+  * specification [SCTP] and any extensions for a list of possible
+  * error formats.
+  */
+-struct sctp_ulpevent *sctp_ulpevent_make_remote_error(
+-	const struct sctp_association *asoc, struct sctp_chunk *chunk,
+-	__u16 flags, gfp_t gfp)
++struct sctp_ulpevent *
++sctp_ulpevent_make_remote_error(const struct sctp_association *asoc,
++				struct sctp_chunk *chunk, __u16 flags,
++				gfp_t gfp)
+ {
+ 	struct sctp_ulpevent *event;
+ 	struct sctp_remote_error *sre;
+@@ -393,8 +394,7 @@ struct sctp_ulpevent *sctp_ulpevent_make_remote_error(
+ 	/* Copy the skb to a new skb with room for us to prepend
+ 	 * notification with.
+ 	 */
+-	skb = skb_copy_expand(chunk->skb, sizeof(struct sctp_remote_error),
+-			      0, gfp);
++	skb = skb_copy_expand(chunk->skb, sizeof(*sre), 0, gfp);
+ 
+ 	/* Pull off the rest of the cause TLV from the chunk.  */
+ 	skb_pull(chunk->skb, elen);
+@@ -405,62 +405,21 @@ struct sctp_ulpevent *sctp_ulpevent_make_remote_error(
+ 	event = sctp_skb2event(skb);
+ 	sctp_ulpevent_init(event, MSG_NOTIFICATION, skb->truesize);
+ 
+-	sre = (struct sctp_remote_error *)
+-		skb_push(skb, sizeof(struct sctp_remote_error));
++	sre = (struct sctp_remote_error *) skb_push(skb, sizeof(*sre));
+ 
+ 	/* Trim the buffer to the right length.  */
+-	skb_trim(skb, sizeof(struct sctp_remote_error) + elen);
++	skb_trim(skb, sizeof(*sre) + elen);
+ 
+-	/* Socket Extensions for SCTP
+-	 * 5.3.1.3 SCTP_REMOTE_ERROR
+-	 *
+-	 * sre_type:
+-	 *   It should be SCTP_REMOTE_ERROR.
+-	 */
++	/* RFC6458, Section 6.1.3. SCTP_REMOTE_ERROR */
++	memset(sre, 0, sizeof(*sre));
+ 	sre->sre_type = SCTP_REMOTE_ERROR;
+-
+-	/*
+-	 * Socket Extensions for SCTP
+-	 * 5.3.1.3 SCTP_REMOTE_ERROR
+-	 *
+-	 * sre_flags: 16 bits (unsigned integer)
+-	 *   Currently unused.
+-	 */
+ 	sre->sre_flags = 0;
+-
+-	/* Socket Extensions for SCTP
+-	 * 5.3.1.3 SCTP_REMOTE_ERROR
+-	 *
+-	 * sre_length: sizeof (__u32)
+-	 *
+-	 * This field is the total length of the notification data,
+-	 * including the notification header.
+-	 */
+ 	sre->sre_length = skb->len;
+-
+-	/* Socket Extensions for SCTP
+-	 * 5.3.1.3 SCTP_REMOTE_ERROR
+-	 *
+-	 * sre_error: 16 bits (unsigned integer)
+-	 * This value represents one of the Operational Error causes defined in
+-	 * the SCTP specification, in network byte order.
+-	 */
+ 	sre->sre_error = cause;
+-
+-	/* Socket Extensions for SCTP
+-	 * 5.3.1.3 SCTP_REMOTE_ERROR
+-	 *
+-	 * sre_assoc_id: sizeof (sctp_assoc_t)
+-	 *
+-	 * The association id field, holds the identifier for the association.
+-	 * All notifications for a given association have the same association
+-	 * identifier.  For TCP style socket, this field is ignored.
+-	 */
+ 	sctp_ulpevent_set_owner(event, asoc);
+ 	sre->sre_assoc_id = sctp_assoc2id(asoc);
+ 
+ 	return event;
+-
+ fail:
+ 	return NULL;
+ }
+@@ -875,7 +834,9 @@ __u16 sctp_ulpevent_get_notification_type(const struct sctp_ulpevent *event)
+ 	return notification->sn_header.sn_type;
+ }
+ 
+-/* Copy out the sndrcvinfo into a msghdr.  */
++/* RFC6458, Section 5.3.2. SCTP Header Information Structure
++ * (SCTP_SNDRCV, DEPRECATED)
++ */
+ void sctp_ulpevent_read_sndrcvinfo(const struct sctp_ulpevent *event,
+ 				   struct msghdr *msghdr)
+ {
+@@ -884,74 +845,21 @@ void sctp_ulpevent_read_sndrcvinfo(const struct sctp_ulpevent *event,
+ 	if (sctp_ulpevent_is_notification(event))
+ 		return;
+ 
+-	/* Sockets API Extensions for SCTP
+-	 * Section 5.2.2 SCTP Header Information Structure (SCTP_SNDRCV)
+-	 *
+-	 * sinfo_stream: 16 bits (unsigned integer)
+-	 *
+-	 * For recvmsg() the SCTP stack places the message's stream number in
+-	 * this value.
+-	*/
++	memset(&sinfo, 0, sizeof(sinfo));
+ 	sinfo.sinfo_stream = event->stream;
+-	/* sinfo_ssn: 16 bits (unsigned integer)
+-	 *
+-	 * For recvmsg() this value contains the stream sequence number that
+-	 * the remote endpoint placed in the DATA chunk.  For fragmented
+-	 * messages this is the same number for all deliveries of the message
+-	 * (if more than one recvmsg() is needed to read the message).
+-	 */
+ 	sinfo.sinfo_ssn = event->ssn;
+-	/* sinfo_ppid: 32 bits (unsigned integer)
+-	 *
+-	 * In recvmsg() this value is
+-	 * the same information that was passed by the upper layer in the peer
+-	 * application.  Please note that byte order issues are NOT accounted
+-	 * for and this information is passed opaquely by the SCTP stack from
+-	 * one end to the other.
+-	 */
+ 	sinfo.sinfo_ppid = event->ppid;
+-	/* sinfo_flags: 16 bits (unsigned integer)
+-	 *
+-	 * This field may contain any of the following flags and is composed of
+-	 * a bitwise OR of these values.
+-	 *
+-	 * recvmsg() flags:
+-	 *
+-	 * SCTP_UNORDERED - This flag is present when the message was sent
+-	 *                 non-ordered.
+-	 */
+ 	sinfo.sinfo_flags = event->flags;
+-	/* sinfo_tsn: 32 bit (unsigned integer)
+-	 *
+-	 * For the receiving side, this field holds a TSN that was
+-	 * assigned to one of the SCTP Data Chunks.
+-	 */
+ 	sinfo.sinfo_tsn = event->tsn;
+-	/* sinfo_cumtsn: 32 bit (unsigned integer)
+-	 *
+-	 * This field will hold the current cumulative TSN as
+-	 * known by the underlying SCTP layer.  Note this field is
+-	 * ignored when sending and only valid for a receive
+-	 * operation when sinfo_flags are set to SCTP_UNORDERED.
+-	 */
+ 	sinfo.sinfo_cumtsn = event->cumtsn;
+-	/* sinfo_assoc_id: sizeof (sctp_assoc_t)
+-	 *
+-	 * The association handle field, sinfo_assoc_id, holds the identifier
+-	 * for the association announced in the COMMUNICATION_UP notification.
+-	 * All notifications for a given association have the same identifier.
+-	 * Ignored for one-to-one style sockets.
+-	 */
+ 	sinfo.sinfo_assoc_id = sctp_assoc2id(event->asoc);
+-
+-	/* context value that is set via SCTP_CONTEXT socket option. */
++	/* Context value that is set via SCTP_CONTEXT socket option. */
+ 	sinfo.sinfo_context = event->asoc->default_rcv_context;
+-
+ 	/* These fields are not used while receiving. */
+ 	sinfo.sinfo_timetolive = 0;
+ 
+ 	put_cmsg(msghdr, IPPROTO_SCTP, SCTP_SNDRCV,
+-		 sizeof(struct sctp_sndrcvinfo), (void *)&sinfo);
++		 sizeof(sinfo), &sinfo);
+ }
+ 
+ /* Do accounting for bytes received and hold a reference to the association
+diff --git a/sound/core/control.c b/sound/core/control.c
+index 7834a54..8bf3a6d 100644
+--- a/sound/core/control.c
++++ b/sound/core/control.c
+@@ -278,6 +278,10 @@ static unsigned int snd_ctl_hole_check(struct snd_card *card,
+ {
+ 	struct snd_kcontrol *kctl;
+ 
++	/* Make sure that the ids assigned to the control do not wrap around */
++	if (card->last_numid >= UINT_MAX - count)
++		card->last_numid = 0;
++
+ 	list_for_each_entry(kctl, &card->controls, list) {
+ 		if ((kctl->id.numid <= card->last_numid &&
+ 		     kctl->id.numid + kctl->count > card->last_numid) ||
+@@ -328,6 +332,9 @@ int snd_ctl_add(struct snd_card *card, struct snd_kcontrol *kcontrol)
+ 	if (snd_BUG_ON(!card || !kcontrol->info))
+ 		goto error;
+ 	id = kcontrol->id;
++	if (id.index > UINT_MAX - kcontrol->count)
++		goto error;
++
+ 	down_write(&card->controls_rwsem);
+ 	if (snd_ctl_find_id(card, &id)) {
+ 		up_write(&card->controls_rwsem);
+@@ -873,6 +880,7 @@ static int snd_ctl_elem_unlock(struct snd_ctl_file *file,
+ 
+ struct user_element {
+ 	struct snd_ctl_elem_info info;
++	struct snd_card *card;
+ 	void *elem_data;		/* element data */
+ 	unsigned long elem_data_size;	/* size of element data in bytes */
+ 	void *tlv_data;			/* TLV data */
+@@ -895,7 +903,9 @@ static int snd_ctl_elem_user_get(struct snd_kcontrol *kcontrol,
+ {
+ 	struct user_element *ue = kcontrol->private_data;
+ 
++	mutex_lock(&ue->card->user_ctl_lock);
+ 	memcpy(&ucontrol->value, ue->elem_data, ue->elem_data_size);
++	mutex_unlock(&ue->card->user_ctl_lock);
+ 	return 0;
+ }
+ 
+@@ -904,10 +914,12 @@ static int snd_ctl_elem_user_put(struct snd_kcontrol *kcontrol,
+ {
+ 	int change;
+ 	struct user_element *ue = kcontrol->private_data;
+-	
++
++	mutex_lock(&ue->card->user_ctl_lock);
+ 	change = memcmp(&ucontrol->value, ue->elem_data, ue->elem_data_size) != 0;
+ 	if (change)
+ 		memcpy(ue->elem_data, &ucontrol->value, ue->elem_data_size);
++	mutex_unlock(&ue->card->user_ctl_lock);
+ 	return change;
+ }
+ 
+@@ -927,19 +939,32 @@ static int snd_ctl_elem_user_tlv(struct snd_kcontrol *kcontrol,
+ 		new_data = memdup_user(tlv, size);
+ 		if (IS_ERR(new_data))
+ 			return PTR_ERR(new_data);
++		mutex_lock(&ue->card->user_ctl_lock);
+ 		change = ue->tlv_data_size != size;
+ 		if (!change)
+ 			change = memcmp(ue->tlv_data, new_data, size);
+ 		kfree(ue->tlv_data);
+ 		ue->tlv_data = new_data;
+ 		ue->tlv_data_size = size;
++		mutex_unlock(&ue->card->user_ctl_lock);
+ 	} else {
+-		if (! ue->tlv_data_size || ! ue->tlv_data)
+-			return -ENXIO;
+-		if (size < ue->tlv_data_size)
+-			return -ENOSPC;
++		int ret = 0;
++
++		mutex_lock(&ue->card->user_ctl_lock);
++		if (!ue->tlv_data_size || !ue->tlv_data) {
++			ret = -ENXIO;
++			goto err_unlock;
++		}
++		if (size < ue->tlv_data_size) {
++			ret = -ENOSPC;
++			goto err_unlock;
++		}
+ 		if (copy_to_user(tlv, ue->tlv_data, ue->tlv_data_size))
+-			return -EFAULT;
++			ret = -EFAULT;
++err_unlock:
++		mutex_unlock(&ue->card->user_ctl_lock);
++		if (ret)
++			return ret;
+ 	}
+ 	return change;
+ }
+@@ -1028,6 +1053,7 @@ static int snd_ctl_elem_add(struct snd_ctl_file *file,
+ 	ue = kzalloc(sizeof(struct user_element) + private_size, GFP_KERNEL);
+ 	if (ue == NULL)
+ 		return -ENOMEM;
++	ue->card = card;
+ 	ue->info = *info;
+ 	ue->info.access = 0;
+ 	ue->elem_data = (char *)ue + sizeof(*ue);
+diff --git a/sound/core/init.c b/sound/core/init.c
+index 82f350e..fd8590f 100644
+--- a/sound/core/init.c
++++ b/sound/core/init.c
+@@ -206,6 +206,7 @@ int snd_card_create(int idx, const char *xid,
+ 	INIT_LIST_HEAD(&card->devices);
+ 	init_rwsem(&card->controls_rwsem);
+ 	rwlock_init(&card->ctl_files_rwlock);
++	mutex_init(&card->user_ctl_lock);
+ 	INIT_LIST_HEAD(&card->controls);
+ 	INIT_LIST_HEAD(&card->ctl_files);
+ 	spin_lock_init(&card->files_lock);
