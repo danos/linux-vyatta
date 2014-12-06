@@ -71671,7 +71671,7 @@ Date:   Mon Feb 15 15:17:35 2010 +0300
  
  asmlinkage void __do_softirq(void)
  {
-+        struct user_beancounter *ub;
++	struct user_beancounter *ub;
  	struct softirq_action *h;
  	__u32 pending;
  	unsigned long end = jiffies + MAX_SOFTIRQ_TIME;
@@ -84963,8 +84963,8 @@ Date:   Mon Feb 15 15:17:35 2010 +0300
  	if (buff == NULL)
  		return -ENOMEM; /* We'll just try again later. */
 +	if (ub_tcpsndbuf_charge(sk, buff) < 0) {
-+	    kfree_skb(buff);
-+	    return -ENOMEM;
++		kfree_skb(buff);
++		return -ENOMEM;
 +	}
  
  	sk->sk_wmem_queued += buff->truesize;
@@ -90351,6 +90351,65 @@ Date:   Mon Feb 15 15:17:35 2010 +0300
  
  #define MAX_RECURSION_LEVEL 4
  
+@@ -1547,6 +1558,16 @@ static int unix_stream_sendmsg(struct kiocb *kiocb, struct socket *sock,
+ 
+ 		size = len-sent;
+ 
++		if (msg->msg_flags & MSG_DONTWAIT)
++			ub_sock_makewres_other(sk, skb_charge_size(size));
++		if (sock_bc(sk) != NULL && 
++				sock_bc(sk)->poll_reserv >= 
++					SOCK_MIN_UBCSPACE &&
++				skb_charge_size(size) >
++					sock_bc(sk)->poll_reserv)
++			size = skb_charge_datalen(sock_bc(sk)->poll_reserv);
++				
++
+ 		/* Keep two messages in the pipe so it schedules better */
+ 		if (size > ((sk->sk_sndbuf >> 1) - 64))
+ 			size = (sk->sk_sndbuf >> 1) - 64;
+@@ -1558,8 +1579,9 @@ static int unix_stream_sendmsg(struct kiocb *kiocb, struct socket *sock,
+ 		 *	Grab a buffer
+ 		 */
+ 
+-		skb = sock_alloc_send_skb(sk, size, msg->msg_flags&MSG_DONTWAIT,
+-					  &err);
++
++		skb = sock_alloc_send_skb2(sk, size, SOCK_MIN_UBCSPACE,
++				msg->msg_flags&MSG_DONTWAIT, &err);
+ 
+ 		if (skb == NULL)
+ 			goto out_err;
+@@ -1998,6 +2020,7 @@ static unsigned int unix_poll(struct file *file, struct socket *sock, poll_table
+ {
+ 	struct sock *sk = sock->sk;
+ 	unsigned int mask;
++	int no_ub_res;
+ 
+ 	sock_poll_wait(file, sk->sk_sleep, wait);
+ 	mask = 0;
+@@ -2010,6 +2033,10 @@ static unsigned int unix_poll(struct file *file, struct socket *sock, poll_table
+ 	if (sk->sk_shutdown & RCV_SHUTDOWN)
+ 		mask |= POLLRDHUP;
+ 
++	no_ub_res = ub_sock_makewres_other(sk, SOCK_MIN_UBCSPACE_CH);
++	if (no_ub_res)
++		ub_sock_sndqueueadd_other(sk, SOCK_MIN_UBCSPACE_CH);
++
+ 	/* readable? */
+ 	if (!skb_queue_empty(&sk->sk_receive_queue) ||
+ 	    (sk->sk_shutdown & RCV_SHUTDOWN))
+@@ -2024,7 +2051,7 @@ static unsigned int unix_poll(struct file *file, struct socket *sock, poll_table
+ 	 * we set writable also when the other side has shut down the
+ 	 * connection. This prevents stuck sockets.
+ 	 */
+-	if (unix_writable(sk))
++	if (!no_ub_res && unix_writable(sk))
+ 		mask |= POLLOUT | POLLWRNORM | POLLWRBAND;
+ 
+ 	return mask;
+diff --git a/net/unix/garbage.c b/net/unix/garbage.c
+index 19c17e4..686d373 100644
 --- a/net/unix/garbage.c
 +++ b/net/unix/garbage.c
 @@ -81,6 +81,7 @@
