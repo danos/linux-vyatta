@@ -1,0 +1,66 @@
+From: Tejun Heo <tj@kernel.org>
+Date: Wed, 14 Dec 2011 00:33:37 +0100
+Subject: [PATCH 2/9] block: add missing blk_queue_dead() checks
+
+commit 8ba61435d73f2274e12d4d823fde06735e8f6a54 upstream.
+
+blk_insert_cloned_request(), blk_execute_rq_nowait() and
+blk_flush_plug_list() either didn't check whether the queue was dead
+or did it without holding queue_lock.  Update them so that dead state
+is checked while holding queue_lock.
+
+AFAICS, this plugs all holes (requeue doesn't matter as the request is
+transitioning atomically from in_flight to queued).
+
+Signed-off-by: Tejun Heo <tj@kernel.org>
+Signed-off-by: Jens Axboe <axboe@kernel.dk>
+[bwh: Backported to 2.6.32:
+ - Drop inapplicable changes to queue_unplugged() and
+   blk_flush_plug_list()
+ - Adjust context]
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+ block/blk-core.c | 4 ++++
+ block/blk-exec.c | 6 ++++--
+ 2 files changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/block/blk-core.c b/block/blk-core.c
+index 4058f46..fc40ab9 100644
+--- a/block/blk-core.c
++++ b/block/blk-core.c
+@@ -1651,6 +1651,10 @@ int blk_insert_cloned_request(struct request_queue *q, struct request *rq)
+ #endif
+ 
+ 	spin_lock_irqsave(q->queue_lock, flags);
++	if (unlikely(blk_queue_dead(q))) {
++		spin_unlock_irqrestore(q->queue_lock, flags);
++		return -ENODEV;
++	}
+ 
+ 	/*
+ 	 * Submitting request must be dequeued before calling this function
+diff --git a/block/blk-exec.c b/block/blk-exec.c
+index 85bd7b4..ae0f2c7 100644
+--- a/block/blk-exec.c
++++ b/block/blk-exec.c
+@@ -50,7 +50,11 @@ void blk_execute_rq_nowait(struct request_queue *q, struct gendisk *bd_disk,
+ {
+ 	int where = at_head ? ELEVATOR_INSERT_FRONT : ELEVATOR_INSERT_BACK;
+ 
++	WARN_ON(irqs_disabled());
++	spin_lock_irq(q->queue_lock);
++
+ 	if (unlikely(test_bit(QUEUE_FLAG_DEAD, &q->queue_flags))) {
++		spin_unlock_irq(q->queue_lock);
+ 		rq->errors = -ENXIO;
+ 		if (rq->end_io)
+ 			rq->end_io(rq, rq->errors);
+@@ -59,8 +63,6 @@ void blk_execute_rq_nowait(struct request_queue *q, struct gendisk *bd_disk,
+ 
+ 	rq->rq_disk = bd_disk;
+ 	rq->end_io = done;
+-	WARN_ON(irqs_disabled());
+-	spin_lock_irq(q->queue_lock);
+ 	__elv_add_request(q, rq, where, 1);
+ 	__generic_unplug_device(q);
+ 	/* the queue is stopped so it won't be plugged+unplugged */
