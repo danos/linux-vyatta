@@ -30173,7 +30173,7 @@ Date:   Mon Feb 15 15:17:35 2010 +0300
 +#endif /* __task.h_ */
 --- /dev/null
 +++ b/include/bc/tcp.h
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,88 @@
 +/*
 + *  include/bc/tcp.h
 + *
@@ -30249,6 +30249,18 @@ Date:   Mon Feb 15 15:17:35 2010 +0300
 +	return 0;
 +}
 +
++/* bwh: skb_unclone() plus beancounting */
++static inline int ub_tcp_unclone(struct sock *sk, struct sk_buff *skb, gfp_t pri)
++{
++	if (skb_cloned(skb)) {
++		if (pskb_expand_head(skb, 0, 0, GFP_ATOMIC))
++			return -ENOMEM;
++		ub_skb_uncharge(skb);
++		ub_tcpsndbuf_charge_forced(sk, skb);
++	}
++
++	return 0;
++}
 +#endif
 --- /dev/null
 +++ b/include/bc/vmpages.h
@@ -84938,17 +84950,13 @@ Date:   Mon Feb 15 15:17:35 2010 +0300
  	if (tcp_packets_in_flight(tp) == 0)
  		tcp_ca_event(sk, CA_EVENT_TX_START);
  
-@@ -829,11 +849,22 @@ int tcp_fragment(struct sock *sk, struct
+@@ -824,13 +844,17 @@ int tcp_fragment(struct sock *sk, struct
+ 	if (nsize < 0)
+ 		nsize = 0;
  
- 	if (skb_unclone(skb, GFP_ATOMIC))
+-	if (skb_unclone(skb, GFP_ATOMIC))
++	if (ub_tcp_unclone(sk, skb, GFP_ATOMIC))
  		return -ENOMEM;
-+	/* XXX: OPENVZ patch used to do this in the case where the skb was
-+	 * cloned:
-+	 * ub_skb_uncharge(skb);
-+	 * ub_tcpsndbuf_charge_forced(sk, skb);
-+	 *
-+	 * I assume it's no longer needed. -- Raphaël Hertzog
-+	 */
  
  	/* Get a new skb... force flag on. */
  	buff = sk_stream_alloc_skb(sk, nsize, GFP_ATOMIC);
@@ -84982,6 +84990,15 @@ Date:   Mon Feb 15 15:17:35 2010 +0300
  			tp->rcv_ssthresh = min(tp->rcv_ssthresh,
  					       4U * tp->advmss);
  
+@@ -1931,7 +1967,7 @@
+ 		int oldpcount = tcp_skb_pcount(skb);
+ 
+ 		if (unlikely(oldpcount > 1)) {
+-			if (skb_unclone(skb, GFP_ATOMIC))
++			if (ub_tcp_unclone(sk, skb, GFP_ATOMIC))
+ 				return -ENOMEM;
+ 			tcp_init_tso_segs(sk, skb, cur_mss);
+ 			tcp_adjust_pcount(sk, skb, oldpcount - tcp_skb_pcount(skb));
 @@ -2149,6 +2185,7 @@ void tcp_send_fin(struct sock *sk)
  				break;
  			yield();
