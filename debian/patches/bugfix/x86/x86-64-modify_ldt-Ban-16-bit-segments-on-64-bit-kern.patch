@@ -1,0 +1,53 @@
+From ca5fc4c87fa72f39f175b52b05ab67d8aec04530 Mon Sep 17 00:00:00 2001
+From: "H. Peter Anvin" <hpa@linux.intel.com>
+Date: Sun, 16 Mar 2014 15:31:54 -0700
+Subject: x86-64, modify_ldt: Ban 16-bit segments on 64-bit kernels
+
+commit b3b42ac2cbae1f3cecbb6229964a4d48af31d382 upstream.
+
+The IRET instruction, when returning to a 16-bit segment, only
+restores the bottom 16 bits of the user space stack pointer.  We have
+a software workaround for that ("espfix") for the 32-bit kernel, but
+it relies on a nonzero stack segment base which is not available in
+32-bit mode.
+
+Since 16-bit support is somewhat crippled anyway on a 64-bit kernel
+(no V86 mode), and most (if not quite all) 64-bit processors support
+virtualization for the users who really need it, simply reject
+attempts at creating a 16-bit segment when running on top of a 64-bit
+kernel.
+
+Cc: Linus Torvalds <torvalds@linux-foundation.org>
+Signed-off-by: H. Peter Anvin <hpa@linux.intel.com>
+Link: http://lkml.kernel.org/n/tip-kicdm89kzw9lldryb1br9od0@git.kernel.org
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+(cherry picked from commit a862b5c4076b1ba4dd6c87aebac478853dc6db47)
+---
+ arch/x86/kernel/ldt.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/arch/x86/kernel/ldt.c b/arch/x86/kernel/ldt.c
+index ec6ef60..75e356c 100644
+--- a/arch/x86/kernel/ldt.c
++++ b/arch/x86/kernel/ldt.c
+@@ -229,6 +229,17 @@ static int write_ldt(void __user *ptr, unsigned long bytecount, int oldmode)
+ 		}
+ 	}
+ 
++	/*
++	 * On x86-64 we do not support 16-bit segments due to
++	 * IRET leaking the high bits of the kernel stack address.
++	 */
++#ifdef CONFIG_X86_64
++	if (!ldt_info.seg_32bit) {
++		error = -EINVAL;
++		goto out_unlock;
++	}
++#endif
++
+ 	fill_ldt(&ldt, &ldt_info);
+ 	if (oldmode)
+ 		ldt.avl = 0;
+-- 
+1.7.12.1
+
