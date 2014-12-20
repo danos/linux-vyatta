@@ -1,0 +1,1428 @@
+diff --git a/Documentation/x86/x86_64/mm.txt b/Documentation/x86/x86_64/mm.txt
+index d6498e3..f33a936 100644
+--- a/Documentation/x86/x86_64/mm.txt
++++ b/Documentation/x86/x86_64/mm.txt
+@@ -12,6 +12,8 @@ ffffc90000000000 - ffffe8ffffffffff (=45 bits) vmalloc/ioremap space
+ ffffe90000000000 - ffffe9ffffffffff (=40 bits) hole
+ ffffea0000000000 - ffffeaffffffffff (=40 bits) virtual memory map (1TB)
+ ... unused hole ...
++ffffff0000000000 - ffffff7fffffffff (=39 bits) %esp fixup stacks
++... unused hole ...
+ ffffffff80000000 - ffffffffa0000000 (=512 MB)  kernel text mapping, from phys 0
+ ffffffffa0000000 - fffffffffff00000 (=1536 MB) module mapping space
+ 
+diff --git a/Makefile b/Makefile
+index 852578d..f925a20 100644
+diff --git a/arch/x86/Kconfig b/arch/x86/Kconfig
+index ee0168d..67c3187 100644
+--- a/arch/x86/Kconfig
++++ b/arch/x86/Kconfig
+@@ -882,10 +882,27 @@ config VM86
+ 	default y
+ 	depends on X86_32
+ 	---help---
+-	  This option is required by programs like DOSEMU to run 16-bit legacy
+-	  code on X86 processors. It also may be needed by software like
+-	  XFree86 to initialize some video cards via BIOS. Disabling this
+-	  option saves about 6k.
++	  This option is required by programs like DOSEMU to run
++	  16-bit real mode legacy code on x86 processors. It also may
++	  be needed by software like XFree86 to initialize some video
++	  cards via BIOS. Disabling this option saves about 6K.
++
++config X86_16BIT
++	bool "Enable support for 16-bit segments"
++	default y
++	---help---
++	  This option is required by programs like Wine to run 16-bit
++	  protected mode legacy code on x86 processors.  Disabling
++	  this option saves about 300 bytes on i386, or around 6K text
++	  plus 16K runtime memory on x86-64,
++
++config X86_ESPFIX32
++	def_bool y
++	depends on X86_16BIT && X86_32
++
++config X86_ESPFIX64
++	def_bool y
++	depends on X86_16BIT && X86_64
+ 
+ config TOSHIBA
+ 	tristate "Toshiba Laptop support"
+diff --git a/arch/x86/include/asm/espfix.h b/arch/x86/include/asm/espfix.h
+new file mode 100644
+index 0000000..f017535
+--- /dev/null
++++ b/arch/x86/include/asm/espfix.h
+@@ -0,0 +1,16 @@
++#ifndef _ASM_X86_ESPFIX_H
++#define _ASM_X86_ESPFIX_H
++
++#ifdef CONFIG_X86_64
++
++#include <asm/percpu.h>
++
++DECLARE_PER_CPU(unsigned long, espfix_stack);
++DECLARE_PER_CPU(unsigned long, espfix_waddr);
++
++extern void init_espfix_bsp(void);
++extern void init_espfix_ap(void);
++
++#endif /* CONFIG_X86_64 */
++
++#endif /* _ASM_X86_ESPFIX_H */
+diff --git a/arch/x86/include/asm/irqflags.h b/arch/x86/include/asm/irqflags.h
+index 9e2b952..58b0c5c 100644
+--- a/arch/x86/include/asm/irqflags.h
++++ b/arch/x86/include/asm/irqflags.h
+@@ -130,7 +130,7 @@ static inline unsigned long __raw_local_irq_save(void)
+ 
+ #define PARAVIRT_ADJUST_EXCEPTION_FRAME	/*  */
+ 
+-#define INTERRUPT_RETURN	iretq
++#define INTERRUPT_RETURN	jmp native_iret
+ #define USERGS_SYSRET64				\
+ 	swapgs;					\
+ 	sysretq;
+diff --git a/arch/x86/include/asm/page_32_types.h b/arch/x86/include/asm/page_32_types.h
+index 6f1b733..775c92f 100644
+--- a/arch/x86/include/asm/page_32_types.h
++++ b/arch/x86/include/asm/page_32_types.h
+@@ -22,7 +22,6 @@
+ #endif
+ #define THREAD_SIZE 	(PAGE_SIZE << THREAD_ORDER)
+ 
+-#define STACKFAULT_STACK 0
+ #define DOUBLEFAULT_STACK 1
+ #define NMI_STACK 0
+ #define DEBUG_STACK 0
+diff --git a/arch/x86/include/asm/page_64_types.h b/arch/x86/include/asm/page_64_types.h
+index 7639dbf..a9e9937 100644
+--- a/arch/x86/include/asm/page_64_types.h
++++ b/arch/x86/include/asm/page_64_types.h
+@@ -14,12 +14,11 @@
+ #define IRQ_STACK_ORDER 2
+ #define IRQ_STACK_SIZE (PAGE_SIZE << IRQ_STACK_ORDER)
+ 
+-#define STACKFAULT_STACK 1
+-#define DOUBLEFAULT_STACK 2
+-#define NMI_STACK 3
+-#define DEBUG_STACK 4
+-#define MCE_STACK 5
+-#define N_EXCEPTION_STACKS 5  /* hw limit: 7 */
++#define DOUBLEFAULT_STACK 1
++#define NMI_STACK 2
++#define DEBUG_STACK 3
++#define MCE_STACK 4
++#define N_EXCEPTION_STACKS 4  /* hw limit: 7 */
+ 
+ #define PUD_PAGE_SIZE		(_AC(1, UL) << PUD_SHIFT)
+ #define PUD_PAGE_MASK		(~(PUD_PAGE_SIZE-1))
+diff --git a/arch/x86/include/asm/pgtable_64_types.h b/arch/x86/include/asm/pgtable_64_types.h
+index 766ea16..51817fa 100644
+--- a/arch/x86/include/asm/pgtable_64_types.h
++++ b/arch/x86/include/asm/pgtable_64_types.h
+@@ -59,5 +59,7 @@ typedef struct { pteval_t pte; } pte_t;
+ #define MODULES_VADDR    _AC(0xffffffffa0000000, UL)
+ #define MODULES_END      _AC(0xffffffffff000000, UL)
+ #define MODULES_LEN   (MODULES_END - MODULES_VADDR)
++#define ESPFIX_PGD_ENTRY _AC(-2, UL)
++#define ESPFIX_BASE_ADDR (ESPFIX_PGD_ENTRY << PGDIR_SHIFT)
+ 
+ #endif /* _ASM_X86_PGTABLE_64_DEFS_H */
+diff --git a/arch/x86/include/asm/setup.h b/arch/x86/include/asm/setup.h
+index 18e496c..ac45d3b 100644
+--- a/arch/x86/include/asm/setup.h
++++ b/arch/x86/include/asm/setup.h
+@@ -57,6 +57,8 @@ static inline void x86_mrst_early_setup(void) { }
+ 
+ #ifndef _SETUP
+ 
++#include <asm/espfix.h>
++
+ /*
+  * This is set up by the setup-routine at boot-time
+  */
+diff --git a/arch/x86/include/asm/uaccess.h b/arch/x86/include/asm/uaccess.h
+index 61c5874..99f0ad7 100644
+--- a/arch/x86/include/asm/uaccess.h
++++ b/arch/x86/include/asm/uaccess.h
+@@ -570,7 +570,6 @@ extern struct movsl_mask {
+ #ifdef CONFIG_X86_32
+ # include "uaccess_32.h"
+ #else
+-# define ARCH_HAS_SEARCH_EXTABLE
+ # include "uaccess_64.h"
+ #endif
+ 
+diff --git a/arch/x86/kernel/Makefile b/arch/x86/kernel/Makefile
+index d1911ab..945ad6f 100644
+--- a/arch/x86/kernel/Makefile
++++ b/arch/x86/kernel/Makefile
+@@ -40,6 +40,7 @@ obj-$(CONFIG_X86_32)	+= probe_roms_32.o
+ obj-$(CONFIG_X86_32)	+= sys_i386_32.o i386_ksyms_32.o
+ obj-$(CONFIG_X86_64)	+= sys_x86_64.o x8664_ksyms_64.o
+ obj-$(CONFIG_X86_64)	+= syscall_64.o vsyscall_64.o
++obj-$(CONFIG_X86_ESPFIX64)	+= espfix_64.o
+ obj-y			+= bootflag.o e820.o
+ obj-y			+= pci-dma.o quirks.o i8237.o topology.o kdebugfs.o
+ obj-y			+= alternative.o i8253.o pci-nommu.o
+diff --git a/arch/x86/kernel/dumpstack_64.c b/arch/x86/kernel/dumpstack_64.c
+index a071e6b..5dc0882 100644
+--- a/arch/x86/kernel/dumpstack_64.c
++++ b/arch/x86/kernel/dumpstack_64.c
+@@ -23,7 +23,6 @@ static char x86_stack_ids[][8] = {
+ 		[DEBUG_STACK - 1] = "#DB",
+ 		[NMI_STACK - 1] = "NMI",
+ 		[DOUBLEFAULT_STACK - 1] = "#DF",
+-		[STACKFAULT_STACK - 1] = "#SS",
+ 		[MCE_STACK - 1] = "#MC",
+ #if DEBUG_STKSZ > EXCEPTION_STKSZ
+ 		[N_EXCEPTION_STACKS ...
+diff --git a/arch/x86/kernel/entry_32.S b/arch/x86/kernel/entry_32.S
+index 8b5370c..c1207f7 100644
+--- a/arch/x86/kernel/entry_32.S
++++ b/arch/x86/kernel/entry_32.S
+@@ -543,6 +543,7 @@ syscall_exit:
+ restore_all:
+ 	TRACE_IRQS_IRET
+ restore_all_notrace:
++#ifdef CONFIG_X86_ESPFIX32
+ 	movl PT_EFLAGS(%esp), %eax	# mix EFLAGS, SS and CS
+ 	# Warning: PT_OLDSS(%esp) contains the wrong/random values if we
+ 	# are returning to the kernel.
+@@ -553,6 +554,7 @@ restore_all_notrace:
+ 	cmpl $((SEGMENT_LDT << 8) | USER_RPL), %eax
+ 	CFI_REMEMBER_STATE
+ 	je ldt_ss			# returning to user-space with LDT SS
++#endif
+ restore_nocheck:
+ 	RESTORE_REGS 4			# skip orig_eax/error_code
+ 	CFI_ADJUST_CFA_OFFSET -4
+@@ -569,13 +571,9 @@ ENTRY(iret_exc)
+ 	.long irq_return,iret_exc
+ .previous
+ 
++#ifdef CONFIG_X86_ESPFIX32
+ 	CFI_RESTORE_STATE
+ ldt_ss:
+-	larl PT_OLDSS(%esp), %eax
+-	jnz restore_nocheck
+-	testl $0x00400000, %eax		# returning to 32bit stack?
+-	jnz restore_nocheck		# allright, normal return
+-
+ #ifdef CONFIG_PARAVIRT
+ 	/*
+ 	 * The kernel can't run on a non-flat stack if paravirt mode
+@@ -619,6 +617,7 @@ ldt_ss:
+ 	lss (%esp), %esp		/* switch to espfix segment */
+ 	CFI_ADJUST_CFA_OFFSET -8
+ 	jmp restore_nocheck
++#endif
+ 	CFI_ENDPROC
+ ENDPROC(system_call)
+ 
+@@ -741,6 +740,7 @@ PTREGSCALL(vm86old)
+  * the high word of the segment base from the GDT and swiches to the
+  * normal stack and adjusts ESP with the matching offset.
+  */
++#ifdef CONFIG_X86_ESPFIX32
+ 	/* fixup the stack */
+ 	PER_CPU(gdt_page, %ebx)
+ 	mov GDT_ENTRY_ESPFIX_SS * 8 + 4(%ebx), %al /* bits 16..23 */
+@@ -753,8 +753,10 @@ PTREGSCALL(vm86old)
+ 	CFI_ADJUST_CFA_OFFSET 4
+ 	lss (%esp), %esp		/* switch to the normal stack segment */
+ 	CFI_ADJUST_CFA_OFFSET -8
++#endif
+ .endm
+ .macro UNWIND_ESPFIX_STACK
++#ifdef CONFIG_X86_ESPFIX32
+ 	movl %ss, %eax
+ 	/* see if on espfix stack */
+ 	cmpw $__ESPFIX_SS, %ax
+@@ -765,6 +767,7 @@ PTREGSCALL(vm86old)
+ 	/* switch to normal stack */
+ 	FIXUP_ESPFIX_STACK
+ 27:
++#endif
+ .endm
+ 
+ /*
+@@ -1328,6 +1331,7 @@ END(debug)
+  */
+ ENTRY(nmi)
+ 	RING0_INT_FRAME
++#ifdef CONFIG_X86_ESPFIX32
+ 	pushl %eax
+ 	CFI_ADJUST_CFA_OFFSET 4
+ 	movl %ss, %eax
+@@ -1335,6 +1339,7 @@ ENTRY(nmi)
+ 	popl %eax
+ 	CFI_ADJUST_CFA_OFFSET -4
+ 	je nmi_espfix_stack
++#endif
+ 	cmpl $ia32_sysenter_target,(%esp)
+ 	je nmi_stack_fixup
+ 	pushl %eax
+@@ -1377,6 +1382,7 @@ nmi_debug_stack_check:
+ 	FIX_STACK 24, nmi_stack_correct, 1
+ 	jmp nmi_stack_correct
+ 
++#ifdef CONFIG_X86_ESPFIX32
+ nmi_espfix_stack:
+ 	/* We have a RING0_INT_FRAME here.
+ 	 *
+@@ -1402,6 +1408,7 @@ nmi_espfix_stack:
+ 	lss 12+4(%esp), %esp		# back to espfix stack
+ 	CFI_ADJUST_CFA_OFFSET -24
+ 	jmp irq_return
++#endif
+ 	CFI_ENDPROC
+ END(nmi)
+ 
+diff --git a/arch/x86/kernel/entry_64.S b/arch/x86/kernel/entry_64.S
+index 34a56a9..d9bcee0 100644
+--- a/arch/x86/kernel/entry_64.S
++++ b/arch/x86/kernel/entry_64.S
+@@ -53,6 +53,7 @@
+ #include <asm/paravirt.h>
+ #include <asm/ftrace.h>
+ #include <asm/percpu.h>
++#include <asm/pgtable_types.h>
+ 
+ /* Avoid __ASSEMBLER__'ifying <linux/audit.h> just for this.  */
+ #include <linux/elf-em.h>
+@@ -860,37 +861,51 @@ restore_args:
+ irq_return:
+ 	INTERRUPT_RETURN
+ 
+-	.section __ex_table, "a"
+-	.quad irq_return, bad_iret
+-	.previous
+-
+-#ifdef CONFIG_PARAVIRT
+ ENTRY(native_iret)
+-	iretq
+-
+-	.section __ex_table,"a"
+-	.quad native_iret, bad_iret
+-	.previous
++	/*
++	 * Are we returning to a stack segment from the LDT?  Note: in
++	 * 64-bit mode SS:RSP on the exception stack is always valid.
++	 */
++#ifdef CONFIG_X86_ESPFIX64
++	testb $4,(SS-RIP)(%rsp)
++	jnz native_irq_return_ldt
+ #endif
+ 
+-	.section .fixup,"ax"
+-bad_iret:
++.global native_irq_return_iret
++native_irq_return_iret:
+ 	/*
+-	 * The iret traps when the %cs or %ss being restored is bogus.
+-	 * We've lost the original trap vector and error code.
+-	 * #GPF is the most likely one to get for an invalid selector.
+-	 * So pretend we completed the iret and took the #GPF in user mode.
+-	 *
+-	 * We are now running with the kernel GS after exception recovery.
+-	 * But error_entry expects us to have user GS to match the user %cs,
+-	 * so swap back.
++	 * This may fault.  Non-paranoid faults on return to userspace are
++	 * handled by fixup_bad_iret.  These include #SS, #GP, and #NP.
++	 * Double-faults due to espfix64 are handled in do_double_fault.
++	 * Other faults here are fatal.
+ 	 */
+-	pushq $0
++	iretq
+ 
++#ifdef CONFIG_X86_ESPFIX64
++native_irq_return_ldt:
++	pushq_cfi %rax
++	pushq_cfi %rdi
+ 	SWAPGS
+-	jmp general_protection
+-
+-	.previous
++	movq PER_CPU_VAR(espfix_waddr),%rdi
++	movq %rax,(0*8)(%rdi)	/* RAX */
++	movq (2*8)(%rsp),%rax	/* RIP */
++	movq %rax,(1*8)(%rdi)
++	movq (3*8)(%rsp),%rax	/* CS */
++	movq %rax,(2*8)(%rdi)
++	movq (4*8)(%rsp),%rax	/* RFLAGS */
++	movq %rax,(3*8)(%rdi)
++	movq (6*8)(%rsp),%rax	/* SS */
++	movq %rax,(5*8)(%rdi)
++	movq (5*8)(%rsp),%rax	/* RSP */
++	movq %rax,(4*8)(%rdi)
++	andl $0xffff0000,%eax
++	popq_cfi %rdi
++	orq PER_CPU_VAR(espfix_stack),%rax
++	SWAPGS
++	movq %rax,%rsp
++	popq_cfi %rax
++	jmp native_irq_return_iret
++#endif
+ 
+ 	/* edi: workmask, edx: work */
+ retint_careful:
+@@ -938,7 +953,6 @@ ENTRY(retint_kernel)
+ 	call preempt_schedule_irq
+ 	jmp exit_intr
+ #endif
+-
+ 	CFI_ENDPROC
+ END(common_interrupt)
+ 
+@@ -1373,7 +1387,7 @@ END(xen_failsafe_callback)
+ 
+ paranoidzeroentry_ist debug do_debug DEBUG_STACK
+ paranoidzeroentry_ist int3 do_int3 DEBUG_STACK
+-paranoiderrorentry stack_segment do_stack_segment
++errorentry stack_segment do_stack_segment
+ #ifdef CONFIG_XEN
+ zeroentry xen_debug do_debug
+ zeroentry xen_int3 do_int3
+@@ -1400,7 +1414,7 @@ paranoidzeroentry machine_check *machine_check_vector(%rip)
+ 
+ 	/* ebx:	no swapgs flag */
+ ENTRY(paranoid_exit)
+-	INTR_FRAME
++	DEFAULT_FRAME
+ 	DISABLE_INTERRUPTS(CLBR_NONE)
+ 	TRACE_IRQS_OFF
+ 	testl %ebx,%ebx				/* swapgs needed? */
+@@ -1481,22 +1495,34 @@ error_sti:
+ 
+ /*
+  * There are two places in the kernel that can potentially fault with
+- * usergs. Handle them here. The exception handlers after iret run with
+- * kernel gs again, so don't set the user space flag. B stepping K8s
+- * sometimes report an truncated RIP for IRET exceptions returning to
+- * compat mode. Check for these here too.
++ * usergs. Handle them here.  B stepping K8s sometimes report a
++ * truncated RIP for IRET exceptions returning to compat mode. Check
++ * for these here too.
+  */
+ error_kernelspace:
+ 	incl %ebx
+-	leaq irq_return(%rip),%rcx
++	leaq native_irq_return_iret(%rip),%rcx
+ 	cmpq %rcx,RIP+8(%rsp)
+-	je error_swapgs
+-	movl %ecx,%ecx	/* zero extend */
+-	cmpq %rcx,RIP+8(%rsp)
+-	je error_swapgs
++	je error_bad_iret
++	movl %ecx,%eax	/* zero extend */
++	cmpq %rax,RIP+8(%rsp)
++	je bstep_iret
+ 	cmpq $gs_change,RIP+8(%rsp)
+ 	je error_swapgs
+ 	jmp error_sti
++
++bstep_iret:
++	/* Fix truncated RIP */
++	movq %rcx,RIP+8(%rsp)
++	/* fall through */
++
++error_bad_iret:
++	SWAPGS
++	mov %rsp,%rdi
++	call fixup_bad_iret
++	mov %rax,%rsp
++	decl %ebx	/* Return to usergs */
++	jmp error_sti
+ END(error_entry)
+ 
+ 
+diff --git a/arch/x86/kernel/espfix_64.c b/arch/x86/kernel/espfix_64.c
+new file mode 100644
+index 0000000..8563154
+--- /dev/null
++++ b/arch/x86/kernel/espfix_64.c
+@@ -0,0 +1,208 @@
++/* ----------------------------------------------------------------------- *
++ *
++ *   Copyright 2014 Intel Corporation; author: H. Peter Anvin
++ *
++ *   This program is free software; you can redistribute it and/or modify it
++ *   under the terms and conditions of the GNU General Public License,
++ *   version 2, as published by the Free Software Foundation.
++ *
++ *   This program is distributed in the hope it will be useful, but WITHOUT
++ *   ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ *   FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ *   more details.
++ *
++ * ----------------------------------------------------------------------- */
++
++/*
++ * The IRET instruction, when returning to a 16-bit segment, only
++ * restores the bottom 16 bits of the user space stack pointer.  This
++ * causes some 16-bit software to break, but it also leaks kernel state
++ * to user space.
++ *
++ * This works around this by creating percpu "ministacks", each of which
++ * is mapped 2^16 times 64K apart.  When we detect that the return SS is
++ * on the LDT, we copy the IRET frame to the ministack and use the
++ * relevant alias to return to userspace.  The ministacks are mapped
++ * readonly, so if the IRET fault we promote #GP to #DF which is an IST
++ * vector and thus has its own stack; we then do the fixup in the #DF
++ * handler.
++ *
++ * This file sets up the ministacks and the related page tables.  The
++ * actual ministack invocation is in entry_64.S.
++ */
++
++#include <linux/init.h>
++#include <linux/init_task.h>
++#include <linux/kernel.h>
++#include <linux/percpu.h>
++#include <linux/gfp.h>
++#include <linux/random.h>
++#include <asm/pgtable.h>
++#include <asm/pgalloc.h>
++#include <asm/setup.h>
++#include <asm/espfix.h>
++
++/*
++ * Note: we only need 6*8 = 48 bytes for the espfix stack, but round
++ * it up to a cache line to avoid unnecessary sharing.
++ */
++#define ESPFIX_STACK_SIZE	(8*8UL)
++#define ESPFIX_STACKS_PER_PAGE	(PAGE_SIZE/ESPFIX_STACK_SIZE)
++
++/* There is address space for how many espfix pages? */
++#define ESPFIX_PAGE_SPACE	(1UL << (PGDIR_SHIFT-PAGE_SHIFT-16))
++
++#define ESPFIX_MAX_CPUS		(ESPFIX_STACKS_PER_PAGE * ESPFIX_PAGE_SPACE)
++#if CONFIG_NR_CPUS > ESPFIX_MAX_CPUS
++# error "Need more than one PGD for the ESPFIX hack"
++#endif
++
++#define PGALLOC_GFP (GFP_KERNEL | __GFP_NOTRACK | __GFP_REPEAT | __GFP_ZERO)
++
++/* This contains the *bottom* address of the espfix stack */
++DEFINE_PER_CPU(unsigned long, espfix_stack);
++DEFINE_PER_CPU(unsigned long, espfix_waddr);
++
++/* Initialization mutex - should this be a spinlock? */
++static DEFINE_MUTEX(espfix_init_mutex);
++
++/* Page allocation bitmap - each page serves ESPFIX_STACKS_PER_PAGE CPUs */
++#define ESPFIX_MAX_PAGES  DIV_ROUND_UP(CONFIG_NR_CPUS, ESPFIX_STACKS_PER_PAGE)
++static void *espfix_pages[ESPFIX_MAX_PAGES];
++
++static __page_aligned_bss pud_t espfix_pud_page[PTRS_PER_PUD]
++	__aligned(PAGE_SIZE);
++
++static unsigned int page_random, slot_random;
++
++/*
++ * This returns the bottom address of the espfix stack for a specific CPU.
++ * The math allows for a non-power-of-two ESPFIX_STACK_SIZE, in which case
++ * we have to account for some amount of padding at the end of each page.
++ */
++static inline unsigned long espfix_base_addr(unsigned int cpu)
++{
++	unsigned long page, slot;
++	unsigned long addr;
++
++	page = (cpu / ESPFIX_STACKS_PER_PAGE) ^ page_random;
++	slot = (cpu + slot_random) % ESPFIX_STACKS_PER_PAGE;
++	addr = (page << PAGE_SHIFT) + (slot * ESPFIX_STACK_SIZE);
++	addr = (addr & 0xffffUL) | ((addr & ~0xffffUL) << 16);
++	addr += ESPFIX_BASE_ADDR;
++	return addr;
++}
++
++#define PTE_STRIDE        (65536/PAGE_SIZE)
++#define ESPFIX_PTE_CLONES (PTRS_PER_PTE/PTE_STRIDE)
++#define ESPFIX_PMD_CLONES PTRS_PER_PMD
++#define ESPFIX_PUD_CLONES (65536/(ESPFIX_PTE_CLONES*ESPFIX_PMD_CLONES))
++
++#define PGTABLE_PROT	  ((_KERNPG_TABLE & ~_PAGE_RW) | _PAGE_NX)
++
++static void init_espfix_random(void)
++{
++	unsigned long rand;
++
++	/*
++	 * This is run before the entropy pools are initialized,
++	 * but this is hopefully better than nothing.
++	 */
++	if (!arch_get_random_long(&rand)) {
++		/* The constant is an arbitrary large prime */
++		rdtscll(rand);
++		rand *= 0xc345c6b72fd16123UL;
++	}
++
++	slot_random = rand % ESPFIX_STACKS_PER_PAGE;
++	page_random = (rand / ESPFIX_STACKS_PER_PAGE)
++		& (ESPFIX_PAGE_SPACE - 1);
++}
++
++void __init init_espfix_bsp(void)
++{
++	pgd_t *pgd_p;
++	pteval_t ptemask;
++
++	ptemask = __supported_pte_mask;
++
++	/* Install the espfix pud into the kernel page directory */
++	pgd_p = &init_level4_pgt[pgd_index(ESPFIX_BASE_ADDR)];
++	pgd_populate(&init_mm, pgd_p, (pud_t *)espfix_pud_page);
++
++	/* Randomize the locations */
++	init_espfix_random();
++
++	/* The rest is the same as for any other processor */
++	init_espfix_ap();
++}
++
++void init_espfix_ap(void)
++{
++	unsigned int cpu, page;
++	unsigned long addr;
++	pud_t pud, *pud_p;
++	pmd_t pmd, *pmd_p;
++	pte_t pte, *pte_p;
++	int n;
++	void *stack_page;
++	pteval_t ptemask;
++
++	/* We only have to do this once... */
++	if (likely(per_cpu(espfix_stack, smp_processor_id())))
++		return;		/* Already initialized */
++
++	cpu = smp_processor_id();
++	addr = espfix_base_addr(cpu);
++	page = cpu/ESPFIX_STACKS_PER_PAGE;
++
++	/* Did another CPU already set this up? */
++	stack_page = ACCESS_ONCE(espfix_pages[page]);
++	if (likely(stack_page))
++		goto done;
++
++	mutex_lock(&espfix_init_mutex);
++
++	/* Did we race on the lock? */
++	stack_page = ACCESS_ONCE(espfix_pages[page]);
++	if (stack_page)
++		goto unlock_done;
++
++	ptemask = __supported_pte_mask;
++
++	pud_p = &espfix_pud_page[pud_index(addr)];
++	pud = *pud_p;
++	if (!pud_present(pud)) {
++		pmd_p = (pmd_t *)__get_free_page(PGALLOC_GFP);
++		pud = __pud(__pa(pmd_p) | (PGTABLE_PROT & ptemask));
++		paravirt_alloc_pmd(&init_mm, __pa(pmd_p) >> PAGE_SHIFT);
++		for (n = 0; n < ESPFIX_PUD_CLONES; n++)
++			set_pud(&pud_p[n], pud);
++	}
++
++	pmd_p = pmd_offset(&pud, addr);
++	pmd = *pmd_p;
++	if (!pmd_present(pmd)) {
++		pte_p = (pte_t *)__get_free_page(PGALLOC_GFP);
++		pmd = __pmd(__pa(pte_p) | (PGTABLE_PROT & ptemask));
++		paravirt_alloc_pte(&init_mm, __pa(pte_p) >> PAGE_SHIFT);
++		for (n = 0; n < ESPFIX_PMD_CLONES; n++)
++			set_pmd(&pmd_p[n], pmd);
++	}
++
++	pte_p = pte_offset_kernel(&pmd, addr);
++	stack_page = (void *)__get_free_page(GFP_KERNEL);
++	pte = __pte(__pa(stack_page) | (__PAGE_KERNEL_RO & ptemask));
++	for (n = 0; n < ESPFIX_PTE_CLONES; n++)
++		set_pte(&pte_p[n*PTE_STRIDE], pte);
++
++	/* Job is done for this CPU and any CPU which shares this page */
++	ACCESS_ONCE(espfix_pages[page]) = stack_page;
++
++unlock_done:
++	mutex_unlock(&espfix_init_mutex);
++done:
++	per_cpu(espfix_stack, smp_processor_id()) = addr;
++	per_cpu(espfix_waddr, smp_processor_id()) =
++		(unsigned long)stack_page + (addr & ~PAGE_MASK);
++}
+diff --git a/arch/x86/kernel/ldt.c b/arch/x86/kernel/ldt.c
+index ec6ef60..4e668bb 100644
+--- a/arch/x86/kernel/ldt.c
++++ b/arch/x86/kernel/ldt.c
+@@ -229,6 +229,12 @@ static int write_ldt(void __user *ptr, unsigned long bytecount, int oldmode)
+ 		}
+ 	}
+ 
++#ifndef CONFIG_X86_16BIT
++	if (!ldt_info.seg_32bit) {
++		error = -EINVAL;
++		goto out_unlock;
++	}
++#endif
+ 	fill_ldt(&ldt, &ldt_info);
+ 	if (oldmode)
+ 		ldt.avl = 0;
+diff --git a/arch/x86/kernel/paravirt_patch_64.c b/arch/x86/kernel/paravirt_patch_64.c
+index 3f08f34..a1da673 100644
+--- a/arch/x86/kernel/paravirt_patch_64.c
++++ b/arch/x86/kernel/paravirt_patch_64.c
+@@ -6,7 +6,6 @@ DEF_NATIVE(pv_irq_ops, irq_disable, "cli");
+ DEF_NATIVE(pv_irq_ops, irq_enable, "sti");
+ DEF_NATIVE(pv_irq_ops, restore_fl, "pushq %rdi; popfq");
+ DEF_NATIVE(pv_irq_ops, save_fl, "pushfq; popq %rax");
+-DEF_NATIVE(pv_cpu_ops, iret, "iretq");
+ DEF_NATIVE(pv_mmu_ops, read_cr2, "movq %cr2, %rax");
+ DEF_NATIVE(pv_mmu_ops, read_cr3, "movq %cr3, %rax");
+ DEF_NATIVE(pv_mmu_ops, write_cr3, "movq %rdi, %cr3");
+@@ -50,7 +49,6 @@ unsigned native_patch(u8 type, u16 clobbers, void *ibuf,
+ 		PATCH_SITE(pv_irq_ops, save_fl);
+ 		PATCH_SITE(pv_irq_ops, irq_enable);
+ 		PATCH_SITE(pv_irq_ops, irq_disable);
+-		PATCH_SITE(pv_cpu_ops, iret);
+ 		PATCH_SITE(pv_cpu_ops, irq_enable_sysexit);
+ 		PATCH_SITE(pv_cpu_ops, usergs_sysret32);
+ 		PATCH_SITE(pv_cpu_ops, usergs_sysret64);
+diff --git a/arch/x86/kernel/smpboot.c b/arch/x86/kernel/smpboot.c
+index 7e8e905..ca6b3f9 100644
+--- a/arch/x86/kernel/smpboot.c
++++ b/arch/x86/kernel/smpboot.c
+@@ -326,6 +326,13 @@ notrace static void __cpuinit start_secondary(void *unused)
+ 	wmb();
+ 
+ 	/*
++	 * Enable the espfix hack for this CPU
++	 */
++#ifdef CONFIG_X86_ESPFIX64
++	init_espfix_ap();
++#endif
++
++	/*
+ 	 * We need to hold call_lock, so there is no inconsistency
+ 	 * between the time smp_call_function() determines number of
+ 	 * IPI recipients, and the time when the determination is made
+diff --git a/arch/x86/kernel/traps.c b/arch/x86/kernel/traps.c
+index 7e37dce..8a39a6c 100644
+--- a/arch/x86/kernel/traps.c
++++ b/arch/x86/kernel/traps.c
+@@ -220,28 +220,40 @@ DO_ERROR_INFO(6, SIGILL, "invalid opcode", invalid_op, ILL_ILLOPN, regs->ip)
+ DO_ERROR(9, SIGFPE, "coprocessor segment overrun", coprocessor_segment_overrun)
+ DO_ERROR(10, SIGSEGV, "invalid TSS", invalid_TSS)
+ DO_ERROR(11, SIGBUS, "segment not present", segment_not_present)
+-#ifdef CONFIG_X86_32
+ DO_ERROR(12, SIGBUS, "stack segment", stack_segment)
+-#endif
+ DO_ERROR_INFO(17, SIGBUS, "alignment check", alignment_check, BUS_ADRALN, 0)
+ 
+ #ifdef CONFIG_X86_64
+ /* Runs on IST stack */
+-dotraplinkage void do_stack_segment(struct pt_regs *regs, long error_code)
+-{
+-	if (notify_die(DIE_TRAP, "stack segment", regs, error_code,
+-			12, SIGBUS) == NOTIFY_STOP)
+-		return;
+-	preempt_conditional_sti(regs);
+-	do_trap(12, SIGBUS, "stack segment", regs, error_code, NULL);
+-	preempt_conditional_cli(regs);
+-}
+-
+ dotraplinkage void do_double_fault(struct pt_regs *regs, long error_code)
+ {
+ 	static const char str[] = "double fault";
+ 	struct task_struct *tsk = current;
+ 
++#ifdef CONFIG_X86_ESPFIX64
++	extern unsigned char native_irq_return_iret[];
++
++	/*
++	 * If IRET takes a non-IST fault on the espfix64 stack, then we
++	 * end up promoting it to a doublefault.  In that case, modify
++	 * the stack to make it look like we just entered the #GP
++	 * handler from user space, similar to bad_iret.
++	 */
++	if (((long)regs->sp >> PGDIR_SHIFT) == ESPFIX_PGD_ENTRY &&
++		regs->cs == __KERNEL_CS &&
++		regs->ip == (unsigned long)native_irq_return_iret)
++	{
++		struct pt_regs *normal_regs = task_pt_regs(current);
++
++		/* Fake a #GP(0) from userspace. */
++		memmove(&normal_regs->ip, (void *)regs->sp, 5*8);
++		normal_regs->orig_ax = 0;  /* Missing (lost) #GP error code */
++		regs->ip = (unsigned long)general_protection;
++		regs->sp = (unsigned long)&normal_regs->orig_ax;
++		return;
++	}
++#endif
++
+ 	/* Return not checked because double check cannot be ignored */
+ 	notify_die(DIE_TRAP, str, regs, error_code, 8, SIGSEGV);
+ 
+@@ -500,6 +512,35 @@ asmlinkage __kprobes struct pt_regs *sync_regs(struct pt_regs *eregs)
+ 		*regs = *eregs;
+ 	return regs;
+ }
++
++struct bad_iret_stack {
++	void *error_entry_ret;
++	struct pt_regs regs;
++};
++
++asmlinkage
++struct bad_iret_stack *fixup_bad_iret(struct bad_iret_stack *s)
++{
++	/*
++	 * This is called from entry_64.S early in handling a fault
++	 * caused by a bad iret to user mode.  To handle the fault
++	 * correctly, we want move our stack frame to task_pt_regs
++	 * and we want to pretend that the exception came from the
++	 * iret target.
++	 */
++	struct bad_iret_stack *new_stack =
++		container_of(task_pt_regs(current),
++			     struct bad_iret_stack, regs);
++
++	/* Copy the IRET target to the new stack. */
++	memmove(&new_stack->regs.ip, (void *)s->regs.sp, 5*8);
++
++	/* Copy the remainder of the stack from the current stack. */
++	memmove(new_stack, s, offsetof(struct bad_iret_stack, regs.ip));
++
++	BUG_ON(!user_mode_vm(&new_stack->regs));
++	return new_stack;
++}
+ #endif
+ 
+ /*
+@@ -927,7 +968,7 @@ void __init trap_init(void)
+ 	set_intr_gate(9, &coprocessor_segment_overrun);
+ 	set_intr_gate(10, &invalid_TSS);
+ 	set_intr_gate(11, &segment_not_present);
+-	set_intr_gate_ist(12, &stack_segment, STACKFAULT_STACK);
++	set_intr_gate(12, &stack_segment);
+ 	set_intr_gate(13, &general_protection);
+ 	set_intr_gate(14, &page_fault);
+ 	set_intr_gate(15, &spurious_interrupt_bug);
+diff --git a/arch/x86/mm/dump_pagetables.c b/arch/x86/mm/dump_pagetables.c
+index a725b7f..3d6150e 100644
+--- a/arch/x86/mm/dump_pagetables.c
++++ b/arch/x86/mm/dump_pagetables.c
+@@ -30,11 +30,13 @@ struct pg_state {
+ 	unsigned long start_address;
+ 	unsigned long current_address;
+ 	const struct addr_marker *marker;
++	unsigned long lines;
+ };
+ 
+ struct addr_marker {
+ 	unsigned long start_address;
+ 	const char *name;
++	unsigned long max_lines;
+ };
+ 
+ /* Address space markers hints */
+@@ -45,6 +47,7 @@ static struct addr_marker address_markers[] = {
+ 	{ PAGE_OFFSET,		"Low Kernel Mapping" },
+ 	{ VMALLOC_START,        "vmalloc() Area" },
+ 	{ VMEMMAP_START,        "Vmemmap" },
++	{ ESPFIX_BASE_ADDR,	"ESPfix Area", 16 },
+ 	{ __START_KERNEL_map,   "High Kernel Mapping" },
+ 	{ MODULES_VADDR,        "Modules" },
+ 	{ MODULES_END,          "End Modules" },
+@@ -141,7 +144,7 @@ static void note_page(struct seq_file *m, struct pg_state *st,
+ 		      pgprot_t new_prot, int level)
+ {
+ 	pgprotval_t prot, cur;
+-	static const char units[] = "KMGTPE";
++	static const char units[] = "BKMGTPE";
+ 
+ 	/*
+ 	 * If we have a "break" in the series, we need to flush the state that
+@@ -156,6 +159,7 @@ static void note_page(struct seq_file *m, struct pg_state *st,
+ 		st->current_prot = new_prot;
+ 		st->level = level;
+ 		st->marker = address_markers;
++		st->lines = 0;
+ 		seq_printf(m, "---[ %s ]---\n", st->marker->name);
+ 	} else if (prot != cur || level != st->level ||
+ 		   st->current_address >= st->marker[1].start_address) {
+@@ -166,17 +170,21 @@ static void note_page(struct seq_file *m, struct pg_state *st,
+ 		/*
+ 		 * Now print the actual finished series
+ 		 */
+-		seq_printf(m, "0x%0*lx-0x%0*lx   ",
+-			   width, st->start_address,
+-			   width, st->current_address);
+-
+-		delta = (st->current_address - st->start_address) >> 10;
+-		while (!(delta & 1023) && unit[1]) {
+-			delta >>= 10;
+-			unit++;
++		if (!st->marker->max_lines ||
++		    st->lines < st->marker->max_lines) {
++			seq_printf(m, "0x%0*lx-0x%0*lx   ",
++				   width, st->start_address,
++				   width, st->current_address);
++
++			delta = (st->current_address - st->start_address);
++			while (!(delta & 1023) && unit[1]) {
++				delta >>= 10;
++				unit++;
++			}
++			seq_printf(m, "%9lu%c ", delta, *unit);
++			printk_prot(m, st->current_prot, st->level);
+ 		}
+-		seq_printf(m, "%9lu%c ", delta, *unit);
+-		printk_prot(m, st->current_prot, st->level);
++		st->lines++;
+ 
+ 		/*
+ 		 * We print markers for special areas of address space,
+@@ -184,7 +192,15 @@ static void note_page(struct seq_file *m, struct pg_state *st,
+ 		 * This helps in the interpretation.
+ 		 */
+ 		if (st->current_address >= st->marker[1].start_address) {
++			if (st->marker->max_lines &&
++			    st->lines > st->marker->max_lines) {
++				unsigned long nskip =
++					st->lines - st->marker->max_lines;
++				seq_printf(m, "... %lu entr%s skipped ... \n",
++					   nskip, nskip == 1 ? "y" : "ies");
++			}
+ 			st->marker++;
++			st->lines = 0;
+ 			seq_printf(m, "---[ %s ]---\n", st->marker->name);
+ 		}
+ 
+diff --git a/arch/x86/mm/extable.c b/arch/x86/mm/extable.c
+index 61b41ca..d0474ad 100644
+--- a/arch/x86/mm/extable.c
++++ b/arch/x86/mm/extable.c
+@@ -35,34 +35,3 @@ int fixup_exception(struct pt_regs *regs)
+ 
+ 	return 0;
+ }
+-
+-#ifdef CONFIG_X86_64
+-/*
+- * Need to defined our own search_extable on X86_64 to work around
+- * a B stepping K8 bug.
+- */
+-const struct exception_table_entry *
+-search_extable(const struct exception_table_entry *first,
+-	       const struct exception_table_entry *last,
+-	       unsigned long value)
+-{
+-	/* B stepping K8 bug */
+-	if ((value >> 32) == 0)
+-		value |= 0xffffffffUL << 32;
+-
+-	while (first <= last) {
+-		const struct exception_table_entry *mid;
+-		long diff;
+-
+-		mid = (last - first) / 2 + first;
+-		diff = mid->insn - value;
+-		if (diff == 0)
+-			return mid;
+-		else if (diff < 0)
+-			first = mid+1;
+-		else
+-			last = mid-1;
+-	}
+-	return NULL;
+-}
+-#endif
+diff --git a/block/blk-core.c b/block/blk-core.c
+index 4058f46..ad566e2 100644
+--- a/block/blk-core.c
++++ b/block/blk-core.c
+@@ -1651,6 +1651,10 @@ int blk_insert_cloned_request(struct request_queue *q, struct request *rq)
+ #endif
+ 
+ 	spin_lock_irqsave(q->queue_lock, flags);
++	if (unlikely(test_bit(QUEUE_FLAG_DEAD, &q->queue_flags))) {
++		spin_unlock_irqrestore(q->queue_lock, flags);
++		return -ENODEV;
++	}
+ 
+ 	/*
+ 	 * Submitting request must be dequeued before calling this function
+diff --git a/block/blk-exec.c b/block/blk-exec.c
+index 85bd7b4..2ecb362 100644
+--- a/block/blk-exec.c
++++ b/block/blk-exec.c
+@@ -43,6 +43,9 @@ static void blk_end_sync_rq(struct request *rq, int error)
+  * Description:
+  *    Insert a fully prepared request at the back of the I/O scheduler queue
+  *    for execution.  Don't wait for completion.
++ *
++ * Note:
++ *    This function will invoke @done directly if the queue is dead.
+  */
+ void blk_execute_rq_nowait(struct request_queue *q, struct gendisk *bd_disk,
+ 			   struct request *rq, int at_head,
+@@ -50,17 +53,21 @@ void blk_execute_rq_nowait(struct request_queue *q, struct gendisk *bd_disk,
+ {
+ 	int where = at_head ? ELEVATOR_INSERT_FRONT : ELEVATOR_INSERT_BACK;
+ 
++	WARN_ON(irqs_disabled());
++
++	rq->rq_disk = bd_disk;
++	rq->end_io = done;
++
++	spin_lock_irq(q->queue_lock);
++
+ 	if (unlikely(test_bit(QUEUE_FLAG_DEAD, &q->queue_flags))) {
+ 		rq->errors = -ENXIO;
+ 		if (rq->end_io)
+ 			rq->end_io(rq, rq->errors);
++		spin_unlock_irq(q->queue_lock);
+ 		return;
+ 	}
+ 
+-	rq->rq_disk = bd_disk;
+-	rq->end_io = done;
+-	WARN_ON(irqs_disabled());
+-	spin_lock_irq(q->queue_lock);
+ 	__elv_add_request(q, rq, where, 1);
+ 	__generic_unplug_device(q);
+ 	/* the queue is stopped so it won't be plugged+unplugged */
+diff --git a/drivers/block/cciss.c b/drivers/block/cciss.c
+index b2225ab..d4d165a 100644
+--- a/drivers/block/cciss.c
++++ b/drivers/block/cciss.c
+@@ -1011,6 +1011,7 @@ static int cciss_ioctl32_passthru(struct block_device *bdev, fmode_t mode,
+ 	int err;
+ 	u32 cp;
+ 
++	memset(&arg64, 0, sizeof(arg64));
+ 	err = 0;
+ 	err |=
+ 	    copy_from_user(&arg64.LUN_info, &arg32->LUN_info,
+@@ -1051,7 +1052,6 @@ static int cciss_ioctl32_big_passthru(struct block_device *bdev, fmode_t mode,
+ 	int err;
+ 	u32 cp;
+ 
+-	memset(&arg64, 0, sizeof(arg64));
+ 	err = 0;
+ 	err |=
+ 	    copy_from_user(&arg64.LUN_info, &arg32->LUN_info,
+diff --git a/drivers/connector/cn_proc.c b/drivers/connector/cn_proc.c
+index 3603599..551ea92 100644
+--- a/drivers/connector/cn_proc.c
++++ b/drivers/connector/cn_proc.c
+@@ -187,7 +187,6 @@ void proc_exit_connector(struct task_struct *task)
+ 	memset(&ev->event_data, 0, sizeof(ev->event_data));
+ 	get_seq(&msg->seq, &ev->cpu);
+ 	ktime_get_ts(&ts); /* get high res monotonic timestamp */
+-	memset(&ev->event_data, 0, sizeof(ev->event_data));
+ 	put_unaligned(timespec_to_ns(&ts), (__u64 *)&ev->timestamp_ns);
+ 	ev->what = PROC_EVENT_EXIT;
+ 	ev->event_data.exit.process_pid = task->pid;
+diff --git a/drivers/md/raid5.c b/drivers/md/raid5.c
+index 013e598..4d70eef 100644
+--- a/drivers/md/raid5.c
++++ b/drivers/md/raid5.c
+@@ -3091,8 +3091,6 @@ static void handle_stripe5(struct stripe_head *sh)
+ 				set_bit(R5_Wantwrite, &dev->flags);
+ 				if (prexor)
+ 					continue;
+-				if (s.failed > 1)
+-					continue;
+ 				if (!test_bit(R5_Insync, &dev->flags) ||
+ 				    (i == sh->pd_idx && s.failed == 0))
+ 					set_bit(STRIPE_INSYNC, &sh->state);
+@@ -3380,6 +3378,8 @@ static void handle_stripe6(struct stripe_head *sh)
+ 				pr_debug("Writing block %d\n", i);
+ 				BUG_ON(!test_bit(R5_UPTODATE, &dev->flags));
+ 				set_bit(R5_Wantwrite, &dev->flags);
++				if (s.failed > 1)
++					continue;
+ 				if (!test_bit(R5_Insync, &dev->flags) ||
+ 				    ((i == sh->pd_idx || i == qd_idx) &&
+ 				      s.failed == 0))
+diff --git a/drivers/media/dvb/ttusb-dec/ttusbdecfe.c b/drivers/media/dvb/ttusb-dec/ttusbdecfe.c
+index 21260aa..852870b 100644
+--- a/drivers/media/dvb/ttusb-dec/ttusbdecfe.c
++++ b/drivers/media/dvb/ttusb-dec/ttusbdecfe.c
+@@ -154,6 +154,9 @@ static int ttusbdecfe_dvbs_diseqc_send_master_cmd(struct dvb_frontend* fe, struc
+ 		   0x00, 0x00, 0x00, 0x00,
+ 		   0x00, 0x00 };
+ 
++	if (cmd->msg_len > sizeof(b) - 4)
++		return -EINVAL;
++
+ 	memcpy(&b[4], cmd->msg, cmd->msg_len);
+ 
+ 	state->config->send_command(fe, 0x72,
+diff --git a/drivers/net/pppol2tp.c b/drivers/net/pppol2tp.c
+index 4cdc1cf..4c8f019 100644
+--- a/drivers/net/pppol2tp.c
++++ b/drivers/net/pppol2tp.c
+@@ -2190,7 +2190,7 @@ static int pppol2tp_setsockopt(struct socket *sock, int level, int optname,
+ 	int err;
+ 
+ 	if (level != SOL_PPPOL2TP)
+-		return udp_prot.setsockopt(sk, level, optname, optval, optlen);
++		return -EINVAL;
+ 
+ 	if (optlen < sizeof(int))
+ 		return -EINVAL;
+@@ -2314,7 +2314,7 @@ static int pppol2tp_getsockopt(struct socket *sock, int level,
+ 	int err;
+ 
+ 	if (level != SOL_PPPOL2TP)
+-		return udp_prot.getsockopt(sk, level, optname, optval, optlen);
++		return -EINVAL;
+ 
+ 	if (get_user(len, (int __user *) optlen))
+ 		return -EFAULT;
+diff --git a/drivers/usb/serial/whiteheat.c b/drivers/usb/serial/whiteheat.c
+index 1247be1..748c627 100644
+--- a/drivers/usb/serial/whiteheat.c
++++ b/drivers/usb/serial/whiteheat.c
+@@ -1012,6 +1012,10 @@ static void command_port_read_callback(struct urb *urb)
+ 		dbg("%s - command_info is NULL, exiting.", __func__);
+ 		return;
+ 	}
++	if (!urb->actual_length) {
++		dev_dbg(&urb->dev->dev, "%s - empty response, exiting.\n", __func__);
++		return;
++	}
+ 	if (status) {
+ 		dbg("%s - nonzero urb status: %d", __func__, status);
+ 		if (status != -ENOENT)
+@@ -1033,7 +1037,8 @@ static void command_port_read_callback(struct urb *urb)
+ 		/* These are unsolicited reports from the firmware, hence no
+ 		   waiting command to wakeup */
+ 		dbg("%s - event received", __func__);
+-	} else if (data[0] == WHITEHEAT_GET_DTR_RTS) {
++	} else if ((data[0] == WHITEHEAT_GET_DTR_RTS) &&
++		(urb->actual_length - 1 <= sizeof(command_info->result_buffer))) {
+ 		memcpy(command_info->result_buffer, &data[1],
+ 						urb->actual_length - 1);
+ 		command_info->command_finished = WHITEHEAT_CMD_COMPLETE;
+diff --git a/fs/udf/inode.c b/fs/udf/inode.c
+index 3c4ffb2..11c291e 100644
+--- a/fs/udf/inode.c
++++ b/fs/udf/inode.c
+@@ -1062,13 +1062,22 @@ void udf_truncate(struct inode *inode)
+ 	unlock_kernel();
+ }
+ 
++/*
++ * Maximum length of linked list formed by ICB hierarchy. The chosen number is
++ * arbitrary - just that we hopefully don't limit any real use of rewritten
++ * inode on write-once media but avoid looping for too long on corrupted media.
++ */
++#define UDF_MAX_ICB_NESTING 1024
++
+ static void __udf_read_inode(struct inode *inode)
+ {
+ 	struct buffer_head *bh = NULL;
+ 	struct fileEntry *fe;
+ 	uint16_t ident;
+ 	struct udf_inode_info *iinfo = UDF_I(inode);
++	unsigned int indirections = 0;
+ 
++reread:
+ 	/*
+ 	 * Set defaults, but the inode is still incomplete!
+ 	 * Note: get_new_inode() sets the following on a new inode:
+@@ -1106,28 +1115,26 @@ static void __udf_read_inode(struct inode *inode)
+ 		ibh = udf_read_ptagged(inode->i_sb, &iinfo->i_location, 1,
+ 					&ident);
+ 		if (ident == TAG_IDENT_IE && ibh) {
+-			struct buffer_head *nbh = NULL;
+ 			struct kernel_lb_addr loc;
+ 			struct indirectEntry *ie;
+ 
+ 			ie = (struct indirectEntry *)ibh->b_data;
+ 			loc = lelb_to_cpu(ie->indirectICB.extLocation);
+ 
+-			if (ie->indirectICB.extLength &&
+-				(nbh = udf_read_ptagged(inode->i_sb, &loc, 0,
+-							&ident))) {
+-				if (ident == TAG_IDENT_FE ||
+-					ident == TAG_IDENT_EFE) {
+-					memcpy(&iinfo->i_location,
+-						&loc,
+-						sizeof(struct kernel_lb_addr));
+-					brelse(bh);
+-					brelse(ibh);
+-					brelse(nbh);
+-					__udf_read_inode(inode);
++			if (ie->indirectICB.extLength) {
++				brelse(bh);
++				brelse(ibh);
++				memcpy(&iinfo->i_location, &loc,
++				       sizeof(struct kernel_lb_addr));
++				if (++indirections > UDF_MAX_ICB_NESTING) {
++					printk(KERN_ERR "udf: "
++						"too many ICBs in ICB hierarchy"
++						" (max %d supported)\n",
++						UDF_MAX_ICB_NESTING);
++					make_bad_inode(inode);
+ 					return;
+ 				}
+-				brelse(nbh);
++				goto reread;
+ 			}
+ 		}
+ 		brelse(ibh);
+diff --git a/include/net/sctp/sctp.h b/include/net/sctp/sctp.h
+index 8a6d529..ad5989a 100644
+--- a/include/net/sctp/sctp.h
++++ b/include/net/sctp/sctp.h
+@@ -509,6 +509,11 @@ static inline void sctp_assoc_pending_pmtu(struct sctp_association *asoc)
+ 	asoc->pmtu_pending = 0;
+ }
+ 
++static inline bool sctp_chunk_pending(const struct sctp_chunk *chunk)
++{
++	return !list_empty(&chunk->list);
++}
++
+ /* Walk through a list of TLV parameters.  Don't trust the
+  * individual parameter lengths and instead depend on
+  * the chunk length to indicate when to stop.  Make sure
+diff --git a/init/main.c b/init/main.c
+index 1eb4bd5..00e6286 100644
+--- a/init/main.c
++++ b/init/main.c
+@@ -659,6 +659,10 @@ asmlinkage void __init start_kernel(void)
+ 	if (efi_enabled)
+ 		efi_enter_virtual_mode();
+ #endif
++#ifdef CONFIG_X86_ESPFIX64
++	/* Should be run before the first non-init thread is created */
++	init_espfix_bsp();
++#endif
+ 	thread_info_cache_init();
+ 	cred_init();
+ 	fork_init(totalram_pages);
+diff --git a/net/8021q/vlan_dev.c b/net/8021q/vlan_dev.c
+index 9796ea4..8c9f69c 100644
+--- a/net/8021q/vlan_dev.c
++++ b/net/8021q/vlan_dev.c
+@@ -639,10 +639,12 @@ static void vlan_dev_change_rx_flags(struct net_device *dev, int change)
+ {
+ 	struct net_device *real_dev = vlan_dev_info(dev)->real_dev;
+ 
+-	if (change & IFF_ALLMULTI)
+-		dev_set_allmulti(real_dev, dev->flags & IFF_ALLMULTI ? 1 : -1);
+-	if (change & IFF_PROMISC)
+-		dev_set_promiscuity(real_dev, dev->flags & IFF_PROMISC ? 1 : -1);
++	if (dev->flags & IFF_UP) {
++		if (change & IFF_ALLMULTI)
++			dev_set_allmulti(real_dev, dev->flags & IFF_ALLMULTI ? 1 : -1);
++		if (change & IFF_PROMISC)
++			dev_set_promiscuity(real_dev, dev->flags & IFF_PROMISC ? 1 : -1);
++	}
+ }
+ 
+ static void vlan_dev_set_rx_mode(struct net_device *vlan_dev)
+diff --git a/net/compat.c b/net/compat.c
+index 71ed839..a5848ac 100644
+--- a/net/compat.c
++++ b/net/compat.c
+@@ -83,7 +83,7 @@ int verify_compat_iovec(struct msghdr *kern_msg, struct iovec *kern_iov,
+ {
+ 	int tot_len;
+ 
+-	if (kern_msg->msg_namelen && kern_msg->msg_namelen) {
++	if (kern_msg->msg_name && kern_msg->msg_namelen) {
+ 		if (mode==VERIFY_READ) {
+ 			int err = move_addr_to_kernel(kern_msg->msg_name,
+ 						      kern_msg->msg_namelen,
+diff --git a/net/mac80211/tx.c b/net/mac80211/tx.c
+index b1d7904..687fc8e 100644
+--- a/net/mac80211/tx.c
++++ b/net/mac80211/tx.c
+@@ -770,7 +770,7 @@ static int ieee80211_fragment(struct ieee80211_local *local,
+ 		pos += fraglen;
+ 	}
+ 
+-	skb->len = hdrlen + per_fragm;
++	skb_trim(skb, hdrlen + per_fragm);
+ 	return 0;
+ }
+ 
+diff --git a/net/sctp/associola.c b/net/sctp/associola.c
+index 12137d3..8802516 100644
+--- a/net/sctp/associola.c
++++ b/net/sctp/associola.c
+@@ -1605,6 +1605,8 @@ struct sctp_chunk *sctp_assoc_lookup_asconf_ack(
+ 	 * ack chunk whose serial number matches that of the request.
+ 	 */
+ 	list_for_each_entry(ack, &asoc->asconf_ack_list, transmitted_list) {
++		if (sctp_chunk_pending(ack))
++			continue;
+ 		if (ack->subh.addip_hdr->serial == serial) {
+ 			sctp_chunk_hold(ack);
+ 			return ack;
+diff --git a/net/sctp/inqueue.c b/net/sctp/inqueue.c
+index bbf5dd2..7f33bfa 100644
+--- a/net/sctp/inqueue.c
++++ b/net/sctp/inqueue.c
+@@ -149,18 +149,9 @@ struct sctp_chunk *sctp_inq_pop(struct sctp_inq *queue)
+ 		} else {
+ 			/* Nothing to do. Next chunk in the packet, please. */
+ 			ch = (sctp_chunkhdr_t *) chunk->chunk_end;
+-
+ 			/* Force chunk->skb->data to chunk->chunk_end.  */
+-			skb_pull(chunk->skb,
+-				 chunk->chunk_end - chunk->skb->data);
+-
+-			/* Verify that we have at least chunk headers
+-			 * worth of buffer left.
+-			 */
+-			if (skb_headlen(chunk->skb) < sizeof(sctp_chunkhdr_t)) {
+-				sctp_chunk_free(chunk);
+-				chunk = queue->in_progress = NULL;
+-			}
++			skb_pull(chunk->skb, chunk->chunk_end - chunk->skb->data);
++			/* We are guaranteed to pull a SCTP header. */
+ 		}
+ 	}
+ 
+@@ -196,24 +187,14 @@ struct sctp_chunk *sctp_inq_pop(struct sctp_inq *queue)
+ 	skb_pull(chunk->skb, sizeof(sctp_chunkhdr_t));
+ 	chunk->subh.v = NULL; /* Subheader is no longer valid.  */
+ 
+-	if (chunk->chunk_end < skb_tail_pointer(chunk->skb)) {
++	if (chunk->chunk_end + sizeof(sctp_chunkhdr_t) <
++	    skb_tail_pointer(chunk->skb)) {
+ 		/* This is not a singleton */
+ 		chunk->singleton = 0;
+ 	} else if (chunk->chunk_end > skb_tail_pointer(chunk->skb)) {
+-		/* RFC 2960, Section 6.10  Bundling
+-		 *
+-		 * Partial chunks MUST NOT be placed in an SCTP packet.
+-		 * If the receiver detects a partial chunk, it MUST drop
+-		 * the chunk.
+-		 *
+-		 * Since the end of the chunk is past the end of our buffer
+-		 * (which contains the whole packet, we can freely discard
+-		 * the whole packet.
+-		 */
+-		sctp_chunk_free(chunk);
+-		chunk = queue->in_progress = NULL;
+-
+-		return NULL;
++		/* Discard inside state machine. */
++		chunk->pdiscard = 1;
++		chunk->chunk_end = skb_tail_pointer(chunk->skb);
+ 	} else {
+ 		/* We are at the end of the packet, so mark the chunk
+ 		 * in case we need to send a SACK.
+diff --git a/net/sctp/sm_make_chunk.c b/net/sctp/sm_make_chunk.c
+index 5f2dc3f..9de3592 100644
+--- a/net/sctp/sm_make_chunk.c
++++ b/net/sctp/sm_make_chunk.c
+@@ -2544,6 +2544,9 @@ do_addr_param:
+ 		addr_param = param.v + sizeof(sctp_addip_param_t);
+ 
+ 		af = sctp_get_af_specific(param_type2af(param.p->type));
++		if (af == NULL)
++			break;
++
+ 		af->from_addr_param(&addr, addr_param,
+ 				    htons(asoc->peer.port), 0);
+ 
+diff --git a/net/sctp/sm_statefuns.c b/net/sctp/sm_statefuns.c
+index ac98a1e..1d40672 100644
+--- a/net/sctp/sm_statefuns.c
++++ b/net/sctp/sm_statefuns.c
+@@ -160,6 +160,9 @@ sctp_chunk_length_valid(struct sctp_chunk *chunk,
+ {
+ 	__u16 chunk_length = ntohs(chunk->chunk_hdr->length);
+ 
++	/* Previously already marked? */
++	if (unlikely(chunk->pdiscard))
++		return 0;
+ 	if (unlikely(chunk_length < required_length))
+ 		return 0;
+ 
+@@ -747,7 +750,6 @@ sctp_disposition_t sctp_sf_do_5_1D_ce(const struct sctp_endpoint *ep,
+ 
+ 		/* Make sure that we and the peer are AUTH capable */
+ 		if (!sctp_auth_enable || !new_asoc->peer.auth_capable) {
+-			kfree_skb(chunk->auth_chunk);
+ 			sctp_association_free(new_asoc);
+ 			return sctp_sf_pdiscard(ep, asoc, type, arg, commands);
+ 		}
+diff --git a/sound/core/control.c b/sound/core/control.c
+index 8bf3a6d..ffa7857 100644
+--- a/sound/core/control.c
++++ b/sound/core/control.c
+@@ -325,6 +325,7 @@ int snd_ctl_add(struct snd_card *card, struct snd_kcontrol *kcontrol)
+ {
+ 	struct snd_ctl_elem_id id;
+ 	unsigned int idx;
++	unsigned int count;
+ 	int err = -EINVAL;
+ 
+ 	if (! kcontrol)
+@@ -356,8 +357,9 @@ int snd_ctl_add(struct snd_card *card, struct snd_kcontrol *kcontrol)
+ 	card->controls_count += kcontrol->count;
+ 	kcontrol->id.numid = card->last_numid + 1;
+ 	card->last_numid += kcontrol->count;
++	count = kcontrol->count;
+ 	up_write(&card->controls_rwsem);
+-	for (idx = 0; idx < kcontrol->count; idx++, id.index++, id.numid++)
++	for (idx = 0; idx < count; idx++, id.index++, id.numid++)
+ 		snd_ctl_notify(card, SNDRV_CTL_EVENT_MASK_ADD, &id);
+ 	return 0;
+ 
+@@ -784,9 +786,9 @@ static int snd_ctl_elem_write(struct snd_card *card, struct snd_ctl_file *file,
+ 			result = kctl->put(kctl, control);
+ 		}
+ 		if (result > 0) {
++			struct snd_ctl_elem_id id = control->id;
+ 			up_read(&card->controls_rwsem);
+-			snd_ctl_notify(card, SNDRV_CTL_EVENT_MASK_VALUE,
+-				       &control->id);
++			snd_ctl_notify(card, SNDRV_CTL_EVENT_MASK_VALUE, &id);
+ 			return 0;
+ 		}
+ 	}
+@@ -997,21 +999,16 @@ static int snd_ctl_elem_add(struct snd_ctl_file *file,
+ 				 SNDRV_CTL_ELEM_ACCESS_TLV_READWRITE));
+ 	info->id.numid = 0;
+ 	memset(&kctl, 0, sizeof(kctl));
+-	down_write(&card->controls_rwsem);
+-	_kctl = snd_ctl_find_id(card, &info->id);
+-	err = 0;
+-	if (_kctl) {
+-		if (replace)
+-			err = snd_ctl_remove(card, _kctl);
+-		else
+-			err = -EBUSY;
+-	} else {
+-		if (replace)
+-			err = -ENOENT;
++
++	if (replace) {
++		err = snd_ctl_remove_user_ctl(file, &info->id);
++		if (err)
++			return err;
+ 	}
+-	up_write(&card->controls_rwsem);
+-	if (err < 0)
+-		return err;
++
++	if (card->user_ctl_count >= MAX_USER_CONTROLS)
++		return -ENOMEM;
++
+ 	memcpy(&kctl.id, &info->id, sizeof(info->id));
+ 	kctl.count = info->owner ? info->owner : 1;
+ 	access |= SNDRV_CTL_ELEM_ACCESS_USER;
