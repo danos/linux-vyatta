@@ -1,17 +1,17 @@
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Fri, 10 Jun 2011 11:04:15 +0200
-Subject: [PATCH 192/343] rtmutex-futex-prepare-rt.patch
-Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=8ef804fe6136e102ad388f33360f0a1c9ed8af18
+Subject: [PATCH 192/348] rtmutex-futex-prepare-rt.patch
+Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=5a859e27b3e63e6e35000ad9e4fedeb370d63030
 
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 ---
  kernel/futex.c          | 77 +++++++++++++++++++++++++++++++++++++++----------
- kernel/rtmutex.c        | 31 +++++++++++++++++---
+ kernel/rtmutex.c        | 29 +++++++++++++++++--
  kernel/rtmutex_common.h |  2 ++
- 3 files changed, 91 insertions(+), 19 deletions(-)
+ 3 files changed, 90 insertions(+), 18 deletions(-)
 
 diff --git a/kernel/futex.c b/kernel/futex.c
-index 1bb37d0..bcc5b38 100644
+index f31f190..9ab9845 100644
 --- a/kernel/futex.c
 +++ b/kernel/futex.c
 @@ -1568,6 +1568,16 @@ retry_private:
@@ -40,7 +40,7 @@ index 1bb37d0..bcc5b38 100644
  	union futex_key key2 = FUTEX_KEY_INIT;
  	struct futex_q q = futex_q_init;
  	int res, ret;
-@@ -2467,20 +2477,55 @@ static int futex_wait_requeue_pi(u32 __user *uaddr, unsigned int flags,
+@@ -2468,20 +2478,55 @@ static int futex_wait_requeue_pi(u32 __user *uaddr, unsigned int flags,
  	/* Queue the futex_q, drop the hb lock, wait for wakeup. */
  	futex_wait_queue_me(hb, &q, to);
  
@@ -107,7 +107,7 @@ index 1bb37d0..bcc5b38 100644
  
  	/* Check if the requeue code acquired the second futex for us. */
  	if (!q.rt_waiter) {
-@@ -2489,9 +2534,10 @@ static int futex_wait_requeue_pi(u32 __user *uaddr, unsigned int flags,
+@@ -2490,9 +2535,10 @@ static int futex_wait_requeue_pi(u32 __user *uaddr, unsigned int flags,
  		 * did a lock-steal - fix up the PI-state in that case.
  		 */
  		if (q.pi_state && (q.pi_state->owner != current)) {
@@ -120,7 +120,7 @@ index 1bb37d0..bcc5b38 100644
  		}
  	} else {
  		/*
-@@ -2504,7 +2550,8 @@ static int futex_wait_requeue_pi(u32 __user *uaddr, unsigned int flags,
+@@ -2505,7 +2551,8 @@ static int futex_wait_requeue_pi(u32 __user *uaddr, unsigned int flags,
  		ret = rt_mutex_finish_proxy_lock(pi_mutex, to, &rt_waiter, 1);
  		debug_rt_mutex_free_waiter(&rt_waiter);
  
@@ -131,7 +131,7 @@ index 1bb37d0..bcc5b38 100644
  		 * Fixup the pi_state owner and possibly acquire the lock if we
  		 * haven't already.
 diff --git a/kernel/rtmutex.c b/kernel/rtmutex.c
-index 723fd3a..13b3c92 100644
+index 0459561..10b11b2 100644
 --- a/kernel/rtmutex.c
 +++ b/kernel/rtmutex.c
 @@ -67,6 +67,11 @@ static void fixup_rt_mutex_waiters(struct rt_mutex *lock)
@@ -146,7 +146,7 @@ index 723fd3a..13b3c92 100644
  /*
   * We can speed up the acquire/release, if the architecture
   * supports cmpxchg and if there's no debugging state to be set up
-@@ -196,7 +201,7 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
+@@ -270,7 +275,7 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
  	 * reached or the state of the chain has changed while we
  	 * dropped the locks.
  	 */
@@ -155,8 +155,8 @@ index 723fd3a..13b3c92 100644
  		goto out_unlock_pi;
  
  	/*
-@@ -399,6 +404,23 @@ static int task_blocks_on_rt_mutex(struct rt_mutex *lock,
- 	int chain_walk = 0, res;
+@@ -525,6 +530,23 @@ static int task_blocks_on_rt_mutex(struct rt_mutex *lock,
+ 		return -EDEADLK;
  
  	raw_spin_lock_irqsave(&task->pi_lock, flags);
 +
@@ -179,25 +179,16 @@ index 723fd3a..13b3c92 100644
  	__rt_mutex_adjust_prio(task);
  	waiter->task = task;
  	waiter->lock = lock;
-@@ -423,7 +445,7 @@ static int task_blocks_on_rt_mutex(struct rt_mutex *lock,
+@@ -549,7 +571,7 @@ static int task_blocks_on_rt_mutex(struct rt_mutex *lock,
  		plist_add(&waiter->pi_list_entry, &owner->pi_waiters);
  
  		__rt_mutex_adjust_prio(owner);
 -		if (owner->pi_blocked_on)
 +		if (rt_mutex_real_waiter(owner->pi_blocked_on))
  			chain_walk = 1;
- 		raw_spin_unlock_irqrestore(&owner->pi_lock, flags);
- 	}
-@@ -517,7 +539,7 @@ static void remove_waiter(struct rt_mutex *lock,
- 		}
- 		__rt_mutex_adjust_prio(owner);
- 
--		if (owner->pi_blocked_on)
-+		if (rt_mutex_real_waiter(owner->pi_blocked_on))
- 			chain_walk = 1;
- 
- 		raw_spin_unlock_irqrestore(&owner->pi_lock, flags);
-@@ -551,7 +573,8 @@ void rt_mutex_adjust_pi(struct task_struct *task)
+ 	} else if (debug_rt_mutex_detect_deadlock(waiter, detect_deadlock)) {
+ 		chain_walk = 1;
+@@ -700,7 +722,8 @@ void rt_mutex_adjust_pi(struct task_struct *task)
  	raw_spin_lock_irqsave(&task->pi_lock, flags);
  
  	waiter = task->pi_blocked_on;
