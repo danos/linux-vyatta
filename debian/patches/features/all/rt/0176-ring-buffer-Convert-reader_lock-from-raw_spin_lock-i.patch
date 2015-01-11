@@ -1,8 +1,8 @@
 From: Steven Rostedt <rostedt@goodmis.org>
 Date: Tue, 27 Sep 2011 13:56:50 -0400
-Subject: [PATCH 176/343] ring-buffer: Convert reader_lock from raw_spin_lock
+Subject: [PATCH 176/348] ring-buffer: Convert reader_lock from raw_spin_lock
  into spin_lock
-Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=80a72a2a4b8a5975bb94dfbda0c3f7ba45de8ab1
+Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=641ef453f3b9e7ca5f3ed70c8fd4c5f05ffb88a3
 
 The reader_lock is mostly taken in normal context with interrupts enabled.
 But because ftrace_dump() can happen anywhere, it is used as a spin lock
@@ -44,7 +44,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  1 file changed, 81 insertions(+), 70 deletions(-)
 
 diff --git a/kernel/trace/ring_buffer.c b/kernel/trace/ring_buffer.c
-index 648f25a..408d724 100644
+index b252661..aa41914 100644
 --- a/kernel/trace/ring_buffer.c
 +++ b/kernel/trace/ring_buffer.c
 @@ -478,7 +478,7 @@ struct ring_buffer_per_cpu {
@@ -172,7 +172,7 @@ index 648f25a..408d724 100644
  
  	return ret;
  }
-@@ -2871,15 +2913,16 @@ void ring_buffer_iter_reset(struct ring_buffer_iter *iter)
+@@ -2866,15 +2908,16 @@ void ring_buffer_iter_reset(struct ring_buffer_iter *iter)
  {
  	struct ring_buffer_per_cpu *cpu_buffer;
  	unsigned long flags;
@@ -191,7 +191,7 @@ index 648f25a..408d724 100644
  }
  EXPORT_SYMBOL_GPL(ring_buffer_iter_reset);
  
-@@ -3299,21 +3342,6 @@ rb_iter_peek(struct ring_buffer_iter *iter, u64 *ts)
+@@ -3296,21 +3339,6 @@ rb_iter_peek(struct ring_buffer_iter *iter, u64 *ts)
  }
  EXPORT_SYMBOL_GPL(ring_buffer_iter_peek);
  
@@ -213,7 +213,7 @@ index 648f25a..408d724 100644
  /**
   * ring_buffer_peek - peek at the next event to be read
   * @buffer: The ring buffer to read
-@@ -3331,22 +3359,17 @@ ring_buffer_peek(struct ring_buffer *buffer, int cpu, u64 *ts,
+@@ -3328,22 +3356,17 @@ ring_buffer_peek(struct ring_buffer *buffer, int cpu, u64 *ts,
  	struct ring_buffer_per_cpu *cpu_buffer = buffer->buffers[cpu];
  	struct ring_buffer_event *event;
  	unsigned long flags;
@@ -239,7 +239,7 @@ index 648f25a..408d724 100644
  
  	if (event && event->type_len == RINGBUF_TYPE_PADDING)
  		goto again;
-@@ -3368,11 +3391,12 @@ ring_buffer_iter_peek(struct ring_buffer_iter *iter, u64 *ts)
+@@ -3365,11 +3388,12 @@ ring_buffer_iter_peek(struct ring_buffer_iter *iter, u64 *ts)
  	struct ring_buffer_per_cpu *cpu_buffer = iter->cpu_buffer;
  	struct ring_buffer_event *event;
  	unsigned long flags;
@@ -254,7 +254,7 @@ index 648f25a..408d724 100644
  
  	if (event && event->type_len == RINGBUF_TYPE_PADDING)
  		goto again;
-@@ -3398,9 +3422,7 @@ ring_buffer_consume(struct ring_buffer *buffer, int cpu, u64 *ts,
+@@ -3395,9 +3419,7 @@ ring_buffer_consume(struct ring_buffer *buffer, int cpu, u64 *ts,
  	struct ring_buffer_per_cpu *cpu_buffer;
  	struct ring_buffer_event *event = NULL;
  	unsigned long flags;
@@ -265,7 +265,7 @@ index 648f25a..408d724 100644
  
   again:
  	/* might be called in atomic */
-@@ -3410,9 +3432,7 @@ ring_buffer_consume(struct ring_buffer *buffer, int cpu, u64 *ts,
+@@ -3407,9 +3429,7 @@ ring_buffer_consume(struct ring_buffer *buffer, int cpu, u64 *ts,
  		goto out;
  
  	cpu_buffer = buffer->buffers[cpu];
@@ -276,7 +276,7 @@ index 648f25a..408d724 100644
  
  	event = rb_buffer_peek(cpu_buffer, ts, lost_events);
  	if (event) {
-@@ -3420,9 +3440,8 @@ ring_buffer_consume(struct ring_buffer *buffer, int cpu, u64 *ts,
+@@ -3417,9 +3437,8 @@ ring_buffer_consume(struct ring_buffer *buffer, int cpu, u64 *ts,
  		rb_advance_reader(cpu_buffer);
  	}
  
@@ -288,7 +288,7 @@ index 648f25a..408d724 100644
  
   out:
  	preempt_enable();
-@@ -3507,17 +3526,18 @@ ring_buffer_read_start(struct ring_buffer_iter *iter)
+@@ -3504,17 +3523,18 @@ ring_buffer_read_start(struct ring_buffer_iter *iter)
  {
  	struct ring_buffer_per_cpu *cpu_buffer;
  	unsigned long flags;
@@ -309,7 +309,7 @@ index 648f25a..408d724 100644
  }
  EXPORT_SYMBOL_GPL(ring_buffer_read_start);
  
-@@ -3551,8 +3571,9 @@ ring_buffer_read(struct ring_buffer_iter *iter, u64 *ts)
+@@ -3548,8 +3568,9 @@ ring_buffer_read(struct ring_buffer_iter *iter, u64 *ts)
  	struct ring_buffer_event *event;
  	struct ring_buffer_per_cpu *cpu_buffer = iter->cpu_buffer;
  	unsigned long flags;
@@ -320,7 +320,7 @@ index 648f25a..408d724 100644
   again:
  	event = rb_iter_peek(iter, ts);
  	if (!event)
-@@ -3563,7 +3584,7 @@ ring_buffer_read(struct ring_buffer_iter *iter, u64 *ts)
+@@ -3560,7 +3581,7 @@ ring_buffer_read(struct ring_buffer_iter *iter, u64 *ts)
  
  	rb_advance_iter(iter);
   out:
@@ -329,7 +329,7 @@ index 648f25a..408d724 100644
  
  	return event;
  }
-@@ -3628,13 +3649,14 @@ void ring_buffer_reset_cpu(struct ring_buffer *buffer, int cpu)
+@@ -3625,13 +3646,14 @@ void ring_buffer_reset_cpu(struct ring_buffer *buffer, int cpu)
  {
  	struct ring_buffer_per_cpu *cpu_buffer = buffer->buffers[cpu];
  	unsigned long flags;
@@ -345,7 +345,7 @@ index 648f25a..408d724 100644
  
  	if (RB_WARN_ON(cpu_buffer, local_read(&cpu_buffer->committing)))
  		goto out;
-@@ -3646,7 +3668,7 @@ void ring_buffer_reset_cpu(struct ring_buffer *buffer, int cpu)
+@@ -3643,7 +3665,7 @@ void ring_buffer_reset_cpu(struct ring_buffer *buffer, int cpu)
  	arch_spin_unlock(&cpu_buffer->lock);
  
   out:
@@ -354,7 +354,7 @@ index 648f25a..408d724 100644
  
  	atomic_dec(&cpu_buffer->record_disabled);
  }
-@@ -3673,22 +3695,16 @@ int ring_buffer_empty(struct ring_buffer *buffer)
+@@ -3670,22 +3692,16 @@ int ring_buffer_empty(struct ring_buffer *buffer)
  {
  	struct ring_buffer_per_cpu *cpu_buffer;
  	unsigned long flags;
@@ -380,7 +380,7 @@ index 648f25a..408d724 100644
  
  		if (!ret)
  			return 0;
-@@ -3707,22 +3723,16 @@ int ring_buffer_empty_cpu(struct ring_buffer *buffer, int cpu)
+@@ -3704,22 +3720,16 @@ int ring_buffer_empty_cpu(struct ring_buffer *buffer, int cpu)
  {
  	struct ring_buffer_per_cpu *cpu_buffer;
  	unsigned long flags;
@@ -406,7 +406,7 @@ index 648f25a..408d724 100644
  
  	return ret;
  }
-@@ -3897,6 +3907,7 @@ int ring_buffer_read_page(struct ring_buffer *buffer,
+@@ -3894,6 +3904,7 @@ int ring_buffer_read_page(struct ring_buffer *buffer,
  	unsigned int commit;
  	unsigned int read;
  	u64 save_timestamp;
@@ -414,7 +414,7 @@ index 648f25a..408d724 100644
  	int ret = -1;
  
  	if (!cpumask_test_cpu(cpu, buffer->cpumask))
-@@ -3918,7 +3929,7 @@ int ring_buffer_read_page(struct ring_buffer *buffer,
+@@ -3915,7 +3926,7 @@ int ring_buffer_read_page(struct ring_buffer *buffer,
  	if (!bpage)
  		goto out;
  
@@ -423,7 +423,7 @@ index 648f25a..408d724 100644
  
  	reader = rb_get_reader_page(cpu_buffer);
  	if (!reader)
-@@ -4042,7 +4053,7 @@ int ring_buffer_read_page(struct ring_buffer *buffer,
+@@ -4039,7 +4050,7 @@ int ring_buffer_read_page(struct ring_buffer *buffer,
  		memset(&bpage->data[commit], 0, BUF_PAGE_SIZE - commit);
  
   out_unlock:
