@@ -1,0 +1,45 @@
+From: Thomas Gleixner <tglx@linutronix.de>
+Date: Sat, 7 Jun 2014 12:10:36 +0200
+Subject: [PATCH 350/371] rtmutex: No need to keep task ref for lock owner
+ check
+Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=baa484701e23c114f621b3cb6de01dc5607537c7
+
+upstream commit: 2ffa5a5cd2fe792b6399c903d5172adf088d8ff7
+
+There is no point to keep the task ref across the check for lock
+owner. Drop the ref before that, so the protection context is clear.
+
+Found while documenting the chain walk.
+
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Reviewed-by: Steven Rostedt <rostedt@goodmis.org>
+Reviewed-by: Lai Jiangshan <laijs@cn.fujitsu.com>
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ kernel/rtmutex.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/kernel/rtmutex.c b/kernel/rtmutex.c
+index a74c57a..7d338c8 100644
+--- a/kernel/rtmutex.c
++++ b/kernel/rtmutex.c
+@@ -407,6 +407,8 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
+ 
+ 	/* Release the task */
+ 	raw_spin_unlock_irqrestore(&task->pi_lock, flags);
++	put_task_struct(task);
++
+ 	if (!rt_mutex_owner(lock)) {
+ 		struct rt_mutex_waiter *lock_top_waiter;
+ 
+@@ -418,9 +420,8 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
+ 		if (top_waiter != lock_top_waiter)
+ 			rt_mutex_wake_waiter(lock_top_waiter);
+ 		raw_spin_unlock(&lock->wait_lock);
+-		goto out_put_task;
++		return 0;
+ 	}
+-	put_task_struct(task);
+ 
+ 	/* Grab the next task */
+ 	task = rt_mutex_owner(lock);
