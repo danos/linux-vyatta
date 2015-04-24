@@ -1,0 +1,38 @@
+From: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+Date: Tue, 17 Feb 2015 16:18:05 +0100
+Subject: [PATCH 362/371] rt-mutex: avoid a NULL pointer dereference on
+ deadlock
+Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=4e671f7086c89c73b73c990b33b1eb4f9d547243
+
+With task_blocks_on_rt_mutex() returning early -EDEADLK we never add the
+waiter to the waitqueue. Later, we try to remove it via remove_waiter()
+and go boom in rt_mutex_top_waiter() because rb_entry() gives a NULL
+pointer.
+Tested on v3.18-RT where rtmutex is used for regular mutex and I tried
+to get one twice in a row.
+
+Not sure when this started but I guess 397335f00 ("rtmutex: Fix deadlock
+detector for real") or commit 3d5c9340 ("rtmutex: Handle deadlock
+detection smarter").
+
+Cc: stable-rt@vger.kernel.org
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ kernel/rtmutex.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/kernel/rtmutex.c b/kernel/rtmutex.c
+index a94f3a3..52cab27 100644
+--- a/kernel/rtmutex.c
++++ b/kernel/rtmutex.c
+@@ -1511,7 +1511,8 @@ rt_mutex_slowlock(struct rt_mutex *lock, int state,
+ 	set_current_state(TASK_RUNNING);
+ 
+ 	if (unlikely(ret)) {
+-		remove_waiter(lock, &waiter);
++		if (rt_mutex_has_waiters(lock))
++			remove_waiter(lock, &waiter);
+ 		rt_mutex_handle_deadlock(ret, chwalk, &waiter);
+ 	}
+ 

@@ -1,0 +1,55 @@
+From: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+Date: Wed, 18 Feb 2015 14:07:21 +0100
+Subject: [PATCH 365/371] arm/futex: disable preemption during
+ futex_atomic_cmpxchg_inatomic()
+Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=fcaeac4a412858ad15c6746ac227a65a1306e961
+
+The ARM UP implementation of futex_atomic_cmpxchg_inatomic() assumes that
+pagefault_disable() inherits a preempt disabled section. This assumtion
+is true for mainline but -RT reverts this and allows preemption in
+pagefault disabled regions.
+The code sequence of futex_atomic_cmpxchg_inatomic():
+
+|   x = *futex;
+|   if (x == oldval)
+|           *futex = newval;
+
+The problem occurs if the code is preempted after reading the futex value or
+after comparing it with x. While preempted, the futex owner has to be
+scheduled which then releases the lock (in userland because it has no waiter
+yet). Once the code is back on the CPU, it overwrites the futex value
+with with the old PID and the waiter bit set.
+
+The workaround is to explicit disable code preemption to avoid the
+described race window.
+
+Debugged-by:  Thomas Gleixner <tglx@linutronix.de>
+Cc: stable-rt@vger.kernel.org
+Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ arch/arm/include/asm/futex.h | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/arch/arm/include/asm/futex.h b/arch/arm/include/asm/futex.h
+index aefd459..48fc90c 100644
+--- a/arch/arm/include/asm/futex.h
++++ b/arch/arm/include/asm/futex.h
+@@ -86,6 +86,8 @@ futex_atomic_cmpxchg_inatomic(u32 *uval, u32 __user *uaddr,
+ 	int ret = 0;
+ 	u32 val;
+ 
++	preempt_disable_rt();
++
+ 	if (!access_ok(VERIFY_WRITE, uaddr, sizeof(u32)))
+ 		return -EFAULT;
+ 
+@@ -100,6 +102,8 @@ futex_atomic_cmpxchg_inatomic(u32 *uval, u32 __user *uaddr,
+ 	: "cc", "memory");
+ 
+ 	*uval = val;
++
++	preempt_enable_rt();
+ 	return ret;
+ }
+ 
