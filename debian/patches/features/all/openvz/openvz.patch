@@ -6551,6 +6551,8 @@ Date:   Mon Feb 15 15:17:35 2010 +0300
  wrapper introduction in 910ffdb18a6408e14febbb6e4b6840fd2c928c82]
 [bwh: Fix context for changes to ip_send_reply() in fix for CVE-2012-3552]
 [dannf: Fix content to skb_header_size() after fix for CVE-2012-3552]
+[bwh: Fix context for changes to ret_from_fork, tcp_send_fin() and tcp_connect()
+ in 2.6.32.66]
 
 --- /dev/null
 +++ b/COPYING.Parallels
@@ -7308,8 +7310,8 @@ Date:   Mon Feb 15 15:17:35 2010 +0300
  
  	testl $3, CS-ARGOFFSET(%rsp)		# from kernel_thread?
 @@ -418,6 +422,18 @@ ENTRY(ret_from_fork)
- 	RESTORE_TOP_OF_STACK %rdi, -ARGOFFSET
- 	jmp ret_from_sys_call			# go to the SYSRET fastpath
+ 	 */
+ 	jmp  int_ret_from_sys_call
  
 +x86_64_ret_from_resume:
 +	movq (%rsp),%rax
@@ -85000,8 +85002,8 @@ Date:   Mon Feb 15 15:17:35 2010 +0300
  			tcp_init_tso_segs(sk, skb, cur_mss);
  			tcp_adjust_pcount(sk, skb, oldpcount - tcp_skb_pcount(skb));
 @@ -2149,6 +2185,7 @@ void tcp_send_fin(struct sock *sk)
- 				break;
- 			yield();
+ 				goto coalesce;
+ 			return;
  		}
 +		ub_tcpsndbuf_charge_forced(sk, skb);
  
@@ -85053,16 +85055,16 @@ Date:   Mon Feb 15 15:17:35 2010 +0300
  	tcp_initialize_rcv_mss(sk);
  
 @@ -2381,6 +2437,10 @@ int tcp_connect(struct sock *sk)
- 	buff = alloc_skb_fclone(MAX_TCP_HEADER + 15, sk->sk_allocation);
- 	if (unlikely(buff == NULL))
+ 	buff = sk_stream_alloc_skb(sk, 0, sk->sk_allocation);
+ 	if (unlikely(!buff))
  		return -ENOBUFS;
 +	if (ub_tcpsndbuf_charge(sk, buff) < 0) {
 +		kfree_skb(buff);
 +		return -ENOBUFS;
 +	}
  
- 	/* Reserve space for headers. */
- 	skb_reserve(buff, MAX_TCP_HEADER);
+ 	tp->snd_nxt = tp->write_seq;
+ 	tcp_init_nondata_skb(buff, tp->write_seq++, TCPCB_FLAG_SYN);
 --- a/net/ipv4/tcp_timer.c
 +++ b/net/ipv4/tcp_timer.c
 @@ -20,6 +20,8 @@
