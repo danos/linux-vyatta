@@ -1,0 +1,62 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Sun, 14 Jun 2015 18:45:08 +0100
+Subject: [PATCH] pipe: iovec: Fix memory corruption when retrying atomic copy
+ as non-atomic
+
+pipe_iov_copy_{from,to}_user() may be called twice with the same
+iovec, so they must not modify it.  Currently, the second call will
+corrupt the piped data (possibly also leading to an information leak
+between processes) and may also corrupt kernel memory.
+
+This was fixed upstream by commits f0d1bec9d58d ("new helper:
+copy_page_from_iter()") and 637b58c2887e ("switch pipe_read() to
+copy_page_to_iter()"), but those aren't suitable for stable.
+
+Cc: stable <stable@vger.kernel.org> # 3.14 and earlier
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+ fs/pipe.c | 12 +++++-------
+ 1 file changed, 5 insertions(+), 7 deletions(-)
+
+diff --git a/fs/pipe.c b/fs/pipe.c
+index 8ca88fc..5495c4f 100644
+--- a/fs/pipe.c
++++ b/fs/pipe.c
+@@ -103,7 +103,7 @@ void pipe_wait(struct pipe_inode_info *pipe)
+ }
+ 
+ static int
+-pipe_iov_copy_from_user(void *to, struct iovec *iov, unsigned long len,
++pipe_iov_copy_from_user(void *to, const struct iovec *iov, unsigned long len,
+ 			int atomic)
+ {
+ 	unsigned long copy;
+@@ -122,15 +122,14 @@ pipe_iov_copy_from_user(void *to, struct iovec *iov, unsigned long len,
+ 		}
+ 		to += copy;
+ 		len -= copy;
+-		iov->iov_base += copy;
+-		iov->iov_len -= copy;
++		iov++;
+ 	}
+ 	return 0;
+ }
+ 
+ static int
+-pipe_iov_copy_to_user(struct iovec *iov, const void *from, unsigned long len,
+-		      int atomic)
++pipe_iov_copy_to_user(const struct iovec *iov, const void *from,
++		      unsigned long len, int atomic)
+ {
+ 	unsigned long copy;
+ 
+@@ -148,8 +147,7 @@ pipe_iov_copy_to_user(struct iovec *iov, const void *from, unsigned long len,
+ 		}
+ 		from += copy;
+ 		len -= copy;
+-		iov->iov_base += copy;
+-		iov->iov_len -= copy;
++		iov++;
+ 	}
+ 	return 0;
+ }
