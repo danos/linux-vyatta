@@ -6,17 +6,18 @@ commit 86cbce4de23f26f1aee8df789d30b0f1ba78c967 upstream.
 
 Acked-by: Greg Kroah-Hartman <gregkh@suse.de>
 Signed-off-by: Cong Wang <amwang@redhat.com>
-[bwh: Adjust filename to apply after move to drivers/scsi; apply changes
- from Linux's merge commit 9f3938346a5c1fa504647670edb5fea5756cfb00.]
+[bwh: Adjust filename to apply after move to drivers/scsi and after
+ backport of commit 8de580742fee
+ 'scsi: storvsc: Fix a bug in copy_from_bounce_buffer()',
+ apply changes from Linux's merge commit
+ 9f3938346a5c1fa504647670edb5fea5756cfb00.]
 ---
  drivers/scsi/storvsc_drv.c |   52 ++++++++++++++++++++++----------------------
  1 file changed, 26 insertions(+), 26 deletions(-)
 
-diff --git a/drivers/scsi/storvsc_drv.c b/drivers/scsi/storvsc_drv.c
-index 695ffc3..83a1972 100644
 --- a/drivers/scsi/storvsc_drv.c
 +++ b/drivers/scsi/storvsc_drv.c
-@@ -481,6 +481,19 @@ cleanup:
+@@ -483,6 +483,19 @@ cleanup:
  	return NULL;
  }
  
@@ -36,7 +37,7 @@ index 695ffc3..83a1972 100644
  /* Assume the original sgl has enough room */
  static unsigned int copy_from_bounce_buffer(struct scatterlist *orig_sgl,
  					    struct scatterlist *bounce_sgl,
-@@ -499,15 +512,12 @@ static unsigned int copy_from_bounce_buffer(struct scatterlist *orig_sgl,
+@@ -501,15 +514,12 @@ static unsigned int copy_from_bounce_buf
  	local_irq_save(flags);
  
  	for (i = 0; i < orig_sgl_count; i++) {
@@ -54,7 +55,7 @@ index 695ffc3..83a1972 100644
  
  		while (destlen) {
  			src = bounce_addr + bounce_sgl[j].offset;
-@@ -523,7 +533,7 @@ static unsigned int copy_from_bounce_buffer(struct scatterlist *orig_sgl,
+@@ -525,7 +535,7 @@ static unsigned int copy_from_bounce_buf
  
  			if (bounce_sgl[j].offset == bounce_sgl[j].length) {
  				/* full */
@@ -63,7 +64,7 @@ index 695ffc3..83a1972 100644
  				j++;
  
  				/*
-@@ -537,26 +547,21 @@ static unsigned int copy_from_bounce_buffer(struct scatterlist *orig_sgl,
+@@ -539,26 +549,21 @@ static unsigned int copy_from_bounce_buf
  					/*
  					 * We are done; cleanup and return.
  					 */
@@ -94,7 +95,7 @@ index 695ffc3..83a1972 100644
  	}
  
  	local_irq_restore(flags);
-@@ -581,15 +586,12 @@ static unsigned int copy_to_bounce_buffer(struct scatterlist *orig_sgl,
+@@ -583,15 +588,12 @@ static unsigned int copy_to_bounce_buffe
  	local_irq_save(flags);
  
  	for (i = 0; i < orig_sgl_count; i++) {
@@ -112,33 +113,32 @@ index 695ffc3..83a1972 100644
  
  		while (srclen) {
  			/* assume bounce offset always == 0 */
-@@ -606,22 +608,20 @@ static unsigned int copy_to_bounce_buffer(struct scatterlist *orig_sgl,
+@@ -608,24 +610,22 @@ static unsigned int copy_to_bounce_buffe
  
  			if (bounce_sgl[j].length == PAGE_SIZE) {
  				/* full..move to next entry */
 -				kunmap_atomic((void *)bounce_addr, KM_IRQ0);
 +				sg_kunmap_atomic(bounce_addr);
+ 				bounce_addr = 0;
  				j++;
+ 			}
  
- 				/* if we need to use another bounce buffer */
- 				if (srclen || i != orig_sgl_count - 1)
--					bounce_addr =
+ 			/* if we need to use another bounce buffer */
+ 			if (srclen && bounce_addr == 0)
+-				bounce_addr =
 -					(unsigned long)kmap_atomic(
 -					sg_page((&bounce_sgl[j])), KM_IRQ0);
-+					bounce_addr = sg_kmap_atomic(bounce_sgl,j);
++				bounce_addr = sg_kmap_atomic(bounce_sgl,j);
  
- 			} else if (srclen == 0 && i == orig_sgl_count - 1) {
- 				/* unmap the last bounce that is < PAGE_SIZE */
--				kunmap_atomic((void *)bounce_addr, KM_IRQ0);
-+				sg_kunmap_atomic(bounce_addr);
- 			}
  		}
  
 -		kunmap_atomic((void *)(src_addr - orig_sgl[i].offset), KM_IRQ0);
 +		sg_kunmap_atomic(src_addr - orig_sgl[i].offset);
  	}
  
+ 	if (bounce_addr)
+-		kunmap_atomic((void *)bounce_addr, KM_IRQ0);
++		sg_kunmap_atomic(bounce_addr);
+ 
  	local_irq_restore(flags);
--- 
-1.7.9.5
-
+ 
