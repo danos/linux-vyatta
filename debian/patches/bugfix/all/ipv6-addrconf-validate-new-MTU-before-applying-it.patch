@@ -22,41 +22,63 @@ ndisc_router_discovery(), for when kernel itself parses the RA.
 Signed-off-by: Marcelo Ricardo Leitner <mleitner@redhat.com>
 Signed-off-by: Sabrina Dubroca <sd@queasysnail.net>
 Signed-off-by: David S. Miller <davem@davemloft.net>
-[bwh: Backported to 2.6.32: adjust context, spacing]
+[bwh: Backported to 2.6.32:
+ - Add a strategy for the sysctl as we don't get a default strategy
+ - Adjust context, spacing]
 ---
- net/ipv6/addrconf.c | 17 ++++++++++++++++-
- 1 file changed, 16 insertions(+), 1 deletion(-)
+ net/ipv6/addrconf.c | 37 ++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 36 insertions(+), 1 deletion(-)
 
 --- a/net/ipv6/addrconf.c
 +++ b/net/ipv6/addrconf.c
-@@ -4046,6 +4046,21 @@ int addrconf_sysctl_forward(struct ctl_table *ctl, int write,
+@@ -4046,6 +4046,40 @@ int addrconf_sysctl_forward(struct ctl_table *ctl, int write,
  	return addrconf_fixup_forwarding(table, valp, val);
  }
  
 +static
++struct ctl_table *addrconf_sysctl_mtu_init(struct ctl_table *newctl,
++					   const struct ctl_table *ctl)
++{
++	struct inet6_dev *idev = ctl->extra1;
++	static int min_mtu = IPV6_MIN_MTU;
++
++	*newctl = *ctl;
++	newctl->extra1 = &min_mtu;
++	newctl->extra2 = idev ? &idev->dev->mtu : NULL;
++	return newctl;
++}
++
++static
 +int addrconf_sysctl_mtu(struct ctl_table *ctl, int write,
 +			void __user *buffer, size_t *lenp, loff_t *ppos)
 +{
-+	struct inet6_dev *idev = ctl->extra1;
-+	int min_mtu = IPV6_MIN_MTU;
 +	struct ctl_table lctl;
 +
-+	lctl = *ctl;
-+	lctl.extra1 = &min_mtu;
-+	lctl.extra2 = idev ? &idev->dev->mtu : NULL;
++	return proc_dointvec_minmax(addrconf_sysctl_mtu_init(&lctl, ctl),
++				    write, buffer, lenp, ppos);
++}
 +
-+	return proc_dointvec_minmax(&lctl, write, buffer, lenp, ppos);
++static int addrconf_sysctl_mtu_strategy(ctl_table *table,
++					void __user *oldval,
++					size_t __user *oldlenp,
++					void __user *newval, size_t newlen)
++{
++	struct ctl_table lctl;
++
++	return sysctl_intvec(addrconf_sysctl_mtu_init(&lctl, ctl),
++			     oldval, oldlenp, newval, newlen);
 +}
 +
  static void dev_disable_change(struct inet6_dev *idev)
  {
  	if (!idev || !idev->dev)
-@@ -4152,7 +4167,7 @@ static struct addrconf_sysctl_table
+@@ -4152,7 +4186,8 @@ static struct addrconf_sysctl_table
  			.data		=	&ipv6_devconf.mtu6,
  			.maxlen		=	sizeof(int),
  			.mode		=	0644,
 -			.proc_handler	=	proc_dointvec,
 +			.proc_handler	=	addrconf_sysctl_mtu,
++			.strategy	=	addrconf_sysctl_mtu_strategy,
  		},
  		{
  			.ctl_name	=	NET_IPV6_ACCEPT_RA,
