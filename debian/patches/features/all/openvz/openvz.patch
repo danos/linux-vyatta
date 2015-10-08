@@ -6554,6 +6554,9 @@ Date:   Mon Feb 15 15:17:35 2010 +0300
 [bwh: Fix context for changes to ret_from_fork, tcp_send_fin() and tcp_connect()
  in 2.6.32.66]
 [bwh: Fix context for changes to __ptrace_may_access() in 2.6.32.68]
+[bwh: Fix context for changes in ipc/* for fixes for CVE-2015-7613]
+[bwh: Fix context for changes in fs/dcache.c for fix for CVE-2015-2925.
+ Add check for buffer == NULL before the added prepend_path().]
 
 --- /dev/null
 +++ b/COPYING.Parallels
@@ -15946,7 +15949,7 @@ Date:   Mon Feb 15 15:17:35 2010 +0300
 @@ -1911,18 +1997,21 @@ char *__d_path(const struct path *path,
  	struct vfsmount *vfsmnt = path->mnt;
  	char *end = buffer + buflen;
- 	char *retval;
+ 	char *retval, *tail;
 +	int deleted;
 +	struct vfsmount *oldmnt = vfsmnt;
  
@@ -15968,9 +15971,19 @@ Date:   Mon Feb 15 15:17:35 2010 +0300
 -	*retval = '/';
 +	if (buffer)
 +		*retval = '/';
+ 	tail = end;
  
  	for (;;) {
- 		struct dentry * parent;
+@@ -1935,7 +2024,8 @@
+ 			if (dentry != vfsmnt->mnt_root) {
+ 				buflen += (tail - end);
+ 				end = tail;
+-				prepend(&end, &buflen, "(unreachable)/", 14);
++				if (buffer)
++					prepend(&end, &buflen, "(unreachable)/", 14);
+ 				retval = end;
+ 				goto out;
+ 			}
 @@ -1940,20 +2029,43 @@ char *__d_path(const struct path *path,
  		}
  		parent = dentry->d_parent;
@@ -38936,9 +38949,9 @@ Date:   Mon Feb 15 15:17:35 2010 +0300
  
  	if (!nsems)
  		return -EINVAL;
-@@ -264,7 +267,7 @@ static int newary(struct ipc_namespace *
- 		return retval;
- 	}
+@@ -270,7 +274,7 @@ static int newary(struct ipc_namespace *
+  	sma->sem_nsems = nsems;
+ 	sma->sem_ctime = get_seconds();
  
 -	id = ipc_addid(&sem_ids(ns), &sma->sem_perm, ns->sc_semmni);
 +	id = ipc_addid(&sem_ids(ns), &sma->sem_perm, ns->sc_semmni, semid);
@@ -39134,9 +39147,9 @@ Date:   Mon Feb 15 15:17:35 2010 +0300
  	if (shmflg & SHM_HUGETLB) {
  		/* hugetlb_file_setup applies strict accounting */
  		if (shmflg & SHM_NORESERVE)
-@@ -386,7 +364,7 @@ static int newseg(struct ipc_namespace *
- 	if (IS_ERR(file))
- 		goto no_file;
+@@ -394,7 +372,7 @@ static int newseg(struct ipc_namespace *
+ 	shp->shm_nattch = 0;
+ 	shp->shm_file = file;
  
 -	id = ipc_addid(&shm_ids(ns), &shp->shm_perm, ns->shm_ctlmni);
 +	id = ipc_addid(&shm_ids(ns), &shp->shm_perm, ns->shm_ctlmni, shmid);
@@ -39247,9 +39260,9 @@ Date:   Mon Feb 15 15:17:35 2010 +0300
  {
  	uid_t euid;
  	gid_t egid;
-@@ -264,7 +267,16 @@ int ipc_addid(struct ipc_ids* ids, struc
- 	rcu_read_lock();
- 	spin_lock(&new->lock);
+@@ -268,7 +271,16 @@ int ipc_addid(struct ipc_ids* ids, struc
+ 	new->cuid = new->uid = euid;
+ 	new->gid = new->cgid = egid;
  
 -	err = idr_get_new(&ids->ipcs_idr, new, &id);
 +	if (reqid >= 0) {
@@ -39266,8 +39279,8 @@ Date:   Mon Feb 15 15:17:35 2010 +0300
  		spin_unlock(&new->lock);
  		rcu_read_unlock();
 @@ -277,9 +289,13 @@ int ipc_addid(struct ipc_ids* ids, struc
- 	new->cuid = new->uid = euid;
- 	new->gid = new->cgid = egid;
+ 
+ 	ids->in_use++;
  
 -	new->seq = ids->seq++;
 -	if(ids->seq > ids->seq_max)
