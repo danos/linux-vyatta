@@ -10,7 +10,7 @@ from debian_linux.debian import Changelog, VersionLinux
 def main(repo, drm_version):
     changelog = Changelog(version=VersionLinux)[0]
 
-    args = ['git', 'diff',
+    args = ['git', 'diff', '--no-ext-diff',
             'v' + changelog.version.linux_upstream_full, 'v' + drm_version,
             '--', 'drivers/char/agp', 'drivers/gpu/drm', 'include/drm']
     with open('debian/patches/features/all/drm/drm-3.4.patch', 'w') as patch:
