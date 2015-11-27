@@ -10,11 +10,11 @@ VMX is not affected: because it does not save DR6 in the VMCS,
 it already intercepts #DB unconditionally.
 
 Reported-by: Jan Beulich <jbeulich@suse.com>
-Cc: stable@vger.kernel.org
 Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
-[bwh: Backported to 3.2: #DB and #BP did not share a function, and there is
- no operation pointer referring to it, so remove update_db_intercept()
- entirely]
+[bwh: Backported to 3.2, with thanks to Paolo:
+ - update_db_bp_intercept() was called update_db_intercept()
+ - The remaining call is in svm_guest_debug() rather than through svm_x86_ops]
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
 ---
  arch/x86/kvm/svm.c | 14 +++-----------
  1 file changed, 3 insertions(+), 11 deletions(-)
@@ -29,43 +29,38 @@ Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
  
  	set_intercept(svm, INTERCEPT_INTR);
  	set_intercept(svm, INTERCEPT_NMI);
-@@ -1550,26 +1551,6 @@ static void svm_set_segment(struct kvm_v
+@@ -1550,20 +1551,13 @@ static void svm_set_segment(struct kvm_v
  	mark_dirty(svm->vmcb, VMCB_SEG);
  }
  
 -static void update_db_intercept(struct kvm_vcpu *vcpu)
--{
--	struct vcpu_svm *svm = to_svm(vcpu);
--
++static void update_bp_intercept(struct kvm_vcpu *vcpu)
+ {
+ 	struct vcpu_svm *svm = to_svm(vcpu);
+ 
 -	clr_exception_intercept(svm, DB_VECTOR);
--	clr_exception_intercept(svm, BP_VECTOR);
--
+ 	clr_exception_intercept(svm, BP_VECTOR);
+ 
 -	if (svm->nmi_singlestep)
 -		set_exception_intercept(svm, DB_VECTOR);
 -
--	if (vcpu->guest_debug & KVM_GUESTDBG_ENABLE) {
+ 	if (vcpu->guest_debug & KVM_GUESTDBG_ENABLE) {
 -		if (vcpu->guest_debug &
 -		    (KVM_GUESTDBG_SINGLESTEP | KVM_GUESTDBG_USE_HW_BP))
 -			set_exception_intercept(svm, DB_VECTOR);
--		if (vcpu->guest_debug & KVM_GUESTDBG_USE_SW_BP)
--			set_exception_intercept(svm, BP_VECTOR);
--	} else
--		vcpu->guest_debug = 0;
--}
--
- static void svm_guest_debug(struct kvm_vcpu *vcpu, struct kvm_guest_debug *dbg)
- {
- 	struct vcpu_svm *svm = to_svm(vcpu);
-@@ -1580,8 +1561,6 @@ static void svm_guest_debug(struct kvm_v
- 		svm->vmcb->save.dr7 = vcpu->arch.dr7;
+ 		if (vcpu->guest_debug & KVM_GUESTDBG_USE_SW_BP)
+ 			set_exception_intercept(svm, BP_VECTOR);
+ 	} else
+@@ -1581,7 +1575,7 @@ static void svm_guest_debug(struct kvm_v
  
  	mark_dirty(svm->vmcb, VMCB_DR);
--
+ 
 -	update_db_intercept(vcpu);
++	update_bp_intercept(vcpu);
  }
  
  static void new_asid(struct vcpu_svm *svm, struct svm_cpu_data *sd)
-@@ -1655,7 +1634,6 @@ static int db_interception(struct vcpu_s
+@@ -1655,7 +1649,6 @@ static int db_interception(struct vcpu_s
  		if (!(svm->vcpu.guest_debug & KVM_GUESTDBG_SINGLESTEP))
  			svm->vmcb->save.rflags &=
  				~(X86_EFLAGS_TF | X86_EFLAGS_RF);
@@ -73,7 +68,7 @@ Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
  	}
  
  	if (svm->vcpu.guest_debug &
-@@ -3557,7 +3535,6 @@ static void enable_nmi_window(struct kvm
+@@ -3557,7 +3550,6 @@ static void enable_nmi_window(struct kvm
  	 */
  	svm->nmi_singlestep = true;
  	svm->vmcb->save.rflags |= (X86_EFLAGS_TF | X86_EFLAGS_RF);
