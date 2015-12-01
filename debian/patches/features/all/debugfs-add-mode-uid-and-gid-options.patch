@@ -15,11 +15,11 @@ Signed-off-by: Ludwig Nussel <ludwig.nussel@suse.de>
 Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
 [bwh: Backported to 3.2: super_operations::show_options takes a
  struct vfsmount *, not a struct dentry *]
----
- Documentation/filesystems/debugfs.txt |    5 +-
- fs/debugfs/inode.c                    |  149 ++++++++++++++++++++++++++++++++-
- 2 files changed, 152 insertions(+), 2 deletions(-)
+[bwh: Adjust to apply after backported commit 0db59e59299f
+ 'debugfs: leave freeing a symlink body until inode eviction' and
+ commit 20a5d5d4ed15 'debugfs: Fix statfs() regression in 3.2.69']
 
+---
 --- a/Documentation/filesystems/debugfs.txt
 +++ b/Documentation/filesystems/debugfs.txt
 @@ -14,7 +14,10 @@ Debugfs is typically mounted with a comm
@@ -50,8 +50,8 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
  static struct vfsmount *debugfs_mount;
  static int debugfs_mount_count;
  static bool debugfs_registered;
-@@ -125,11 +129,154 @@ static inline int debugfs_positive(struc
- 	return dentry->d_inode && !d_unhashed(dentry);
+@@ -133,23 +137,155 @@ static void debugfs_evict_inode(struct i
+ 		kfree(inode->i_private);
  }
  
 +struct debugfs_mount_opts {
@@ -163,18 +163,19 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
 +	return 0;
 +}
 +
-+static const struct super_operations debugfs_super_operations = {
-+	.statfs		= simple_statfs,
+ static const struct super_operations debugfs_super_operations = {
+ 	.evict_inode	= debugfs_evict_inode,
+ 	.statfs		= simple_statfs,
 +	.remount_fs	= debugfs_remount,
 +	.show_options	= debugfs_show_options,
-+};
-+
+ };
+ 
  static int debug_fill_super(struct super_block *sb, void *data, int silent)
  {
  	static struct tree_descr debug_files[] = {{""}};
 +	struct debugfs_fs_info *fsi;
-+	int err;
-+
+ 	int err;
+ 
 +	save_mount_options(sb, data);
 +
 +	fsi = kzalloc(sizeof(struct debugfs_fs_info), GFP_KERNEL);
@@ -188,17 +189,17 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
 +	if (err)
 +		goto fail;
 +
-+	err  =  simple_fill_super(sb, DEBUGFS_MAGIC, debug_files);
-+	if (err)
+ 	err = simple_fill_super(sb, DEBUGFS_MAGIC, debug_files);
+ 	if (err)
+-		return err;
 +		goto fail;
-+
-+	sb->s_op = &debugfs_super_operations;
-+
+ 
+ 	sb->s_op = &debugfs_super_operations;
+ 
 +	debugfs_apply_options(sb);
 +
-+	return 0;
- 
--	return simple_fill_super(sb, DEBUGFS_MAGIC, debug_files);
+ 	return 0;
++
 +fail:
 +	kfree(fsi);
 +	sb->s_fs_info = NULL;
