@@ -13,20 +13,12 @@ USB transfer while other PCM tasks (software monitoring) are running.
 
 Signed-off-by: Markus Grabner <grabner@icg.tugraz.at>
 Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
+[bwh: Adjust to apply after backported commit 9f613601482c
+ 'staging: line6: avoid __sync_fetch_and_{and,or}']
 ---
- drivers/staging/line6/capture.c  |   46 ++++++++++++++++++++-------
- drivers/staging/line6/capture.h  |    2 ++
- drivers/staging/line6/pcm.c      |   65 ++++++++++++++++++++++++++------------
- drivers/staging/line6/playback.c |   46 ++++++++++++++++++++-------
- drivers/staging/line6/playback.h |    2 ++
- drivers/staging/line6/revision.h |    2 +-
- 6 files changed, 118 insertions(+), 45 deletions(-)
-
-diff --git a/drivers/staging/line6/capture.c b/drivers/staging/line6/capture.c
-index 8f59ff3..127f952 100644
 --- a/drivers/staging/line6/capture.c
 +++ b/drivers/staging/line6/capture.c
-@@ -193,6 +193,31 @@ void line6_capture_check_period(struct snd_line6_pcm *line6pcm, int length)
+@@ -193,6 +193,31 @@ void line6_capture_check_period(struct s
  	}
  }
  
@@ -58,7 +50,7 @@ index 8f59ff3..127f952 100644
  /*
   * Callback for completed capture URB.
   */
-@@ -316,16 +341,11 @@ static int snd_line6_capture_hw_params(struct snd_pcm_substream *substream,
+@@ -316,16 +341,11 @@ static int snd_line6_capture_hw_params(s
  	}
  	/* -- [FD] end */
  
@@ -79,7 +71,7 @@ index 8f59ff3..127f952 100644
  	}
  
  	ret = snd_pcm_lib_malloc_pages(substream,
-@@ -342,9 +362,11 @@ static int snd_line6_capture_hw_free(struct snd_pcm_substream *substream)
+@@ -342,9 +362,11 @@ static int snd_line6_capture_hw_free(str
  {
  	struct snd_line6_pcm *line6pcm = snd_pcm_substream_chip(substream);
  
@@ -94,8 +86,6 @@ index 8f59ff3..127f952 100644
  	return snd_pcm_lib_free_pages(substream);
  }
  
-diff --git a/drivers/staging/line6/capture.h b/drivers/staging/line6/capture.h
-index a7509fb..366cbaa 100644
 --- a/drivers/staging/line6/capture.h
 +++ b/drivers/staging/line6/capture.h
 @@ -19,11 +19,13 @@
@@ -112,11 +102,9 @@ index a7509fb..366cbaa 100644
  extern int line6_submit_audio_in_all_urbs(struct snd_line6_pcm *line6pcm);
  extern void line6_unlink_audio_in_urbs(struct snd_line6_pcm *line6pcm);
  extern void line6_unlink_wait_clear_audio_in_urbs(struct snd_line6_pcm
-diff --git a/drivers/staging/line6/pcm.c b/drivers/staging/line6/pcm.c
-index 68727b2..37675e6 100644
 --- a/drivers/staging/line6/pcm.c
 +++ b/drivers/staging/line6/pcm.c
-@@ -86,17 +86,22 @@ static DEVICE_ATTR(impulse_period, S_IWUSR | S_IRUGO, pcm_get_impulse_period,
+@@ -86,6 +86,12 @@ static DEVICE_ATTR(impulse_period, S_IWU
  
  #endif
  
@@ -128,10 +116,11 @@ index 68727b2..37675e6 100644
 +
  int line6_pcm_start(struct snd_line6_pcm *line6pcm, int channels)
  {
- 	unsigned long flags_old =
- 	    __sync_fetch_and_or(&line6pcm->flags, channels);
- 	unsigned long flags_new = flags_old | channels;
- 	int err = 0;
+ 	unsigned long flags_old, flags_new;
+@@ -95,11 +101,10 @@ int line6_pcm_start(struct snd_line6_pcm
+ 		flags_old = ACCESS_ONCE(line6pcm->flags);
+ 		flags_new = flags_old | channels;
+ 	} while (cmpxchg(&line6pcm->flags, flags_old, flags_new) != flags_old);
 -
 +	
  	line6pcm->prev_fbuf = NULL;
@@ -142,7 +131,7 @@ index 68727b2..37675e6 100644
  		/*
  		   Waiting for completion of active URBs in the stop handler is
  		   a bug, we therefore report an error if capturing is restarted
-@@ -105,34 +110,47 @@ int line6_pcm_start(struct snd_line6_pcm *line6pcm, int channels)
+@@ -108,32 +113,45 @@ int line6_pcm_start(struct snd_line6_pcm
  		if (line6pcm->active_urb_in | line6pcm->unlink_urb_in)
  			return -EBUSY;
  
@@ -157,11 +146,8 @@ index 68727b2..37675e6 100644
  		line6pcm->prev_fsize = 0;
  		err = line6_submit_audio_in_all_urbs(line6pcm);
  
--		if (err < 0) {
--			__sync_fetch_and_and(&line6pcm->flags, ~channels);
--			return err;
--		}
-+		if (err < 0)
+ 		if (err < 0)
+-			goto fail;
 +			goto pcm_start_error;
  	}
  
@@ -184,25 +170,21 @@ index 68727b2..37675e6 100644
  		line6pcm->count_out = 0;
  		err = line6_submit_audio_out_all_urbs(line6pcm);
  
--		if (err < 0) {
--			__sync_fetch_and_and(&line6pcm->flags, ~channels);
--			return err;
--		}
-+		if (err < 0)
+ 		if (err < 0)
+-			goto fail;
 +			goto pcm_start_error;
  	}
  
  	return 0;
-+
-+pcm_start_error:
-+	__sync_fetch_and_and(&line6pcm->flags, ~channels);
-+	return err;
- }
  
- int line6_pcm_stop(struct snd_line6_pcm *line6pcm, int channels)
-@@ -141,14 +159,18 @@ int line6_pcm_stop(struct snd_line6_pcm *line6pcm, int channels)
- 	    __sync_fetch_and_and(&line6pcm->flags, ~channels);
- 	unsigned long flags_new = flags_old & ~channels;
+-fail:
++pcm_start_error:
+ 	do {
+ 		flags_old = ACCESS_ONCE(line6pcm->flags);
+ 		flags_new = flags_old & ~channels;
+@@ -151,14 +169,18 @@ int line6_pcm_stop(struct snd_line6_pcm
+ 		flags_new = flags_old & ~channels;
+ 	} while (cmpxchg(&line6pcm->flags, flags_old, flags_new) != flags_old);
  
 -	if (((flags_old & MASK_CAPTURE) != 0) &&
 -	    ((flags_new & MASK_CAPTURE) == 0)) {
@@ -223,7 +205,7 @@ index 68727b2..37675e6 100644
  	}
  
  	return 0;
-@@ -476,18 +498,21 @@ int snd_line6_prepare(struct snd_pcm_substream *substream)
+@@ -489,18 +511,21 @@ int snd_line6_prepare(struct snd_pcm_sub
  
  	switch (substream->stream) {
  	case SNDRV_PCM_STREAM_PLAYBACK:
@@ -248,11 +230,9 @@ index 68727b2..37675e6 100644
  	if (!test_and_set_bit(BIT_PREPARED, &line6pcm->flags)) {
  		line6pcm->count_out = 0;
  		line6pcm->pos_out = 0;
-diff --git a/drivers/staging/line6/playback.c b/drivers/staging/line6/playback.c
-index 9a51b92..4152db2 100644
 --- a/drivers/staging/line6/playback.c
 +++ b/drivers/staging/line6/playback.c
-@@ -351,6 +351,31 @@ void line6_unlink_wait_clear_audio_out_urbs(struct snd_line6_pcm *line6pcm)
+@@ -351,6 +351,31 @@ void line6_unlink_wait_clear_audio_out_u
  	wait_clear_audio_out_urbs(line6pcm);
  }
  
@@ -284,7 +264,7 @@ index 9a51b92..4152db2 100644
  /*
  	Callback for completed playback URB.
  */
-@@ -459,16 +484,11 @@ static int snd_line6_playback_hw_params(struct snd_pcm_substream *substream,
+@@ -459,16 +484,11 @@ static int snd_line6_playback_hw_params(
  	}
  	/* -- [FD] end */
  
@@ -305,7 +285,7 @@ index 9a51b92..4152db2 100644
  	}
  
  	ret = snd_pcm_lib_malloc_pages(substream,
-@@ -485,9 +505,11 @@ static int snd_line6_playback_hw_free(struct snd_pcm_substream *substream)
+@@ -485,9 +505,11 @@ static int snd_line6_playback_hw_free(st
  {
  	struct snd_line6_pcm *line6pcm = snd_pcm_substream_chip(substream);
  
@@ -320,8 +300,6 @@ index 9a51b92..4152db2 100644
  	return snd_pcm_lib_free_pages(substream);
  }
  
-diff --git a/drivers/staging/line6/playback.h b/drivers/staging/line6/playback.h
-index f2fc8c0..02487ff 100644
 --- a/drivers/staging/line6/playback.h
 +++ b/drivers/staging/line6/playback.h
 @@ -29,7 +29,9 @@
@@ -334,8 +312,6 @@ index f2fc8c0..02487ff 100644
  extern int line6_submit_audio_out_all_urbs(struct snd_line6_pcm *line6pcm);
  extern void line6_unlink_audio_out_urbs(struct snd_line6_pcm *line6pcm);
  extern void line6_unlink_wait_clear_audio_out_urbs(struct snd_line6_pcm
-diff --git a/drivers/staging/line6/revision.h b/drivers/staging/line6/revision.h
-index 350d0df..b4eee2b 100644
 --- a/drivers/staging/line6/revision.h
 +++ b/drivers/staging/line6/revision.h
 @@ -1,4 +1,4 @@

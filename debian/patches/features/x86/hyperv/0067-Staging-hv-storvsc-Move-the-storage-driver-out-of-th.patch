@@ -21,8 +21,9 @@ Acked-by: James Bottomley <JBottomley@Parallels.com>
 Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
 [bwh: Adjusted to apply after backported commits 5c1b10ab7f93
  '[SCSI] storvsc: Account for in-transit packets in the RESET path' and
- 9d2696e658ef '[SCSI] storvsc: Initialize the sglist' and 56b26e69c828
- 'Drivers: scsi: storvsc: Implement a eh_timed_out handler']
+ 9d2696e658ef '[SCSI] storvsc: Initialize the sglist', 56b26e69c828
+ 'Drivers: scsi: storvsc: Implement a eh_timed_out handler' and
+ 8de580742fee 'scsi: storvsc: Fix a bug in copy_from_bounce_buffer()']
 ---
 --- a/drivers/scsi/Kconfig
 +++ b/drivers/scsi/Kconfig
@@ -61,7 +62,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
  sd_mod-objs	:= sd.o
 --- /dev/null
 +++ b/drivers/scsi/storvsc_drv.c
-@@ -0,0 +1,1566 @@
+@@ -0,0 +1,1567 @@
 +/*
 + * Copyright (c) 2009, Microsoft Corporation.
 + *
@@ -673,22 +674,23 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
 +			if (bounce_sgl[j].length == PAGE_SIZE) {
 +				/* full..move to next entry */
 +				kunmap_atomic((void *)bounce_addr, KM_IRQ0);
++				bounce_addr = 0;
 +				j++;
++			}
 +
-+				/* if we need to use another bounce buffer */
-+				if (srclen || i != orig_sgl_count - 1)
-+					bounce_addr =
++			/* if we need to use another bounce buffer */
++			if (srclen && bounce_addr == 0)
++				bounce_addr =
 +					(unsigned long)kmap_atomic(
 +					sg_page((&bounce_sgl[j])), KM_IRQ0);
 +
-+			} else if (srclen == 0 && i == orig_sgl_count - 1) {
-+				/* unmap the last bounce that is < PAGE_SIZE */
-+				kunmap_atomic((void *)bounce_addr, KM_IRQ0);
-+			}
 +		}
 +
 +		kunmap_atomic((void *)(src_addr - orig_sgl[i].offset), KM_IRQ0);
 +	}
++
++	if (bounce_addr)
++		kunmap_atomic((void *)bounce_addr, KM_IRQ0);
 +
 +	local_irq_restore(flags);
 +
@@ -1673,7 +1675,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
 -Haiyang Zhang <haiyangz@microsoft.com>, and K. Y. Srinivasan <kys@microsoft.com>
 --- a/drivers/staging/hv/storvsc_drv.c
 +++ /dev/null
-@@ -1,1566 +0,0 @@
+@@ -1,1567 +0,0 @@
 -/*
 - * Copyright (c) 2009, Microsoft Corporation.
 - *
@@ -2285,22 +2287,23 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
 -			if (bounce_sgl[j].length == PAGE_SIZE) {
 -				/* full..move to next entry */
 -				kunmap_atomic((void *)bounce_addr, KM_IRQ0);
+-				bounce_addr = 0;
 -				j++;
+-			}
 -
--				/* if we need to use another bounce buffer */
--				if (srclen || i != orig_sgl_count - 1)
--					bounce_addr =
+-			/* if we need to use another bounce buffer */
+-			if (srclen && bounce_addr == 0)
+-				bounce_addr =
 -					(unsigned long)kmap_atomic(
 -					sg_page((&bounce_sgl[j])), KM_IRQ0);
 -
--			} else if (srclen == 0 && i == orig_sgl_count - 1) {
--				/* unmap the last bounce that is < PAGE_SIZE */
--				kunmap_atomic((void *)bounce_addr, KM_IRQ0);
--			}
 -		}
 -
 -		kunmap_atomic((void *)(src_addr - orig_sgl[i].offset), KM_IRQ0);
 -	}
+-
+-	if (bounce_addr)
+-		kunmap_atomic((void *)bounce_addr, KM_IRQ0);
 -
 -	local_irq_restore(flags);
 -

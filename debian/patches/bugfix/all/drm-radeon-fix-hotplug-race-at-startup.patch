@@ -1,0 +1,61 @@
+From: Dave Airlie <airlied@redhat.com>
+Date: Thu, 20 Aug 2015 10:13:55 +1000
+Subject: drm/radeon: fix hotplug race at startup
+Origin: https://git.kernel.org/linus/7f98ca454ad373fc1b76be804fa7138ff68c1d27
+Bug-Debian: https://bugs.debian.org/808973
+
+We apparantly get a hotplug irq before we've initialised
+modesetting,
+
+[drm] Loading R100 Microcode
+BUG: unable to handle kernel NULL pointer dereference at   (null)
+IP: [<c125f56f>] __mutex_lock_slowpath+0x23/0x91
+*pde = 00000000
+Oops: 0002 [#1]
+Modules linked in: radeon(+) drm_kms_helper ttm drm i2c_algo_bit backlight pcspkr psmouse evdev sr_mod input_leds led_class cdrom sg parport_pc parport floppy intel_agp intel_gtt lpc_ich acpi_cpufreq processor button mfd_core agpgart uhci_hcd ehci_hcd rng_core snd_intel8x0 snd_ac97_codec ac97_bus snd_pcm usbcore usb_common i2c_i801 i2c_core snd_timer snd soundcore thermal_sys
+CPU: 0 PID: 15 Comm: kworker/0:1 Not tainted 4.2.0-rc7-00015-gbf67402 #111
+Hardware name: MicroLink                               /D850MV                         , BIOS MV85010A.86A.0067.P24.0304081124 04/08/2003
+Workqueue: events radeon_hotplug_work_func [radeon]
+task: f6ca5900 ti: f6d3e000 task.ti: f6d3e000
+EIP: 0060:[<c125f56f>] EFLAGS: 00010282 CPU: 0
+EIP is at __mutex_lock_slowpath+0x23/0x91
+EAX: 00000000 EBX: f5e900fc ECX: 00000000 EDX: fffffffe
+ESI: f6ca5900 EDI: f5e90100 EBP: f5e90000 ESP: f6d3ff0c
+ DS: 007b ES: 007b FS: 0000 GS: 0000 SS: 0068
+CR0: 8005003b CR2: 00000000 CR3: 36f61000 CR4: 000006d0
+Stack:
+ f5e90100 00000000 c103c4c1 f6d2a5a0 f5e900fc f6df394c c125f162 f8b0faca
+ f6d2a5a0 c138ca00 f6df394c f7395600 c1034741 00d40000 00000000 f6d2a5a0
+ c138ca00 f6d2a5b8 c138ca10 c1034b58 00000001 f6d40000 f6ca5900 f6d0c940
+Call Trace:
+ [<c103c4c1>] ? dequeue_task_fair+0xa4/0xb7
+ [<c125f162>] ? mutex_lock+0x9/0xa
+ [<f8b0faca>] ? radeon_hotplug_work_func+0x17/0x57 [radeon]
+ [<c1034741>] ? process_one_work+0xfc/0x194
+ [<c1034b58>] ? worker_thread+0x18d/0x218
+ [<c10349cb>] ? rescuer_thread+0x1d5/0x1d5
+ [<c103742a>] ? kthread+0x7b/0x80
+ [<c12601c0>] ? ret_from_kernel_thread+0x20/0x30
+ [<c10373af>] ? init_completion+0x18/0x18
+Code: 42 08 e8 8e a6 dd ff c3 57 56 53 83 ec 0c 8b 35 48 f7 37 c1 8b 10 4a 74 1a 89 c3 8d 78 04 8b 40 08 89 63
+
+Reported-and-Tested-by: Meelis Roos <mroos@linux.ee>
+Signed-off-by: Dave Airlie <airlied@redhat.com>
+---
+ drivers/gpu/drm/radeon/radeon_irq_kms.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+--- a/drivers/gpu/drm/radeon/radeon_irq_kms.c
++++ b/drivers/gpu/drm/radeon/radeon_irq_kms.c
+@@ -51,6 +51,11 @@ static void radeon_hotplug_work_func(str
+ 	struct drm_mode_config *mode_config = &dev->mode_config;
+ 	struct drm_connector *connector;
+ 
++	/* we can race here at startup, some boards seem to trigger
++	 * hotplug irqs when they shouldn't. */
++	if (!rdev->mode_info.mode_config_initialized)
++		return;
++
+ 	mutex_lock(&mode_config->mutex);
+ 	if (mode_config->num_connector) {
+ 		list_for_each_entry(connector, &mode_config->connector_list, head)

@@ -11,8 +11,9 @@ relocate the bounce buffer handling code (to avoid having forward declarations).
 Signed-off-by: K. Y. Srinivasan <kys@microsoft.com>
 Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
 [bwh: Adjusted to apply after backported commits 9d2696e658ef
- '[SCSI] storvsc: Initialize the sglist' and 56b26e69c828
- 'Drivers: scsi: storvsc: Implement a eh_timed_out handler']
+ '[SCSI] storvsc: Initialize the sglist', 56b26e69c828
+ 'Drivers: scsi: storvsc: Implement a eh_timed_out handler', and
+ 8de580742fee 'scsi: storvsc: Fix a bug in copy_from_bounce_buffer()']
 
 ---
  drivers/staging/hv/storvsc_drv.c |  630 +++++++++++++++++++-------------------
@@ -28,7 +29,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
  	struct hv_multipage_buffer data_buffer;
  
  	struct vstor_packet vstor_packet;
-@@ -437,6 +436,228 @@ get_in_err:
+@@ -437,6 +436,229 @@ get_in_err:
  
  }
  
@@ -232,22 +233,23 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
 +			if (bounce_sgl[j].length == PAGE_SIZE) {
 +				/* full..move to next entry */
 +				kunmap_atomic((void *)bounce_addr, KM_IRQ0);
++				bounce_addr = 0;
 +				j++;
++			}
 +
-+				/* if we need to use another bounce buffer */
-+				if (srclen || i != orig_sgl_count - 1)
-+					bounce_addr =
++			/* if we need to use another bounce buffer */
++			if (srclen && bounce_addr == 0)
++				bounce_addr =
 +					(unsigned long)kmap_atomic(
 +					sg_page((&bounce_sgl[j])), KM_IRQ0);
 +
-+			} else if (srclen == 0 && i == orig_sgl_count - 1) {
-+				/* unmap the last bounce that is < PAGE_SIZE */
-+				kunmap_atomic((void *)bounce_addr, KM_IRQ0);
-+			}
 +		}
 +
 +		kunmap_atomic((void *)(src_addr - orig_sgl[i].offset), KM_IRQ0);
 +	}
++
++	if (bounce_addr)
++		kunmap_atomic((void *)bounce_addr, KM_IRQ0);
 +
 +	local_irq_restore(flags);
 +
@@ -257,7 +259,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
  static int storvsc_channel_init(struct hv_device *device)
  {
  	struct storvsc_device *stor_device;
-@@ -563,23 +784,100 @@ cleanup:
+@@ -563,22 +785,99 @@ cleanup:
  	return ret;
  }
  
@@ -298,7 +300,6 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
 -	 * INQUIRY command with page code parameter set to 0x80
 -	 * MODE_SENSE command with cmd[2] == 0x1c
 -	 *
--	 * Setup srb and scsi status so this won't be fatal.
 +	 * If there is an error; offline the device since all
 +	 * error recovery strategies would have already been
 +	 * deployed on the host side.
@@ -367,11 +368,10 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
 +	 * INQUIRY command with page code parameter set to 0x80
 +	 * MODE_SENSE command with cmd[2] == 0x1c
 +	 *
-+	 * Setup srb and scsi status so this won't be fatal.
+ 	 * Setup srb and scsi status so this won't be fatal.
  	 * We do this so we can distinguish truly fatal failues
  	 * (srb status == 0x4) and off-line the device in that case.
- 	 */
-@@ -626,7 +924,7 @@ static void storvsc_on_io_completion(str
+@@ -626,7 +925,7 @@ static void storvsc_on_io_completion(str
  	stor_pkt->vm_srb.data_transfer_length =
  	vstor_packet->vm_srb.data_transfer_length;
  
@@ -380,7 +380,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
  
  	if (atomic_dec_and_test(&stor_device->num_outstanding_req) &&
  		stor_device->drain_notify)
-@@ -876,230 +1174,6 @@ static int storvsc_device_configure(stru
+@@ -876,231 +1175,6 @@ static int storvsc_device_configure(stru
  	return 0;
  }
  
@@ -586,22 +586,23 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
 -			if (bounce_sgl[j].length == PAGE_SIZE) {
 -				/* full..move to next entry */
 -				kunmap_atomic((void *)bounce_addr, KM_IRQ0);
+-				bounce_addr = 0;
 -				j++;
+-			}
 -
--				/* if we need to use another bounce buffer */
--				if (srclen || i != orig_sgl_count - 1)
--					bounce_addr =
+-			/* if we need to use another bounce buffer */
+-			if (srclen && bounce_addr == 0)
+-				bounce_addr =
 -					(unsigned long)kmap_atomic(
 -					sg_page((&bounce_sgl[j])), KM_IRQ0);
 -
--			} else if (srclen == 0 && i == orig_sgl_count - 1) {
--				/* unmap the last bounce that is < PAGE_SIZE */
--				kunmap_atomic((void *)bounce_addr, KM_IRQ0);
--			}
 -		}
 -
 -		kunmap_atomic((void *)(src_addr - orig_sgl[i].offset), KM_IRQ0);
 -	}
+-
+-	if (bounce_addr)
+-		kunmap_atomic((void *)bounce_addr, KM_IRQ0);
 -
 -	local_irq_restore(flags);
 -
@@ -611,7 +612,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
  static int storvsc_get_chs(struct scsi_device *sdev, struct block_device * bdev,
  			   sector_t capacity, int *info)
  {
-@@ -1173,83 +1247,6 @@ static int storvsc_host_reset_handler(st
+@@ -1174,83 +1248,6 @@ static int storvsc_host_reset_handler(st
  	return SUCCESS;
  }
  
@@ -695,7 +696,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
  /*
   * The host guarantees to respond to each command, although I/O latencies might
   * be unbounded on Azure.  Reset the timer unconditionally to give the host a
-@@ -1335,7 +1332,6 @@ static int storvsc_queuecommand(struct S
+@@ -1336,7 +1333,6 @@ static int storvsc_queuecommand(struct S
  		break;
  	}
  
