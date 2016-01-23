@@ -1,0 +1,83 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Sat, 23 Jan 2016 17:30:51 +0000
+Subject: Revert "af_unix: fix a fatal race with bit fields"
+Forwarded: not-needed
+
+This reverts commit cb0ce77732713e7bbff28ce66ef2ad2dd110500e, which
+was commit 60bc851ae59bfe99be6ee89d6bc50008c85ec75d upstream.
+
+It causes an unavoidable ABI break, and squeeze LTS doesn't support
+the architectures that need the fix.
+---
+ include/net/af_unix.h |  5 ++---
+ net/unix/garbage.c    | 12 ++++++------
+ 2 files changed, 8 insertions(+), 9 deletions(-)
+
+diff --git a/include/net/af_unix.h b/include/net/af_unix.h
+index faf1d6d..c364711 100644
+--- a/include/net/af_unix.h
++++ b/include/net/af_unix.h
+@@ -55,10 +55,9 @@ struct unix_sock {
+ 	struct list_head	link;
+         atomic_long_t           inflight;
+         spinlock_t		lock;
++	unsigned int		gc_candidate : 1;
++	unsigned int		gc_maybe_cycle : 1;
+ 	unsigned char		recursion_level;
+-	unsigned long		gc_flags;
+-#define UNIX_GC_CANDIDATE	0
+-#define UNIX_GC_MAYBE_CYCLE	1
+         wait_queue_head_t       peer_wait;
+ 	wait_queue_t		peer_wake;
+ };
+diff --git a/net/unix/garbage.c b/net/unix/garbage.c
+index de93193..cb72e91 100644
+--- a/net/unix/garbage.c
++++ b/net/unix/garbage.c
+@@ -201,7 +201,7 @@ static void scan_inflight(struct sock *x, void (*func)(struct unix_sock *),
+ 					 * have been added to the queues after
+ 					 * starting the garbage collection
+ 					 */
+-					if (test_bit(UNIX_GC_CANDIDATE, &u->gc_flags)) {
++					if (u->gc_candidate) {
+ 						hit = true;
+ 						func(u);
+ 					}
+@@ -270,7 +270,7 @@ static void inc_inflight_move_tail(struct unix_sock *u)
+ 	 * of the list, so that it's checked even if it was already
+ 	 * passed over
+ 	 */
+-	if (test_bit(UNIX_GC_MAYBE_CYCLE, &u->gc_flags))
++	if (u->gc_maybe_cycle)
+ 		list_move_tail(&u->link, &gc_candidates);
+ }
+ 
+@@ -331,8 +331,8 @@ void unix_gc(void)
+ 		BUG_ON(total_refs < inflight_refs);
+ 		if (total_refs == inflight_refs) {
+ 			list_move_tail(&u->link, &gc_candidates);
+-			__set_bit(UNIX_GC_CANDIDATE, &u->gc_flags);
+-			__set_bit(UNIX_GC_MAYBE_CYCLE, &u->gc_flags);
++			u->gc_candidate = 1;
++			u->gc_maybe_cycle = 1;
+ 		}
+ 	}
+ 
+@@ -360,7 +360,7 @@ void unix_gc(void)
+ 
+ 		if (atomic_long_read(&u->inflight) > 0) {
+ 			list_move_tail(&u->link, &not_cycle_list);
+-			__clear_bit(UNIX_GC_MAYBE_CYCLE, &u->gc_flags);
++			u->gc_maybe_cycle = 0;
+ 			scan_children(&u->sk, inc_inflight_move_tail, NULL);
+ 		}
+ 	}
+@@ -372,7 +372,7 @@ void unix_gc(void)
+ 	 */
+ 	while (!list_empty(&not_cycle_list)) {
+ 		u = list_entry(not_cycle_list.next, struct unix_sock, link);
+-		__clear_bit(UNIX_GC_CANDIDATE, &u->gc_flags);
++		u->gc_candidate = 0;
+ 		list_move_tail(&u->link, &gc_inflight_list);
+ 	}
+ 
