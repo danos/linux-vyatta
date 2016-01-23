@@ -3179,7 +3179,7 @@ index dd58373..a0d6e89 100644
  out_free:
  	drm_fb_helper_crtc_free(fb_helper);
 diff --git a/drivers/gpu/drm/drm_fops.c b/drivers/gpu/drm/drm_fops.c
-index 020b103..b90abff 100644
+index 5f1a653..b90abff 100644
 --- a/drivers/gpu/drm/drm_fops.c
 +++ b/drivers/gpu/drm/drm_fops.c
 @@ -133,6 +133,9 @@ int drm_open(struct inode *inode, struct file *filp)
@@ -3205,7 +3205,70 @@ index 020b103..b90abff 100644
  	if (filp->f_op == NULL) {
  		filp->f_op = old_fops;
  		goto out;
-@@ -268,6 +274,9 @@ static int drm_open_helper(struct inode *inode, struct file *filp,
+@@ -219,62 +225,6 @@ static int drm_cpu_valid(void)
+ }
+ 
+ /**
+- * drm_new_set_master - Allocate a new master object and become master for the
+- * associated master realm.
+- *
+- * @dev: The associated device.
+- * @fpriv: File private identifying the client.
+- *
+- * This function must be called with dev::struct_mutex held.
+- * Returns negative error code on failure. Zero on success.
+- */
+-int drm_new_set_master(struct drm_device *dev, struct drm_file *fpriv)
+-{
+-	struct drm_master *old_master;
+-	int ret;
+-
+-	lockdep_assert_held_once(&dev->struct_mutex);
+-
+-	/* create a new master */
+-	fpriv->minor->master = drm_master_create(fpriv->minor);
+-	if (!fpriv->minor->master)
+-		return -ENOMEM;
+-
+-	/* take another reference for the copy in the local file priv */
+-	old_master = fpriv->master;
+-	fpriv->master = drm_master_get(fpriv->minor->master);
+-
+-	if (dev->driver->master_create) {
+-		mutex_unlock(&dev->struct_mutex);
+-		ret = dev->driver->master_create(dev, fpriv->master);
+-		mutex_lock(&dev->struct_mutex);
+-		if (ret)
+-			goto out_err;
+-	}
+-	if (dev->driver->master_set) {
+-		ret = dev->driver->master_set(dev, fpriv, true);
+-		if (ret)
+-			goto out_err;
+-	}
+-
+-	fpriv->is_master = 1;
+-	fpriv->allowed_master = 1;
+-	fpriv->authenticated = 1;
+-	if (old_master)
+-		drm_master_put(&old_master);
+-
+-	return 0;
+-
+-out_err:
+-	/* drop both references and restore old master on failure */
+-	drm_master_put(&fpriv->minor->master);
+-	drm_master_put(&fpriv->master);
+-	fpriv->master = old_master;
+-
+-	return ret;
+-}
+-
+-/**
+  * Called whenever a process opens /dev/drm.
+  *
+  * \param inode device inode.
+@@ -324,6 +274,9 @@ static int drm_open_helper(struct inode *inode, struct file *filp,
  	if (dev->driver->driver_features & DRIVER_GEM)
  		drm_gem_open(dev, priv);
  
@@ -3215,7 +3278,54 @@ index 020b103..b90abff 100644
  	if (dev->driver->open) {
  		ret = dev->driver->open(dev, priv);
  		if (ret < 0)
-@@ -501,12 +510,12 @@ int drm_release(struct inode *inode, struct file *filp)
+@@ -335,10 +288,43 @@ static int drm_open_helper(struct inode *inode, struct file *filp,
+ 	mutex_lock(&dev->struct_mutex);
+ 	if (!priv->minor->master) {
+ 		/* create a new master */
+-		ret = drm_new_set_master(dev, priv);
+-		mutex_unlock(&dev->struct_mutex);
+-		if (ret)
++		priv->minor->master = drm_master_create(priv->minor);
++		if (!priv->minor->master) {
++			mutex_unlock(&dev->struct_mutex);
++			ret = -ENOMEM;
+ 			goto out_free;
++		}
++
++		priv->is_master = 1;
++		/* take another reference for the copy in the local file priv */
++		priv->master = drm_master_get(priv->minor->master);
++
++		priv->authenticated = 1;
++
++		mutex_unlock(&dev->struct_mutex);
++		if (dev->driver->master_create) {
++			ret = dev->driver->master_create(dev, priv->master);
++			if (ret) {
++				mutex_lock(&dev->struct_mutex);
++				/* drop both references if this fails */
++				drm_master_put(&priv->minor->master);
++				drm_master_put(&priv->master);
++				mutex_unlock(&dev->struct_mutex);
++				goto out_free;
++			}
++		}
++		mutex_lock(&dev->struct_mutex);
++		if (dev->driver->master_set) {
++			ret = dev->driver->master_set(dev, priv, true);
++			if (ret) {
++				/* drop both references if this fails */
++				drm_master_put(&priv->minor->master);
++				drm_master_put(&priv->master);
++				mutex_unlock(&dev->struct_mutex);
++				goto out_free;
++			}
++		}
++		mutex_unlock(&dev->struct_mutex);
+ 	} else {
+ 		/* get a reference to the master */
+ 		priv->master = drm_master_get(priv->minor->master);
+@@ -524,12 +510,12 @@ int drm_release(struct inode *inode, struct file *filp)
  
  	drm_events_release(file_priv);
  
@@ -3231,7 +3341,7 @@ index 020b103..b90abff 100644
  	mutex_lock(&dev->ctxlist_mutex);
  	if (!list_empty(&dev->ctxlist)) {
  		struct drm_ctx_list *pos, *n;
-@@ -568,6 +577,10 @@ int drm_release(struct inode *inode, struct file *filp)
+@@ -591,6 +577,10 @@ int drm_release(struct inode *inode, struct file *filp)
  
  	if (dev->driver->postclose)
  		dev->driver->postclose(dev, file_priv);
@@ -3242,7 +3352,7 @@ index 020b103..b90abff 100644
  	kfree(file_priv);
  
  	/* ========================================================
-@@ -582,6 +595,8 @@ int drm_release(struct inode *inode, struct file *filp)
+@@ -605,6 +595,8 @@ int drm_release(struct inode *inode, struct file *filp)
  			retcode = -EBUSY;
  		} else
  			retcode = drm_lastclose(dev);
@@ -4311,10 +4421,34 @@ index cebce45..0000000
 -
 -EXPORT_SYMBOL(drm_sman_cleanup);
 diff --git a/drivers/gpu/drm/drm_stub.c b/drivers/gpu/drm/drm_stub.c
-index 6d7b083..aa454f8 100644
+index 6c1f6ce..aa454f8 100644
 --- a/drivers/gpu/drm/drm_stub.c
 +++ b/drivers/gpu/drm/drm_stub.c
-@@ -319,6 +319,7 @@ int drm_fill_in_dev(struct drm_device *dev,
+@@ -225,10 +225,6 @@ int drm_setmaster_ioctl(struct drm_device *dev, void *data,
+ 	if (!file_priv->minor->master &&
+ 	    file_priv->minor->master != file_priv->master) {
+ 		mutex_lock(&dev->struct_mutex);
+-		if (!file_priv->allowed_master) {
+-			ret = drm_new_set_master(dev, file_priv);
+-			goto out_unlock;
+-		}
+ 		file_priv->minor->master = drm_master_get(file_priv->master);
+ 		file_priv->is_master = 1;
+ 		if (dev->driver->master_set) {
+@@ -238,11 +234,10 @@ int drm_setmaster_ioctl(struct drm_device *dev, void *data,
+ 				drm_master_put(&file_priv->minor->master);
+ 			}
+ 		}
+-	out_unlock:
+ 		mutex_unlock(&dev->struct_mutex);
+ 	}
+ 
+-	return ret;
++	return 0;
+ }
+ 
+ int drm_dropmaster_ioctl(struct drm_device *dev, void *data,
+@@ -324,6 +319,7 @@ int drm_fill_in_dev(struct drm_device *dev,
  	drm_lastclose(dev);
  	return retcode;
  }
@@ -4322,7 +4456,7 @@ index 6d7b083..aa454f8 100644
  
  
  /**
-@@ -397,6 +398,7 @@ err_idr:
+@@ -402,6 +398,7 @@ err_idr:
  	*minor = NULL;
  	return ret;
  }
@@ -4330,7 +4464,7 @@ index 6d7b083..aa454f8 100644
  
  /**
   * Put a secondary minor number.
-@@ -428,6 +430,12 @@ int drm_put_minor(struct drm_minor **minor_p)
+@@ -433,6 +430,12 @@ int drm_put_minor(struct drm_minor **minor_p)
  	*minor_p = NULL;
  	return 0;
  }
@@ -4343,7 +4477,7 @@ index 6d7b083..aa454f8 100644
  
  /**
   * Called via drm_exit() at module unload time or when pci device is
-@@ -492,3 +500,21 @@ void drm_put_dev(struct drm_device *dev)
+@@ -497,3 +500,21 @@ void drm_put_dev(struct drm_device *dev)
  	kfree(dev);
  }
  EXPORT_SYMBOL(drm_put_dev);
@@ -46164,7 +46298,7 @@ index 861223b..1a93066 100644
  		/* On Ironlake whatever DRAM config, GPU always do
  		 * same swizzling setup.
 diff --git a/drivers/gpu/drm/i915/i915_irq.c b/drivers/gpu/drm/i915/i915_irq.c
-index 93e74fb..fc6f32a 100644
+index 93e74fbd..fc6f32a 100644
 --- a/drivers/gpu/drm/i915/i915_irq.c
 +++ b/drivers/gpu/drm/i915/i915_irq.c
 @@ -716,7 +716,6 @@ i915_error_object_create(struct drm_i915_private *dev_priv,
@@ -76201,7 +76335,7 @@ index e022776b..e534e5d 100644
 +
  #endif
 diff --git a/drivers/gpu/drm/radeon/evergreend.h b/drivers/gpu/drm/radeon/evergreend.h
-index 47f3bd2..52aabf24 100644
+index 47f3bd2..52aabf2 100644
 --- a/drivers/gpu/drm/radeon/evergreend.h
 +++ b/drivers/gpu/drm/radeon/evergreend.h
 @@ -81,6 +81,11 @@
@@ -88819,10 +88953,22 @@ index 894b5f0..19d68c5 100644
  	snprintf(i2c->adapter.name, sizeof(i2c->adapter.name),
  		 "Radeon aux bus %s", name);
 diff --git a/drivers/gpu/drm/radeon/radeon_irq_kms.c b/drivers/gpu/drm/radeon/radeon_irq_kms.c
-index 42f5a2b..77c456d 100644
+index 931a8a9..77c456d 100644
 --- a/drivers/gpu/drm/radeon/radeon_irq_kms.c
 +++ b/drivers/gpu/drm/radeon/radeon_irq_kms.c
-@@ -67,7 +67,8 @@ void radeon_driver_irq_preinstall_kms(struct drm_device *dev)
+@@ -51,11 +51,6 @@ static void radeon_hotplug_work_func(struct work_struct *work)
+ 	struct drm_mode_config *mode_config = &dev->mode_config;
+ 	struct drm_connector *connector;
+ 
+-	/* we can race here at startup, some boards seem to trigger
+-	 * hotplug irqs when they shouldn't. */
+-	if (!rdev->mode_info.mode_config_initialized)
+-		return;
+-
+ 	mutex_lock(&mode_config->mutex);
+ 	if (mode_config->num_connector) {
+ 		list_for_each_entry(connector, &mode_config->connector_list, head)
+@@ -72,7 +67,8 @@ void radeon_driver_irq_preinstall_kms(struct drm_device *dev)
  	unsigned i;
  
  	/* Disable *all* interrupts */
@@ -88832,7 +88978,7 @@ index 42f5a2b..77c456d 100644
  	rdev->irq.gui_idle = false;
  	for (i = 0; i < RADEON_MAX_HPD_PINS; i++)
  		rdev->irq.hpd[i] = false;
-@@ -83,9 +84,11 @@ void radeon_driver_irq_preinstall_kms(struct drm_device *dev)
+@@ -88,9 +84,11 @@ void radeon_driver_irq_preinstall_kms(struct drm_device *dev)
  int radeon_driver_irq_postinstall_kms(struct drm_device *dev)
  {
  	struct radeon_device *rdev = dev->dev_private;
@@ -88845,7 +88991,7 @@ index 42f5a2b..77c456d 100644
  	radeon_irq_set(rdev);
  	return 0;
  }
-@@ -99,7 +102,8 @@ void radeon_driver_irq_uninstall_kms(struct drm_device *dev)
+@@ -104,7 +102,8 @@ void radeon_driver_irq_uninstall_kms(struct drm_device *dev)
  		return;
  	}
  	/* Disable *all* interrupts */
@@ -88855,7 +89001,7 @@ index 42f5a2b..77c456d 100644
  	rdev->irq.gui_idle = false;
  	for (i = 0; i < RADEON_MAX_HPD_PINS; i++)
  		rdev->irq.hpd[i] = false;
-@@ -218,26 +222,26 @@ void radeon_irq_kms_fini(struct radeon_device *rdev)
+@@ -223,26 +222,26 @@ void radeon_irq_kms_fini(struct radeon_device *rdev)
  	flush_work_sync(&rdev->hotplug_work);
  }
  
@@ -99069,6 +99215,19 @@ index e223175..a877813 100644
  		return -EINVAL;
  	}
  
+diff --git a/drivers/gpu/drm/ttm/ttm_lock.c b/drivers/gpu/drm/ttm/ttm_lock.c
+index 9934b4d..075daf4 100644
+--- a/drivers/gpu/drm/ttm/ttm_lock.c
++++ b/drivers/gpu/drm/ttm/ttm_lock.c
+@@ -180,7 +180,7 @@ int ttm_write_lock(struct ttm_lock *lock, bool interruptible)
+ 			spin_unlock(&lock->lock);
+ 		}
+ 	} else
+-		wait_event(lock->queue, __ttm_write_lock(lock));
++		wait_event(lock->queue, __ttm_read_lock(lock));
+ 
+ 	return ret;
+ }
 diff --git a/drivers/gpu/drm/ttm/ttm_memory.c b/drivers/gpu/drm/ttm/ttm_memory.c
 index e70ddd8..23d2ecb 100644
 --- a/drivers/gpu/drm/ttm/ttm_memory.c
@@ -105491,7 +105650,7 @@ index 4be33b4..64ff02d 100644
  /* typedef area */
  #ifndef __KERNEL__
 diff --git a/include/drm/drmP.h b/include/drm/drmP.h
-index bf4b2dc..dd73104 100644
+index e7cd03c..dd73104 100644
 --- a/include/drm/drmP.h
 +++ b/include/drm/drmP.h
 @@ -91,6 +91,7 @@ struct drm_device;
@@ -105543,7 +105702,19 @@ index bf4b2dc..dd73104 100644
  /** File private data */
  struct drm_file {
  	int authenticated;
-@@ -437,6 +451,8 @@ struct drm_file {
+@@ -430,11 +444,6 @@ struct drm_file {
+ 	void *driver_priv;
+ 
+ 	int is_master; /* this file private is a master for a minor */
+-	/*
+-	 * This client is allowed to gain master privileges for @master.
+-	 * Protected by struct drm_device::struct_mutex.
+-	 */
+-	unsigned allowed_master:1;
+ 	struct drm_master *master; /* master this node is currently associated with
+ 				      N.B. not always minor->master */
+ 	struct list_head fbs;
+@@ -442,6 +451,8 @@ struct drm_file {
  	wait_queue_head_t event_wait;
  	struct list_head event_list;
  	int event_space;
@@ -105552,7 +105723,7 @@ index bf4b2dc..dd73104 100644
  };
  
  /** Wait queue */
-@@ -652,6 +668,12 @@ struct drm_gem_object {
+@@ -657,6 +668,12 @@ struct drm_gem_object {
  	uint32_t pending_write_domain;
  
  	void *driver_private;
@@ -105565,7 +105736,7 @@ index bf4b2dc..dd73104 100644
  };
  
  #include "drm_crtc.h"
-@@ -820,7 +842,7 @@ struct drm_driver {
+@@ -825,7 +842,7 @@ struct drm_driver {
  	 * Specifically, the timestamp in @vblank_time should correspond as
  	 * closely as possible to the time when the first video scanline of
  	 * the video frame after the end of VBLANK will start scanning out,
@@ -105574,7 +105745,7 @@ index bf4b2dc..dd73104 100644
  	 * @crtc is currently inside VBLANK, this will be a time in the future.
  	 * If the @crtc is currently scanning out a frame, this will be the
  	 * past start time of the current scanout. This is meant to adhere
-@@ -890,6 +912,20 @@ struct drm_driver {
+@@ -895,6 +912,20 @@ struct drm_driver {
  	int (*gem_open_object) (struct drm_gem_object *, struct drm_file *);
  	void (*gem_close_object) (struct drm_gem_object *, struct drm_file *);
  
@@ -105595,7 +105766,7 @@ index bf4b2dc..dd73104 100644
  	/* vga arb irq handler */
  	void (*vgaarb_irq)(struct drm_device *dev, bool state);
  
-@@ -918,7 +954,7 @@ struct drm_driver {
+@@ -923,7 +954,7 @@ struct drm_driver {
  	int dev_priv_size;
  	struct drm_ioctl_desc *ioctls;
  	int num_ioctls;
@@ -105604,7 +105775,7 @@ index bf4b2dc..dd73104 100644
  	union {
  		struct pci_driver *pci;
  		struct platform_device *platform_device;
-@@ -1170,6 +1206,8 @@ struct drm_device {
+@@ -1175,6 +1206,8 @@ struct drm_device {
  	struct idr object_name_idr;
  	/*@} */
  	int switch_power_state;
@@ -105613,7 +105784,7 @@ index bf4b2dc..dd73104 100644
  };
  
  #define DRM_SWITCH_POWER_ON 0
-@@ -1235,6 +1273,19 @@ static inline int drm_mtrr_del(int handle, unsigned long offset,
+@@ -1240,6 +1273,19 @@ static inline int drm_mtrr_del(int handle, unsigned long offset,
  }
  #endif
  
@@ -105633,7 +105804,15 @@ index bf4b2dc..dd73104 100644
  /******************************************************************/
  /** \name Internal function definitions */
  /*@{*/
-@@ -1264,11 +1315,6 @@ extern unsigned int drm_poll(struct file *filp, struct poll_table_struct *wait);
+@@ -1259,7 +1305,6 @@ extern int drm_fasync(int fd, struct file *filp, int on);
+ extern ssize_t drm_read(struct file *filp, char __user *buffer,
+ 			size_t count, loff_t *offset);
+ extern int drm_release(struct inode *inode, struct file *filp);
+-extern int drm_new_set_master(struct drm_device *dev, struct drm_file *fpriv);
+ 
+ 				/* Mapping support (drm_vm.h) */
+ extern int drm_mmap(struct file *filp, struct vm_area_struct *vma);
+@@ -1270,11 +1315,6 @@ extern unsigned int drm_poll(struct file *filp, struct poll_table_struct *wait);
  
  				/* Memory management support (drm_memory.h) */
  #include "drm_memory.h"
@@ -105645,7 +105824,7 @@ index bf4b2dc..dd73104 100644
  extern void drm_free_agp(DRM_AGP_MEM * handle, int pages);
  extern int drm_bind_agp(DRM_AGP_MEM * handle, unsigned int start);
  extern DRM_AGP_MEM *drm_agp_bind_pages(struct drm_device *dev,
-@@ -1383,12 +1429,8 @@ extern void drm_core_reclaim_buffers(struct drm_device *dev,
+@@ -1389,12 +1429,8 @@ extern void drm_core_reclaim_buffers(struct drm_device *dev,
  				/* IRQ support (drm_irq.h) */
  extern int drm_control(struct drm_device *dev, void *data,
  		       struct drm_file *file_priv);
@@ -105658,7 +105837,7 @@ index bf4b2dc..dd73104 100644
  
  extern int drm_vblank_init(struct drm_device *dev, int num_crtcs);
  extern int drm_wait_vblank(struct drm_device *dev, void *data,
-@@ -1464,6 +1506,7 @@ extern void drm_master_put(struct drm_master **master);
+@@ -1470,6 +1506,7 @@ extern void drm_master_put(struct drm_master **master);
  
  extern void drm_put_dev(struct drm_device *dev);
  extern int drm_put_minor(struct drm_minor **minor);
@@ -105666,7 +105845,7 @@ index bf4b2dc..dd73104 100644
  extern unsigned int drm_debug;
  
  extern unsigned int drm_vblank_offdelay;
-@@ -1502,6 +1545,32 @@ extern int drm_vblank_info(struct seq_file *m, void *data);
+@@ -1508,6 +1545,32 @@ extern int drm_vblank_info(struct seq_file *m, void *data);
  extern int drm_clients_info(struct seq_file *m, void* data);
  extern int drm_gem_name_info(struct seq_file *m, void *data);
  
@@ -105699,7 +105878,7 @@ index bf4b2dc..dd73104 100644
  #if DRM_DEBUG_CODE
  extern int drm_vma_info(struct seq_file *m, void *data);
  #endif
-@@ -1697,5 +1766,13 @@ extern void drm_platform_exit(struct drm_driver *driver, struct platform_device
+@@ -1703,5 +1766,13 @@ extern void drm_platform_exit(struct drm_driver *driver, struct platform_device
  extern int drm_get_platform_dev(struct platform_device *pdev,
  				struct drm_driver *driver);
  
