@@ -1,7 +1,7 @@
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Fri, 10 Jun 2011 11:04:15 +0200
-Subject: [PATCH 192/374] rtmutex-futex-prepare-rt.patch
-Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=0c1baf78c3ddd8091f6b5d8c3db940b9bc5e9e0a
+Subject: [PATCH 192/380] rtmutex-futex-prepare-rt.patch
+Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=a3e3e174a40f581801e5792cffeafd712d1c07b9
 
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 ---
@@ -11,7 +11,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  3 files changed, 90 insertions(+), 18 deletions(-)
 
 diff --git a/kernel/futex.c b/kernel/futex.c
-index 7481595..bd5f495 100644
+index 9dc2c7192b2e..bc35f1cc923f 100644
 --- a/kernel/futex.c
 +++ b/kernel/futex.c
 @@ -1569,6 +1569,16 @@ retry_private:
@@ -107,7 +107,7 @@ index 7481595..bd5f495 100644
  
  	/* Check if the requeue code acquired the second futex for us. */
  	if (!q.rt_waiter) {
-@@ -2490,9 +2535,10 @@ static int futex_wait_requeue_pi(u32 __user *uaddr, unsigned int flags,
+@@ -2490,14 +2535,15 @@ static int futex_wait_requeue_pi(u32 __user *uaddr, unsigned int flags,
  		 * did a lock-steal - fix up the PI-state in that case.
  		 */
  		if (q.pi_state && (q.pi_state->owner != current)) {
@@ -115,12 +115,17 @@ index 7481595..bd5f495 100644
 +			spin_lock(&hb2->lock);
 +			BUG_ON(&hb2->lock != q.lock_ptr);
  			ret = fixup_pi_state_owner(uaddr2, &q, current);
+ 			/*
+ 			 * Drop the reference to the pi state which
+ 			 * the requeue_pi() code acquired for us.
+ 			 */
+ 			free_pi_state(q.pi_state);
 -			spin_unlock(q.lock_ptr);
 +			spin_unlock(&hb2->lock);
  		}
  	} else {
  		/*
-@@ -2505,7 +2551,8 @@ static int futex_wait_requeue_pi(u32 __user *uaddr, unsigned int flags,
+@@ -2510,7 +2556,8 @@ static int futex_wait_requeue_pi(u32 __user *uaddr, unsigned int flags,
  		ret = rt_mutex_finish_proxy_lock(pi_mutex, to, &rt_waiter, 1);
  		debug_rt_mutex_free_waiter(&rt_waiter);
  
@@ -131,7 +136,7 @@ index 7481595..bd5f495 100644
  		 * Fixup the pi_state owner and possibly acquire the lock if we
  		 * haven't already.
 diff --git a/kernel/rtmutex.c b/kernel/rtmutex.c
-index 0459561..10b11b2 100644
+index 04595617c43d..10b11b2e884a 100644
 --- a/kernel/rtmutex.c
 +++ b/kernel/rtmutex.c
 @@ -67,6 +67,11 @@ static void fixup_rt_mutex_waiters(struct rt_mutex *lock)
@@ -199,7 +204,7 @@ index 0459561..10b11b2 100644
  		return;
  	}
 diff --git a/kernel/rtmutex_common.h b/kernel/rtmutex_common.h
-index 53a66c8..b43d832 100644
+index 53a66c85261b..b43d832f4f6f 100644
 --- a/kernel/rtmutex_common.h
 +++ b/kernel/rtmutex_common.h
 @@ -103,6 +103,8 @@ static inline struct task_struct *rt_mutex_owner(struct rt_mutex *lock)

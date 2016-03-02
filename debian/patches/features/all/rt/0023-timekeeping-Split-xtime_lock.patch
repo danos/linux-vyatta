@@ -1,7 +1,7 @@
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Thu, 1 Mar 2012 15:14:06 +0100
-Subject: [PATCH 023/374] timekeeping: Split xtime_lock
-Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=98f0964ca5faee5f9bd18c73d879f966dcbc6c29
+Subject: [PATCH 023/380] timekeeping: Split xtime_lock
+Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=f528bd78ac7eb30a80af365e481e60b6bb306b93
 
 xtime_lock is going to be split apart in mainline, so we can shorten
 the seqcount protected regions and avoid updating seqcount in some
@@ -19,7 +19,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  6 files changed, 89 insertions(+), 57 deletions(-)
 
 diff --git a/kernel/time/jiffies.c b/kernel/time/jiffies.c
-index 955560e..c84f1ce 100644
+index 955560e25e05..c84f1ceeff23 100644
 --- a/kernel/time/jiffies.c
 +++ b/kernel/time/jiffies.c
 @@ -80,9 +80,9 @@ u64 get_jiffies_64(void)
@@ -35,7 +35,7 @@ index 955560e..c84f1ce 100644
  }
  EXPORT_SYMBOL(get_jiffies_64);
 diff --git a/kernel/time/ntp.c b/kernel/time/ntp.c
-index 34fd01e..635c2bc 100644
+index 34fd01ebd168..635c2bcf651f 100644
 --- a/kernel/time/ntp.c
 +++ b/kernel/time/ntp.c
 @@ -362,6 +362,9 @@ int second_overflow(unsigned long secs)
@@ -118,7 +118,7 @@ index 34fd01e..635c2bc 100644
  EXPORT_SYMBOL(hardpps);
  
 diff --git a/kernel/time/tick-common.c b/kernel/time/tick-common.c
-index ead79bc..538d45a 100644
+index ead79bce1258..538d45a556ea 100644
 --- a/kernel/time/tick-common.c
 +++ b/kernel/time/tick-common.c
 @@ -63,13 +63,15 @@ int tick_is_oneshot_available(void)
@@ -152,7 +152,7 @@ index ead79bc..538d45a 100644
  		clockevents_set_mode(dev, CLOCK_EVT_MODE_ONESHOT);
  
 diff --git a/kernel/time/tick-internal.h b/kernel/time/tick-internal.h
-index 4e265b9..c91100d 100644
+index 4e265b901fed..c91100d99fb9 100644
 --- a/kernel/time/tick-internal.h
 +++ b/kernel/time/tick-internal.h
 @@ -141,4 +141,5 @@ static inline int tick_device_is_functional(struct clock_event_device *dev)
@@ -163,7 +163,7 @@ index 4e265b9..c91100d 100644
 +extern raw_spinlock_t xtime_lock;
 +extern seqcount_t xtime_seq;
 diff --git a/kernel/time/tick-sched.c b/kernel/time/tick-sched.c
-index 2695d72..c92282e 100644
+index 2695d72d68ec..c92282ee6ae8 100644
 --- a/kernel/time/tick-sched.c
 +++ b/kernel/time/tick-sched.c
 @@ -56,7 +56,8 @@ static void tick_do_update_jiffies64(ktime_t now)
@@ -218,7 +218,7 @@ index 2695d72..c92282e 100644
  	if (rcu_needs_cpu(cpu) || printk_needs_cpu(cpu) ||
  	    arch_needs_cpu(cpu)) {
 diff --git a/kernel/time/timekeeping.c b/kernel/time/timekeeping.c
-index 068c092..d00be1d 100644
+index 068c0929904c..d00be1dc385c 100644
 --- a/kernel/time/timekeeping.c
 +++ b/kernel/time/timekeeping.c
 @@ -139,8 +139,8 @@ static inline s64 timekeeping_get_ns_raw(void)

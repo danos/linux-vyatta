@@ -1,7 +1,7 @@
 From: John Stultz <johnstul@us.ibm.com>
 Date: Fri, 3 Jul 2009 08:29:58 -0500
-Subject: [PATCH 138/374] posix-timers: thread posix-cpu-timers on -rt
-Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=04e78fc271c6084d7556161bd419c67158ed657e
+Subject: [PATCH 138/380] posix-timers: thread posix-cpu-timers on -rt
+Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=1805562116cb694e9cdb42390edad89189aa5574
 
 posix-cpu-timer code takes non -rt safe locks in hard irq
 context. Move it to a thread.
@@ -19,7 +19,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  5 files changed, 190 insertions(+), 6 deletions(-)
 
 diff --git a/include/linux/init_task.h b/include/linux/init_task.h
-index cdde2b37..3202e80 100644
+index cdde2b379c8d..3202e80e5796 100644
 --- a/include/linux/init_task.h
 +++ b/include/linux/init_task.h
 @@ -142,6 +142,12 @@ extern struct task_group root_task_group;
@@ -44,7 +44,7 @@ index cdde2b37..3202e80 100644
  		[PIDTYPE_PID]  = INIT_PID_LINK(PIDTYPE_PID),		\
  		[PIDTYPE_PGID] = INIT_PID_LINK(PIDTYPE_PGID),		\
 diff --git a/include/linux/sched.h b/include/linux/sched.h
-index 514bb5d..059a4cb 100644
+index 6044cecea4ba..caba177eae22 100644
 --- a/include/linux/sched.h
 +++ b/include/linux/sched.h
 @@ -1364,6 +1364,9 @@ struct task_struct {
@@ -58,7 +58,7 @@ index 514bb5d..059a4cb 100644
  /* process credentials */
  	const struct cred __rcu *real_cred; /* objective and real subjective task
 diff --git a/init/main.c b/init/main.c
-index 85b1b3d..7bf452a 100644
+index 85b1b3dfa7fe..7bf452a4743b 100644
 --- a/init/main.c
 +++ b/init/main.c
 @@ -69,6 +69,7 @@
@@ -70,7 +70,7 @@ index 85b1b3d..7bf452a 100644
  #include <asm/io.h>
  #include <asm/bugs.h>
 diff --git a/kernel/fork.c b/kernel/fork.c
-index ed468a3..84115e7 100644
+index ed468a34b333..84115e74de17 100644
 --- a/kernel/fork.c
 +++ b/kernel/fork.c
 @@ -1031,6 +1031,9 @@ void mm_init_owner(struct mm_struct *mm, struct task_struct *p)
@@ -84,7 +84,7 @@ index ed468a3..84115e7 100644
  	tsk->cputime_expires.virt_exp = cputime_zero;
  	tsk->cputime_expires.sched_exp = 0;
 diff --git a/kernel/posix-cpu-timers.c b/kernel/posix-cpu-timers.c
-index 962c291..cff1757 100644
+index 962c291224d7..cff175794fd9 100644
 --- a/kernel/posix-cpu-timers.c
 +++ b/kernel/posix-cpu-timers.c
 @@ -701,7 +701,7 @@ static int posix_cpu_timer_set(struct k_itimer *timer, int flags,
