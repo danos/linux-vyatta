@@ -1,7 +1,7 @@
 From: Ingo Molnar <mingo@elte.hu>
 Date: Fri, 3 Jul 2009 08:29:34 -0500
-Subject: [PATCH 133/374] hrtimers: prepare full preemption
-Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=b3bed66b7aec4811abc73af6976e52212ecc43cd
+Subject: [PATCH 133/380] hrtimers: prepare full preemption
+Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=2ed6c0f78ae6c5bef9b1dbb259964c50d638976a
 
 Make cancellation of a running callback in softirq context safe
 against preemption.
@@ -15,11 +15,9 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  kernel/posix-timers.c   | 33 +++++++++++++++++++++++++++++++++
  4 files changed, 76 insertions(+), 1 deletion(-)
 
-diff --git a/include/linux/hrtimer.h b/include/linux/hrtimer.h
-index cc07d27..75b2545 100644
 --- a/include/linux/hrtimer.h
 +++ b/include/linux/hrtimer.h
-@@ -189,6 +189,9 @@ struct hrtimer_cpu_base {
+@@ -195,6 +195,9 @@ struct hrtimer_cpu_base {
  	unsigned long			nr_hangs;
  	ktime_t				max_hang_time;
  #endif
@@ -29,7 +27,7 @@ index cc07d27..75b2545 100644
  	struct hrtimer_clock_base	clock_base[HRTIMER_MAX_CLOCK_BASES];
  };
  
-@@ -382,6 +385,13 @@ static inline int hrtimer_restart(struct hrtimer *timer)
+@@ -411,6 +414,13 @@ static inline int hrtimer_restart(struct
  	return hrtimer_start_expires(timer, HRTIMER_MODE_ABS);
  }
  
@@ -41,13 +39,11 @@ index cc07d27..75b2545 100644
 +#endif
 +
  /* Query timers: */
+ extern ktime_t __hrtimer_get_remaining(const struct hrtimer *timer, bool adjust);
  extern ktime_t hrtimer_get_remaining(const struct hrtimer *timer);
- extern int hrtimer_get_res(const clockid_t which_clock, struct timespec *tp);
-diff --git a/kernel/hrtimer.c b/kernel/hrtimer.c
-index fa8c09b..818b2ec 100644
 --- a/kernel/hrtimer.c
 +++ b/kernel/hrtimer.c
-@@ -874,6 +874,32 @@ u64 hrtimer_forward(struct hrtimer *timer, ktime_t now, ktime_t interval)
+@@ -874,6 +874,32 @@ u64 hrtimer_forward(struct hrtimer *time
  }
  EXPORT_SYMBOL_GPL(hrtimer_forward);
  
@@ -80,7 +76,7 @@ index fa8c09b..818b2ec 100644
  /*
   * enqueue_hrtimer - internal function to (re)start a timer
   *
-@@ -1113,7 +1139,7 @@ int hrtimer_cancel(struct hrtimer *timer)
+@@ -1120,7 +1146,7 @@ int hrtimer_cancel(struct hrtimer *timer
  
  		if (ret >= 0)
  			return ret;
@@ -89,7 +85,7 @@ index fa8c09b..818b2ec 100644
  	}
  }
  EXPORT_SYMBOL_GPL(hrtimer_cancel);
-@@ -1532,6 +1558,8 @@ void hrtimer_run_queues(void)
+@@ -1559,6 +1585,8 @@ void hrtimer_run_queues(void)
  		}
  		raw_spin_unlock(&cpu_base->lock);
  	}
@@ -98,7 +94,7 @@ index fa8c09b..818b2ec 100644
  }
  
  /*
-@@ -1692,6 +1720,9 @@ static void __cpuinit init_hrtimers_cpu(int cpu)
+@@ -1719,6 +1747,9 @@ static void __cpuinit init_hrtimers_cpu(
  	}
  
  	hrtimer_init_hres(cpu_base);
@@ -108,8 +104,6 @@ index fa8c09b..818b2ec 100644
  }
  
  #ifdef CONFIG_HOTPLUG_CPU
-diff --git a/kernel/itimer.c b/kernel/itimer.c
-index d802883..2c582fc 100644
 --- a/kernel/itimer.c
 +++ b/kernel/itimer.c
 @@ -214,6 +214,7 @@ again:
@@ -120,11 +114,9 @@ index d802883..2c582fc 100644
  			goto again;
  		}
  		expires = timeval_to_ktime(value->it_value);
-diff --git a/kernel/posix-timers.c b/kernel/posix-timers.c
-index 81ad8aa..f183690 100644
 --- a/kernel/posix-timers.c
 +++ b/kernel/posix-timers.c
-@@ -774,6 +774,20 @@ SYSCALL_DEFINE1(timer_getoverrun, timer_t, timer_id)
+@@ -774,6 +774,20 @@ SYSCALL_DEFINE1(timer_getoverrun, timer_
  	return overrun;
  }
  
@@ -182,7 +174,7 @@ index 81ad8aa..f183690 100644
  
  	spin_lock(&current->sighand->siglock);
  	list_del(&timer->list);
-@@ -928,8 +951,18 @@ static void itimer_delete(struct k_itimer *timer)
+@@ -928,8 +951,18 @@ static void itimer_delete(struct k_itime
  retry_delete:
  	spin_lock_irqsave(&timer->it_lock, flags);
  

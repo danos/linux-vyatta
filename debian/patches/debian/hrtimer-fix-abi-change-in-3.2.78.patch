@@ -1,0 +1,69 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Wed, 02 Mar 2016 16:53:56 +0000
+Subject: hrtimer: Fix ABI change in 3.2.78
+Forwarded: not-needed
+
+The fudge for relative timers on architectures with only low-res
+hardware timers broke ABI.  Limit the structure change to those
+architectures that need it, which doesn't include any of those
+supported in wheezy.
+
+Changing hrtimer_get_remaining() from exported to static inline
+also broke ABI; undo that.
+
+---
+--- a/include/linux/hrtimer.h
++++ b/include/linux/hrtimer.h
+@@ -111,8 +111,12 @@ struct hrtimer {
+ 	ktime_t				_softexpires;
+ 	enum hrtimer_restart		(*function)(struct hrtimer *);
+ 	struct hrtimer_clock_base	*base;
++#ifdef CONFIG_TIME_LOW_RES
+ 	u8				state;
+ 	u8				is_rel;
++#else
++	unsigned long			state;
++#endif
+ #ifdef CONFIG_TIMER_STATS
+ 	int				start_pid;
+ 	void				*start_site;
+@@ -409,11 +413,7 @@ static inline int hrtimer_restart(struct
+ 
+ /* Query timers: */
+ extern ktime_t __hrtimer_get_remaining(const struct hrtimer *timer, bool adjust);
+-
+-static inline ktime_t hrtimer_get_remaining(const struct hrtimer *timer)
+-{
+-	return __hrtimer_get_remaining(timer, false);
+-}
++extern ktime_t hrtimer_get_remaining(const struct hrtimer *timer);
+ extern int hrtimer_get_res(const clockid_t which_clock, struct timespec *tp);
+ 
+ extern ktime_t hrtimer_get_next_event(void);
+--- a/kernel/hrtimer.c
++++ b/kernel/hrtimer.c
+@@ -1145,7 +1145,12 @@ ktime_t __hrtimer_get_remaining(const st
+ 
+ 	return rem;
+ }
+-EXPORT_SYMBOL_GPL(__hrtimer_get_remaining);
++
++ktime_t hrtimer_get_remaining(const struct hrtimer *timer)
++{
++	return __hrtimer_get_remaining(timer, false);
++}
++EXPORT_SYMBOL_GPL(hrtimer_get_remaining);
+ 
+ #ifdef CONFIG_NO_HZ
+ /**
+--- a/kernel/time/timer_list.c
++++ b/kernel/time/timer_list.c
+@@ -57,7 +57,7 @@ print_timer(struct seq_file *m, struct h
+ 	print_name_offset(m, taddr);
+ 	SEQ_printf(m, ", ");
+ 	print_name_offset(m, timer->function);
+-	SEQ_printf(m, ", S:%02x", timer->state);
++	SEQ_printf(m, ", S:%02x", (unsigned int)timer->state);
+ #ifdef CONFIG_TIMER_STATS
+ 	SEQ_printf(m, ", ");
+ 	print_name_offset(m, timer->start_site);
