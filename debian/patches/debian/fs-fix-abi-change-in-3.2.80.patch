@@ -1,0 +1,60 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Sun, 01 May 2016 15:39:07 +0200
+Subject: fs: Fix ABI change in 3.2.80
+Forwarded: not-needed
+
+file_open_root() gained an extra parameter to set the file mode.
+Restore the old function signature and define a separate function,
+file_open_root_umode(), that takes the extra parameter.
+
+---
+--- a/fs/open.c
++++ b/fs/open.c
+@@ -958,8 +958,8 @@ struct file *filp_open(const char *filen
+ }
+ EXPORT_SYMBOL(filp_open);
+ 
+-struct file *file_open_root(struct dentry *dentry, struct vfsmount *mnt,
+-			    const char *filename, int flags, umode_t mode)
++struct file *file_open_root_umode(struct dentry *dentry, struct vfsmount *mnt,
++				  const char *filename, int flags, umode_t mode)
+ {
+ 	struct open_flags op;
+ 	int lookup = build_open_flags(flags, mode, &op);
+@@ -968,7 +968,7 @@ struct file *file_open_root(struct dentr
+ 			return ERR_PTR(-ENOTDIR);
+ 	return do_file_open_root(dentry, mnt, filename, &op, lookup);
+ }
+-EXPORT_SYMBOL(file_open_root);
++EXPORT_SYMBOL(file_open_root_umode);
+ 
+ long do_sys_open(int dfd, const char __user *filename, int flags, int mode)
+ {
+@@ -1141,3 +1141,13 @@ int nonseekable_open(struct inode *inode
+ }
+ 
+ EXPORT_SYMBOL(nonseekable_open);
++
++#undef file_open_root
++struct file *file_open_root(struct dentry *dentry, struct vfsmount *mnt,
++			    const char *filename, int flags)
++{
++	if (flags & O_CREAT)
++		return ERR_PTR(-EINVAL);
++	return file_open_root_umode(dentry, mnt, filename, flags, 0);
++}
++EXPORT_SYMBOL(file_open_root);
+--- a/include/linux/fs.h
++++ b/include/linux/fs.h
+@@ -2075,7 +2075,10 @@ extern long do_sys_open(int dfd, const c
+ 			int mode);
+ extern struct file *filp_open(const char *, int, int);
+ extern struct file *file_open_root(struct dentry *, struct vfsmount *,
+-				   const char *, int, umode_t);
++				   const char *, int);
++extern struct file *file_open_root_umode(struct dentry *, struct vfsmount *,
++					 const char *, int, umode_t);
++#define file_open_root file_open_root_umode
+ extern struct file * dentry_open(struct dentry *, struct vfsmount *, int,
+ 				 const struct cred *);
+ extern int filp_close(struct file *, fl_owner_t id);
