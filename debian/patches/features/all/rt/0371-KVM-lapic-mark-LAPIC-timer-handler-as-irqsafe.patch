@@ -1,7 +1,7 @@
 From: Marcelo Tosatti <mtosatti@redhat.com>
 Date: Wed, 8 Apr 2015 20:33:25 -0300
-Subject: [PATCH 371/386] KVM: lapic: mark LAPIC timer handler as irqsafe
-Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=a824d0ec7427fec13063820cd410dedf751c197d
+Subject: [PATCH 371/389] KVM: lapic: mark LAPIC timer handler as irqsafe
+Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=c14e94431bbd40f915a9690cde23df26ec8586a2
 
 Since lapic timer handler only wakes up a simple waitqueue,
 it can be executed from hardirq context.
@@ -15,14 +15,20 @@ Cc: stable-rt@vger.kernel.org
 Signed-off-by: Marcelo Tosatti <mtosatti@redhat.com>
 Signed-off-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
 Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
-[bwh: Fix backport: apic_timer_fn() is called kvm_timer_fn() in 3.2]
 ---
+ arch/x86/kvm/lapic.c | 42 +++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 39 insertions(+), 3 deletions(-)
+
+diff --git a/arch/x86/kvm/lapic.c b/arch/x86/kvm/lapic.c
+index 055cc49ffb10..7198be07b406 100644
 --- a/arch/x86/kvm/lapic.c
 +++ b/arch/x86/kvm/lapic.c
-@@ -679,8 +679,36 @@ static void update_divide_count(struct k
+@@ -679,8 +679,38 @@ static void update_divide_count(struct kvm_lapic *apic)
  				   apic->divide_count);
  }
  
++
++static enum hrtimer_restart apic_timer_fn(struct hrtimer *data);
 +
 +static void apic_timer_expired(struct hrtimer *data)
 +{
@@ -30,7 +36,7 @@ Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
 +	enum hrtimer_restart r;
 +	struct kvm_timer *ktimer = container_of(data, struct kvm_timer, timer);
 +
-+	r = kvm_timer_fn(data);
++	r = apic_timer_fn(data);
 +
 +	if (r == HRTIMER_RESTART) {
 +		do {
@@ -56,7 +62,7 @@ Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
  	ktime_t now;
  	atomic_set(&apic->lapic_timer.pending, 0);
  
-@@ -710,9 +738,11 @@ static void start_apic_timer(struct kvm_
+@@ -710,9 +740,11 @@ static void start_apic_timer(struct kvm_lapic *apic)
  			}
  		}
  
@@ -69,7 +75,7 @@ Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
  
  		apic_debug("%s: bus cycle is %" PRId64 "ns, now 0x%016"
  			   PRIx64 ", "
-@@ -742,8 +772,10 @@ static void start_apic_timer(struct kvm_
+@@ -742,8 +774,10 @@ static void start_apic_timer(struct kvm_lapic *apic)
  			ns = (tscdeadline - guest_tsc) * 1000000ULL;
  			do_div(ns, this_tsc_khz);
  		}
@@ -81,7 +87,7 @@ Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
  
  		local_irq_restore(flags);
  	}
-@@ -1173,6 +1205,7 @@ int kvm_create_lapic(struct kvm_vcpu *vc
+@@ -1173,6 +1207,7 @@ int kvm_create_lapic(struct kvm_vcpu *vcpu)
  	hrtimer_init(&apic->lapic_timer.timer, CLOCK_MONOTONIC,
  		     HRTIMER_MODE_ABS);
  	apic->lapic_timer.timer.function = kvm_timer_fn;
@@ -89,7 +95,7 @@ Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
  	apic->lapic_timer.t_ops = &lapic_timer_ops;
  	apic->lapic_timer.kvm = vcpu->kvm;
  	apic->lapic_timer.vcpu = vcpu;
-@@ -1270,7 +1303,8 @@ void __kvm_migrate_apic_timer(struct kvm
+@@ -1270,7 +1305,8 @@ void __kvm_migrate_apic_timer(struct kvm_vcpu *vcpu)
  
  	timer = &apic->lapic_timer.timer;
  	if (hrtimer_cancel(timer))
