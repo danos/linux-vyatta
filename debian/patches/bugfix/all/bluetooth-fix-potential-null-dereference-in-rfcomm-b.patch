@@ -1,0 +1,60 @@
+From: Jaganath Kanakkassery <jaganath.k@samsung.com>
+Date: Thu, 14 May 2015 12:58:08 +0530
+Subject: Bluetooth: Fix potential NULL dereference in RFCOMM bind callback
+Origin: https://git.kernel.org/linus/951b6a0717db97ce420547222647bcc40bf1eacd
+
+addr can be NULL and it should not be dereferenced before NULL checking.
+
+Signed-off-by: Jaganath Kanakkassery <jaganath.k@samsung.com>
+Signed-off-by: Marcel Holtmann <marcel@holtmann.org>
+[bwh: Backported to 3.2:
+ - There's no 'chan' variable
+ - Keep using batostr() to log addresses
+ - Adjust context]
+---
+ net/bluetooth/rfcomm/sock.c | 20 ++++++++++++--------
+ 1 file changed, 12 insertions(+), 8 deletions(-)
+
+--- a/net/bluetooth/rfcomm/sock.c
++++ b/net/bluetooth/rfcomm/sock.c
+@@ -349,15 +349,19 @@ static int rfcomm_sock_create(struct net
+ 
+ static int rfcomm_sock_bind(struct socket *sock, struct sockaddr *addr, int addr_len)
+ {
+-	struct sockaddr_rc *sa = (struct sockaddr_rc *) addr;
++	struct sockaddr_rc sa;
+ 	struct sock *sk = sock->sk;
+-	int err = 0;
+-
+-	BT_DBG("sk %p %s", sk, batostr(&sa->rc_bdaddr));
++	int len, err = 0;
+ 
+ 	if (!addr || addr->sa_family != AF_BLUETOOTH)
+ 		return -EINVAL;
+ 
++	memset(&sa, 0, sizeof(sa));
++	len = min_t(unsigned int, sizeof(sa), addr_len);
++	memcpy(&sa, addr, len);
++
++	BT_DBG("sk %p %s", sk, batostr(&sa.rc_bdaddr));
++
+ 	lock_sock(sk);
+ 
+ 	if (sk->sk_state != BT_OPEN) {
+@@ -372,12 +376,13 @@ static int rfcomm_sock_bind(struct socke
+ 
+ 	write_lock_bh(&rfcomm_sk_list.lock);
+ 
+-	if (sa->rc_channel && __rfcomm_get_sock_by_addr(sa->rc_channel, &sa->rc_bdaddr)) {
++	if (sa.rc_channel &&
++	    __rfcomm_get_sock_by_addr(sa.rc_channel, &sa.rc_bdaddr)) {
+ 		err = -EADDRINUSE;
+ 	} else {
+ 		/* Save source address */
+-		bacpy(&bt_sk(sk)->src, &sa->rc_bdaddr);
+-		rfcomm_pi(sk)->channel = sa->rc_channel;
++		bacpy(&bt_sk(sk)->src, &sa.rc_bdaddr);
++		rfcomm_pi(sk)->channel = sa.rc_channel;
+ 		sk->sk_state = BT_BOUND;
+ 	}
+ 
