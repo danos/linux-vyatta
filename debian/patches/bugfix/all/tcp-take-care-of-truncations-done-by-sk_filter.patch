@@ -1,0 +1,98 @@
+From: Eric Dumazet <edumazet@google.com>
+Date: Thu, 10 Nov 2016 13:12:35 -0800
+Subject: tcp: take care of truncations done by sk_filter()
+Origin: https://git.kernel.org/linus/ac6e780070e30e4c35bd395acfe9191e6268bdd3
+Bug-Debian-Security: https://security-tracker.debian.org/tracker/CVE-2016-8645
+
+With syzkaller help, Marco Grassi found a bug in TCP stack,
+crashing in tcp_collapse()
+
+Root cause is that sk_filter() can truncate the incoming skb,
+but TCP stack was not really expecting this to happen.
+It probably was expecting a simple DROP or ACCEPT behavior.
+
+We first need to make sure no part of TCP header could be removed.
+Then we need to adjust TCP_SKB_CB(skb)->end_seq
+
+Many thanks to syzkaller team and Marco for giving us a reproducer.
+
+Signed-off-by: Eric Dumazet <edumazet@google.com>
+Reported-by: Marco Grassi <marco.gra@gmail.com>
+Reported-by: Vladis Dronov <vdronov@redhat.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+[bwh: Backported to 3.16: adjust context]
+---
+ include/net/tcp.h   |  1 +
+ net/ipv4/tcp_ipv4.c | 19 ++++++++++++++++++-
+ net/ipv6/tcp_ipv6.c |  6 ++++--
+ 3 files changed, 23 insertions(+), 3 deletions(-)
+
+--- a/include/net/tcp.h
++++ b/include/net/tcp.h
+@@ -1053,6 +1053,7 @@ static inline void tcp_prequeue_init(str
+ }
+ 
+ bool tcp_prequeue(struct sock *sk, struct sk_buff *skb);
++int tcp_filter(struct sock *sk, struct sk_buff *skb);
+ 
+ #undef STATE_TRACE
+ 
+--- a/net/ipv4/tcp_ipv4.c
++++ b/net/ipv4/tcp_ipv4.c
+@@ -1697,6 +1697,21 @@ bool tcp_prequeue(struct sock *sk, struc
+ }
+ EXPORT_SYMBOL(tcp_prequeue);
+ 
++int tcp_filter(struct sock *sk, struct sk_buff *skb)
++{
++	struct tcphdr *th = (struct tcphdr *)skb->data;
++	unsigned int eaten = skb->len;
++	int err;
++
++	err = sk_filter_trim_cap(sk, skb, th->doff * 4);
++	if (!err) {
++		eaten -= skb->len;
++		TCP_SKB_CB(skb)->end_seq -= eaten;
++	}
++	return err;
++}
++EXPORT_SYMBOL(tcp_filter);
++
+ /*
+  *	From tcp_input.c
+  */
+@@ -1760,8 +1775,10 @@ process:
+ 		goto discard_and_relse;
+ 	nf_reset(skb);
+ 
+-	if (sk_filter(sk, skb))
++	if (tcp_filter(sk, skb))
+ 		goto discard_and_relse;
++	th = (const struct tcphdr *)skb->data;
++	iph = ip_hdr(skb);
+ 
+ 	sk_mark_napi_id(sk, skb);
+ 	skb->dev = NULL;
+--- a/net/ipv6/tcp_ipv6.c
++++ b/net/ipv6/tcp_ipv6.c
+@@ -1359,7 +1359,7 @@ static int tcp_v6_do_rcv(struct sock *sk
+ 		goto discard;
+ #endif
+ 
+-	if (sk_filter(sk, skb))
++	if (tcp_filter(sk, skb))
+ 		goto discard;
+ 
+ 	/*
+@@ -1531,8 +1531,10 @@ process:
+ 	if (!xfrm6_policy_check(sk, XFRM_POLICY_IN, skb))
+ 		goto discard_and_relse;
+ 
+-	if (sk_filter(sk, skb))
++	if (tcp_filter(sk, skb))
+ 		goto discard_and_relse;
++	th = (const struct tcphdr *)skb->data;
++	hdr = ipv6_hdr(skb);
+ 
+ 	sk_mark_napi_id(sk, skb);
+ 	skb->dev = NULL;
