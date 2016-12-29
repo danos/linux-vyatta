@@ -1,0 +1,94 @@
+From: Willem de Bruijn <willemb@google.com>
+Date: Tue, 12 Jul 2016 18:18:56 -0400
+Subject: rose: limit sk_filter trim to payload
+Origin: https://git.kernel.org/linus/f4979fcea7fd36d8e2f556abef86f80e0d5af1ba
+
+Sockets can have a filter program attached that drops or trims
+incoming packets based on the filter program return value.
+
+Rose requires data packets to have at least ROSE_MIN_LEN bytes. It
+verifies this on arrival in rose_route_frame and unconditionally pulls
+the bytes in rose_recvmsg. The filter can trim packets to below this
+value in-between, causing pull to fail, leaving the partial header at
+the time of skb_copy_datagram_msg.
+
+Place a lower bound on the size to which sk_filter may trim packets
+by introducing sk_filter_trim_cap and call this for rose packets.
+
+Signed-off-by: Willem de Bruijn <willemb@google.com>
+Acked-by: Daniel Borkmann <daniel@iogearbox.net>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+[bwh: Backported to 3.2: adjust context]
+---
+ include/linux/filter.h |  6 +++++-
+ net/core/filter.c      | 10 +++++-----
+ net/rose/rose_in.c     |  3 ++-
+ 3 files changed, 12 insertions(+), 7 deletions(-)
+
+--- a/include/linux/filter.h
++++ b/include/linux/filter.h
+@@ -150,7 +150,11 @@ static inline unsigned int sk_filter_len
+ 	return fp->len * sizeof(struct sock_filter) + sizeof(*fp);
+ }
+ 
+-extern int sk_filter(struct sock *sk, struct sk_buff *skb);
++int sk_filter_trim_cap(struct sock *sk, struct sk_buff *skb, unsigned int cap);
++static inline int sk_filter(struct sock *sk, struct sk_buff *skb)
++{
++	return sk_filter_trim_cap(sk, skb, 1);
++}
+ extern unsigned int sk_run_filter(const struct sk_buff *skb,
+ 				  const struct sock_filter *filter);
+ extern int sk_attach_filter(struct sock_fprog *fprog, struct sock *sk);
+--- a/net/core/filter.c
++++ b/net/core/filter.c
+@@ -64,9 +64,10 @@ static inline void *load_pointer(const s
+ }
+ 
+ /**
+- *	sk_filter - run a packet through a socket filter
++ *	sk_filter_trim_cap - run a packet through a socket filter
+  *	@sk: sock associated with &sk_buff
+  *	@skb: buffer to filter
++ *	@cap: limit on how short the eBPF program may trim the packet
+  *
+  * Run the filter code and then cut skb->data to correct size returned by
+  * sk_run_filter. If pkt_len is 0 we toss packet. If skb->len is smaller
+@@ -75,7 +76,7 @@ static inline void *load_pointer(const s
+  * be accepted or -EPERM if the packet should be tossed.
+  *
+  */
+-int sk_filter(struct sock *sk, struct sk_buff *skb)
++int sk_filter_trim_cap(struct sock *sk, struct sk_buff *skb, unsigned int cap)
+ {
+ 	int err;
+ 	struct sk_filter *filter;
+@@ -88,14 +89,13 @@ int sk_filter(struct sock *sk, struct sk
+ 	filter = rcu_dereference(sk->sk_filter);
+ 	if (filter) {
+ 		unsigned int pkt_len = SK_RUN_FILTER(filter, skb);
+-
+-		err = pkt_len ? pskb_trim(skb, pkt_len) : -EPERM;
++		err = pkt_len ? pskb_trim(skb, max(cap, pkt_len)) : -EPERM;
+ 	}
+ 	rcu_read_unlock();
+ 
+ 	return err;
+ }
+-EXPORT_SYMBOL(sk_filter);
++EXPORT_SYMBOL(sk_filter_trim_cap);
+ 
+ /**
+  *	sk_run_filter - run a filter on a socket
+--- a/net/rose/rose_in.c
++++ b/net/rose/rose_in.c
+@@ -165,7 +165,8 @@ static int rose_state3_machine(struct so
+ 		rose_frames_acked(sk, nr);
+ 		if (ns == rose->vr) {
+ 			rose_start_idletimer(sk);
+-			if (sock_queue_rcv_skb(sk, skb) == 0) {
++			if (sk_filter_trim_cap(sk, skb, ROSE_MIN_LEN) == 0 &&
++			    __sock_queue_rcv_skb(sk, skb) == 0) {
+ 				rose->vr = (rose->vr + 1) % ROSE_MODULUS;
+ 				queued = 1;
+ 			} else {
