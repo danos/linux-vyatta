@@ -1,0 +1,49 @@
+From: Peter Zijlstra <peterz@infradead.org>
+Date: Wed, 24 Sep 2014 10:18:46 +0200
+Subject: locking/mutex: Don't assume TASK_RUNNING
+Origin: https://git.kernel.org/linus/6f942a1f264e875c5f3ad6f505d7b500a3e7fa82
+Bug-Debian: https://bugs.debian.org/841171
+
+We're going to make might_sleep() test for TASK_RUNNING, because
+blocking without TASK_RUNNING will destroy the task state by setting
+it to TASK_RUNNING.
+
+There are a few occasions where its 'valid' to call blocking
+primitives (and mutex_lock in particular) and not have TASK_RUNNING,
+typically such cases are right before we set TASK_RUNNING anyhow.
+
+Robustify the code by not assuming this; this has the beneficial side
+effect of allowing optional code emission for fixing the above
+might_sleep() false positives.
+
+Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+Cc: tglx@linutronix.de
+Cc: ilya.dryomov@inktank.com
+Cc: umgwanakikbuti@gmail.com
+Cc: Oleg Nesterov <oleg@redhat.com>
+Cc: Linus Torvalds <torvalds@linux-foundation.org>
+Link: http://lkml.kernel.org/r/20140924082241.988560063@infradead.org
+Signed-off-by: Ingo Molnar <mingo@kernel.org>
+[bwh: Backported to 3.16: adjust context]
+---
+ kernel/locking/mutex.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+--- a/kernel/locking/mutex.c
++++ b/kernel/locking/mutex.c
+@@ -480,8 +480,14 @@ static bool mutex_optimistic_spin(struct mutex *lock,
+ 	 * reschedule now, before we try-lock the mutex. This avoids getting
+ 	 * scheduled out right after we obtained the mutex.
+ 	 */
+-	if (need_resched())
++	if (need_resched()) {
++		/*
++		 * We _should_ have TASK_RUNNING here, but just in case
++		 * we do not, make it so, otherwise we might get stuck.
++		 */
++		__set_current_state(TASK_RUNNING);
+ 		schedule_preempt_disabled();
++	}
+ #endif
+ 	spin_lock_mutex(&lock->wait_lock, flags);
+ 
