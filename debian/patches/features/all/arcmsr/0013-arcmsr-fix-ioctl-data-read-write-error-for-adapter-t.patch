@@ -10,14 +10,14 @@ read/write error and change data I/O access from byte to Dword.
 Signed-off-by: Ching Huang <ching2048@areca.com.tw>
 Reviewed-by: Tomas Henzl <thenzl@redhat.com>
 Signed-off-by: Christoph Hellwig <hch@lst.de>
+[bwh: Adjust context to apply after "scsi: arcmsr: Buffer overflow in
+ arcmsr_iop_message_xfer()" in 3.16.39]
 ---
  drivers/scsi/arcmsr/arcmsr.h      |   8 +-
  drivers/scsi/arcmsr/arcmsr_attr.c | 101 +++++--
  drivers/scsi/arcmsr/arcmsr_hba.c  | 572 ++++++++++++++++++++++++--------------
  3 files changed, 442 insertions(+), 239 deletions(-)
 
-diff --git a/drivers/scsi/arcmsr/arcmsr.h b/drivers/scsi/arcmsr/arcmsr.h
-index 83c0a7d..799393e 100644
 --- a/drivers/scsi/arcmsr/arcmsr.h
 +++ b/drivers/scsi/arcmsr/arcmsr.h
 @@ -518,6 +518,8 @@ struct AdapterControlBlock
@@ -42,11 +42,9 @@ index 83c0a7d..799393e 100644
  extern struct QBUFFER __iomem *arcmsr_get_iop_rqbuffer(struct AdapterControlBlock *);
  extern struct device_attribute *arcmsr_host_attrs[];
  extern int arcmsr_alloc_sysfs_attr(struct AdapterControlBlock *);
-diff --git a/drivers/scsi/arcmsr/arcmsr_attr.c b/drivers/scsi/arcmsr/arcmsr_attr.c
-index acdae33..16422ad 100644
 --- a/drivers/scsi/arcmsr/arcmsr_attr.c
 +++ b/drivers/scsi/arcmsr/arcmsr_attr.c
-@@ -70,40 +70,75 @@ static ssize_t arcmsr_sysfs_iop_message_read(struct file *filp,
+@@ -70,40 +70,75 @@ static ssize_t arcmsr_sysfs_iop_message_
  	struct AdapterControlBlock *acb = (struct AdapterControlBlock *) host->hostdata;
  	uint8_t *pQbuffer,*ptmpQbuffer;
  	int32_t allxfer_len = 0;
@@ -143,7 +141,7 @@ index acdae33..16422ad 100644
  }
  
  static ssize_t arcmsr_sysfs_iop_message_write(struct file *filp,
-@@ -117,6 +152,7 @@ static ssize_t arcmsr_sysfs_iop_message_write(struct file *filp,
+@@ -117,6 +152,7 @@ static ssize_t arcmsr_sysfs_iop_message_
  	struct AdapterControlBlock *acb = (struct AdapterControlBlock *) host->hostdata;
  	int32_t my_empty_len, user_len, wqbuf_firstindex, wqbuf_lastindex;
  	uint8_t *pQbuffer, *ptmpuserbuffer;
@@ -151,7 +149,7 @@ index acdae33..16422ad 100644
  
  	if (!capable(CAP_SYS_ADMIN))
  		return -EACCES;
-@@ -125,18 +161,19 @@ static ssize_t arcmsr_sysfs_iop_message_write(struct file *filp,
+@@ -125,18 +161,19 @@ static ssize_t arcmsr_sysfs_iop_message_
  	/* do message unit write. */
  	ptmpuserbuffer = (uint8_t *)buf;
  	user_len = (int32_t)count;
@@ -175,7 +173,7 @@ index acdae33..16422ad 100644
  				memcpy(pQbuffer, ptmpuserbuffer, 1);
  				acb->wqbuf_lastindex++;
  				acb->wqbuf_lastindex %= ARCMSR_MAX_QBUFFER;
-@@ -146,10 +183,12 @@ static ssize_t arcmsr_sysfs_iop_message_write(struct file *filp,
+@@ -146,10 +183,12 @@ static ssize_t arcmsr_sysfs_iop_message_
  			if (acb->acb_flags & ACB_F_MESSAGE_WQBUFFER_CLEARED) {
  				acb->acb_flags &=
  					~ACB_F_MESSAGE_WQBUFFER_CLEARED;
@@ -189,7 +187,7 @@ index acdae33..16422ad 100644
  			return 0;	/*need retry*/
  		}
  	}
-@@ -165,22 +204,24 @@ static ssize_t arcmsr_sysfs_iop_message_clear(struct file *filp,
+@@ -165,22 +204,24 @@ static ssize_t arcmsr_sysfs_iop_message_
  	struct Scsi_Host *host = class_to_shost(dev);
  	struct AdapterControlBlock *acb = (struct AdapterControlBlock *) host->hostdata;
  	uint8_t *pQbuffer;
@@ -218,11 +216,9 @@ index acdae33..16422ad 100644
  	pQbuffer = acb->rqbuffer;
  	memset(pQbuffer, 0, sizeof (struct QBUFFER));
  	pQbuffer = acb->wqbuffer;
-diff --git a/drivers/scsi/arcmsr/arcmsr_hba.c b/drivers/scsi/arcmsr/arcmsr_hba.c
-index fc0dfbc..1576805 100644
 --- a/drivers/scsi/arcmsr/arcmsr_hba.c
 +++ b/drivers/scsi/arcmsr/arcmsr_hba.c
-@@ -653,6 +653,8 @@ static int arcmsr_probe(struct pci_dev *pdev, const struct pci_device_id *id)
+@@ -653,6 +653,8 @@ static int arcmsr_probe(struct pci_dev *
  	}
  	spin_lock_init(&acb->eh_lock);
  	spin_lock_init(&acb->ccblist_lock);
@@ -231,7 +227,7 @@ index fc0dfbc..1576805 100644
  	acb->acb_flags |= (ACB_F_MESSAGE_WQBUFFER_CLEARED |
  			ACB_F_MESSAGE_RQBUFFER_CLEARED |
  			ACB_F_MESSAGE_WQBUFFER_READED);
-@@ -1449,68 +1451,175 @@ static struct QBUFFER __iomem *arcmsr_get_iop_wqbuffer(struct AdapterControlBloc
+@@ -1449,68 +1451,175 @@ static struct QBUFFER __iomem *arcmsr_ge
  	return pqbuffer;
  }
  
@@ -322,14 +318,14 @@ index fc0dfbc..1576805 100644
 +	arcmsr_iop_message_read(acb);
 +	return 1;
 +}
- 
--	else {
++
 +static void arcmsr_iop2drv_data_wrote_handle(struct AdapterControlBlock *acb)
 +{
 +	unsigned long flags;
 +	struct QBUFFER __iomem  *prbuffer;
 +	int32_t buf_empty_len;
-+
+ 
+-	else {
 +	spin_lock_irqsave(&acb->rqbuffer_lock, flags);
 +	prbuffer = arcmsr_get_iop_rqbuffer(acb);
 +	buf_empty_len = (acb->rqbuf_lastindex - acb->rqbuf_firstindex - 1) &
@@ -428,12 +424,12 @@ index fc0dfbc..1576805 100644
  		arcmsr_iop_message_wrote(acb);
  	}
 +}
-+
+ 
+-	if (acb->wqbuf_firstindex == acb->wqbuf_lastindex) {
 +static void arcmsr_iop2drv_data_read_handle(struct AdapterControlBlock *acb)
 +{
 +	unsigned long flags;
- 
--	if (acb->wqbuf_firstindex == acb->wqbuf_lastindex) {
++
 +	spin_lock_irqsave(&acb->wqbuffer_lock, flags);
 +	acb->acb_flags |= ACB_F_MESSAGE_WQBUFFER_READED;
 +	if (acb->wqbuf_firstindex != acb->wqbuf_lastindex)
@@ -445,7 +441,7 @@ index fc0dfbc..1576805 100644
  }
  
  static void arcmsr_hbaA_doorbell_isr(struct AdapterControlBlock *acb)
-@@ -1768,296 +1877,345 @@ static void arcmsr_iop_parking(struct AdapterControlBlock *acb)
+@@ -1768,129 +1877,162 @@ static void arcmsr_iop_parking(struct Ad
  	}
  }
  
@@ -665,7 +661,8 @@ index fc0dfbc..1576805 100644
 +	}
  	case ARCMSR_MESSAGE_WRITE_WQBUFFER: {
  		unsigned char *ver_addr;
- 		int32_t my_empty_len, user_len, wqbuf_firstindex, wqbuf_lastindex;
+ 		uint32_t user_len;
+ 		int32_t my_empty_len, wqbuf_firstindex, wqbuf_lastindex;
  		uint8_t *pQbuffer, *ptmpuserbuffer;
 -
  		ver_addr = kmalloc(1032, GFP_ATOMIC);
@@ -682,6 +679,11 @@ index fc0dfbc..1576805 100644
 -		}
  		ptmpuserbuffer = ver_addr;
  		user_len = pcmdmessagefld->cmdmessage.Length;
+ 		if (user_len > 1032) {
+@@ -1898,172 +2040,188 @@ static int arcmsr_iop_message_xfer(struc
+ 			kfree(ver_addr);
+ 			goto message_out;
+ 		}
 -		memcpy(ptmpuserbuffer, pcmdmessagefld->messagedatabuffer, user_len);
 +		memcpy(ptmpuserbuffer,
 +			pcmdmessagefld->messagedatabuffer, user_len);
@@ -960,6 +962,3 @@ index fc0dfbc..1576805 100644
  	return retvalue;
  }
  
--- 
-2.8.1
-

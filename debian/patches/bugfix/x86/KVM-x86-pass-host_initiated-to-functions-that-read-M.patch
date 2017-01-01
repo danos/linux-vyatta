@@ -1,0 +1,537 @@
+From: Paolo Bonzini <pbonzini@redhat.com>
+Date: Wed, 8 Apr 2015 15:30:38 +0200
+Subject: KVM: x86: pass host_initiated to functions that read MSRs
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+Origin: https://git.kernel.org/linus/609e36d372ad9329269e4a1467bd35311893d1d6
+
+SMBASE is only readable from SMM for the VCPU, but it must be always
+accessible if userspace is accessing it.  Thus, all functions that
+read MSRs are changed to accept a struct msr_data; the host_initiated
+and index fields are pre-initialized, while the data field is filled
+on return.
+
+Reviewed-by: Radim Krčmář <rkrcmar@redhat.com>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+[carnil: backport to 3.16, adjust context]
+---
+ arch/x86/include/asm/kvm_host.h |   6 +--
+ arch/x86/kvm/svm.c              |  54 ++++++++++----------
+ arch/x86/kvm/vmx.c              |  62 ++++++++++++-----------
+ arch/x86/kvm/x86.c              | 106 ++++++++++++++++++++++++----------------
+ 4 files changed, 127 insertions(+), 101 deletions(-)
+
+--- a/arch/x86/include/asm/kvm_host.h
++++ b/arch/x86/include/asm/kvm_host.h
+@@ -683,7 +683,7 @@ struct kvm_x86_ops {
+ 	void (*vcpu_put)(struct kvm_vcpu *vcpu);
+ 
+ 	void (*update_bp_intercept)(struct kvm_vcpu *vcpu);
+-	int (*get_msr)(struct kvm_vcpu *vcpu, u32 msr_index, u64 *pdata);
++	int (*get_msr)(struct kvm_vcpu *vcpu, struct msr_data *msr);
+ 	int (*set_msr)(struct kvm_vcpu *vcpu, struct msr_data *msr);
+ 	u64 (*get_segment_base)(struct kvm_vcpu *vcpu, int seg);
+ 	void (*get_segment)(struct kvm_vcpu *vcpu,
+@@ -852,7 +852,7 @@ static inline int emulate_instruction(st
+ 
+ void kvm_enable_efer_bits(u64);
+ bool kvm_valid_efer(struct kvm_vcpu *vcpu, u64 efer);
+-int kvm_get_msr(struct kvm_vcpu *vcpu, u32 msr_index, u64 *data);
++int kvm_get_msr(struct kvm_vcpu *vcpu, struct msr_data *msr);
+ int kvm_set_msr(struct kvm_vcpu *vcpu, struct msr_data *msr);
+ 
+ struct x86_emulate_ctxt;
+@@ -880,7 +880,7 @@ void kvm_lmsw(struct kvm_vcpu *vcpu, uns
+ void kvm_get_cs_db_l_bits(struct kvm_vcpu *vcpu, int *db, int *l);
+ int kvm_set_xcr(struct kvm_vcpu *vcpu, u32 index, u64 xcr);
+ 
+-int kvm_get_msr_common(struct kvm_vcpu *vcpu, u32 msr, u64 *pdata);
++int kvm_get_msr_common(struct kvm_vcpu *vcpu, struct msr_data *msr);
+ int kvm_set_msr_common(struct kvm_vcpu *vcpu, struct msr_data *msr);
+ 
+ unsigned long kvm_get_rflags(struct kvm_vcpu *vcpu);
+--- a/arch/x86/kvm/svm.c
++++ b/arch/x86/kvm/svm.c
+@@ -3034,42 +3034,42 @@ u64 svm_read_l1_tsc(struct kvm_vcpu *vcp
+ 		svm_scale_tsc(vcpu, host_tsc);
+ }
+ 
+-static int svm_get_msr(struct kvm_vcpu *vcpu, unsigned ecx, u64 *data)
++static int svm_get_msr(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
+ {
+ 	struct vcpu_svm *svm = to_svm(vcpu);
+ 
+-	switch (ecx) {
++	switch (msr_info->index) {
+ 	case MSR_IA32_TSC: {
+-		*data = svm->vmcb->control.tsc_offset +
++		msr_info->data = svm->vmcb->control.tsc_offset +
+ 			svm_scale_tsc(vcpu, native_read_tsc());
+ 
+ 		break;
+ 	}
+ 	case MSR_STAR:
+-		*data = svm->vmcb->save.star;
++		msr_info->data = svm->vmcb->save.star;
+ 		break;
+ #ifdef CONFIG_X86_64
+ 	case MSR_LSTAR:
+-		*data = svm->vmcb->save.lstar;
++		msr_info->data = svm->vmcb->save.lstar;
+ 		break;
+ 	case MSR_CSTAR:
+-		*data = svm->vmcb->save.cstar;
++		msr_info->data = svm->vmcb->save.cstar;
+ 		break;
+ 	case MSR_KERNEL_GS_BASE:
+-		*data = svm->vmcb->save.kernel_gs_base;
++		msr_info->data = svm->vmcb->save.kernel_gs_base;
+ 		break;
+ 	case MSR_SYSCALL_MASK:
+-		*data = svm->vmcb->save.sfmask;
++		msr_info->data = svm->vmcb->save.sfmask;
+ 		break;
+ #endif
+ 	case MSR_IA32_SYSENTER_CS:
+-		*data = svm->vmcb->save.sysenter_cs;
++		msr_info->data = svm->vmcb->save.sysenter_cs;
+ 		break;
+ 	case MSR_IA32_SYSENTER_EIP:
+-		*data = svm->sysenter_eip;
++		msr_info->data = svm->sysenter_eip;
+ 		break;
+ 	case MSR_IA32_SYSENTER_ESP:
+-		*data = svm->sysenter_esp;
++		msr_info->data = svm->sysenter_esp;
+ 		break;
+ 	/*
+ 	 * Nobody will change the following 5 values in the VMCB so we can
+@@ -3077,31 +3077,31 @@ static int svm_get_msr(struct kvm_vcpu *
+ 	 * implemented.
+ 	 */
+ 	case MSR_IA32_DEBUGCTLMSR:
+-		*data = svm->vmcb->save.dbgctl;
++		msr_info->data = svm->vmcb->save.dbgctl;
+ 		break;
+ 	case MSR_IA32_LASTBRANCHFROMIP:
+-		*data = svm->vmcb->save.br_from;
++		msr_info->data = svm->vmcb->save.br_from;
+ 		break;
+ 	case MSR_IA32_LASTBRANCHTOIP:
+-		*data = svm->vmcb->save.br_to;
++		msr_info->data = svm->vmcb->save.br_to;
+ 		break;
+ 	case MSR_IA32_LASTINTFROMIP:
+-		*data = svm->vmcb->save.last_excp_from;
++		msr_info->data = svm->vmcb->save.last_excp_from;
+ 		break;
+ 	case MSR_IA32_LASTINTTOIP:
+-		*data = svm->vmcb->save.last_excp_to;
++		msr_info->data = svm->vmcb->save.last_excp_to;
+ 		break;
+ 	case MSR_VM_HSAVE_PA:
+-		*data = svm->nested.hsave_msr;
++		msr_info->data = svm->nested.hsave_msr;
+ 		break;
+ 	case MSR_VM_CR:
+-		*data = svm->nested.vm_cr_msr;
++		msr_info->data = svm->nested.vm_cr_msr;
+ 		break;
+ 	case MSR_IA32_UCODE_REV:
+-		*data = 0x01000065;
++		msr_info->data = 0x01000065;
+ 		break;
+ 	default:
+-		return kvm_get_msr_common(vcpu, ecx, data);
++		return kvm_get_msr_common(vcpu, msr_info);
+ 	}
+ 	return 0;
+ }
+@@ -3109,16 +3109,18 @@ static int svm_get_msr(struct kvm_vcpu *
+ static int rdmsr_interception(struct vcpu_svm *svm)
+ {
+ 	u32 ecx = svm->vcpu.arch.regs[VCPU_REGS_RCX];
+-	u64 data;
++	struct msr_data msr_info;
+ 
+-	if (svm_get_msr(&svm->vcpu, ecx, &data)) {
++	msr_info.index = ecx;
++	msr_info.host_initiated = false;
++	if (svm_get_msr(&svm->vcpu, &msr_info)) {
+ 		trace_kvm_msr_read_ex(ecx);
+ 		kvm_inject_gp(&svm->vcpu, 0);
+ 	} else {
+-		trace_kvm_msr_read(ecx, data);
++		trace_kvm_msr_read(ecx, msr_info.data);
+ 
+-		svm->vcpu.arch.regs[VCPU_REGS_RAX] = data & 0xffffffff;
+-		svm->vcpu.arch.regs[VCPU_REGS_RDX] = data >> 32;
++		svm->vcpu.arch.regs[VCPU_REGS_RAX] = msr_info.data & 0xffffffff;
++		svm->vcpu.arch.regs[VCPU_REGS_RDX] = msr_info.data >> 32;
+ 		svm->next_rip = kvm_rip_read(&svm->vcpu) + 2;
+ 		skip_emulated_instruction(&svm->vcpu);
+ 	}
+--- a/arch/x86/kvm/vmx.c
++++ b/arch/x86/kvm/vmx.c
+@@ -2475,71 +2475,64 @@ static int vmx_get_vmx_msr(struct kvm_vc
+  * Returns 0 on success, non-0 otherwise.
+  * Assumes vcpu_load() was already called.
+  */
+-static int vmx_get_msr(struct kvm_vcpu *vcpu, u32 msr_index, u64 *pdata)
++static int vmx_get_msr(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
+ {
+-	u64 data;
+ 	struct shared_msr_entry *msr;
+ 
+-	if (!pdata) {
+-		printk(KERN_ERR "BUG: get_msr called with NULL pdata\n");
+-		return -EINVAL;
+-	}
+-
+-	switch (msr_index) {
++	switch (msr_info->index) {
+ #ifdef CONFIG_X86_64
+ 	case MSR_FS_BASE:
+-		data = vmcs_readl(GUEST_FS_BASE);
++		msr_info->data = vmcs_readl(GUEST_FS_BASE);
+ 		break;
+ 	case MSR_GS_BASE:
+-		data = vmcs_readl(GUEST_GS_BASE);
++		msr_info->data = vmcs_readl(GUEST_GS_BASE);
+ 		break;
+ 	case MSR_KERNEL_GS_BASE:
+ 		vmx_load_host_state(to_vmx(vcpu));
+-		data = to_vmx(vcpu)->msr_guest_kernel_gs_base;
++		msr_info->data = to_vmx(vcpu)->msr_guest_kernel_gs_base;
+ 		break;
+ #endif
+ 	case MSR_EFER:
+-		return kvm_get_msr_common(vcpu, msr_index, pdata);
++		return kvm_get_msr_common(vcpu, msr_info);
+ 	case MSR_IA32_TSC:
+-		data = guest_read_tsc();
++		msr_info->data = guest_read_tsc();
+ 		break;
+ 	case MSR_IA32_SYSENTER_CS:
+-		data = vmcs_read32(GUEST_SYSENTER_CS);
++		msr_info->data = vmcs_read32(GUEST_SYSENTER_CS);
+ 		break;
+ 	case MSR_IA32_SYSENTER_EIP:
+-		data = vmcs_readl(GUEST_SYSENTER_EIP);
++		msr_info->data = vmcs_readl(GUEST_SYSENTER_EIP);
+ 		break;
+ 	case MSR_IA32_SYSENTER_ESP:
+-		data = vmcs_readl(GUEST_SYSENTER_ESP);
++		msr_info->data = vmcs_readl(GUEST_SYSENTER_ESP);
+ 		break;
+ 	case MSR_IA32_BNDCFGS:
+ 		if (!vmx_mpx_supported())
+ 			return 1;
+-		data = vmcs_read64(GUEST_BNDCFGS);
++		msr_info->data = vmcs_read64(GUEST_BNDCFGS);
+ 		break;
+ 	case MSR_IA32_FEATURE_CONTROL:
+ 		if (!nested_vmx_allowed(vcpu))
+ 			return 1;
+-		data = to_vmx(vcpu)->nested.msr_ia32_feature_control;
++		msr_info->data = to_vmx(vcpu)->nested.msr_ia32_feature_control;
+ 		break;
+ 	case MSR_IA32_VMX_BASIC ... MSR_IA32_VMX_VMFUNC:
+ 		if (!nested_vmx_allowed(vcpu))
+ 			return 1;
+-		return vmx_get_vmx_msr(vcpu, msr_index, pdata);
++		return vmx_get_vmx_msr(vcpu, msr_info->index, &msr_info->data);
+ 	case MSR_TSC_AUX:
+ 		if (!to_vmx(vcpu)->rdtscp_enabled)
+ 			return 1;
+ 		/* Otherwise falls through */
+ 	default:
+-		msr = find_msr_entry(to_vmx(vcpu), msr_index);
++		msr = find_msr_entry(to_vmx(vcpu), msr_info->index);
+ 		if (msr) {
+-			data = msr->data;
++			msr_info->data = msr->data;
+ 			break;
+ 		}
+-		return kvm_get_msr_common(vcpu, msr_index, pdata);
++		return kvm_get_msr_common(vcpu, msr_info);
+ 	}
+ 
+-	*pdata = data;
+ 	return 0;
+ }
+ 
+@@ -5236,19 +5229,21 @@ static int handle_cpuid(struct kvm_vcpu
+ static int handle_rdmsr(struct kvm_vcpu *vcpu)
+ {
+ 	u32 ecx = vcpu->arch.regs[VCPU_REGS_RCX];
+-	u64 data;
++	struct msr_data msr_info;
+ 
+-	if (vmx_get_msr(vcpu, ecx, &data)) {
++	msr_info.index = ecx;
++	msr_info.host_initiated = false;
++	if (vmx_get_msr(vcpu, &msr_info)) {
+ 		trace_kvm_msr_read_ex(ecx);
+ 		kvm_inject_gp(vcpu, 0);
+ 		return 1;
+ 	}
+ 
+-	trace_kvm_msr_read(ecx, data);
++	trace_kvm_msr_read(ecx, msr_info.data);
+ 
+ 	/* FIXME: handling of bits 32:63 of rax, rdx */
+-	vcpu->arch.regs[VCPU_REGS_RAX] = data & -1u;
+-	vcpu->arch.regs[VCPU_REGS_RDX] = (data >> 32) & -1u;
++	vcpu->arch.regs[VCPU_REGS_RAX] = msr_info.data & -1u;
++	vcpu->arch.regs[VCPU_REGS_RDX] = (msr_info.data >> 32) & -1u;
+ 	skip_emulated_instruction(vcpu);
+ 	return 1;
+ }
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -989,6 +989,21 @@ EXPORT_SYMBOL_GPL(kvm_set_msr);
+ /*
+  * Adapt set_msr() to msr_io()'s calling convention
+  */
++static int do_get_msr(struct kvm_vcpu *vcpu, unsigned index, u64 *data)
++{
++	struct msr_data msr;
++	int r;
++
++	msr.index = index;
++	msr.host_initiated = true;
++	r = kvm_get_msr(vcpu, &msr);
++	if (r)
++		return r;
++
++	*data = msr.data;
++	return 0;
++}
++
+ static int do_set_msr(struct kvm_vcpu *vcpu, unsigned index, u64 *data)
+ {
+ 	struct msr_data msr;
+@@ -2269,9 +2284,9 @@ EXPORT_SYMBOL_GPL(kvm_set_msr_common);
+  * Returns 0 on success, non-0 otherwise.
+  * Assumes vcpu_load() was already called.
+  */
+-int kvm_get_msr(struct kvm_vcpu *vcpu, u32 msr_index, u64 *pdata)
++int kvm_get_msr(struct kvm_vcpu *vcpu, struct msr_data *msr)
+ {
+-	return kvm_x86_ops->get_msr(vcpu, msr_index, pdata);
++	return kvm_x86_ops->get_msr(vcpu, msr);
+ }
+ 
+ static int get_msr_mtrr(struct kvm_vcpu *vcpu, u32 msr, u64 *pdata)
+@@ -2407,11 +2422,11 @@ static int get_msr_hyperv(struct kvm_vcp
+ 	return 0;
+ }
+ 
+-int kvm_get_msr_common(struct kvm_vcpu *vcpu, u32 msr, u64 *pdata)
++int kvm_get_msr_common(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
+ {
+ 	u64 data;
+ 
+-	switch (msr) {
++	switch (msr_info->index) {
+ 	case MSR_IA32_PLATFORM_ID:
+ 	case MSR_IA32_EBL_CR_POWERON:
+ 	case MSR_IA32_DEBUGCTLMSR:
+@@ -2430,26 +2445,26 @@ int kvm_get_msr_common(struct kvm_vcpu *
+ 	case MSR_AMD64_NB_CFG:
+ 	case MSR_FAM10H_MMIO_CONF_BASE:
+ 	case MSR_AMD64_BU_CFG2:
+-		data = 0;
++		msr_info->data = 0;
+ 		break;
+ 	case MSR_P6_PERFCTR0:
+ 	case MSR_P6_PERFCTR1:
+ 	case MSR_P6_EVNTSEL0:
+ 	case MSR_P6_EVNTSEL1:
+-		if (kvm_pmu_msr(vcpu, msr))
+-			return kvm_pmu_get_msr(vcpu, msr, pdata);
+-		data = 0;
++		if (kvm_pmu_msr(vcpu, msr_info->index))
++			return kvm_pmu_get_msr(vcpu, msr_info->index, &msr_info->data);
++		msr_info->data = 0;
+ 		break;
+ 	case MSR_IA32_UCODE_REV:
+-		data = 0x100000000ULL;
++		msr_info->data = 0x100000000ULL;
+ 		break;
+ 	case MSR_MTRRcap:
+-		data = 0x500 | KVM_NR_VAR_MTRR;
++		msr_info->data = 0x500 | KVM_NR_VAR_MTRR;
+ 		break;
+ 	case 0x200 ... 0x2ff:
+-		return get_msr_mtrr(vcpu, msr, pdata);
++		return get_msr_mtrr(vcpu, msr_info->index, &msr_info->data);
+ 	case 0xcd: /* fsb frequency */
+-		data = 3;
++		msr_info->data = 3;
+ 		break;
+ 		/*
+ 		 * MSR_EBC_FREQUENCY_ID
+@@ -2463,48 +2478,48 @@ int kvm_get_msr_common(struct kvm_vcpu *
+ 		 * multiplying by zero otherwise.
+ 		 */
+ 	case MSR_EBC_FREQUENCY_ID:
+-		data = 1 << 24;
++		msr_info->data = 1 << 24;
+ 		break;
+ 	case MSR_IA32_APICBASE:
+-		data = kvm_get_apic_base(vcpu);
++		msr_info->data = kvm_get_apic_base(vcpu);
+ 		break;
+ 	case APIC_BASE_MSR ... APIC_BASE_MSR + 0x3ff:
+-		return kvm_x2apic_msr_read(vcpu, msr, pdata);
++		return kvm_x2apic_msr_read(vcpu, msr_info->index, &msr_info->data);
+ 		break;
+ 	case MSR_IA32_TSCDEADLINE:
+-		data = kvm_get_lapic_tscdeadline_msr(vcpu);
++		msr_info->data = kvm_get_lapic_tscdeadline_msr(vcpu);
+ 		break;
+ 	case MSR_IA32_TSC_ADJUST:
+-		data = (u64)vcpu->arch.ia32_tsc_adjust_msr;
++		msr_info->data = (u64)vcpu->arch.ia32_tsc_adjust_msr;
+ 		break;
+ 	case MSR_IA32_MISC_ENABLE:
+-		data = vcpu->arch.ia32_misc_enable_msr;
++		msr_info->data = vcpu->arch.ia32_misc_enable_msr;
+ 		break;
+ 	case MSR_IA32_PERF_STATUS:
+ 		/* TSC increment by tick */
+-		data = 1000ULL;
++		msr_info->data = 1000ULL;
+ 		/* CPU multiplier */
+ 		data |= (((uint64_t)4ULL) << 40);
+ 		break;
+ 	case MSR_EFER:
+-		data = vcpu->arch.efer;
++		msr_info->data = vcpu->arch.efer;
+ 		break;
+ 	case MSR_KVM_WALL_CLOCK:
+ 	case MSR_KVM_WALL_CLOCK_NEW:
+-		data = vcpu->kvm->arch.wall_clock;
++		msr_info->data = vcpu->kvm->arch.wall_clock;
+ 		break;
+ 	case MSR_KVM_SYSTEM_TIME:
+ 	case MSR_KVM_SYSTEM_TIME_NEW:
+-		data = vcpu->arch.time;
++		msr_info->data = vcpu->arch.time;
+ 		break;
+ 	case MSR_KVM_ASYNC_PF_EN:
+-		data = vcpu->arch.apf.msr_val;
++		msr_info->data = vcpu->arch.apf.msr_val;
+ 		break;
+ 	case MSR_KVM_STEAL_TIME:
+-		data = vcpu->arch.st.msr_val;
++		msr_info->data = vcpu->arch.st.msr_val;
+ 		break;
+ 	case MSR_KVM_PV_EOI_EN:
+-		data = vcpu->arch.pv_eoi.msr_val;
++		msr_info->data = vcpu->arch.pv_eoi.msr_val;
+ 		break;
+ 	case MSR_IA32_P5_MC_ADDR:
+ 	case MSR_IA32_P5_MC_TYPE:
+@@ -2512,7 +2527,7 @@ int kvm_get_msr_common(struct kvm_vcpu *
+ 	case MSR_IA32_MCG_CTL:
+ 	case MSR_IA32_MCG_STATUS:
+ 	case MSR_IA32_MC0_CTL ... MSR_IA32_MC0_CTL + 4 * KVM_MAX_MCE_BANKS - 1:
+-		return get_msr_mce(vcpu, msr, pdata);
++		return get_msr_mce(vcpu, msr_info->index, &msr_info->data);
+ 	case MSR_K7_CLK_CTL:
+ 		/*
+ 		 * Provide expected ramp-up count for K7. All other
+@@ -2523,17 +2538,17 @@ int kvm_get_msr_common(struct kvm_vcpu *
+ 		 * type 6, model 8 and higher from exploding due to
+ 		 * the rdmsr failing.
+ 		 */
+-		data = 0x20000000;
++		msr_info->data = 0x20000000;
+ 		break;
+ 	case HV_X64_MSR_GUEST_OS_ID ... HV_X64_MSR_SINT15:
+-		if (kvm_hv_msr_partition_wide(msr)) {
++		if (kvm_hv_msr_partition_wide(msr_info->index)) {
+ 			int r;
+ 			mutex_lock(&vcpu->kvm->lock);
+-			r = get_msr_hyperv_pw(vcpu, msr, pdata);
++			r = get_msr_hyperv_pw(vcpu, msr_info->index, &msr_info->data);
+ 			mutex_unlock(&vcpu->kvm->lock);
+ 			return r;
+ 		} else
+-			return get_msr_hyperv(vcpu, msr, pdata);
++			return get_msr_hyperv(vcpu, msr_info->index, &msr_info->data);
+ 		break;
+ 	case MSR_IA32_BBL_CR_CTL3:
+ 		/* This legacy MSR exists but isn't fully documented in current
+@@ -2546,31 +2561,30 @@ int kvm_get_msr_common(struct kvm_vcpu *
+ 		 * L2 cache control register 3: 64GB range, 256KB size,
+ 		 * enabled, latency 0x1, configured
+ 		 */
+-		data = 0xbe702111;
++		msr_info->data = 0xbe702111;
+ 		break;
+ 	case MSR_AMD64_OSVW_ID_LENGTH:
+ 		if (!guest_cpuid_has_osvw(vcpu))
+ 			return 1;
+-		data = vcpu->arch.osvw.length;
++		msr_info->data = vcpu->arch.osvw.length;
+ 		break;
+ 	case MSR_AMD64_OSVW_STATUS:
+ 		if (!guest_cpuid_has_osvw(vcpu))
+ 			return 1;
+-		data = vcpu->arch.osvw.status;
++		msr_info->data = vcpu->arch.osvw.status;
+ 		break;
+ 	default:
+-		if (kvm_pmu_msr(vcpu, msr))
+-			return kvm_pmu_get_msr(vcpu, msr, pdata);
++		if (kvm_pmu_msr(vcpu, msr_info->index))
++			return kvm_pmu_get_msr(vcpu, msr_info->index, &msr_info->data);
+ 		if (!ignore_msrs) {
+-			vcpu_unimpl(vcpu, "unhandled rdmsr: 0x%x\n", msr);
++			vcpu_unimpl(vcpu, "unhandled rdmsr: 0x%x\n", msr_info->index);
+ 			return 1;
+ 		} else {
+-			vcpu_unimpl(vcpu, "ignored rdmsr: 0x%x\n", msr);
+-			data = 0;
++			vcpu_unimpl(vcpu, "ignored rdmsr: 0x%x\n", msr_info->index);
++			msr_info->data = 0;
+ 		}
+ 		break;
+ 	}
+-	*pdata = data;
+ 	return 0;
+ }
+ EXPORT_SYMBOL_GPL(kvm_get_msr_common);
+@@ -3269,7 +3283,7 @@ long kvm_arch_vcpu_ioctl(struct file *fi
+ 		break;
+ 	}
+ 	case KVM_GET_MSRS:
+-		r = msr_io(vcpu, argp, kvm_get_msr, 1);
++		r = msr_io(vcpu, argp, do_get_msr, 1);
+ 		break;
+ 	case KVM_SET_MSRS:
+ 		r = msr_io(vcpu, argp, do_set_msr, 0);
+@@ -4779,7 +4793,17 @@ static void emulator_set_segment(struct
+ static int emulator_get_msr(struct x86_emulate_ctxt *ctxt,
+ 			    u32 msr_index, u64 *pdata)
+ {
+-	return kvm_get_msr(emul_to_vcpu(ctxt), msr_index, pdata);
++	struct msr_data msr;
++	int r;
++
++	msr.index = msr_index;
++	msr.host_initiated = false;
++	r = kvm_get_msr(emul_to_vcpu(ctxt), &msr);
++	if (r)
++		return r;
++
++	*pdata = msr.data;
++	return 0;
+ }
+ 
+ static int emulator_set_msr(struct x86_emulate_ctxt *ctxt,

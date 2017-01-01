@@ -1,21 +1,13 @@
-From: Jan Kara <jack@suse.cz>
-Date: Thu, 26 May 2016 16:55:18 +0200
-Subject: fs: Give dentry to inode_change_ok() instead of inode
-Origin: https://git.kernel.org/linus/31051c85b5e2aaaf6315f74c72a732673632a905
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Wed, 30 Nov 2016 23:13:05 +0000
+Subject: Revert "fs: Give dentry to inode_change_ok() instead of inode"
+Origin: https://git.kernel.org/cgit/linux/kernel/git/bwh/linux-stable-queue.git/tree/queue-3.16/revert-fs-give-dentry-to-inode_change_ok-instead-of-inode.patch
 
-inode_change_ok() will be resposible for clearing capabilities and IMA
-extended attributes and as such will need dentry. Give it as an argument
-to inode_change_ok() instead of an inode. Also rename inode_change_ok()
-to setattr_prepare() to better relect that it does also some
-modifications in addition to checks.
+This reverts commit be9df699432235753c3824b0f5a27d46de7fdc9e, which was
+commit 31051c85b5e2aaaf6315f74c72a732673632a905 upstream.  The backport
+breaks fuse and makes a mess of xfs, which can be improved by picking
+further upstream commits as I should have done in the first place.
 
-Reviewed-by: Christoph Hellwig <hch@lst.de>
-Signed-off-by: Jan Kara <jack@suse.cz>
-[bwh: Backported to 3.16:
- - Drop changes to orangefs, overlayfs
- - Adjust filenames, context
- - In nfsd, pass dentry to nfsd_sanitize_attrs()
- - Update ext3 as well]
 Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
 ---
 --- a/Documentation/filesystems/porting
@@ -24,10 +16,10 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  and vmtruncate, and the reorder the vmtruncate + foofs_vmtruncate sequence to
  be in order of zeroing blocks using block_truncate_page or similar helpers,
  size update and on finally on-disk truncation which should not fail.
--inode_change_ok now includes the size checks for ATTR_SIZE and must be called
--in the beginning of ->setattr unconditionally.
-+setattr_prepare (which used to be inode_change_ok) now includes the size checks
-+for ATTR_SIZE and must be called in the beginning of ->setattr unconditionally.
+-setattr_prepare (which used to be inode_change_ok) now includes the size checks
+-for ATTR_SIZE and must be called in the beginning of ->setattr unconditionally.
++inode_change_ok now includes the size checks for ATTR_SIZE and must be called
++in the beginning of ->setattr unconditionally.
  
  [mandatory]
  
@@ -37,8 +29,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  		attr->ia_valid |= ATTR_MTIME | ATTR_CTIME;
  	}
  
--	/* POSIX: check before ATTR_*TIME_SET set (from inode_change_ok) */
-+	/* POSIX: check before ATTR_*TIME_SET set (from setattr_prepare) */
+-	/* POSIX: check before ATTR_*TIME_SET set (from setattr_prepare) */
++	/* POSIX: check before ATTR_*TIME_SET set (from inode_change_ok) */
  	if (attr->ia_valid & TIMES_SET_FLAGS) {
  		if ((!uid_eq(current_fsuid(), inode->i_uid)) &&
  		    !capable(CFS_CAP_FOWNER))
@@ -48,8 +40,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	struct p9_wstat wstat;
  
  	p9_debug(P9_DEBUG_VFS, "\n");
--	retval = inode_change_ok(dentry->d_inode, iattr);
-+	retval = setattr_prepare(dentry, iattr);
+-	retval = setattr_prepare(dentry, iattr);
++	retval = inode_change_ok(dentry->d_inode, iattr);
  	if (retval)
  		return retval;
  
@@ -59,8 +51,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  
  	p9_debug(P9_DEBUG_VFS, "\n");
  
--	retval = inode_change_ok(inode, iattr);
-+	retval = setattr_prepare(dentry, iattr);
+-	retval = setattr_prepare(dentry, iattr);
++	retval = inode_change_ok(inode, iattr);
  	if (retval)
  		return retval;
  
@@ -70,8 +62,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	unsigned int ia_valid = attr->ia_valid;
  	int error;
  	
--	error = inode_change_ok(inode, attr);
-+	error = setattr_prepare(dentry, attr);
+-	error = setattr_prepare(dentry, attr);
++	error = inode_change_ok(inode, attr);
  
  	/*
  	 * we can't change the UID or GID of any file -
@@ -81,47 +73,47 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  
  	pr_debug("notify_change(%lu,0x%x)\n", inode->i_ino, attr->ia_valid);
  
--	error = inode_change_ok(inode,attr);
-+	error = setattr_prepare(dentry, attr);
+-	error = setattr_prepare(dentry, attr);
++	error = inode_change_ok(inode,attr);
  	if (error)
  		goto out;
  
 --- a/fs/attr.c
 +++ b/fs/attr.c
-@@ -17,19 +17,22 @@
+@@ -17,22 +17,19 @@
  #include <linux/ima.h>
  
  /**
-- * inode_change_ok - check if attribute changes to an inode are allowed
-- * @inode:	inode to check
-+ * setattr_prepare - check if attribute changes to a dentry are allowed
-+ * @dentry:	dentry to check
+- * setattr_prepare - check if attribute changes to a dentry are allowed
+- * @dentry:	dentry to check
++ * inode_change_ok - check if attribute changes to an inode are allowed
++ * @inode:	inode to check
   * @attr:	attributes to change
   *
   * Check if we are allowed to change the attributes contained in @attr
-- * in the given inode.  This includes the normal unix access permission
-- * checks, as well as checks for rlimits and others.
-+ * in the given dentry.  This includes the normal unix access permission
-+ * checks, as well as checks for rlimits and others. The function also clears
-+ * SGID bit from mode if user is not allowed to set it. Also file capabilities
-+ * and IMA extended attributes are cleared if ATTR_KILL_PRIV is set.
+- * in the given dentry.  This includes the normal unix access permission
+- * checks, as well as checks for rlimits and others. The function also clears
+- * SGID bit from mode if user is not allowed to set it. Also file capabilities
+- * and IMA extended attributes are cleared if ATTR_KILL_PRIV is set.
++ * in the given inode.  This includes the normal unix access permission
++ * checks, as well as checks for rlimits and others.
   *
   * Should be called as the first thing in ->setattr implementations,
   * possibly after taking additional locks.
   */
--int inode_change_ok(const struct inode *inode, struct iattr *attr)
-+int setattr_prepare(struct dentry *dentry, struct iattr *attr)
+-int setattr_prepare(struct dentry *dentry, struct iattr *attr)
++int inode_change_ok(const struct inode *inode, struct iattr *attr)
  {
-+	struct inode *inode = d_inode(dentry);
+-	struct inode *inode = d_inode(dentry);
  	unsigned int ia_valid = attr->ia_valid;
  
  	/*
-@@ -89,7 +92,7 @@ kill_priv:
+@@ -92,7 +89,7 @@ kill_priv:
  
  	return 0;
  }
--EXPORT_SYMBOL(inode_change_ok);
-+EXPORT_SYMBOL(setattr_prepare);
+-EXPORT_SYMBOL(setattr_prepare);
++EXPORT_SYMBOL(inode_change_ok);
  
  /**
   * inode_newsize_ok - may this inode be truncated to a given size
@@ -131,8 +123,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	if (btrfs_root_readonly(root))
  		return -EROFS;
  
--	err = inode_change_ok(inode, attr);
-+	err = setattr_prepare(dentry, attr);
+-	err = setattr_prepare(dentry, attr);
++	err = inode_change_ok(inode, attr);
  	if (err)
  		return err;
  
@@ -142,8 +134,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	if (ceph_snap(inode) != CEPH_NOSNAP)
  		return -EROFS;
  
--	err = inode_change_ok(inode, attr);
-+	err = setattr_prepare(dentry, attr);
+-	err = setattr_prepare(dentry, attr);
++	err = inode_change_ok(inode, attr);
  	if (err != 0)
  		return err;
  
@@ -153,8 +145,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_NO_PERM)
  		attrs->ia_valid |= ATTR_FORCE;
  
--	rc = inode_change_ok(inode, attrs);
-+	rc = setattr_prepare(direntry, attrs);
+-	rc = setattr_prepare(direntry, attrs);
++	rc = inode_change_ok(inode, attrs);
  	if (rc < 0)
  		goto out;
  
@@ -162,8 +154,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_NO_PERM)
  		attrs->ia_valid |= ATTR_FORCE;
  
--	rc = inode_change_ok(inode, attrs);
-+	rc = setattr_prepare(direntry, attrs);
+-	rc = setattr_prepare(direntry, attrs);
++	rc = inode_change_ok(inode, attrs);
  	if (rc < 0) {
  		free_xid(xid);
  		return rc;
@@ -173,8 +165,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	}
  	mutex_unlock(&crypt_stat->cs_mutex);
  
--	rc = inode_change_ok(inode, ia);
-+	rc = setattr_prepare(dentry, ia);
+-	rc = setattr_prepare(dentry, ia);
++	rc = inode_change_ok(inode, ia);
  	if (rc)
  		goto out;
  	if (ia->ia_valid & ATTR_SIZE) {
@@ -184,8 +176,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	if (unlikely(error))
  		return error;
  
--	error = inode_change_ok(inode, iattr);
-+	error = setattr_prepare(dentry, iattr);
+-	error = setattr_prepare(dentry, iattr);
++	error = inode_change_ok(inode, iattr);
  	if (unlikely(error))
  		return error;
  
@@ -195,8 +187,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	struct inode *inode = dentry->d_inode;
  	int error;
  
--	error = inode_change_ok(inode, iattr);
-+	error = setattr_prepare(dentry, iattr);
+-	error = setattr_prepare(dentry, iattr);
++	error = inode_change_ok(inode, iattr);
  	if (error)
  		return error;
  
@@ -206,8 +198,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	int error, rc = 0;
  	const unsigned int ia_valid = attr->ia_valid;
  
--	error = inode_change_ok(inode, attr);
-+	error = setattr_prepare(dentry, attr);
+-	error = setattr_prepare(dentry, attr);
++	error = inode_change_ok(inode, attr);
  	if (error)
  		return error;
  
@@ -217,8 +209,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	int orphan = 0;
  	const unsigned int ia_valid = attr->ia_valid;
  
--	error = inode_change_ok(inode, attr);
-+	error = setattr_prepare(dentry, attr);
+-	error = setattr_prepare(dentry, attr);
++	error = inode_change_ok(inode, attr);
  	if (error)
  		return error;
  
@@ -228,8 +220,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	struct f2fs_inode_info *fi = F2FS_I(inode);
  	int err;
  
--	err = inode_change_ok(inode, attr);
-+	err = setattr_prepare(dentry, attr);
+-	err = setattr_prepare(dentry, attr);
++	err = inode_change_ok(inode, attr);
  	if (err)
  		return err;
  
@@ -239,30 +231,65 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  			attr->ia_valid &= ~TIMES_SET_FLAGS;
  	}
  
--	error = inode_change_ok(inode, attr);
-+	error = setattr_prepare(dentry, attr);
+-	error = setattr_prepare(dentry, attr);
++	error = inode_change_ok(inode, attr);
  	attr->ia_valid = ia_valid;
  	if (error) {
  		if (sbi->options.quiet)
 --- a/fs/fuse/dir.c
 +++ b/fs/fuse/dir.c
-@@ -1722,7 +1722,7 @@ int fuse_do_setattr(struct dentry *dentr
+@@ -1704,10 +1704,9 @@ int fuse_flush_times(struct inode *inode
+  * vmtruncate() doesn't allow for this case, so do the rlimit checking
+  * and the actual truncation by hand.
+  */
+-int fuse_do_setattr(struct dentry *dentry, struct iattr *attr,
++int fuse_do_setattr(struct inode *inode, struct iattr *attr,
+ 		    struct file *file)
+ {
+-	struct inode *inode = dentry->d_inode;
+ 	struct fuse_conn *fc = get_fuse_conn(inode);
+ 	struct fuse_inode *fi = get_fuse_inode(inode);
+ 	struct fuse_req *req;
+@@ -1722,7 +1721,7 @@ int fuse_do_setattr(struct dentry *dentr
  	if (!(fc->flags & FUSE_DEFAULT_PERMISSIONS))
  		attr->ia_valid |= ATTR_FORCE;
  
--	err = inode_change_ok(inode, attr);
-+	err = setattr_prepare(dentry, attr);
+-	err = setattr_prepare(dentry, attr);
++	err = inode_change_ok(inode, attr);
  	if (err)
  		return err;
  
+@@ -1827,9 +1826,9 @@ static int fuse_setattr(struct dentry *e
+ 		return -EACCES;
+ 
+ 	if (attr->ia_valid & ATTR_FILE)
+-		return fuse_do_setattr(entry, attr, attr->ia_file);
++		return fuse_do_setattr(inode, attr, attr->ia_file);
+ 	else
+-		return fuse_do_setattr(entry, attr, NULL);
++		return fuse_do_setattr(inode, attr, NULL);
+ }
+ 
+ static int fuse_getattr(struct vfsmount *mnt, struct dentry *entry,
+--- a/fs/fuse/fuse_i.h
++++ b/fs/fuse/fuse_i.h
+@@ -894,7 +894,7 @@ bool fuse_write_update_size(struct inode
+ int fuse_flush_times(struct inode *inode, struct fuse_file *ff);
+ int fuse_write_inode(struct inode *inode, struct writeback_control *wbc);
+ 
+-int fuse_do_setattr(struct dentry *dentry, struct iattr *attr,
++int fuse_do_setattr(struct inode *inode, struct iattr *attr,
+ 		    struct file *file);
+ 
+ #endif /* _FS_FUSE_I_H */
 --- a/fs/gfs2/inode.c
 +++ b/fs/gfs2/inode.c
 @@ -1774,7 +1774,7 @@ static int gfs2_setattr(struct dentry *d
  	if (IS_IMMUTABLE(inode) || IS_APPEND(inode))
  		goto out;
  
--	error = inode_change_ok(inode, attr);
-+	error = setattr_prepare(dentry, attr);
+-	error = setattr_prepare(dentry, attr);
++	error = inode_change_ok(inode, attr);
  	if (error)
  		goto out;
  
@@ -272,8 +299,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	struct hfs_sb_info *hsb = HFS_SB(inode->i_sb);
  	int error;
  
--	error = inode_change_ok(inode, attr); /* basic permission checks */
-+	error = setattr_prepare(dentry, attr); /* basic permission checks */
+-	error = setattr_prepare(dentry, attr); /* basic permission checks */
++	error = inode_change_ok(inode, attr); /* basic permission checks */
  	if (error)
  		return error;
  
@@ -283,8 +310,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	struct inode *inode = dentry->d_inode;
  	int error;
  
--	error = inode_change_ok(inode, attr);
-+	error = setattr_prepare(dentry, attr);
+-	error = setattr_prepare(dentry, attr);
++	error = inode_change_ok(inode, attr);
  	if (error)
  		return error;
  
@@ -294,8 +321,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  
  	int fd = HOSTFS_I(inode)->fd;
  
--	err = inode_change_ok(inode, attr);
-+	err = setattr_prepare(dentry, attr);
+-	err = setattr_prepare(dentry, attr);
++	err = inode_change_ok(inode, attr);
  	if (err)
  		return err;
  
@@ -305,8 +332,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	if ((attr->ia_valid & ATTR_SIZE) && attr->ia_size > inode->i_size)
  		goto out_unlock;
  
--	error = inode_change_ok(inode, attr);
-+	error = setattr_prepare(dentry, attr);
+-	error = setattr_prepare(dentry, attr);
++	error = inode_change_ok(inode, attr);
  	if (error)
  		goto out_unlock;
  
@@ -316,8 +343,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  
  	BUG_ON(!inode);
  
--	error = inode_change_ok(inode, attr);
-+	error = setattr_prepare(dentry, attr);
+-	error = setattr_prepare(dentry, attr);
++	error = inode_change_ok(inode, attr);
  	if (error)
  		return error;
  
@@ -327,8 +354,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	struct inode *inode = dentry->d_inode;
  	int rc;
  
--	rc = inode_change_ok(inode, iattr);
-+	rc = setattr_prepare(dentry, iattr);
+-	rc = setattr_prepare(dentry, iattr);
++	rc = inode_change_ok(inode, iattr);
  	if (rc)
  		return rc;
  
@@ -338,8 +365,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	struct inode *inode = dentry->d_inode;
  	int rc;
  
--	rc = inode_change_ok(inode, iattr);
-+	rc = setattr_prepare(dentry, iattr);
+-	rc = setattr_prepare(dentry, iattr);
++	rc = inode_change_ok(inode, iattr);
  	if (rc)
  		return rc;
  
@@ -349,8 +376,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  		return -EINVAL;
  
  	mutex_lock(&kernfs_mutex);
--	error = inode_change_ok(inode, iattr);
-+	error = setattr_prepare(dentry, iattr);
+-	error = setattr_prepare(dentry, iattr);
++	error = inode_change_ok(inode, iattr);
  	if (error)
  		goto out;
  
@@ -360,8 +387,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	struct inode *inode = dentry->d_inode;
  	int error;
  
--	error = inode_change_ok(inode, iattr);
-+	error = setattr_prepare(dentry, iattr);
+-	error = setattr_prepare(dentry, iattr);
++	error = inode_change_ok(inode, iattr);
  	if (error)
  		return error;
  
@@ -371,8 +398,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	struct inode *inode = dentry->d_inode;
  	int err = 0;
  
--	err = inode_change_ok(inode, attr);
-+	err = setattr_prepare(dentry, attr);
+-	err = setattr_prepare(dentry, attr);
++	err = inode_change_ok(inode, attr);
  	if (err)
  		return err;
  
@@ -382,8 +409,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	struct inode *inode = dentry->d_inode;
  	int error;
  
--	error = inode_change_ok(inode, attr);
-+	error = setattr_prepare(dentry, attr);
+-	error = setattr_prepare(dentry, attr);
++	error = inode_change_ok(inode, attr);
  	if (error)
  		return error;
  
@@ -393,51 +420,51 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	/* ageing the dentry to force validation */
  	ncp_age_dentry(server, dentry);
  
--	result = inode_change_ok(inode, attr);
-+	result = setattr_prepare(dentry, attr);
+-	result = setattr_prepare(dentry, attr);
++	result = inode_change_ok(inode, attr);
  	if (result < 0)
  		goto out;
  
 --- a/fs/nfsd/vfs.c
 +++ b/fs/nfsd/vfs.c
-@@ -300,17 +300,19 @@ commit_metadata(struct svc_fh *fhp)
+@@ -300,19 +300,17 @@ commit_metadata(struct svc_fh *fhp)
   * NFS semantics and what Linux expects.
   */
  static void
--nfsd_sanitize_attrs(struct inode *inode, struct iattr *iap)
-+nfsd_sanitize_attrs(struct dentry *dentry, struct iattr *iap)
+-nfsd_sanitize_attrs(struct dentry *dentry, struct iattr *iap)
++nfsd_sanitize_attrs(struct inode *inode, struct iattr *iap)
  {
-+	struct inode *inode = dentry->d_inode;
-+
+-	struct inode *inode = dentry->d_inode;
+-
  	/*
  	 * NFSv2 does not differentiate between "set-[ac]time-to-now"
  	 * which only requires access, and "set-[ac]time-to-X" which
  	 * requires ownership.
  	 * So if it looks like it might be "set both to the same time which
--	 * is close to now", and if inode_change_ok fails, then we
-+	 * is close to now", and if setattr_prepare fails, then we
+-	 * is close to now", and if setattr_prepare fails, then we
++	 * is close to now", and if inode_change_ok fails, then we
  	 * convert to "set to now" instead of "set to explicit time"
  	 *
--	 * We only call inode_change_ok as the last test as technically
-+	 * We only call setattr_prepare as the last test as technically
+-	 * We only call setattr_prepare as the last test as technically
++	 * We only call inode_change_ok as the last test as technically
  	 * it is not an interface that we should be using.
  	 */
  #define BOTH_TIME_SET (ATTR_ATIME_SET | ATTR_MTIME_SET)
-@@ -328,7 +330,7 @@ nfsd_sanitize_attrs(struct inode *inode,
+@@ -330,7 +328,7 @@ nfsd_sanitize_attrs(struct dentry *dentr
  		if (delta < 0)
  			delta = -delta;
  		if (delta < MAX_TOUCH_TIME_ERROR &&
--		    inode_change_ok(inode, iap) != 0) {
-+		    setattr_prepare(dentry, iap) != 0) {
+-		    setattr_prepare(dentry, iap) != 0) {
++		    inode_change_ok(inode, iap) != 0) {
  			/*
  			 * Turn off ATTR_[AM]TIME_SET but leave ATTR_[AM]TIME.
  			 * This will cause notify_change to set these times
-@@ -435,7 +437,7 @@ nfsd_setattr(struct svc_rqst *rqstp, str
+@@ -437,7 +435,7 @@ nfsd_setattr(struct svc_rqst *rqstp, str
  	if (!iap->ia_valid)
  		goto out;
  
--	nfsd_sanitize_attrs(inode, iap);
-+	nfsd_sanitize_attrs(dentry, iap);
+-	nfsd_sanitize_attrs(dentry, iap);
++	nfsd_sanitize_attrs(inode, iap);
  
  	/*
  	 * The size case is special, it changes the file in addition to the
@@ -447,8 +474,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	struct super_block *sb = inode->i_sb;
  	int err;
  
--	err = inode_change_ok(inode, iattr);
-+	err = setattr_prepare(dentry, iattr);
+-	err = setattr_prepare(dentry, iattr);
++	err = inode_change_ok(inode, iattr);
  	if (err)
  		return err;
  
@@ -458,8 +485,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	int err;
  	unsigned int ia_valid = attr->ia_valid;
  
--	err = inode_change_ok(vi, attr);
-+	err = setattr_prepare(dentry, attr);
+-	err = setattr_prepare(dentry, attr);
++	err = inode_change_ok(vi, attr);
  	if (err)
  		goto out;
  	/* We do not support NTFS ACLs yet. */
@@ -469,8 +496,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	struct inode *inode = dentry->d_inode;
  
  	attr->ia_valid &= ~ATTR_SIZE;
--	error = inode_change_ok(inode, attr);
-+	error = setattr_prepare(dentry, attr);
+-	error = setattr_prepare(dentry, attr);
++	error = inode_change_ok(inode, attr);
  	if (error)
  		return error;
  
@@ -480,8 +507,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	if (!(attr->ia_valid & OCFS2_VALID_ATTRS))
  		return 0;
  
--	status = inode_change_ok(inode, attr);
-+	status = setattr_prepare(dentry, attr);
+-	status = setattr_prepare(dentry, attr);
++	status = inode_change_ok(inode, attr);
  	if (status)
  		return status;
  
@@ -491,8 +518,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	struct inode *inode = dentry->d_inode;
  	int error;
  
--	error = inode_change_ok(inode, attr);
-+	error = setattr_prepare(dentry, attr);
+-	error = setattr_prepare(dentry, attr);
++	error = inode_change_ok(inode, attr);
  	if (error)
  		return error;
  
@@ -502,8 +529,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	if (attr->ia_valid & ATTR_MODE)
  		return -EPERM;
  
--	error = inode_change_ok(inode, attr);
-+	error = setattr_prepare(dentry, attr);
+-	error = setattr_prepare(dentry, attr);
++	error = inode_change_ok(inode, attr);
  	if (error)
  		return error;
  
@@ -513,8 +540,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	struct proc_dir_entry *de = PDE(inode);
  	int error;
  
--	error = inode_change_ok(inode, iattr);
-+	error = setattr_prepare(dentry, iattr);
+-	error = setattr_prepare(dentry, iattr);
++	error = inode_change_ok(inode, iattr);
  	if (error)
  		return error;
  
@@ -524,8 +551,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	if (attr->ia_valid & (ATTR_MODE | ATTR_UID | ATTR_GID))
  		return -EPERM;
  
--	error = inode_change_ok(inode, attr);
-+	error = setattr_prepare(dentry, attr);
+-	error = setattr_prepare(dentry, attr);
++	error = inode_change_ok(inode, attr);
  	if (error)
  		return error;
  
@@ -535,8 +562,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	int ret = 0;
  
  	/* POSIX UID/GID verification for setting inode attributes */
--	ret = inode_change_ok(inode, ia);
-+	ret = setattr_prepare(dentry, ia);
+-	ret = setattr_prepare(dentry, ia);
++	ret = inode_change_ok(inode, ia);
  	if (ret)
  		return ret;
  
@@ -546,8 +573,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	unsigned int ia_valid;
  	int error;
  
--	error = inode_change_ok(inode, attr);
-+	error = setattr_prepare(dentry, attr);
+-	error = setattr_prepare(dentry, attr);
++	error = inode_change_ok(inode, attr);
  	if (error)
  		return error;
  
@@ -557,8 +584,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	struct inode *inode = dentry->d_inode;
  	int error;
  
--	error = inode_change_ok(inode, attr);
-+	error = setattr_prepare(dentry, attr);
+-	error = setattr_prepare(dentry, attr);
++	error = inode_change_ok(inode, attr);
  	if (error)
  		return error;
  
@@ -568,8 +595,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  
  	dbg_gen("ino %lu, mode %#x, ia_valid %#x",
  		inode->i_ino, inode->i_mode, attr->ia_valid);
--	err = inode_change_ok(inode, attr);
-+	err = setattr_prepare(dentry, attr);
+-	err = setattr_prepare(dentry, attr);
++	err = inode_change_ok(inode, attr);
  	if (err)
  		return err;
  
@@ -579,8 +606,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	struct inode *inode = dentry->d_inode;
  	int error;
  
--	error = inode_change_ok(inode, attr);
-+	error = setattr_prepare(dentry, attr);
+-	error = setattr_prepare(dentry, attr);
++	error = inode_change_ok(inode, attr);
  	if (error)
  		return error;
  
@@ -590,8 +617,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	unsigned int ia_valid = attr->ia_valid;
  	int error;
  
--	error = inode_change_ok(inode, attr);
-+	error = setattr_prepare(dentry, attr);
+-	error = setattr_prepare(dentry, attr);
++	error = inode_change_ok(inode, attr);
  	if (error)
  		return error;
  
@@ -601,8 +628,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  			newattrs.ia_valid |= ATTR_MTIME_SET;
  		}
  		/*
--		 * Tell inode_change_ok(), that this is an explicit time
-+		 * Tell setattr_prepare(), that this is an explicit time
+-		 * Tell setattr_prepare(), that this is an explicit time
++		 * Tell inode_change_ok(), that this is an explicit time
  		 * update, even if neither ATTR_ATIME_SET nor ATTR_MTIME_SET
  		 * were used.
  		 */
@@ -610,58 +637,132 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  		/*
  		 * If times is NULL (or both times are UTIME_NOW),
  		 * then we need to check permissions, because
--		 * inode_change_ok() won't do it.
-+		 * setattr_prepare() won't do it.
+-		 * setattr_prepare() won't do it.
++		 * inode_change_ok() won't do it.
  		 */
  		error = -EACCES;
                  if (IS_IMMUTABLE(inode))
+--- a/fs/xfs/xfs_acl.c
++++ b/fs/xfs/xfs_acl.c
+@@ -244,8 +244,7 @@ xfs_set_mode(struct inode *inode, umode_
+ 		iattr.ia_mode = mode;
+ 		iattr.ia_ctime = current_fs_time(inode->i_sb);
+ 
+-		error = -xfs_setattr_nonsize(NULL, XFS_I(inode), &iattr,
+-					     XFS_ATTR_NOACL);
++		error = -xfs_setattr_nonsize(XFS_I(inode), &iattr, XFS_ATTR_NOACL);
+ 	}
+ 
+ 	return error;
+--- a/fs/xfs/xfs_file.c
++++ b/fs/xfs/xfs_file.c
+@@ -862,7 +862,7 @@ xfs_file_fallocate(
+ 
+ 		iattr.ia_valid = ATTR_SIZE;
+ 		iattr.ia_size = new_size;
+-		error = xfs_setattr_size(file->f_dentry, &iattr);
++		error = xfs_setattr_size(ip, &iattr);
+ 	}
+ 
+ out_unlock:
+--- a/fs/xfs/xfs_ioctl.c
++++ b/fs/xfs/xfs_ioctl.c
+@@ -717,7 +717,7 @@ xfs_ioc_space(
+ 		iattr.ia_valid = ATTR_SIZE;
+ 		iattr.ia_size = bf->l_start;
+ 
+-		error = xfs_setattr_size(filp->f_dentry, &iattr);
++		error = xfs_setattr_size(ip, &iattr);
+ 		if (!error)
+ 			clrprealloc = true;
+ 		break;
 --- a/fs/xfs/xfs_iops.c
 +++ b/fs/xfs/xfs_iops.c
-@@ -530,9 +530,7 @@ xfs_vn_change_ok(
- 	struct dentry	*dentry,
- 	struct iattr	*iattr)
- {
--	struct inode		*inode = d_inode(dentry);
--	struct xfs_inode	*ip = XFS_I(inode);
--	struct xfs_mount	*mp = ip->i_mount;
-+	struct xfs_mount	*mp = XFS_I(d_inode(dentry))->i_mount;
+@@ -527,7 +527,6 @@ xfs_setattr_time(
  
- 	if (mp->m_flags & XFS_MOUNT_RDONLY)
- 		return XFS_ERROR(EROFS);
-@@ -540,14 +538,14 @@ xfs_vn_change_ok(
- 	if (XFS_FORCED_SHUTDOWN(mp))
- 		return XFS_ERROR(EIO);
- 
--	return XFS_ERROR(-inode_change_ok(inode, iattr));
-+	return XFS_ERROR(-setattr_prepare(dentry, iattr));
- }
- 
- /*
-  * Set non-size attributes of an inode.
-  *
-  * Caution: The caller of this function is responsible for calling
-- * inode_change_ok() or otherwise verifying the change is fine.
-+ * setattr_prepare() or otherwise verifying the change is fine.
-  */
  int
  xfs_setattr_nonsize(
-@@ -758,7 +756,7 @@ xfs_vn_setattr_nonsize(
-  * Truncate file.  Must have write permission and not be a directory.
-  *
-  * Caution: The caller of this function is responsible for calling
-- * inode_change_ok() or otherwise verifying the change is fine.
-+ * setattr_prepare() or otherwise verifying the change is fine.
+-	struct dentry		*dentry,
+ 	struct xfs_inode	*ip,
+ 	struct iattr		*iattr,
+ 	int			flags)
+@@ -552,7 +551,7 @@ xfs_setattr_nonsize(
+ 		if (XFS_FORCED_SHUTDOWN(mp))
+ 			return XFS_ERROR(EIO);
+ 
+-		error = -setattr_prepare(dentry, iattr);
++		error = -inode_change_ok(inode, iattr);
+ 		if (error)
+ 			return XFS_ERROR(error);
+ 	}
+@@ -735,12 +734,11 @@ out_dqrele:
   */
  int
  xfs_setattr_size(
+-	struct dentry		*dentry,
++	struct xfs_inode	*ip,
+ 	struct iattr		*iattr)
+ {
+-	struct inode		*inode = dentry->d_inode;
+-	struct xfs_inode	*ip = XFS_I(inode);
+ 	struct xfs_mount	*mp = ip->i_mount;
++	struct inode		*inode = VFS_I(ip);
+ 	xfs_off_t		oldsize, newsize;
+ 	struct xfs_trans	*tp;
+ 	int			error;
+@@ -756,7 +754,7 @@ xfs_setattr_size(
+ 	if (XFS_FORCED_SHUTDOWN(mp))
+ 		return XFS_ERROR(EIO);
+ 
+-	error = -setattr_prepare(dentry, iattr);
++	error = -inode_change_ok(inode, iattr);
+ 	if (error)
+ 		return XFS_ERROR(error);
+ 
+@@ -780,7 +778,7 @@ xfs_setattr_size(
+ 		 * Use the regular setattr path to update the timestamps.
+ 		 */
+ 		iattr->ia_valid &= ~ATTR_SIZE;
+-		return xfs_setattr_nonsize(dentry, ip, iattr, 0);
++		return xfs_setattr_nonsize(ip, iattr, 0);
+ 	}
+ 
+ 	/*
+@@ -941,10 +939,10 @@ xfs_vn_setattr(
+ 
+ 	if (iattr->ia_valid & ATTR_SIZE) {
+ 		xfs_ilock(ip, XFS_IOLOCK_EXCL | XFS_MMAPLOCK_EXCL);
+-		error = xfs_setattr_size(dentry, iattr);
++		error = xfs_setattr_size(ip, iattr);
+ 		xfs_iunlock(ip, XFS_IOLOCK_EXCL | XFS_MMAPLOCK_EXCL);
+ 	} else {
+-		error = xfs_setattr_nonsize(dentry, ip, iattr, 0);
++		error = xfs_setattr_nonsize(ip, iattr, 0);
+ 	}
+ 
+ 	return -error;
+--- a/fs/xfs/xfs_iops.h
++++ b/fs/xfs/xfs_iops.h
+@@ -32,8 +32,8 @@ extern void xfs_setup_inode(struct xfs_i
+  */
+ #define XFS_ATTR_NOACL		0x01	/* Don't call posix_acl_chmod */
+ 
+-extern int xfs_setattr_nonsize(struct dentry *dentry, struct xfs_inode *ip,
+-			       struct iattr *vap, int flags);
+-extern int xfs_setattr_size(struct dentry *dentry, struct iattr *vap);
++extern int xfs_setattr_nonsize(struct xfs_inode *ip, struct iattr *vap,
++			       int flags);
++extern int xfs_setattr_size(struct xfs_inode *ip, struct iattr *vap);
+ 
+ #endif /* __XFS_IOPS_H__ */
 --- a/include/linux/fs.h
 +++ b/include/linux/fs.h
 @@ -2629,7 +2629,7 @@ extern int buffer_migrate_page(struct ad
  #define buffer_migrate_page NULL
  #endif
  
--extern int inode_change_ok(const struct inode *, struct iattr *);
-+extern int setattr_prepare(struct dentry *, struct iattr *);
+-extern int setattr_prepare(struct dentry *, struct iattr *);
++extern int inode_change_ok(const struct inode *, struct iattr *);
  extern int inode_newsize_ok(const struct inode *, loff_t offset);
  extern void setattr_copy(struct inode *inode, const struct iattr *attr);
  
@@ -671,8 +772,8 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	struct inode *inode = dentry->d_inode;
  	int error;
  
--	error = inode_change_ok(inode, attr);
-+	error = setattr_prepare(dentry, attr);
+-	error = setattr_prepare(dentry, attr);
++	error = inode_change_ok(inode, attr);
  	if (error)
  		return error;
  

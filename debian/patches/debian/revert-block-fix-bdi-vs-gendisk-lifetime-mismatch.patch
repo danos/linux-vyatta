@@ -1,0 +1,75 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Fri, 09 Dec 2016 22:29:06 +0000
+Subject: Revert "block: fix bdi vs gendisk lifetime mismatch"
+Forwarded: not-needed
+
+This reverts commit dae435005a0a398dde9a421e222c379bbad0c643 which
+was commit df08c32ce3be5be138c1dbfcba203314a3a7cd6f upstream.
+The bug doesn't cause a major problem and the fix changes struct
+backing_dev_info which breaks the module ABI.
+
+---
+--- a/block/genhd.c
++++ b/block/genhd.c
+@@ -611,7 +611,7 @@ void add_disk(struct gendisk *disk)
+ 
+ 	/* Register BDI before referencing it from bdev */
+ 	bdi = &disk->queue->backing_dev_info;
+-	bdi_register_owner(bdi, disk_to_dev(disk));
++	bdi_register_dev(bdi, disk_devt(disk));
+ 
+ 	blk_register_region(disk_devt(disk), disk->minors, NULL,
+ 			    exact_match, exact_lock, disk);
+--- a/include/linux/backing-dev.h
++++ b/include/linux/backing-dev.h
+@@ -100,7 +100,6 @@ struct backing_dev_info {
+ 	struct list_head work_list;
+ 
+ 	struct device *dev;
+-	struct device *owner;
+ 
+ 	struct timer_list laptop_mode_wb_timer;
+ 
+@@ -117,7 +116,6 @@ __printf(3, 4)
+ int bdi_register(struct backing_dev_info *bdi, struct device *parent,
+ 		const char *fmt, ...);
+ int bdi_register_dev(struct backing_dev_info *bdi, dev_t dev);
+-int bdi_register_owner(struct backing_dev_info *bdi, struct device *owner);
+ void bdi_unregister(struct backing_dev_info *bdi);
+ int __must_check bdi_setup_and_register(struct backing_dev_info *, char *, unsigned int);
+ void bdi_start_writeback(struct backing_dev_info *bdi, long nr_pages,
+--- a/mm/backing-dev.c
++++ b/mm/backing-dev.c
+@@ -350,20 +350,6 @@ int bdi_register_dev(struct backing_dev_
+ }
+ EXPORT_SYMBOL(bdi_register_dev);
+ 
+-int bdi_register_owner(struct backing_dev_info *bdi, struct device *owner)
+-{
+-	int rc;
+-
+-	rc = bdi_register(bdi, NULL, "%u:%u", MAJOR(owner->devt),
+-			MINOR(owner->devt));
+-	if (rc)
+-		return rc;
+-	bdi->owner = owner;
+-	get_device(owner);
+-	return 0;
+-}
+-EXPORT_SYMBOL(bdi_register_owner);
+-
+ /*
+  * Remove bdi from the global list and shutdown any threads we have running
+  */
+@@ -432,11 +418,6 @@ void bdi_unregister(struct backing_dev_i
+ 
+ 		device_unregister(dev);
+ 	}
+-
+-	if (bdi->owner) {
+-		put_device(bdi->owner);
+-		bdi->owner = NULL;
+-	}
+ }
+ EXPORT_SYMBOL(bdi_unregister);
+ 

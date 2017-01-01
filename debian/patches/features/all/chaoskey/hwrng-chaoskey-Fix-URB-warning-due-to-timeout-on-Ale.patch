@@ -1,0 +1,101 @@
+From: Bob Ham <bob.ham@collabora.com>
+Date: Fri, 3 Jun 2016 12:13:08 +0100
+Subject: hwrng: chaoskey - Fix URB warning due to timeout on Alea
+Origin: https://git.kernel.org/linus/e4a886e811cd07dd5c6f389eae4d35870ec2a483
+Bug-Debian: https://bugs.debian.org/839616
+
+The first read on an Alea takes about 1.8 seconds, more than the
+timeout value waiting for the read.  As a consequence, later URB reuse
+causes the warning given below.  To avoid this, we increase the wait
+time for the first read on the Alea.
+
+[   78.293247] WARNING: CPU: 3 PID: 1892 at drivers/usb/core/urb.c:338 usb_submit_urb+0x2b4/0x580 [usbcore]
+[   78.293250] URB ffff8802135be3c0 submitted while active
+[   78.293252] Modules linked in: chaoskey(+) rng_core rfcomm binfmt_misc bnep cfg80211 nfsd auth_rpcgss oid_registry nfs_acl nfs lockd grace fscache sunrpc bridge stp llc tun snd_hda_codec_hdmi snd_hda_codec_realtek snd_hda_codec_generic iTCO_wdt iTCO_vendor_support nls_utf8 nls_cp437 vfat fat intel_rapl x86_pkg_temp_thermal intel_powerclamp coretemp kvm_intel efi_pstore kvm irqbypass pcspkr btusb btrtl btbcm btintel uvcvideo joydev bluetooth videobuf2_vmalloc videobuf2_memops efivars videobuf2_v4l2 serio_raw i2c_i801 videobuf2_core videodev cdc_mbim media lpc_ich shpchp mfd_core cdc_ncm usbnet mii cdc_wdm cdc_acm evdev snd_hda_intel snd_hda_codec snd_hwdep snd_hda_core i915 snd_pcm snd_timer i2c_algo_bit drm_kms_helper wmi thinkpad_acpi drm nvram mei_me mei snd soundcore rfkill ac battery i2c_core
+[   78.293335]  video button tpm_tis tpm fuse parport_pc ppdev lp parport autofs4 ext4 crc16 jbd2 mbcache algif_skcipher af_alg hid_generic usbhid hid dm_crypt dm_mod sg sr_mod cdrom sd_mod crct10dif_pclmul crc32_pclmul crc32c_intel jitterentropy_rng sha256_generic hmac drbg aesni_intel xhci_pci aes_x86_64 ahci glue_helper xhci_hcd ehci_pci lrw libahci gf128mul ablk_helper cryptd libata sdhci_pci psmouse sdhci scsi_mod ehci_hcd mmc_core usbcore usb_common thermal
+[   78.293402] CPU: 3 PID: 1892 Comm: hwrng Not tainted 4.7.0-rc1-linux-14+ #16
+[   78.293405] Hardware name: LENOVO 232577G/232577G, BIOS G2ET92WW (2.52 ) 02/22/2013
+[   78.293408]  0000000000000000 ffffffff812dfa0f ffff8801fa5b3d68 0000000000000000
+[   78.293413]  ffffffff81072224 ffff8802135be3c0 ffff8801fa5b3db8 ffff880212e44210
+[   78.293418]  0000000000000040 ffff880209fb32c0 ffff880212e44200 ffffffff8107228f
+[   78.293422] Call Trace:
+[   78.293432]  [<ffffffff812dfa0f>] ? dump_stack+0x5c/0x7d
+[   78.293437]  [<ffffffff81072224>] ? __warn+0xc4/0xe0
+[   78.293441]  [<ffffffff8107228f>] ? warn_slowpath_fmt+0x4f/0x60
+[   78.293451]  [<ffffffff810a46a2>] ? enqueue_task_fair+0xcd2/0x1260
+[   78.293463]  [<ffffffffa001ec54>] ? usb_submit_urb+0x2b4/0x580 [usbcore]
+[   78.293474]  [<ffffffff8140c2e5>] ? __pm_runtime_resume+0x55/0x70
+[   78.293484]  [<ffffffffa0825212>] ? _chaoskey_fill+0x132/0x250 [chaoskey]
+[   78.293485] usbcore: registered new interface driver chaoskey
+[   78.293493]  [<ffffffff810aed50>] ? wait_woken+0x90/0x90
+[   78.293500]  [<ffffffffa06448c0>] ? devm_hwrng_register+0x80/0x80 [rng_core]
+[   78.293505]  [<ffffffffa0825907>] ? chaoskey_rng_read+0x127/0x140 [chaoskey]
+[   78.293511]  [<ffffffffa06448c0>] ? devm_hwrng_register+0x80/0x80 [rng_core]
+[   78.293515]  [<ffffffffa064492e>] ? hwrng_fillfn+0x6e/0x120 [rng_core]
+[   78.293520]  [<ffffffff8108fb5f>] ? kthread+0xcf/0xf0
+[   78.293529]  [<ffffffff81596d5f>] ? ret_from_fork+0x1f/0x40
+[   78.293535]  [<ffffffff8108fa90>] ? kthread_park+0x50/0x50
+
+Signed-off-by: Bob Ham <bob.ham@collabora.com>
+Signed-off-by: Herbert Xu <herbert@gondor.apana.org.au>
+---
+ drivers/usb/misc/chaoskey.c | 17 +++++++++++++++--
+ 1 file changed, 15 insertions(+), 2 deletions(-)
+
+--- a/drivers/usb/misc/chaoskey.c
++++ b/drivers/usb/misc/chaoskey.c
+@@ -60,7 +60,8 @@ MODULE_LICENSE("GPL");
+ 
+ #define CHAOSKEY_BUF_LEN	64	/* max size of USB full speed packet */
+ 
+-#define NAK_TIMEOUT (HZ)		/* stall/wait timeout for device */
++#define NAK_TIMEOUT (HZ)		/* normal stall/wait timeout */
++#define ALEA_FIRST_TIMEOUT (HZ*3)	/* first stall/wait timeout for Alea */
+ 
+ #ifdef CONFIG_USB_DYNAMIC_MINORS
+ #define USB_CHAOSKEY_MINOR_BASE 0
+@@ -88,6 +89,7 @@ struct chaoskey {
+ 	int open;			/* open count */
+ 	bool present;			/* device not disconnected */
+ 	bool reading;			/* ongoing IO */
++	bool reads_started;		/* track first read for Alea */
+ 	int size;			/* size of buf */
+ 	int valid;			/* bytes of buf read */
+ 	int used;			/* bytes of buf consumed */
+@@ -192,6 +194,9 @@ static int chaoskey_probe(struct usb_int
+ 
+ 	dev->in_ep = in_ep;
+ 
++	if (udev->descriptor.idVendor != ALEA_VENDOR_ID)
++		dev->reads_started = 1;
++
+ 	dev->size = size;
+ 	dev->present = 1;
+ 
+@@ -361,6 +366,7 @@ static int _chaoskey_fill(struct chaoske
+ {
+ 	DEFINE_WAIT(wait);
+ 	int result;
++	bool started;
+ 
+ 	usb_dbg(dev->interface, "fill");
+ 
+@@ -393,10 +399,17 @@ static int _chaoskey_fill(struct chaoske
+ 		goto out;
+ 	}
+ 
++	/* The first read on the Alea takes a little under 2 seconds.
++	 * Reads after the first read take only a few microseconds
++	 * though.  Presumably the entropy-generating circuit needs
++	 * time to ramp up.  So, we wait longer on the first read.
++	 */
++	started = dev->reads_started;
++	dev->reads_started = true;
+ 	result = wait_event_interruptible_timeout(
+ 		dev->wait_q,
+ 		!dev->reading,
+-		NAK_TIMEOUT);
++		(started ? NAK_TIMEOUT : ALEA_FIRST_TIMEOUT) );
+ 
+ 	if (result < 0)
+ 		goto out;

@@ -1,0 +1,53 @@
+From: Keith Packard <keithp@keithp.com>
+Date: Thu, 26 Mar 2015 16:49:38 -0700
+Subject: usb: Fix warnings in chaoskey driver
+Origin: https://git.kernel.org/linus/8b86ed078a65433a60ff59091a136d23724bd6d3
+Bug-Debian: https://bugs.debian.org/839616
+
+>    drivers/usb/misc/chaoskey.c: In function 'chaoskey_read':
+> >> drivers/usb/misc/chaoskey.c:412:3: error: implicit declaration of function 'copy_to_user'
+> >> [-Werror=implicit-function-declaration]
+>       remain = copy_to_user(buffer, dev->buf + dev->used, this_time);
+
+I was unable to reproduce this locally, but added an explicit
+
+	#include <linux/uaccess.h>
+
+which should ensure the definition on all architectures.
+
+> sparse warnings: (new ones prefixed by >>)
+>
+> >> drivers/usb/misc/chaoskey.c:117:30: sparse: incorrect type in assignment (different base types)
+>    drivers/usb/misc/chaoskey.c:117:30:    expected int [signed] size
+>    drivers/usb/misc/chaoskey.c:117:30:    got restricted __le16 [usertype] wMaxPacketSize
+
+Switched the code to using the USB descriptor accessor functions.
+
+Signed-off-by: Keith Packard <keithp@keithp.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/usb/misc/chaoskey.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+--- a/drivers/usb/misc/chaoskey.c
++++ b/drivers/usb/misc/chaoskey.c
+@@ -27,6 +27,8 @@
+ #include <linux/usb.h>
+ #include <linux/wait.h>
+ #include <linux/hw_random.h>
++#include <linux/mutex.h>
++#include <linux/uaccess.h>
+ 
+ static struct usb_driver chaoskey_driver;
+ static struct usb_class_driver chaoskey_class;
+@@ -113,8 +115,8 @@ static int chaoskey_probe(struct usb_int
+ 	/* Find the first bulk IN endpoint and its packet size */
+ 	for (i = 0; i < altsetting->desc.bNumEndpoints; i++) {
+ 		if (usb_endpoint_is_bulk_in(&altsetting->endpoint[i].desc)) {
+-			in_ep = altsetting->endpoint[i].desc.bEndpointAddress;
+-			size = altsetting->endpoint[i].desc.wMaxPacketSize;
++			in_ep = usb_endpoint_num(&altsetting->endpoint[i].desc);
++			size = usb_endpoint_maxp(&altsetting->endpoint[i].desc);
+ 			break;
+ 		}
+ 	}
