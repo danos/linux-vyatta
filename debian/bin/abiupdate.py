@@ -63,9 +63,9 @@ class Main(object):
         self.version = changelog.version.linux_version
         self.version_source = changelog.version.complete
 
-        local_config = ConfigCoreDump(fp=file("debian/config.defines.dump"))
+        self.config = ConfigCoreDump(fp=file("debian/config.defines.dump"))
 
-        self.version_abi = local_config['version', ]['abiname']
+        self.version_abi = self.config['version', ]['abiname']
 
     def __call__(self):
         self.dir = tempfile.mkdtemp(prefix='abiupdate')
@@ -103,13 +103,10 @@ class Main(object):
         return s
 
     def get_config(self):
-        filename = "linux-support-%s_%s_all.deb" % (self.version_abi, self.version_source)
-        f = self.retrieve_package(self.url_config, filename, 'all')
-        d = self.extract_package(f, "linux-support")
-        c = d + "/usr/src/linux-support-" + self.version_abi + "/config.defines.dump"
-        config = ConfigCoreDump(fp=file(c))
-        shutil.rmtree(d)
-        return config
+        # XXX We used to fetch the previous version of linux-support here,
+        # but until we authenticate downloads we should not do that as
+        # pickle.load allows running arbitrary code.
+        return self.config
 
     def retrieve_package(self, url, filename, arch):
         u = url(self.source, filename, arch)
