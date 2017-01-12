@@ -1,0 +1,99 @@
+From: Oliver Neukum <oneukum@suse.com>
+Date: Wed, 17 Feb 2016 09:58:11 -0800
+Subject: usb/misc/chaoskey: Cleanup probe failure paths
+Origin: https://git.kernel.org/linus/0a15e24c2740b7db99fbe21642b33a3028700225
+Bug-Debian: https://bugs.debian.org/839616
+
+Shares the cleanup code between all probe failure paths, instead of
+having per-failure cleanup at each point in the function.
+
+Signed-off-by: Oliver Neukum <oneukum@suse.com>
+Signed-off-by: Keith Packard <keithp@keithp.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+---
+ drivers/usb/misc/chaoskey.c | 36 ++++++++++++++++++------------------
+ 1 file changed, 18 insertions(+), 18 deletions(-)
+
+--- a/drivers/usb/misc/chaoskey.c
++++ b/drivers/usb/misc/chaoskey.c
+@@ -93,10 +93,12 @@ struct chaoskey {
+ 
+ static void chaoskey_free(struct chaoskey *dev)
+ {
+-	usb_dbg(dev->interface, "free");
+-	kfree(dev->name);
+-	kfree(dev->buf);
+-	kfree(dev);
++	if (dev) {
++		usb_dbg(dev->interface, "free");
++		kfree(dev->name);
++		kfree(dev->buf);
++		kfree(dev);
++	}
+ }
+ 
+ static int chaoskey_probe(struct usb_interface *interface,
+@@ -107,7 +109,7 @@ static int chaoskey_probe(struct usb_int
+ 	int i;
+ 	int in_ep = -1;
+ 	struct chaoskey *dev;
+-	int result;
++	int result = -ENOMEM;
+ 	int size;
+ 
+ 	usb_dbg(interface, "probe %s-%s", udev->product, udev->serial);
+@@ -142,14 +144,12 @@ static int chaoskey_probe(struct usb_int
+ 	dev = kzalloc(sizeof(struct chaoskey), GFP_KERNEL);
+ 
+ 	if (dev == NULL)
+-		return -ENOMEM;
++		goto out;
+ 
+ 	dev->buf = kmalloc(size, GFP_KERNEL);
+ 
+-	if (dev->buf == NULL) {
+-		kfree(dev);
+-		return -ENOMEM;
+-	}
++	if (dev->buf == NULL)
++		goto out;
+ 
+ 	/* Construct a name using the product and serial values. Each
+ 	 * device needs a unique name for the hwrng code
+@@ -158,11 +158,8 @@ static int chaoskey_probe(struct usb_int
+ 	if (udev->product && udev->serial) {
+ 		dev->name = kmalloc(strlen(udev->product) + 1 +
+ 				    strlen(udev->serial) + 1, GFP_KERNEL);
+-		if (dev->name == NULL) {
+-			kfree(dev->buf);
+-			kfree(dev);
+-			return -ENOMEM;
+-		}
++		if (dev->name == NULL)
++			goto out;
+ 
+ 		strcpy(dev->name, udev->product);
+ 		strcat(dev->name, "-");
+@@ -186,9 +183,7 @@ static int chaoskey_probe(struct usb_int
+ 	result = usb_register_dev(interface, &chaoskey_class);
+ 	if (result) {
+ 		usb_err(interface, "Unable to allocate minor number.");
+-		usb_set_intfdata(interface, NULL);
+-		chaoskey_free(dev);
+-		return result;
++		goto out;
+ 	}
+ 
+ 	dev->hwrng.name = dev->name ? dev->name : chaoskey_driver.name;
+@@ -215,6 +210,11 @@ static int chaoskey_probe(struct usb_int
+ 
+ 	usb_dbg(interface, "chaoskey probe success, size %d", dev->size);
+ 	return 0;
++
++out:
++	usb_set_intfdata(interface, NULL);
++	chaoskey_free(dev);
++	return result;
+ }
+ 
+ static void chaoskey_disconnect(struct usb_interface *interface)

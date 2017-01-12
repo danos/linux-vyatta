@@ -1,0 +1,94 @@
+From: Willem de Bruijn <willemb@google.com>
+Date: Tue, 12 Jul 2016 18:18:57 -0400
+Subject: dccp: limit sk_filter trim to payload
+Origin: https://git.kernel.org/linus/4f0c40d94461cfd23893a17335b2ab78ecb333c8
+
+Dccp verifies packet integrity, including length, at initial rcv in
+dccp_invalid_packet, later pulls headers in dccp_enqueue_skb.
+
+A call to sk_filter in-between can cause __skb_pull to wrap skb->len.
+skb_copy_datagram_msg interprets this as a negative value, so
+(correctly) fails with EFAULT. The negative length is reported in
+ioctl SIOCINQ or possibly in a DCCP_WARN in dccp_close.
+
+Introduce an sk_receive_skb variant that caps how small a filter
+program can trim packets, and call this in dccp with the header
+length. Excessively trimmed packets are now processed normally and
+queued for reception as 0B payloads.
+
+Fixes: 7c657876b63c ("[DCCP]: Initial implementation")
+Signed-off-by: Willem de Bruijn <willemb@google.com>
+Acked-by: Daniel Borkmann <daniel@iogearbox.net>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+---
+ include/net/sock.h | 8 +++++++-
+ net/core/sock.c    | 7 ++++---
+ net/dccp/ipv4.c    | 2 +-
+ net/dccp/ipv6.c    | 2 +-
+ 4 files changed, 13 insertions(+), 6 deletions(-)
+
+--- a/include/net/sock.h
++++ b/include/net/sock.h
+@@ -1669,7 +1669,13 @@ static inline void sock_put(struct sock
+  */
+ void sock_gen_put(struct sock *sk);
+ 
+-int sk_receive_skb(struct sock *sk, struct sk_buff *skb, const int nested);
++int __sk_receive_skb(struct sock *sk, struct sk_buff *skb, const int nested,
++		     unsigned int trim_cap);
++static inline int sk_receive_skb(struct sock *sk, struct sk_buff *skb,
++				 const int nested)
++{
++	return __sk_receive_skb(sk, skb, nested, 1);
++}
+ 
+ static inline void sk_tx_queue_set(struct sock *sk, int tx_queue)
+ {
+--- a/net/core/sock.c
++++ b/net/core/sock.c
+@@ -480,11 +480,12 @@ int sock_queue_rcv_skb(struct sock *sk,
+ }
+ EXPORT_SYMBOL(sock_queue_rcv_skb);
+ 
+-int sk_receive_skb(struct sock *sk, struct sk_buff *skb, const int nested)
++int __sk_receive_skb(struct sock *sk, struct sk_buff *skb,
++		     const int nested, unsigned int trim_cap)
+ {
+ 	int rc = NET_RX_SUCCESS;
+ 
+-	if (sk_filter(sk, skb))
++	if (sk_filter_trim_cap(sk, skb, trim_cap))
+ 		goto discard_and_relse;
+ 
+ 	skb->dev = NULL;
+@@ -520,7 +521,7 @@ discard_and_relse:
+ 	kfree_skb(skb);
+ 	goto out;
+ }
+-EXPORT_SYMBOL(sk_receive_skb);
++EXPORT_SYMBOL(__sk_receive_skb);
+ 
+ struct dst_entry *__sk_dst_check(struct sock *sk, u32 cookie)
+ {
+--- a/net/dccp/ipv4.c
++++ b/net/dccp/ipv4.c
+@@ -890,7 +890,7 @@ static int dccp_v4_rcv(struct sk_buff *s
+ 		goto discard_and_relse;
+ 	nf_reset(skb);
+ 
+-	return sk_receive_skb(sk, skb, 1);
++	return __sk_receive_skb(sk, skb, 1, dh->dccph_doff * 4);
+ 
+ no_dccp_socket:
+ 	if (!xfrm4_policy_check(NULL, XFRM_POLICY_IN, skb))
+--- a/net/dccp/ipv6.c
++++ b/net/dccp/ipv6.c
+@@ -804,7 +804,7 @@ static int dccp_v6_rcv(struct sk_buff *s
+ 	if (!xfrm6_policy_check(sk, XFRM_POLICY_IN, skb))
+ 		goto discard_and_relse;
+ 
+-	return sk_receive_skb(sk, skb, 1) ? -1 : 0;
++	return __sk_receive_skb(sk, skb, 1, dh->dccph_doff * 4) ? -1 : 0;
+ 
+ no_dccp_socket:
+ 	if (!xfrm6_policy_check(NULL, XFRM_POLICY_IN, skb))
