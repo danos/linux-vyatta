@@ -1,0 +1,48 @@
+From: Peter Zijlstra <peterz@infradead.org>
+Date: Wed, 24 Feb 2016 18:45:41 +0100
+Subject: perf: Do not double free
+Origin: https:/.git.kernel.org/linus/130056275ade730e7a79c110212c8815202773ee
+
+In case of: err_file: fput(event_file), we'll end up calling
+perf_release() which in turn will free the event.
+
+Do not then free the event _again_.
+
+Tested-by: Alexander Shishkin <alexander.shishkin@linux.intel.com>
+Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+Reviewed-by: Alexander Shishkin <alexander.shishkin@linux.intel.com>
+Cc: Arnaldo Carvalho de Melo <acme@redhat.com>
+Cc: Jiri Olsa <jolsa@redhat.com>
+Cc: Linus Torvalds <torvalds@linux-foundation.org>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Thomas Gleixner <tglx@linutronix.de>
+Cc: dvyukov@google.com
+Cc: eranian@google.com
+Cc: oleg@redhat.com
+Cc: panand@redhat.com
+Cc: sasha.levin@oracle.com
+Cc: vince@deater.net
+Link: http://lkml.kernel.org/r/20160224174947.697350349@infradead.org
+Signed-off-by: Ingo Molnar <mingo@kernel.org>
+[bwh: Backported to 3.2: adjust context]
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+ kernel/events/core.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+--- a/kernel/events/core.c
++++ b/kernel/events/core.c
+@@ -6749,7 +6749,12 @@ err_context:
+ 	perf_unpin_context(ctx);
+ 	put_ctx(ctx);
+ err_alloc:
+-	free_event(event);
++	/*
++	 * If event_file is set, the fput() above will have called ->release()
++	 * and that will take care of freeing the event.
++	 */
++	if (!event_file)
++		free_event(event);
+ err_task:
+ 	if (task)
+ 		put_task_struct(task);
