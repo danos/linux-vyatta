@@ -1,0 +1,63 @@
+From: Arun Chandran <achandran@mvista.com>
+Date: Fri, 10 Oct 2014 12:31:24 +0100
+Subject: arm64: ASLR: Don't randomise text when randomise_va_space == 0
+Origin: https://git.kernel.org/linus/92980405f3537136b8e81007a9df576762f49bbb
+Bug-Debian: https://bugs.debian.org/797530
+
+When user asks to turn off ASLR by writing "0" to
+/proc/sys/kernel/randomize_va_space there should not be
+any randomization to mmap base, stack, VDSO, libs, text and heap
+
+Currently arm64 violates this behavior by randomising text.
+Fix this by defining a constant ELF_ET_DYN_BASE. The randomisation of
+mm->mmap_base is done by setup_new_exec -> arch_pick_mmap_layout ->
+mmap_base -> mmap_rnd.
+
+Signed-off-by: Arun Chandran <achandran@mvista.com>
+Signed-off-by: Catalin Marinas <catalin.marinas@arm.com>
+---
+ arch/arm64/Kconfig           | 1 +
+ arch/arm64/include/asm/elf.h | 4 ++--
+ arch/arm64/kernel/process.c  | 5 -----
+ 3 files changed, 3 insertions(+), 7 deletions(-)
+
+--- a/arch/arm64/Kconfig
++++ b/arch/arm64/Kconfig
+@@ -1,5 +1,6 @@
+ config ARM64
+ 	def_bool y
++	select ARCH_BINFMT_ELF_RANDOMIZE_PIE
+ 	select ARCH_HAS_ATOMIC64_DEC_IF_POSITIVE
+ 	select ARCH_HAS_OPP
+ 	select ARCH_HAS_TICK_BROADCAST if GENERIC_CLOCKEVENTS_BROADCAST
+--- a/arch/arm64/include/asm/elf.h
++++ b/arch/arm64/include/asm/elf.h
+@@ -126,7 +126,7 @@ typedef struct user_fpsimd_state elf_fpr
+  * that it will "exec", and that there is sufficient room for the brk.
+  */
+ extern unsigned long randomize_et_dyn(unsigned long base);
+-#define ELF_ET_DYN_BASE	(randomize_et_dyn(2 * TASK_SIZE_64 / 3))
++#define ELF_ET_DYN_BASE	(2 * TASK_SIZE_64 / 3)
+ 
+ /*
+  * When the program starts, a1 contains a pointer to a function to be
+@@ -169,7 +169,7 @@ extern unsigned long arch_randomize_brk(
+ 
+ #ifdef CONFIG_COMPAT
+ 
+-#define COMPAT_ELF_ET_DYN_BASE		(randomize_et_dyn(2 * TASK_SIZE_32 / 3))
++#define COMPAT_ELF_ET_DYN_BASE		(2 * TASK_SIZE_32 / 3)
+ 
+ /* AArch32 registers. */
+ #define COMPAT_ELF_NGREG		18
+--- a/arch/arm64/kernel/process.c
++++ b/arch/arm64/kernel/process.c
+@@ -397,8 +397,3 @@ unsigned long arch_randomize_brk(struct
+ {
+ 	return randomize_base(mm->brk);
+ }
+-
+-unsigned long randomize_et_dyn(unsigned long base)
+-{
+-	return randomize_base(base);
+-}

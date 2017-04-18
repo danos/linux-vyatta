@@ -1,0 +1,277 @@
+From: Kees Cook <keescook@chromium.org>
+Date: Tue, 14 Apr 2015 15:48:00 -0700
+Subject: mm: expose arch_mmap_rnd when available
+Origin: https://git.kernel.org/linus/2b68f6caeac271620cd2f9362aeaed360e317df0
+Bug-Debian: https://bugs.debian.org/797530
+
+When an architecture fully supports randomizing the ELF load location,
+a per-arch mmap_rnd() function is used to find a randomized mmap base.
+In preparation for randomizing the location of ET_DYN binaries
+separately from mmap, this renames and exports these functions as
+arch_mmap_rnd(). Additionally introduces CONFIG_ARCH_HAS_ELF_RANDOMIZE
+for describing this feature on architectures that support it
+(which is a superset of ARCH_BINFMT_ELF_RANDOMIZE_PIE, since s390
+already supports a separated ET_DYN ASLR from mmap ASLR without the
+ARCH_BINFMT_ELF_RANDOMIZE_PIE logic).
+
+Signed-off-by: Kees Cook <keescook@chromium.org>
+Cc: Hector Marco-Gisbert <hecmargi@upv.es>
+Cc: Russell King <linux@arm.linux.org.uk>
+Reviewed-by: Ingo Molnar <mingo@kernel.org>
+Cc: Catalin Marinas <catalin.marinas@arm.com>
+Cc: Will Deacon <will.deacon@arm.com>
+Cc: Ralf Baechle <ralf@linux-mips.org>
+Cc: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+Cc: Paul Mackerras <paulus@samba.org>
+Cc: Michael Ellerman <mpe@ellerman.id.au>
+Cc: Martin Schwidefsky <schwidefsky@de.ibm.com>
+Cc: Heiko Carstens <heiko.carstens@de.ibm.com>
+Cc: Alexander Viro <viro@zeniv.linux.org.uk>
+Cc: Oleg Nesterov <oleg@redhat.com>
+Cc: Andy Lutomirski <luto@amacapital.net>
+Cc: "David A. Long" <dave.long@linaro.org>
+Cc: Andrey Ryabinin <a.ryabinin@samsung.com>
+Cc: Arun Chandran <achandran@mvista.com>
+Cc: Yann Droneaud <ydroneaud@opteya.com>
+Cc: Min-Hua Chen <orca.chen@gmail.com>
+Cc: Paul Burton <paul.burton@imgtec.com>
+Cc: Alex Smith <alex@alex-smith.me.uk>
+Cc: Markos Chandras <markos.chandras@imgtec.com>
+Cc: Vineeth Vijayan <vvijayan@mvista.com>
+Cc: Jeff Bailey <jeffbailey@google.com>
+Cc: Michael Holzheu <holzheu@linux.vnet.ibm.com>
+Cc: Ben Hutchings <ben@decadent.org.uk>
+Cc: Behan Webster <behanw@converseincode.com>
+Cc: Ismael Ripoll <iripoll@upv.es>
+Cc: Jan-Simon Mller <dl9pf@gmx.de>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+[bwh: Backported to 3.16: adjust context]
+---
+--- a/arch/Kconfig
++++ b/arch/Kconfig
+@@ -472,6 +472,13 @@ config HAVE_IRQ_EXIT_ON_IRQ_STACK
+ 	  This spares a stack switch and improves cache usage on softirq
+ 	  processing.
+ 
++config ARCH_HAS_ELF_RANDOMIZE
++	bool
++	help
++	  An architecture supports choosing randomized locations for
++	  stack, mmap, brk, and ET_DYN. Defined functions:
++	  - arch_mmap_rnd()
++
+ #
+ # ABI hall of shame
+ #
+--- a/arch/arm/Kconfig
++++ b/arch/arm/Kconfig
+@@ -3,6 +3,7 @@ config ARM
+ 	default y
+ 	select ARCH_BINFMT_ELF_RANDOMIZE_PIE
+ 	select ARCH_HAS_ATOMIC64_DEC_IF_POSITIVE
++	select ARCH_HAS_ELF_RANDOMIZE
+ 	select ARCH_HAS_TICK_BROADCAST if GENERIC_CLOCKEVENTS_BROADCAST
+ 	select ARCH_HAVE_CUSTOM_GPIO_H
+ 	select ARCH_MIGHT_HAVE_PC_PARPORT
+--- a/arch/arm/mm/mmap.c
++++ b/arch/arm/mm/mmap.c
+@@ -169,7 +169,7 @@ arch_get_unmapped_area_topdown(struct fi
+ 	return addr;
+ }
+ 
+-static unsigned long mmap_rnd(void)
++unsigned long arch_mmap_rnd(void)
+ {
+ 	unsigned long rnd;
+ 
+@@ -184,7 +184,7 @@ void arch_pick_mmap_layout(struct mm_str
+ 	unsigned long random_factor = 0UL;
+ 
+ 	if (current->flags & PF_RANDOMIZE)
+-		random_factor = mmap_rnd();
++		random_factor = arch_mmap_rnd();
+ 
+ 	if (mmap_is_legacy()) {
+ 		mm->mmap_base = TASK_UNMAPPED_BASE + random_factor;
+--- a/arch/arm64/Kconfig
++++ b/arch/arm64/Kconfig
+@@ -2,6 +2,7 @@ config ARM64
+ 	def_bool y
+ 	select ARCH_BINFMT_ELF_RANDOMIZE_PIE
+ 	select ARCH_HAS_ATOMIC64_DEC_IF_POSITIVE
++	select ARCH_HAS_ELF_RANDOMIZE
+ 	select ARCH_HAS_OPP
+ 	select ARCH_HAS_TICK_BROADCAST if GENERIC_CLOCKEVENTS_BROADCAST
+ 	select ARCH_USE_CMPXCHG_LOCKREF
+--- a/arch/arm64/mm/mmap.c
++++ b/arch/arm64/mm/mmap.c
+@@ -47,7 +47,7 @@ static int mmap_is_legacy(void)
+ 	return sysctl_legacy_va_layout;
+ }
+ 
+-static unsigned long mmap_rnd(void)
++unsigned long arch_mmap_rnd(void)
+ {
+ 	unsigned long rnd;
+ 
+@@ -77,7 +77,7 @@ void arch_pick_mmap_layout(struct mm_str
+ 	unsigned long random_factor = 0UL;
+ 
+ 	if (current->flags & PF_RANDOMIZE)
+-		random_factor = mmap_rnd();
++		random_factor = arch_mmap_rnd();
+ 
+ 	/*
+ 	 * Fall back to the standard layout if the personality bit is set, or
+--- a/arch/mips/Kconfig
++++ b/arch/mips/Kconfig
+@@ -25,6 +25,7 @@ config MIPS
+ 	select HAVE_DEBUG_KMEMLEAK
+ 	select HAVE_SYSCALL_TRACEPOINTS
+ 	select ARCH_BINFMT_ELF_RANDOMIZE_PIE
++	select ARCH_HAS_ELF_RANDOMIZE
+ 	select HAVE_ARCH_TRANSPARENT_HUGEPAGE if CPU_SUPPORTS_HUGEPAGES && 64BIT
+ 	select RTC_LIB if !MACH_LOONGSON
+ 	select GENERIC_ATOMIC64 if !64BIT
+--- a/arch/mips/mm/mmap.c
++++ b/arch/mips/mm/mmap.c
+@@ -142,7 +142,7 @@ unsigned long arch_get_unmapped_area_top
+ 			addr0, len, pgoff, flags, DOWN);
+ }
+ 
+-static unsigned long mmap_rnd(void)
++unsigned long arch_mmap_rnd(void)
+ {
+ 	unsigned long rnd;
+ 
+@@ -161,7 +161,7 @@ void arch_pick_mmap_layout(struct mm_str
+ 	unsigned long random_factor = 0UL;
+ 
+ 	if (current->flags & PF_RANDOMIZE)
+-		random_factor = mmap_rnd();
++		random_factor = arch_mmap_rnd();
+ 
+ 	if (mmap_is_legacy()) {
+ 		mm->mmap_base = TASK_UNMAPPED_BASE + random_factor;
+--- a/arch/powerpc/Kconfig
++++ b/arch/powerpc/Kconfig
+@@ -89,6 +89,7 @@ config PPC
+ 	select ARCH_MIGHT_HAVE_PC_SERIO
+ 	select BINFMT_ELF
+ 	select ARCH_BINFMT_ELF_RANDOMIZE_PIE
++	select ARCH_HAS_ELF_RANDOMIZE
+ 	select OF
+ 	select OF_EARLY_FLATTREE
+ 	select OF_RESERVED_MEM
+--- a/arch/powerpc/mm/mmap.c
++++ b/arch/powerpc/mm/mmap.c
+@@ -53,7 +53,7 @@ static inline int mmap_is_legacy(void)
+ 	return sysctl_legacy_va_layout;
+ }
+ 
+-static unsigned long mmap_rnd(void)
++unsigned long arch_mmap_rnd(void)
+ {
+ 	unsigned long rnd;
+ 
+@@ -87,7 +87,7 @@ void arch_pick_mmap_layout(struct mm_str
+ 	unsigned long random_factor = 0UL;
+ 
+ 	if (current->flags & PF_RANDOMIZE)
+-		random_factor = mmap_rnd();
++		random_factor = arch_mmap_rnd();
+ 
+ 	/*
+ 	 * Fall back to the standard layout if the personality
+--- a/arch/s390/Kconfig
++++ b/arch/s390/Kconfig
+@@ -62,6 +62,7 @@ config S390
+ 	def_bool y
+ 	select ARCH_HAS_ATOMIC64_DEC_IF_POSITIVE
+ 	select ARCH_HAS_DEBUG_STRICT_USER_COPY_CHECKS
++	select ARCH_HAS_ELF_RANDOMIZE
+ 	select ARCH_HAVE_NMI_SAFE_CMPXCHG
+ 	select ARCH_INLINE_READ_LOCK
+ 	select ARCH_INLINE_READ_LOCK_BH
+--- a/arch/s390/mm/mmap.c
++++ b/arch/s390/mm/mmap.c
+@@ -56,7 +56,7 @@ static inline int mmap_is_legacy(void)
+ 	return sysctl_legacy_va_layout;
+ }
+ 
+-static unsigned long mmap_rnd(void)
++unsigned long arch_mmap_rnd(void)
+ {
+ 	/* 8MB randomization for mmap_base */
+ 	return (get_random_int() & 0x7ffUL) << PAGE_SHIFT;
+@@ -86,7 +86,7 @@ unsigned long randomize_et_dyn(void)
+ 	base = STACK_TOP / 3 * 2;
+ 
+ 	if (current->flags & PF_RANDOMIZE)
+-		base += mmap_rnd();
++		base += arch_mmap_rnd();
+ 
+ 	return base;
+ }
+@@ -102,7 +102,7 @@ void arch_pick_mmap_layout(struct mm_str
+ 	unsigned long random_factor = 0UL;
+ 
+ 	if (current->flags & PF_RANDOMIZE)
+-		random_factor = mmap_rnd();
++		random_factor = arch_mmap_rnd();
+ 
+ 	/*
+ 	 * Fall back to the standard layout if the personality
+@@ -182,7 +182,7 @@ void arch_pick_mmap_layout(struct mm_str
+ 	unsigned long random_factor = 0UL;
+ 
+ 	if (current->flags & PF_RANDOMIZE)
+-		random_factor = mmap_rnd();
++		random_factor = arch_mmap_rnd();
+ 
+ 	/*
+ 	 * Fall back to the standard layout if the personality
+--- a/arch/x86/Kconfig
++++ b/arch/x86/Kconfig
+@@ -85,6 +85,7 @@ config X86
+ 	select HAVE_ARCH_KMEMCHECK
+ 	select HAVE_USER_RETURN_NOTIFIER
+ 	select ARCH_BINFMT_ELF_RANDOMIZE_PIE
++	select ARCH_HAS_ELF_RANDOMIZE
+ 	select HAVE_ARCH_JUMP_LABEL
+ 	select ARCH_HAS_ATOMIC64_DEC_IF_POSITIVE
+ 	select SPARSE_IRQ
+--- a/arch/x86/mm/mmap.c
++++ b/arch/x86/mm/mmap.c
+@@ -65,7 +65,7 @@ static int mmap_is_legacy(void)
+ 	return sysctl_legacy_va_layout;
+ }
+ 
+-static unsigned long mmap_rnd(void)
++unsigned long arch_mmap_rnd(void)
+ {
+ 	unsigned long rnd;
+ 
+@@ -102,7 +102,7 @@ void arch_pick_mmap_layout(struct mm_str
+ 	unsigned long random_factor = 0UL;
+ 
+ 	if (current->flags & PF_RANDOMIZE)
+-		random_factor = mmap_rnd();
++		random_factor = arch_mmap_rnd();
+ 
+ 	mm->mmap_legacy_base = TASK_UNMAPPED_BASE + random_factor;
+ 
+--- /dev/null
++++ b/include/linux/elf-randomize.h
+@@ -0,0 +1,10 @@
++#ifndef _ELF_RANDOMIZE_H
++#define _ELF_RANDOMIZE_H
++
++#ifndef CONFIG_ARCH_HAS_ELF_RANDOMIZE
++static inline unsigned long arch_mmap_rnd(void) { return 0; }
++#else
++extern unsigned long arch_mmap_rnd(void);
++#endif
++
++#endif

@@ -1,0 +1,86 @@
+From: Kees Cook <keescook@chromium.org>
+Date: Tue, 14 Apr 2015 15:47:48 -0700
+Subject: arm64: standardize mmap_rnd() usage
+Origin: https://git.kernel.org/linus/dd04cff1dceab18226853b555cf07914648a235f
+Bug-Debian: https://bugs.debian.org/797530
+
+In preparation for splitting out ET_DYN ASLR, this refactors the use of
+mmap_rnd() to be used similarly to arm and x86.  This additionally
+enables mmap ASLR on legacy mmap layouts, which appeared to be missing
+on arm64, and was already supported on arm.  Additionally removes a
+copy/pasted declaration of an unused function.
+
+Signed-off-by: Kees Cook <keescook@chromium.org>
+Cc: Russell King <linux@arm.linux.org.uk>
+Cc: Catalin Marinas <catalin.marinas@arm.com>
+Reviewed-by: Ingo Molnar <mingo@kernel.org>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+---
+ arch/arm64/include/asm/elf.h |  1 -
+ arch/arm64/mm/mmap.c         | 18 +++++++++++-------
+ 2 files changed, 11 insertions(+), 8 deletions(-)
+
+--- a/arch/arm64/include/asm/elf.h
++++ b/arch/arm64/include/asm/elf.h
+@@ -125,7 +125,6 @@ typedef struct user_fpsimd_state elf_fpr
+  * the loader.  We need to make sure that it is out of the way of the program
+  * that it will "exec", and that there is sufficient room for the brk.
+  */
+-extern unsigned long randomize_et_dyn(unsigned long base);
+ #define ELF_ET_DYN_BASE	(2 * TASK_SIZE_64 / 3)
+ 
+ /*
+--- a/arch/arm64/mm/mmap.c
++++ b/arch/arm64/mm/mmap.c
+@@ -49,15 +49,14 @@ static int mmap_is_legacy(void)
+ 
+ static unsigned long mmap_rnd(void)
+ {
+-	unsigned long rnd = 0;
++	unsigned long rnd;
+ 
+-	if (current->flags & PF_RANDOMIZE)
+-		rnd = (long)get_random_int() & STACK_RND_MASK;
++	rnd = (unsigned long)get_random_int() & STACK_RND_MASK;
+ 
+ 	return rnd << PAGE_SHIFT;
+ }
+ 
+-static unsigned long mmap_base(void)
++static unsigned long mmap_base(unsigned long rnd)
+ {
+ 	unsigned long gap = rlimit(RLIMIT_STACK);
+ 
+@@ -66,7 +65,7 @@ static unsigned long mmap_base(void)
+ 	else if (gap > MAX_GAP)
+ 		gap = MAX_GAP;
+ 
+-	return PAGE_ALIGN(STACK_TOP - gap - mmap_rnd());
++	return PAGE_ALIGN(STACK_TOP - gap - rnd);
+ }
+ 
+ /*
+@@ -75,15 +74,20 @@ static unsigned long mmap_base(void)
+  */
+ void arch_pick_mmap_layout(struct mm_struct *mm)
+ {
++	unsigned long random_factor = 0UL;
++
++	if (current->flags & PF_RANDOMIZE)
++		random_factor = mmap_rnd();
++
+ 	/*
+ 	 * Fall back to the standard layout if the personality bit is set, or
+ 	 * if the expected stack growth is unlimited:
+ 	 */
+ 	if (mmap_is_legacy()) {
+-		mm->mmap_base = TASK_UNMAPPED_BASE;
++		mm->mmap_base = TASK_UNMAPPED_BASE + random_factor;
+ 		mm->get_unmapped_area = arch_get_unmapped_area;
+ 	} else {
+-		mm->mmap_base = mmap_base();
++		mm->mmap_base = mmap_base(random_factor);
+ 		mm->get_unmapped_area = arch_get_unmapped_area_topdown;
+ 	}
+ }

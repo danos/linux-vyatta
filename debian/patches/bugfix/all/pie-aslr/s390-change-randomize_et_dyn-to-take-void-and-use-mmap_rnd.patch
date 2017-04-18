@@ -1,0 +1,57 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Tue, 18 Apr 2017 04:34:20 +0100
+Subject: s390: Change randomize_et_dyn() to take void and use mmap_rnd()
+Bug-Debian: https://bugs.debian.org/797530
+Forwarded: not-needed
+
+Extracted from commit 1f6b83e5e4d3aed46eac1d219322fba9c7341cd8 "s390:
+avoid z13 cache aliasing".  This is a pre-requisite for the following
+patches that eliminate randomize_et_dyn() altogether.
+
+---
+--- a/arch/s390/include/asm/elf.h
++++ b/arch/s390/include/asm/elf.h
+@@ -162,8 +162,8 @@ extern unsigned int vdso_enabled;
+    the loader.  We need to make sure that it is out of the way of the program
+    that it will "exec", and that there is sufficient room for the brk.  */
+ 
+-extern unsigned long randomize_et_dyn(unsigned long base);
+-#define ELF_ET_DYN_BASE		(randomize_et_dyn(STACK_TOP / 3 * 2))
++extern unsigned long randomize_et_dyn(void);
++#define ELF_ET_DYN_BASE		randomize_et_dyn()
+ 
+ /* This yields a mask that user programs can use to figure out what
+    instruction set this CPU supports. */
+--- a/arch/s390/kernel/process.c
++++ b/arch/s390/kernel/process.c
+@@ -266,13 +266,3 @@ unsigned long arch_randomize_brk(struct
+ 	ret = PAGE_ALIGN(mm->brk + brk_rnd());
+ 	return (ret > mm->brk) ? ret : mm->brk;
+ }
+-
+-unsigned long randomize_et_dyn(unsigned long base)
+-{
+-	unsigned long ret;
+-
+-	if (!(current->flags & PF_RANDOMIZE))
+-		return base;
+-	ret = PAGE_ALIGN(base + brk_rnd());
+-	return (ret > base) ? ret : base;
+-}
+--- a/arch/s390/mm/mmap.c
++++ b/arch/s390/mm/mmap.c
+@@ -81,6 +81,14 @@ static inline unsigned long mmap_base(vo
+ 	return STACK_TOP - stack_maxrandom_size() - mmap_rnd() - gap;
+ }
+ 
++unsigned long randomize_et_dyn(void)
++{
++	unsigned long base;
++
++	base = STACK_TOP / 3 * 2;
++	return base + mmap_rnd();
++}
++
+ #ifndef CONFIG_64BIT
+ 
+ /*

@@ -1,0 +1,184 @@
+From: Kees Cook <keescook@chromium.org>
+Date: Tue, 14 Apr 2015 15:48:12 -0700
+Subject: mm: fold arch_randomize_brk into ARCH_HAS_ELF_RANDOMIZE
+Origin: https://git.kernel.org/linus/204db6ed17743000691d930368a5abd6ea541c58
+Bug-Debian: https://bugs.debian.org/797530
+
+The arch_randomize_brk() function is used on several architectures,
+even those that don't support ET_DYN ASLR. To avoid bulky extern/#define
+tricks, consolidate the support under CONFIG_ARCH_HAS_ELF_RANDOMIZE for
+the architectures that support it, while still handling CONFIG_COMPAT_BRK.
+
+Signed-off-by: Kees Cook <keescook@chromium.org>
+Cc: Hector Marco-Gisbert <hecmargi@upv.es>
+Cc: Russell King <linux@arm.linux.org.uk>
+Reviewed-by: Ingo Molnar <mingo@kernel.org>
+Cc: Catalin Marinas <catalin.marinas@arm.com>
+Cc: Will Deacon <will.deacon@arm.com>
+Cc: Ralf Baechle <ralf@linux-mips.org>
+Cc: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+Cc: Paul Mackerras <paulus@samba.org>
+Cc: Michael Ellerman <mpe@ellerman.id.au>
+Cc: Martin Schwidefsky <schwidefsky@de.ibm.com>
+Cc: Heiko Carstens <heiko.carstens@de.ibm.com>
+Cc: Alexander Viro <viro@zeniv.linux.org.uk>
+Cc: Oleg Nesterov <oleg@redhat.com>
+Cc: Andy Lutomirski <luto@amacapital.net>
+Cc: "David A. Long" <dave.long@linaro.org>
+Cc: Andrey Ryabinin <a.ryabinin@samsung.com>
+Cc: Arun Chandran <achandran@mvista.com>
+Cc: Yann Droneaud <ydroneaud@opteya.com>
+Cc: Min-Hua Chen <orca.chen@gmail.com>
+Cc: Paul Burton <paul.burton@imgtec.com>
+Cc: Alex Smith <alex@alex-smith.me.uk>
+Cc: Markos Chandras <markos.chandras@imgtec.com>
+Cc: Vineeth Vijayan <vvijayan@mvista.com>
+Cc: Jeff Bailey <jeffbailey@google.com>
+Cc: Michael Holzheu <holzheu@linux.vnet.ibm.com>
+Cc: Ben Hutchings <ben@decadent.org.uk>
+Cc: Behan Webster <behanw@converseincode.com>
+Cc: Ismael Ripoll <iripoll@upv.es>
+Cc: Jan-Simon Mller <dl9pf@gmx.de>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+[bwh: Backported to 3.16: adjust context]
+---
+ arch/Kconfig                   |  1 +
+ arch/arm/include/asm/elf.h     |  4 ----
+ arch/arm64/include/asm/elf.h   |  4 ----
+ arch/mips/include/asm/elf.h    |  4 ----
+ arch/powerpc/include/asm/elf.h |  4 ----
+ arch/s390/include/asm/elf.h    |  3 ---
+ arch/x86/include/asm/elf.h     |  3 ---
+ fs/binfmt_elf.c                |  4 +---
+ include/linux/elf-randomize.h  | 12 ++++++++++++
+ 9 files changed, 14 insertions(+), 25 deletions(-)
+
+--- a/arch/Kconfig
++++ b/arch/Kconfig
+@@ -478,6 +478,7 @@ config ARCH_HAS_ELF_RANDOMIZE
+ 	  An architecture supports choosing randomized locations for
+ 	  stack, mmap, brk, and ET_DYN. Defined functions:
+ 	  - arch_mmap_rnd()
++	  - arch_randomize_brk()
+ 
+ #
+ # ABI hall of shame
+--- a/arch/arm/include/asm/elf.h
++++ b/arch/arm/include/asm/elf.h
+@@ -124,10 +124,6 @@ int dump_task_regs(struct task_struct *t
+ extern void elf_set_personality(const struct elf32_hdr *);
+ #define SET_PERSONALITY(ex)	elf_set_personality(&(ex))
+ 
+-struct mm_struct;
+-extern unsigned long arch_randomize_brk(struct mm_struct *mm);
+-#define arch_randomize_brk arch_randomize_brk
+-
+ #ifdef CONFIG_MMU
+ #define ARCH_HAS_SETUP_ADDITIONAL_PAGES 1
+ struct linux_binprm;
+--- a/arch/arm64/include/asm/elf.h
++++ b/arch/arm64/include/asm/elf.h
+@@ -156,10 +156,6 @@ extern int arch_setup_additional_pages(s
+ #define STACK_RND_MASK			(0x3ffff >> (PAGE_SHIFT - 12))
+ #endif
+ 
+-struct mm_struct;
+-extern unsigned long arch_randomize_brk(struct mm_struct *mm);
+-#define arch_randomize_brk arch_randomize_brk
+-
+ #ifdef __AARCH64EB__
+ #define COMPAT_ELF_PLATFORM		("v8b")
+ #else
+--- a/arch/mips/include/asm/elf.h
++++ b/arch/mips/include/asm/elf.h
+@@ -403,8 +403,4 @@ struct linux_binprm;
+ extern int arch_setup_additional_pages(struct linux_binprm *bprm,
+ 				       int uses_interp);
+ 
+-struct mm_struct;
+-extern unsigned long arch_randomize_brk(struct mm_struct *mm);
+-#define arch_randomize_brk arch_randomize_brk
+-
+ #endif /* _ASM_ELF_H */
+--- a/arch/powerpc/include/asm/elf.h
++++ b/arch/powerpc/include/asm/elf.h
+@@ -128,10 +128,6 @@ extern int arch_setup_additional_pages(s
+ 	(0x7ff >> (PAGE_SHIFT - 12)) : \
+ 	(0x3ffff >> (PAGE_SHIFT - 12)))
+ 
+-extern unsigned long arch_randomize_brk(struct mm_struct *mm);
+-#define arch_randomize_brk arch_randomize_brk
+-
+-
+ #ifdef CONFIG_SPU_BASE
+ /* Notes used in ET_CORE. Note name is "SPU/<fd>/<filename>". */
+ #define NT_SPU		1
+--- a/arch/s390/include/asm/elf.h
++++ b/arch/s390/include/asm/elf.h
+@@ -221,9 +221,6 @@ struct linux_binprm;
+ #define ARCH_HAS_SETUP_ADDITIONAL_PAGES 1
+ int arch_setup_additional_pages(struct linux_binprm *, int);
+ 
+-extern unsigned long arch_randomize_brk(struct mm_struct *mm);
+-#define arch_randomize_brk arch_randomize_brk
+-
+ void *fill_cpu_elf_notes(void *ptr, struct save_area *sa);
+ 
+ #endif
+--- a/arch/x86/include/asm/elf.h
++++ b/arch/x86/include/asm/elf.h
+@@ -344,9 +344,6 @@ extern int compat_arch_setup_additional_
+ 					      int uses_interp);
+ #define compat_arch_setup_additional_pages compat_arch_setup_additional_pages
+ 
+-extern unsigned long arch_randomize_brk(struct mm_struct *mm);
+-#define arch_randomize_brk arch_randomize_brk
+-
+ /*
+  * True on X86_32 or when emulating IA32 on X86_64
+  */
+--- a/fs/binfmt_elf.c
++++ b/fs/binfmt_elf.c
+@@ -952,15 +952,13 @@ static int load_elf_binary(struct linux_
+ 	current->mm->end_data = end_data;
+ 	current->mm->start_stack = bprm->p;
+ 
+-#ifdef arch_randomize_brk
+ 	if ((current->flags & PF_RANDOMIZE) && (randomize_va_space > 1)) {
+ 		current->mm->brk = current->mm->start_brk =
+ 			arch_randomize_brk(current->mm);
+-#ifdef CONFIG_COMPAT_BRK
++#ifdef compat_brk_randomized
+ 		current->brk_randomized = 1;
+ #endif
+ 	}
+-#endif
+ 
+ 	if (current->personality & MMAP_PAGE_ZERO) {
+ 		/* Why this, you ask???  Well SVr4 maps page 0 as read-only,
+--- a/include/linux/elf-randomize.h
++++ b/include/linux/elf-randomize.h
+@@ -1,10 +1,22 @@
+ #ifndef _ELF_RANDOMIZE_H
+ #define _ELF_RANDOMIZE_H
+ 
++struct mm_struct;
++
+ #ifndef CONFIG_ARCH_HAS_ELF_RANDOMIZE
+ static inline unsigned long arch_mmap_rnd(void) { return 0; }
++# if defined(arch_randomize_brk) && defined(CONFIG_COMPAT_BRK)
++#  define compat_brk_randomized
++# endif
++# ifndef arch_randomize_brk
++#  define arch_randomize_brk(mm)	(mm->brk)
++# endif
+ #else
+ extern unsigned long arch_mmap_rnd(void);
++extern unsigned long arch_randomize_brk(struct mm_struct *mm);
++# ifdef CONFIG_COMPAT_BRK
++#  define compat_brk_randomized
++# endif
+ #endif
+ 
+ #endif

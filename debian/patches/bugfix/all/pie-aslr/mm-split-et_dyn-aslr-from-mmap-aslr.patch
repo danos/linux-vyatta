@@ -1,0 +1,214 @@
+From: Kees Cook <keescook@chromium.org>
+Date: Tue, 14 Apr 2015 15:48:07 -0700
+Subject: mm: split ET_DYN ASLR from mmap ASLR
+Origin: https://git.kernel.org/linus/d1fd836dcf00d2028c700c7e44d2c23404062c90
+Bug-Debian: https://bugs.debian.org/797530
+
+This fixes the "offset2lib" weakness in ASLR for arm, arm64, mips,
+powerpc, and x86.  The problem is that if there is a leak of ASLR from
+the executable (ET_DYN), it means a leak of shared library offset as
+well (mmap), and vice versa.  Further details and a PoC of this attack
+is available here:
+
+  http://cybersecurity.upv.es/attacks/offset2lib/offset2lib.html
+
+With this patch, a PIE linked executable (ET_DYN) has its own ASLR
+region:
+
+  $ ./show_mmaps_pie
+  54859ccd6000-54859ccd7000 r-xp  ...  /tmp/show_mmaps_pie
+  54859ced6000-54859ced7000 r--p  ...  /tmp/show_mmaps_pie
+  54859ced7000-54859ced8000 rw-p  ...  /tmp/show_mmaps_pie
+  7f75be764000-7f75be91f000 r-xp  ...  /lib/x86_64-linux-gnu/libc.so.6
+  7f75be91f000-7f75beb1f000 ---p  ...  /lib/x86_64-linux-gnu/libc.so.6
+  7f75beb1f000-7f75beb23000 r--p  ...  /lib/x86_64-linux-gnu/libc.so.6
+  7f75beb23000-7f75beb25000 rw-p  ...  /lib/x86_64-linux-gnu/libc.so.6
+  7f75beb25000-7f75beb2a000 rw-p  ...
+  7f75beb2a000-7f75beb4d000 r-xp  ...  /lib64/ld-linux-x86-64.so.2
+  7f75bed45000-7f75bed46000 rw-p  ...
+  7f75bed46000-7f75bed47000 r-xp  ...
+  7f75bed47000-7f75bed4c000 rw-p  ...
+  7f75bed4c000-7f75bed4d000 r--p  ...  /lib64/ld-linux-x86-64.so.2
+  7f75bed4d000-7f75bed4e000 rw-p  ...  /lib64/ld-linux-x86-64.so.2
+  7f75bed4e000-7f75bed4f000 rw-p  ...
+  7fffb3741000-7fffb3762000 rw-p  ...  [stack]
+  7fffb377b000-7fffb377d000 r--p  ...  [vvar]
+  7fffb377d000-7fffb377f000 r-xp  ...  [vdso]
+
+The change is to add a call the newly created arch_mmap_rnd() into the
+ELF loader for handling ET_DYN ASLR in a separate region from mmap ASLR,
+as was already done on s390.  Removes CONFIG_BINFMT_ELF_RANDOMIZE_PIE,
+which is no longer needed.
+
+Signed-off-by: Kees Cook <keescook@chromium.org>
+Reported-by: Hector Marco-Gisbert <hecmargi@upv.es>
+Cc: Russell King <linux@arm.linux.org.uk>
+Reviewed-by: Ingo Molnar <mingo@kernel.org>
+Cc: Catalin Marinas <catalin.marinas@arm.com>
+Cc: Will Deacon <will.deacon@arm.com>
+Cc: Ralf Baechle <ralf@linux-mips.org>
+Cc: Benjamin Herrenschmidt <benh@kernel.crashing.org>
+Cc: Paul Mackerras <paulus@samba.org>
+Cc: Michael Ellerman <mpe@ellerman.id.au>
+Cc: Martin Schwidefsky <schwidefsky@de.ibm.com>
+Cc: Heiko Carstens <heiko.carstens@de.ibm.com>
+Cc: Alexander Viro <viro@zeniv.linux.org.uk>
+Cc: Oleg Nesterov <oleg@redhat.com>
+Cc: Andy Lutomirski <luto@amacapital.net>
+Cc: "David A. Long" <dave.long@linaro.org>
+Cc: Andrey Ryabinin <a.ryabinin@samsung.com>
+Cc: Arun Chandran <achandran@mvista.com>
+Cc: Yann Droneaud <ydroneaud@opteya.com>
+Cc: Min-Hua Chen <orca.chen@gmail.com>
+Cc: Paul Burton <paul.burton@imgtec.com>
+Cc: Alex Smith <alex@alex-smith.me.uk>
+Cc: Markos Chandras <markos.chandras@imgtec.com>
+Cc: Vineeth Vijayan <vvijayan@mvista.com>
+Cc: Jeff Bailey <jeffbailey@google.com>
+Cc: Michael Holzheu <holzheu@linux.vnet.ibm.com>
+Cc: Ben Hutchings <ben@decadent.org.uk>
+Cc: Behan Webster <behanw@converseincode.com>
+Cc: Ismael Ripoll <iripoll@upv.es>
+Cc: Jan-Simon Mller <dl9pf@gmx.de>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+[bwh: Backported to 3.16:
+ - We don't do 4 GiB alignent on 64-bit s390
+ - Adjust context]
+---
+ arch/arm/Kconfig            |  1 -
+ arch/arm64/Kconfig          |  1 -
+ arch/mips/Kconfig           |  1 -
+ arch/powerpc/Kconfig        |  1 -
+ arch/s390/include/asm/elf.h |  5 ++---
+ arch/s390/mm/mmap.c         |  8 --------
+ arch/x86/Kconfig            |  1 -
+ fs/Kconfig.binfmt           |  3 ---
+ fs/binfmt_elf.c             | 18 ++++--------------
+ 9 files changed, 6 insertions(+), 33 deletions(-)
+
+--- a/arch/arm/Kconfig
++++ b/arch/arm/Kconfig
+@@ -1,7 +1,6 @@
+ config ARM
+ 	bool
+ 	default y
+-	select ARCH_BINFMT_ELF_RANDOMIZE_PIE
+ 	select ARCH_HAS_ATOMIC64_DEC_IF_POSITIVE
+ 	select ARCH_HAS_ELF_RANDOMIZE
+ 	select ARCH_HAS_TICK_BROADCAST if GENERIC_CLOCKEVENTS_BROADCAST
+--- a/arch/arm64/Kconfig
++++ b/arch/arm64/Kconfig
+@@ -1,6 +1,5 @@
+ config ARM64
+ 	def_bool y
+-	select ARCH_BINFMT_ELF_RANDOMIZE_PIE
+ 	select ARCH_HAS_ATOMIC64_DEC_IF_POSITIVE
+ 	select ARCH_HAS_ELF_RANDOMIZE
+ 	select ARCH_HAS_OPP
+--- a/arch/mips/Kconfig
++++ b/arch/mips/Kconfig
+@@ -24,7 +24,6 @@ config MIPS
+ 	select HAVE_KRETPROBES
+ 	select HAVE_DEBUG_KMEMLEAK
+ 	select HAVE_SYSCALL_TRACEPOINTS
+-	select ARCH_BINFMT_ELF_RANDOMIZE_PIE
+ 	select ARCH_HAS_ELF_RANDOMIZE
+ 	select HAVE_ARCH_TRANSPARENT_HUGEPAGE if CPU_SUPPORTS_HUGEPAGES && 64BIT
+ 	select RTC_LIB if !MACH_LOONGSON
+--- a/arch/powerpc/Kconfig
++++ b/arch/powerpc/Kconfig
+@@ -88,7 +88,6 @@ config PPC
+ 	select ARCH_MIGHT_HAVE_PC_PARPORT
+ 	select ARCH_MIGHT_HAVE_PC_SERIO
+ 	select BINFMT_ELF
+-	select ARCH_BINFMT_ELF_RANDOMIZE_PIE
+ 	select ARCH_HAS_ELF_RANDOMIZE
+ 	select OF
+ 	select OF_EARLY_FLATTREE
+--- a/arch/s390/include/asm/elf.h
++++ b/arch/s390/include/asm/elf.h
+@@ -162,8 +162,7 @@ extern unsigned int vdso_enabled;
+    the loader.  We need to make sure that it is out of the way of the program
+    that it will "exec", and that there is sufficient room for the brk.  */
+ 
+-extern unsigned long randomize_et_dyn(void);
+-#define ELF_ET_DYN_BASE (randomize_et_dyn() + (STACK_TOP / 3 * 2))
++#define ELF_ET_DYN_BASE (STACK_TOP / 3 * 2)
+ 
+ /* This yields a mask that user programs can use to figure out what
+    instruction set this CPU supports. */
+--- a/arch/s390/mm/mmap.c
++++ b/arch/s390/mm/mmap.c
+@@ -79,14 +79,6 @@ static inline unsigned long mmap_base(un
+ 	return STACK_TOP - stack_maxrandom_size() - rnd - gap;
+ }
+ 
+-unsigned long randomize_et_dyn(void)
+-{
+-	if (current->flags & PF_RANDOMIZE)
+-		return arch_mmap_rnd();
+-
+-	return 0UL;
+-}
+-
+ #ifndef CONFIG_64BIT
+ 
+ /*
+--- a/arch/x86/Kconfig
++++ b/arch/x86/Kconfig
+@@ -84,7 +84,6 @@ config X86
+ 	select HAVE_CMPXCHG_DOUBLE
+ 	select HAVE_ARCH_KMEMCHECK
+ 	select HAVE_USER_RETURN_NOTIFIER
+-	select ARCH_BINFMT_ELF_RANDOMIZE_PIE
+ 	select ARCH_HAS_ELF_RANDOMIZE
+ 	select HAVE_ARCH_JUMP_LABEL
+ 	select ARCH_HAS_ATOMIC64_DEC_IF_POSITIVE
+--- a/fs/Kconfig.binfmt
++++ b/fs/Kconfig.binfmt
+@@ -27,9 +27,6 @@ config COMPAT_BINFMT_ELF
+ 	bool
+ 	depends on COMPAT && BINFMT_ELF
+ 
+-config ARCH_BINFMT_ELF_RANDOMIZE_PIE
+-	bool
+-
+ config BINFMT_ELF_FDPIC
+ 	bool "Kernel support for FDPIC ELF binaries"
+ 	default y
+--- a/fs/binfmt_elf.c
++++ b/fs/binfmt_elf.c
+@@ -31,6 +31,7 @@
+ #include <linux/security.h>
+ #include <linux/random.h>
+ #include <linux/elf.h>
++#include <linux/elf-randomize.h>
+ #include <linux/utsname.h>
+ #include <linux/coredump.h>
+ #include <linux/sched.h>
+@@ -802,21 +803,10 @@ static int load_elf_binary(struct linux_
+ 			 * default mmap base, as well as whatever program they
+ 			 * might try to exec.  This is because the brk will
+ 			 * follow the loader, and is not movable.  */
+-#ifdef CONFIG_ARCH_BINFMT_ELF_RANDOMIZE_PIE
+-			/* Memory randomization might have been switched off
+-			 * in runtime via sysctl or explicit setting of
+-			 * personality flags.
+-			 * If that is the case, retain the original non-zero
+-			 * load_bias value in order to establish proper
+-			 * non-randomized mappings.
+-			 */
++			load_bias = ELF_ET_DYN_BASE - vaddr;
+ 			if (current->flags & PF_RANDOMIZE)
+-				load_bias = 0;
+-			else
+-				load_bias = ELF_PAGESTART(ELF_ET_DYN_BASE - vaddr);
+-#else
+-			load_bias = ELF_PAGESTART(ELF_ET_DYN_BASE - vaddr);
+-#endif
++				load_bias += arch_mmap_rnd();
++			load_bias = ELF_PAGESTART(load_bias);
+ 			total_size = total_mapping_size(elf_phdata,
+ 							loc->elf_ex.e_phnum);
+ 			if (!total_size) {
