@@ -1,0 +1,45 @@
+From: Emil Tantilov <emil.s.tantilov@intel.com>
+Date: Thu, 3 Dec 2015 15:20:06 -0800
+Subject: ixgbe: do not call check_link for ethtool in ixgbe_get_settings()
+Origin: https://git.kernel.org/linus/0e4d422f5f7249324ac8d1b8e12772e530787a66
+Bug-Debian: https://bugs.debian.org/851952
+
+In ixgbe_get_settings() the link status and speed of the interface
+are determined based on a read from the LINKS register via the call
+to mac.ops.check.link(). This can cause issues where external drivers
+may end up with unknown speed when calling ethtool_get_setings().
+
+Instead of calling the mac.ops.check_link() we can report the speed
+from the adapter structure which is populated by the driver.
+
+Signed-off-by: Emil Tantilov <emil.s.tantilov@intel.com>
+Tested-by: Phil Schmitt <phillip.j.schmitt@intel.com>
+Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+---
+ drivers/net/ethernet/intel/ixgbe/ixgbe_ethtool.c | 7 ++-----
+ 1 file changed, 2 insertions(+), 5 deletions(-)
+
+--- a/drivers/net/ethernet/intel/ixgbe/ixgbe_ethtool.c
++++ b/drivers/net/ethernet/intel/ixgbe/ixgbe_ethtool.c
+@@ -157,9 +157,7 @@ static int ixgbe_get_settings(struct net
+ 	struct ixgbe_adapter *adapter = netdev_priv(netdev);
+ 	struct ixgbe_hw *hw = &adapter->hw;
+ 	ixgbe_link_speed supported_link;
+-	u32 link_speed = 0;
+ 	bool autoneg = false;
+-	bool link_up;
+ 
+ 	hw->mac.ops.get_link_capabilities(hw, &supported_link, &autoneg);
+ 
+@@ -279,9 +277,8 @@ static int ixgbe_get_settings(struct net
+ 		break;
+ 	}
+ 
+-	hw->mac.ops.check_link(hw, &link_speed, &link_up, false);
+-	if (link_up) {
+-		switch (link_speed) {
++	if (netif_carrier_ok(netdev)) {
++		switch (adapter->link_speed) {
+ 		case IXGBE_LINK_SPEED_10GB_FULL:
+ 			ethtool_cmd_speed_set(ecmd, SPEED_10000);
+ 			break;
