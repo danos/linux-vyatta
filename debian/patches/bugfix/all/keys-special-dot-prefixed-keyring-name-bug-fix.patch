@@ -1,0 +1,49 @@
+From: Mimi Zohar <zohar@linux.vnet.ibm.com>
+Date: Thu, 22 May 2014 14:02:23 -0400
+Subject: KEYS: special dot prefixed keyring name bug fix
+Origin: https://git.kernel.org/linus/a4e3b8d79a5c6d40f4a9703abf7fe3abcc6c3b8d
+
+Dot prefixed keyring names are supposed to be reserved for the
+kernel, but add_key() calls key_get_type_from_user(), which
+incorrectly verifies the 'type' field, not the 'description' field.
+This patch verifies the 'description' field isn't dot prefixed,
+when creating a new keyring, and removes the dot prefix test in
+key_get_type_from_user().
+
+Changelog v6:
+- whitespace and other cleanup
+
+Changelog v5:
+- Only prevent userspace from creating a dot prefixed keyring, not
+  regular keys  - Dmitry
+
+Reported-by: Dmitry Kasatkin <d.kasatkin@samsung.com>
+Signed-off-by: Mimi Zohar <zohar@linux.vnet.ibm.com>
+Acked-by: David Howells <dhowells@redhat.com>
+[bwh: Backported to 3.2: adjust context, indentation]
+---
+ security/keys/keyctl.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+--- a/security/keys/keyctl.c
++++ b/security/keys/keyctl.c
+@@ -35,8 +35,6 @@ static int key_get_type_from_user(char *
+ 		return ret;
+ 	if (ret == 0 || ret >= len)
+ 		return -EINVAL;
+-	if (type[0] == '.')
+-		return -EPERM;
+ 	type[len - 1] = '\0';
+ 	return 0;
+ }
+@@ -75,6 +73,10 @@ SYSCALL_DEFINE5(add_key, const char __us
+ 	if (IS_ERR(description)) {
+ 		ret = PTR_ERR(description);
+ 		goto error;
++	} else if ((description[0] == '.') &&
++		   (strncmp(type, "keyring", 7) == 0)) {
++		ret = -EPERM;
++		goto error2;
+ 	}
+ 
+ 	/* pull the payload in if one was supplied */
