@@ -14,9 +14,9 @@ Signed-off-by: Mike Sterling <Mike.Sterling@microsoft.com>
 Acked-by: Stephen Hemminger <shemminger@vyatta.com>
 Acked-by: David S. Miller <davem@davemloft.net>
 Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
-[bwh: Adjust context to apply after commit
- 045b1684bc21575793a099490938d197555eb128 ('Staging: hv: mousevsc: Remove the
- mouse driver from the staging tree') which makes adjacent deletions.]
+[bwh: Adjust context to apply after commits 045b1684bc21
+ ("Staging: hv: mousevsc: Remove the mouse driver from the staging tree")
+ and a50af86dd49e ("netvsc: reduce maximum GSO size")]
 ---
  drivers/net/Kconfig               |    2 +
  drivers/net/Makefile              |    2 +
@@ -45,19 +45,15 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
  delete mode 100644 drivers/staging/hv/netvsc_drv.c
  delete mode 100644 drivers/staging/hv/rndis_filter.c
 
-diff --git a/drivers/net/Kconfig b/drivers/net/Kconfig
-index 654a5e9..99aa7fa 100644
 --- a/drivers/net/Kconfig
 +++ b/drivers/net/Kconfig
-@@ -338,4 +338,6 @@ config VMXNET3
+@@ -340,4 +340,6 @@ config VMXNET3
  	  To compile this driver as a module, choose M here: the
  	  module will be called vmxnet3.
  
 +source "drivers/net/hyperv/Kconfig"
 +
  endif # NETDEVICES
-diff --git a/drivers/net/Makefile b/drivers/net/Makefile
-index fa877cd..a81192b 100644
 --- a/drivers/net/Makefile
 +++ b/drivers/net/Makefile
 @@ -66,3 +66,5 @@ obj-$(CONFIG_USB_USBNET)        += usb/
@@ -66,9 +62,6 @@ index fa877cd..a81192b 100644
  obj-$(CONFIG_USB_CDC_PHONET)   += usb/
 +
 +obj-$(CONFIG_HYPERV_NET) += hyperv/
-diff --git a/drivers/net/hyperv/Kconfig b/drivers/net/hyperv/Kconfig
-new file mode 100644
-index 0000000..936968d
 --- /dev/null
 +++ b/drivers/net/hyperv/Kconfig
 @@ -0,0 +1,5 @@
@@ -77,18 +70,12 @@ index 0000000..936968d
 +	depends on HYPERV
 +	help
 +	  Select this option to enable the Hyper-V virtual network driver.
-diff --git a/drivers/net/hyperv/Makefile b/drivers/net/hyperv/Makefile
-new file mode 100644
-index 0000000..c8a6682
 --- /dev/null
 +++ b/drivers/net/hyperv/Makefile
 @@ -0,0 +1,3 @@
 +obj-$(CONFIG_HYPERV_NET) += hv_netvsc.o
 +
 +hv_netvsc-y := netvsc_drv.o netvsc.o rndis_filter.o
-diff --git a/drivers/net/hyperv/hyperv_net.h b/drivers/net/hyperv/hyperv_net.h
-new file mode 100644
-index 0000000..ac1ec84
 --- /dev/null
 +++ b/drivers/net/hyperv/hyperv_net.h
 @@ -0,0 +1,1058 @@
@@ -1150,9 +1137,6 @@ index 0000000..ac1ec84
 +
 +
 +#endif /* _HYPERV_NET_H */
-diff --git a/drivers/net/hyperv/netvsc.c b/drivers/net/hyperv/netvsc.c
-new file mode 100644
-index 0000000..28e69a6
 --- /dev/null
 +++ b/drivers/net/hyperv/netvsc.c
 @@ -0,0 +1,939 @@
@@ -2095,12 +2079,9 @@ index 0000000..28e69a6
 +
 +	return ret;
 +}
-diff --git a/drivers/net/hyperv/netvsc_drv.c b/drivers/net/hyperv/netvsc_drv.c
-new file mode 100644
-index 0000000..93b0e91
 --- /dev/null
 +++ b/drivers/net/hyperv/netvsc_drv.c
-@@ -0,0 +1,456 @@
+@@ -0,0 +1,460 @@
 +/*
 + * Copyright (c) 2009, Microsoft Corporation.
 + *
@@ -2154,6 +2135,9 @@ index 0000000..93b0e91
 +#define PACKET_PAGES_LOWATER  8
 +/* Need this many pages to handle worst case fragmented packet */
 +#define PACKET_PAGES_HIWATER  (MAX_SKB_FRAGS + 2)
++
++/* Restrict GSO size to account for NVGRE */
++#define NETVSC_GSO_MAX_SIZE	62768
 +
 +static int ring_size = 128;
 +module_param(ring_size, int, S_IRUGO);
@@ -2466,6 +2450,7 @@ index 0000000..93b0e91
 +
 +	SET_ETHTOOL_OPS(net, &ethtool_ops);
 +	SET_NETDEV_DEV(net, &dev->device);
++	netif_set_gso_max_size(net, NETVSC_GSO_MAX_SIZE);
 +
 +	ret = register_netdev(net);
 +	if (ret != 0) {
@@ -2557,9 +2542,6 @@ index 0000000..93b0e91
 +
 +module_init(netvsc_drv_init);
 +module_exit(netvsc_drv_exit);
-diff --git a/drivers/net/hyperv/rndis_filter.c b/drivers/net/hyperv/rndis_filter.c
-new file mode 100644
-index 0000000..bafccb3
 --- /dev/null
 +++ b/drivers/net/hyperv/rndis_filter.c
 @@ -0,0 +1,855 @@
@@ -3418,8 +3400,6 @@ index 0000000..bafccb3
 +{
 +	/* Noop */
 +}
-diff --git a/drivers/staging/hv/Kconfig b/drivers/staging/hv/Kconfig
-index 6c0dc30..60ac479 100644
 --- a/drivers/staging/hv/Kconfig
 +++ b/drivers/staging/hv/Kconfig
 @@ -3,9 +3,3 @@ config HYPERV_STORAGE
@@ -3432,8 +3412,6 @@ index 6c0dc30..60ac479 100644
 -	depends on HYPERV && NET
 -	help
 -	  Select this option to enable the Hyper-V virtual network driver.
-diff --git a/drivers/staging/hv/Makefile b/drivers/staging/hv/Makefile
-index fbe9a42..af95a6b 100644
 --- a/drivers/staging/hv/Makefile
 +++ b/drivers/staging/hv/Makefile
 @@ -1,5 +1,3 @@
@@ -3442,8 +3420,6 @@ index fbe9a42..af95a6b 100644
  
  hv_storvsc-y := storvsc_drv.o
 -hv_netvsc-y := netvsc_drv.o netvsc.o rndis_filter.o
-diff --git a/drivers/staging/hv/TODO b/drivers/staging/hv/TODO
-index ed4d636..fd080cb 100644
 --- a/drivers/staging/hv/TODO
 +++ b/drivers/staging/hv/TODO
 @@ -1,5 +1,4 @@
@@ -3452,9 +3428,6 @@ index ed4d636..fd080cb 100644
  	- audit the scsi driver
  
  Please send patches for this code to Greg Kroah-Hartman <gregkh@suse.de>,
-diff --git a/drivers/staging/hv/hyperv_net.h b/drivers/staging/hv/hyperv_net.h
-deleted file mode 100644
-index ac1ec84..0000000
 --- a/drivers/staging/hv/hyperv_net.h
 +++ /dev/null
 @@ -1,1058 +0,0 @@
@@ -4516,9 +4489,6 @@ index ac1ec84..0000000
 -
 -
 -#endif /* _HYPERV_NET_H */
-diff --git a/drivers/staging/hv/netvsc.c b/drivers/staging/hv/netvsc.c
-deleted file mode 100644
-index 28e69a6..0000000
 --- a/drivers/staging/hv/netvsc.c
 +++ /dev/null
 @@ -1,939 +0,0 @@
@@ -5461,12 +5431,9 @@ index 28e69a6..0000000
 -
 -	return ret;
 -}
-diff --git a/drivers/staging/hv/netvsc_drv.c b/drivers/staging/hv/netvsc_drv.c
-deleted file mode 100644
-index 93b0e91..0000000
 --- a/drivers/staging/hv/netvsc_drv.c
 +++ /dev/null
-@@ -1,456 +0,0 @@
+@@ -1,460 +0,0 @@
 -/*
 - * Copyright (c) 2009, Microsoft Corporation.
 - *
@@ -5520,6 +5487,9 @@ index 93b0e91..0000000
 -#define PACKET_PAGES_LOWATER  8
 -/* Need this many pages to handle worst case fragmented packet */
 -#define PACKET_PAGES_HIWATER  (MAX_SKB_FRAGS + 2)
+-
+-/* Restrict GSO size to account for NVGRE */
+-#define NETVSC_GSO_MAX_SIZE	62768
 -
 -static int ring_size = 128;
 -module_param(ring_size, int, S_IRUGO);
@@ -5832,6 +5802,7 @@ index 93b0e91..0000000
 -
 -	SET_ETHTOOL_OPS(net, &ethtool_ops);
 -	SET_NETDEV_DEV(net, &dev->device);
+-	netif_set_gso_max_size(net, NETVSC_GSO_MAX_SIZE);
 -
 -	ret = register_netdev(net);
 -	if (ret != 0) {
@@ -5923,9 +5894,6 @@ index 93b0e91..0000000
 -
 -module_init(netvsc_drv_init);
 -module_exit(netvsc_drv_exit);
-diff --git a/drivers/staging/hv/rndis_filter.c b/drivers/staging/hv/rndis_filter.c
-deleted file mode 100644
-index bafccb3..0000000
 --- a/drivers/staging/hv/rndis_filter.c
 +++ /dev/null
 @@ -1,855 +0,0 @@
@@ -6784,6 +6752,3 @@ index bafccb3..0000000
 -{
 -	/* Noop */
 -}
--- 
-1.7.9.5
-
