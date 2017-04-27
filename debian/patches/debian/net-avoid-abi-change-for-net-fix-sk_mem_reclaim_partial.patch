@@ -1,0 +1,80 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Subject: net: Avoid ABI change for "net: fix sk_mem_reclaim_partial()"
+Date: Sun, 02 Apr 2017 01:31:03 +0100
+Forwarded: not-needed
+
+Commit 1a24e04e4b50939daa3041682b38b82c896ca438 added a parameter to
+__sk_mem_reclaim().  Rename the modified function to
+__sk_mem_reclaim_amount() and add an ABI-compatible wrapper.
+
+---
+--- a/include/net/sock.h
++++ b/include/net/sock.h
+@@ -962,7 +962,8 @@ static inline struct inode *SOCK_INODE(s
+  * Functions for memory accounting
+  */
+ extern int __sk_mem_schedule(struct sock *sk, int size, int kind);
+-void __sk_mem_reclaim(struct sock *sk, int amount);
++void __sk_mem_reclaim(struct sock *sk);
++void __sk_mem_reclaim_amount(struct sock *sk, int amount);
+ 
+ #define SK_MEM_QUANTUM ((int)PAGE_SIZE)
+ #define SK_MEM_QUANTUM_SHIFT ilog2(SK_MEM_QUANTUM)
+@@ -1001,7 +1002,7 @@ static inline void sk_mem_reclaim(struct
+ 	if (!sk_has_account(sk))
+ 		return;
+ 	if (sk->sk_forward_alloc >= SK_MEM_QUANTUM)
+-		__sk_mem_reclaim(sk, sk->sk_forward_alloc);
++		__sk_mem_reclaim_amount(sk, sk->sk_forward_alloc);
+ }
+ 
+ static inline void sk_mem_reclaim_partial(struct sock *sk)
+@@ -1009,7 +1010,7 @@ static inline void sk_mem_reclaim_partia
+ 	if (!sk_has_account(sk))
+ 		return;
+ 	if (sk->sk_forward_alloc > SK_MEM_QUANTUM)
+-		__sk_mem_reclaim(sk, sk->sk_forward_alloc - 1);
++		__sk_mem_reclaim_amount(sk, sk->sk_forward_alloc - 1);
+ }
+ 
+ static inline void sk_mem_charge(struct sock *sk, int size)
+@@ -1033,7 +1034,7 @@ static inline void sk_mem_uncharge(struc
+ 	 * no need to hold that much forward allocation anyway.
+ 	 */
+ 	if (unlikely(sk->sk_forward_alloc >= 1 << 21))
+-		__sk_mem_reclaim(sk, 1 << 20);
++		__sk_mem_reclaim_amount(sk, 1 << 20);
+ }
+ 
+ static inline void sk_wmem_free_skb(struct sock *sk, struct sk_buff *skb)
+--- a/net/core/sock.c
++++ b/net/core/sock.c
+@@ -1755,11 +1755,11 @@ suppress_allocation:
+ EXPORT_SYMBOL(__sk_mem_schedule);
+ 
+ /**
+- *	__sk_reclaim - reclaim memory_allocated
++ *	__sk_reclaim_amount - reclaim memory_allocated
+  *	@sk: socket
+  *	@amount: number of bytes (rounded down to a SK_MEM_QUANTUM multiple)
+  */
+-void __sk_mem_reclaim(struct sock *sk, int amount)
++void __sk_mem_reclaim_amount(struct sock *sk, int amount)
+ {
+ 	struct proto *prot = sk->sk_prot;
+ 
+@@ -1771,8 +1771,13 @@ void __sk_mem_reclaim(struct sock *sk, i
+ 	    (atomic_long_read(prot->memory_allocated) < prot->sysctl_mem[0]))
+ 		*prot->memory_pressure = 0;
+ }
+-EXPORT_SYMBOL(__sk_mem_reclaim);
++EXPORT_SYMBOL(__sk_mem_reclaim_amount);
+ 
++void __sk_mem_reclaim(struct sock *sk)
++{
++	__sk_mem_reclaim_amount(sk, sk->sk_forward_alloc);
++}
++EXPORT_SYMBOL(__sk_mem_reclaim);
+ 
+ /*
+  * Set of default routines for initialising struct proto_ops when
