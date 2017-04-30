@@ -1,0 +1,59 @@
+From: Michal Hocko <mhocko@suse.com>
+Date: Tue, 28 Mar 2017 15:17:26 +0200
+Subject: mm/huge_memory.c: fix up "mm/huge_memory.c: respect FOLL_FORCE/FOLL_COW for thp" backport
+Origin: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git/commit?id=2ea6895123eb8604c1c0c153e2fcd1305fb96aca
+Bug-Debian: https://bugs.debian.org/861313
+
+This is a stable follow up fix for an incorrect backport. The issue is
+not present in the upstream kernel.
+
+Miroslav has noticed the following splat when testing my 3.2 forward
+port of 8310d48b125d ("mm/huge_memory.c: respect FOLL_FORCE/FOLL_COW for
+thp") to 3.12:
+
+BUG: Bad page state in process a.out  pfn:26400
+page:ffffea000085e000 count:0 mapcount:1 mapping:          (null) index:0x7f049d600
+page flags: 0x1fffff80108018(uptodate|dirty|head|swapbacked)
+page dumped because: nonzero mapcount
+[iii]
+CPU: 2 PID: 5926 Comm: a.out Tainted: G            E    3.12.61-0-default #1
+Hardware name: QEMU Standard PC (i440FX + PIIX, 1996), BIOS 1.0.0-prebuilt.qemu-project.org 04/01/2014
+ 0000000000000000 ffffffff81515830 ffffea000085e000 ffffffff81800ad7
+ ffffffff815118a5 ffffea000085e000 0000000000000000 000fffff80000000
+ ffffffff81140f18 fff000007c000000 ffffea000085e000 0000000000000009
+Call Trace:
+ [<ffffffff8100475d>] dump_trace+0x7d/0x2d0
+ [<ffffffff81004a44>] show_stack_log_lvl+0x94/0x170
+ [<ffffffff81005ce1>] show_stack+0x21/0x50
+ [<ffffffff81515830>] dump_stack+0x5d/0x78
+ [<ffffffff815118a5>] bad_page.part.67+0xe8/0x102
+ [<ffffffff81140f18>] free_pages_prepare+0x198/0x1b0
+ [<ffffffff81141275>] __free_pages_ok+0x15/0xd0
+ [<ffffffff8116444c>] __access_remote_vm+0x7c/0x1e0
+ [<ffffffff81205afb>] mem_rw.isra.13+0x14b/0x1a0
+ [<ffffffff811a3b18>] vfs_write+0xb8/0x1e0
+ [<ffffffff811a469b>] SyS_pwrite64+0x6b/0xa0
+ [<ffffffff81523b49>] system_call_fastpath+0x16/0x1b
+ [<00007f049da18573>] 0x7f049da18572
+
+The problem is that the original 3.2 backport didn't return NULL page on
+the FOLL_COW page and so the page got reused.
+
+Reported-and-tested-by: Miroslav Beneš <mbenes@suse.com>
+Signed-off-by: Michal Hocko <mhocko@suse.com>
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+ mm/huge_memory.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+--- a/mm/huge_memory.c
++++ b/mm/huge_memory.c
+@@ -1226,7 +1226,7 @@ struct page *follow_trans_huge_pmd(struc
+ 	VM_BUG_ON_PAGE(!PageHead(page), page);
+ 
+ 	if (flags & FOLL_WRITE && !can_follow_write_pmd(*pmd, page, flags))
+-		goto out;
++		return NULL;
+ 
+ 	if (flags & FOLL_TOUCH) {
+ 		pmd_t _pmd;
