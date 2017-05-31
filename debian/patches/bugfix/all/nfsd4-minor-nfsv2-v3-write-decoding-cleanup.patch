@@ -1,0 +1,79 @@
+From: "J. Bruce Fields" <bfields@redhat.com>
+Date: Tue, 25 Apr 2017 16:21:34 -0400
+Subject: [1/2] nfsd4: minor NFSv2/v3 write decoding cleanup
+Origin: https://git.kernel.org/linus/db44bac41bbfc0c0d9dd943092d8bded3c9db19b
+Bug-Debian-Security: https://security-tracker.debian.org/tracker/CVE-2017-7895
+
+Use a couple shortcuts that will simplify a following bugfix.
+
+Cc: stable@vger.kernel.org
+Signed-off-by: J. Bruce Fields <bfields@redhat.com>
+[bwh: Backported to 3.16: in nfs3svc_decode_writeargs(), dlen doesn't include
+ tail]
+---
+ fs/nfsd/nfs3xdr.c | 9 +++++----
+ fs/nfsd/nfsxdr.c  | 8 ++++----
+ 2 files changed, 9 insertions(+), 8 deletions(-)
+
+--- a/fs/nfsd/nfs3xdr.c
++++ b/fs/nfsd/nfs3xdr.c
+@@ -363,6 +363,7 @@ nfs3svc_decode_writeargs(struct svc_rqst
+ {
+ 	unsigned int len, v, hdr, dlen;
+ 	u32 max_blocksize = svc_max_payload(rqstp);
++	struct kvec *head = rqstp->rq_arg.head;
+ 
+ 	p = decode_fh(p, &args->fh);
+ 	if (!p)
+@@ -382,9 +383,8 @@ nfs3svc_decode_writeargs(struct svc_rqst
+ 	 * Check to make sure that we got the right number of
+ 	 * bytes.
+ 	 */
+-	hdr = (void*)p - rqstp->rq_arg.head[0].iov_base;
+-	dlen = rqstp->rq_arg.head[0].iov_len + rqstp->rq_arg.page_len
+-		- hdr;
++	hdr = (void*)p - head->iov_base;
++	dlen = head->iov_len + rqstp->rq_arg.page_len - hdr;
+ 	/*
+ 	 * Round the length of the data which was specified up to
+ 	 * the next multiple of XDR units and then compare that
+@@ -401,7 +401,7 @@ nfs3svc_decode_writeargs(struct svc_rqst
+ 		len = args->len = max_blocksize;
+ 	}
+ 	rqstp->rq_vec[0].iov_base = (void*)p;
+-	rqstp->rq_vec[0].iov_len = rqstp->rq_arg.head[0].iov_len - hdr;
++	rqstp->rq_vec[0].iov_len = head->iov_len - hdr;
+ 	v = 0;
+ 	while (len > rqstp->rq_vec[v].iov_len) {
+ 		len -= rqstp->rq_vec[v].iov_len;
+--- a/fs/nfsd/nfsxdr.c
++++ b/fs/nfsd/nfsxdr.c
+@@ -281,6 +281,7 @@ nfssvc_decode_writeargs(struct svc_rqst
+ 					struct nfsd_writeargs *args)
+ {
+ 	unsigned int len, hdr, dlen;
++	struct kvec *head = rqstp->rq_arg.head;
+ 	int v;
+ 
+ 	p = decode_fh(p, &args->fh);
+@@ -301,9 +302,8 @@ nfssvc_decode_writeargs(struct svc_rqst
+ 	 * Check to make sure that we got the right number of
+ 	 * bytes.
+ 	 */
+-	hdr = (void*)p - rqstp->rq_arg.head[0].iov_base;
+-	dlen = rqstp->rq_arg.head[0].iov_len + rqstp->rq_arg.page_len
+-		- hdr;
++	hdr = (void*)p - head->iov_base;
++	dlen = head->iov_len + rqstp->rq_arg.page_len - hdr;
+ 
+ 	/*
+ 	 * Round the length of the data which was specified up to
+@@ -317,7 +317,7 @@ nfssvc_decode_writeargs(struct svc_rqst
+ 		return 0;
+ 
+ 	rqstp->rq_vec[0].iov_base = (void*)p;
+-	rqstp->rq_vec[0].iov_len = rqstp->rq_arg.head[0].iov_len - hdr;
++	rqstp->rq_vec[0].iov_len = head->iov_len - hdr;
+ 	v = 0;
+ 	while (len > rqstp->rq_vec[v].iov_len) {
+ 		len -= rqstp->rq_vec[v].iov_len;
