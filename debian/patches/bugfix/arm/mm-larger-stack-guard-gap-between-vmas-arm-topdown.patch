@@ -1,0 +1,68 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Mon, 26 Jun 2017 18:50:44 +0100
+Subject: mm: larger stack guard gap, between vmas - ARM topdown case
+Bug-Debian-Security: https://security-tracker.debian.org/tracker/CVE-2017-1000364
+Forwarded: not-needed
+
+Apply the stack gap in ARM implementation of
+arch_get_unmapped_area_topdown().  This is only needed in Debian's
+3.2 branch because we cherry-picked commit 7dbaa466780a "ARM: 7169/1:
+topdown mmap support" from 3.3.
+
+---
+--- a/arch/arm/mm/mmap.c
++++ b/arch/arm/mm/mmap.c
+@@ -155,7 +155,7 @@ arch_get_unmapped_area_topdown(struct fi
+ {
+ 	struct vm_area_struct *vma;
+ 	struct mm_struct *mm = current->mm;
+-	unsigned long addr = addr0;
++	unsigned long addr = addr0, vm_start;
+ 	int do_align = 0;
+ 	int aliasing = cache_is_vipt_aliasing();
+ 
+@@ -185,7 +185,7 @@ arch_get_unmapped_area_topdown(struct fi
+ 			addr = PAGE_ALIGN(addr);
+ 		vma = find_vma(mm, addr);
+ 		if (TASK_SIZE - len >= addr &&
+-				(!vma || addr + len <= vma->vm_start))
++		    (!vma || addr + len <= vm_start_gap(vma)))
+ 			return addr;
+ 	}
+ 
+@@ -205,7 +205,7 @@ arch_get_unmapped_area_topdown(struct fi
+ 	/* make sure it can fit in the remaining address space */
+ 	if (addr > len) {
+ 		vma = find_vma(mm, addr-len);
+-		if (!vma || addr <= vma->vm_start)
++		if (!vma || addr <= vm_start_gap(vma))
+ 			/* remember the address as a hint for next time */
+ 			return (mm->free_area_cache = addr-len);
+ 	}
+@@ -224,19 +224,21 @@ arch_get_unmapped_area_topdown(struct fi
+ 		 * return with success:
+ 		 */
+ 		vma = find_vma(mm, addr);
+-		if (!vma || addr+len <= vma->vm_start)
++		if (vma)
++			vm_start = vm_start_gap(vma);
++		if (!vma || addr + len <= vm_start)
+ 			/* remember the address as a hint for next time */
+ 			return (mm->free_area_cache = addr);
+ 
+ 		/* remember the largest hole we saw so far */
+-		if (addr + mm->cached_hole_size < vma->vm_start)
+-			mm->cached_hole_size = vma->vm_start - addr;
++		if (addr + mm->cached_hole_size < vm_start)
++			mm->cached_hole_size = vm_start - addr;
+ 
+ 		/* try just below the current vma->vm_start */
+-		addr = vma->vm_start - len;
++		addr = vm_start - len;
+ 		if (do_align)
+ 			addr = COLOUR_ALIGN_DOWN(addr, pgoff);
+-	} while (len < vma->vm_start);
++	} while (len < vm_start);
+ 
+ bottomup:
+ 	/*
