@@ -1,7 +1,7 @@
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Thu, 22 May 2014 03:25:50 +0000
 Subject: [PATCH 354/397] rtmutex: Confine deadlock logic to futex
-Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=08de59c5236766cc9ea3b00632fccb7858ea7b34
+Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=e2401f3713f76e4641aa34057919f42ff37913b4
 
 upstream commit: c051b21f71d1ffdfd7ad406a1ef5ede5e5f974c5
 
@@ -48,10 +48,10 @@ index 5ebd0bbb6eaa..9340b866ce21 100644
  extern int rt_mutex_trylock(struct rt_mutex *lock);
  
 diff --git a/kernel/futex.c b/kernel/futex.c
-index 7cfa4527e942..f44094da0949 100644
+index c567c456468b..4410f64fb7df 100644
 --- a/kernel/futex.c
 +++ b/kernel/futex.c
-@@ -1563,7 +1563,7 @@ retry_private:
+@@ -1563,7 +1563,7 @@ static int futex_requeue(u32 __user *uaddr1, unsigned int flags,
  			this->pi_state = pi_state;
  			ret = rt_mutex_start_proxy_lock(&pi_state->pi_mutex,
  							this->rt_waiter,
@@ -60,7 +60,7 @@ index 7cfa4527e942..f44094da0949 100644
  			if (ret == 1) {
  				/* We got the lock. */
  				requeue_pi_wake_futex(this, &key2, hb2);
-@@ -2178,9 +2178,9 @@ retry_private:
+@@ -2178,9 +2178,9 @@ static int futex_lock_pi(u32 __user *uaddr, unsigned int flags, int detect,
  	/*
  	 * Block on the PI mutex:
  	 */
@@ -145,10 +145,10 @@ index 3d9f31cd79e7..9eb84bb55881 100644
  		td->mutexes[id] = ret ? 0 : 4;
  		return ret ? -EINTR : 0;
 diff --git a/kernel/rtmutex.c b/kernel/rtmutex.c
-index 6405f7bc81f7..799efec18e7a 100644
+index b651ed538667..9701821ce4bf 100644
 --- a/kernel/rtmutex.c
 +++ b/kernel/rtmutex.c
-@@ -1548,16 +1548,15 @@ rt_mutex_slowunlock(struct rt_mutex *lock)
+@@ -1612,16 +1612,15 @@ rt_mutex_slowunlock(struct rt_mutex *lock)
   */
  static inline int
  rt_mutex_fastlock(struct rt_mutex *lock, int state,
@@ -167,7 +167,7 @@ index 6405f7bc81f7..799efec18e7a 100644
  }
  
  static inline int
-@@ -1604,7 +1603,7 @@ void __sched rt_mutex_lock(struct rt_mutex *lock)
+@@ -1668,7 +1667,7 @@ void __sched rt_mutex_lock(struct rt_mutex *lock)
  {
  	might_sleep();
  
@@ -176,7 +176,7 @@ index 6405f7bc81f7..799efec18e7a 100644
  }
  EXPORT_SYMBOL_GPL(rt_mutex_lock);
  
-@@ -1612,41 +1611,46 @@ EXPORT_SYMBOL_GPL(rt_mutex_lock);
+@@ -1676,41 +1675,46 @@ EXPORT_SYMBOL_GPL(rt_mutex_lock);
   * rt_mutex_lock_interruptible - lock a rt_mutex interruptible
   *
   * @lock:		the rt_mutex to be locked
@@ -234,7 +234,7 @@ index 6405f7bc81f7..799efec18e7a 100644
  }
  EXPORT_SYMBOL_GPL(rt_mutex_lock_killable);
  
-@@ -1657,22 +1661,19 @@ EXPORT_SYMBOL_GPL(rt_mutex_lock_killable);
+@@ -1721,22 +1725,19 @@ EXPORT_SYMBOL_GPL(rt_mutex_lock_killable);
   *
   * @lock:		the rt_mutex to be locked
   * @timeout:		timeout structure or NULL (no timeout)
@@ -260,7 +260,7 @@ index 6405f7bc81f7..799efec18e7a 100644
  }
  EXPORT_SYMBOL_GPL(rt_mutex_timed_lock);
  
-@@ -1776,7 +1777,6 @@ void rt_mutex_proxy_unlock(struct rt_mutex *lock,
+@@ -1840,7 +1841,6 @@ void rt_mutex_proxy_unlock(struct rt_mutex *lock,
   * @lock:		the rt_mutex to take
   * @waiter:		the pre-initialized rt_mutex_waiter
   * @task:		the task to prepare
@@ -268,7 +268,7 @@ index 6405f7bc81f7..799efec18e7a 100644
   *
   * Returns:
   *  0 - task blocked on lock
-@@ -1787,7 +1787,7 @@ void rt_mutex_proxy_unlock(struct rt_mutex *lock,
+@@ -1851,7 +1851,7 @@ void rt_mutex_proxy_unlock(struct rt_mutex *lock,
   */
  int rt_mutex_start_proxy_lock(struct rt_mutex *lock,
  			      struct rt_mutex_waiter *waiter,
@@ -277,7 +277,7 @@ index 6405f7bc81f7..799efec18e7a 100644
  {
  	int ret;
  
-@@ -1874,22 +1874,20 @@ struct task_struct *rt_mutex_next_owner(struct rt_mutex *lock)
+@@ -1938,22 +1938,20 @@ struct task_struct *rt_mutex_next_owner(struct rt_mutex *lock)
   * rt_mutex_finish_proxy_lock() - Complete lock acquisition
   * @lock:		the rt_mutex we were woken on
   * @to:			the timeout, null if none. hrtimer should already have

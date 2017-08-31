@@ -2,7 +2,7 @@ From: Thomas Gleixner <tglx@linutronix.de>
 Date: Thu, 22 May 2014 03:25:57 +0000
 Subject: [PATCH 356/397] rtmutex: Avoid pointless requeueing in the deadlock
  detection chain walk
-Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=1b0acda86d845f872b7b2603145495de88716b98
+Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=9f2cce59e8f17ff1c1dbd4e12dc8ace166667b13
 
 upstream commit: 67792e2cabadbadd1a93f6790fa7bcbd47eca7c3
 
@@ -29,10 +29,10 @@ Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
  1 file changed, 70 insertions(+), 7 deletions(-)
 
 diff --git a/kernel/rtmutex.c b/kernel/rtmutex.c
-index 5b100b361a64..a94f3a316dca 100644
+index 311ecea282fe..0ee5811fd45b 100644
 --- a/kernel/rtmutex.c
 +++ b/kernel/rtmutex.c
-@@ -363,6 +363,7 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
+@@ -427,6 +427,7 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
  	struct rt_mutex *lock;
  	bool detect_deadlock;
  	unsigned long flags;
@@ -40,7 +40,7 @@ index 5b100b361a64..a94f3a316dca 100644
  
  	detect_deadlock = rt_mutex_cond_detect_deadlock(orig_waiter, chwalk);
  
-@@ -452,18 +453,31 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
+@@ -516,18 +517,31 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
  			goto out_unlock_pi;
  		/*
  		 * If deadlock detection is off, we stop here if we
@@ -79,10 +79,11 @@ index 5b100b361a64..a94f3a316dca 100644
  
  	/*
  	 * [4] Get the next lock
-@@ -497,6 +511,55 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
+@@ -560,6 +574,55 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
+ 		goto out_unlock_pi;
  	}
  
- 	/*
++	/*
 +	 * If we just follow the lock chain for deadlock detection, no
 +	 * need to do all the requeue operations. To avoid a truckload
 +	 * of conditionals around the various places below, just do the
@@ -131,7 +132,6 @@ index 5b100b361a64..a94f3a316dca 100644
 +		goto again;
 +	}
 +
-+	/*
+ 	/*
  	 * Store the current top waiter before doing the requeue
  	 * operation on @lock. We need it for the boost/deboost
- 	 * decision below.

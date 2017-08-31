@@ -1,7 +1,7 @@
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Wed, 15 Jun 2011 12:36:06 +0200
 Subject: [PATCH 158/397] hotplug: Lightweight get online cpus
-Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=fb2a23581ea28a994bea602c4374e6f52fc123e9
+Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=974671172966cbcb937061b96e7b1f867c04ae23
 
 get_online_cpus() is a heavy weight function which involves a global
 mutex. migrate_disable() wants a simpler construct which prevents only
@@ -18,10 +18,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  2 files changed, 128 insertions(+), 3 deletions(-)
 
 diff --git a/include/linux/cpu.h b/include/linux/cpu.h
-index 9c3e071900c0..ff0a0ec8d2f7 100644
+index 21b1e9789a80..a639ef22a523 100644
 --- a/include/linux/cpu.h
 +++ b/include/linux/cpu.h
-@@ -168,6 +168,8 @@ extern struct sysdev_class cpu_sysdev_class;
+@@ -162,6 +162,8 @@ extern struct sysdev_class cpu_sysdev_class;
  
  extern void get_online_cpus(void);
  extern void put_online_cpus(void);
@@ -30,7 +30,7 @@ index 9c3e071900c0..ff0a0ec8d2f7 100644
  extern void cpu_hotplug_disable(void);
  extern void cpu_hotplug_enable(void);
  #define hotcpu_notifier(fn, pri)	cpu_notifier(fn, pri)
-@@ -192,6 +194,8 @@ static inline void cpu_hotplug_driver_unlock(void)
+@@ -186,6 +188,8 @@ static inline void cpu_hotplug_driver_unlock(void)
  
  #define get_online_cpus()	do { } while (0)
  #define put_online_cpus()	do { } while (0)
@@ -40,7 +40,7 @@ index 9c3e071900c0..ff0a0ec8d2f7 100644
  #define cpu_hotplug_enable()	do { } while (0)
  #define hotcpu_notifier(fn, pri)	do { (void)(fn); } while (0)
 diff --git a/kernel/cpu.c b/kernel/cpu.c
-index 82c91f1b715a..c9230ddaa157 100644
+index f735a58bf7b4..70ac0fac49d3 100644
 --- a/kernel/cpu.c
 +++ b/kernel/cpu.c
 @@ -58,6 +58,102 @@ static struct {
@@ -146,7 +146,7 @@ index 82c91f1b715a..c9230ddaa157 100644
  void get_online_cpus(void)
  {
  	might_sleep();
-@@ -232,13 +328,14 @@ static int __ref take_cpu_down(void *_param)
+@@ -233,13 +329,14 @@ static int __ref take_cpu_down(void *_param)
  /* Requires cpu_add_remove_lock to be held */
  static int __ref _cpu_down(unsigned int cpu, int tasks_frozen)
  {
@@ -162,7 +162,7 @@ index 82c91f1b715a..c9230ddaa157 100644
  
  	if (num_online_cpus() == 1)
  		return -EBUSY;
-@@ -246,7 +343,20 @@ static int __ref _cpu_down(unsigned int cpu, int tasks_frozen)
+@@ -247,7 +344,20 @@ static int __ref _cpu_down(unsigned int cpu, int tasks_frozen)
  	if (!cpu_online(cpu))
  		return -EINVAL;
  
@@ -184,7 +184,7 @@ index 82c91f1b715a..c9230ddaa157 100644
  
  	err = __cpu_notify(CPU_DOWN_PREPARE | mod, hcpu, -1, &nr_calls);
  	if (err) {
-@@ -254,7 +364,16 @@ static int __ref _cpu_down(unsigned int cpu, int tasks_frozen)
+@@ -255,7 +365,16 @@ static int __ref _cpu_down(unsigned int cpu, int tasks_frozen)
  		__cpu_notify(CPU_DOWN_FAILED | mod, hcpu, nr_calls, NULL);
  		printk("%s: attempt to take down CPU %u failed\n",
  				__func__, cpu);
@@ -202,7 +202,7 @@ index 82c91f1b715a..c9230ddaa157 100644
  	}
  
  	err = __stop_machine(take_cpu_down, &tcd_param, cpumask_of(cpu));
-@@ -285,6 +404,8 @@ static int __ref _cpu_down(unsigned int cpu, int tasks_frozen)
+@@ -286,6 +405,8 @@ static int __ref _cpu_down(unsigned int cpu, int tasks_frozen)
  	check_for_tasks(cpu);
  
  out_release:

@@ -1,7 +1,7 @@
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Thu, 20 Dec 2012 15:13:49 +0100
 Subject: [PATCH 290/397] sched: Consider pi boosting in setscheduler
-Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=e92c299f8050b0c57760011ca5c9313cfd3ee667
+Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=72f3529f60ed873757e2c211f0763fffe29537b7
 
 If a PI boosted task policy/priority is modified by a setscheduler()
 call we unconditionally dequeue and requeue the task if it is on the
@@ -48,13 +48,14 @@ index 25f06ced50eb..b5d55c014267 100644
  static inline bool tsk_is_pi_blocked(struct task_struct *tsk)
  {
 diff --git a/kernel/rtmutex.c b/kernel/rtmutex.c
-index 1042825820d6..7e0c4d7a0b5b 100644
+index 6ee10abef169..2b375104feca 100644
 --- a/kernel/rtmutex.c
 +++ b/kernel/rtmutex.c
-@@ -176,6 +176,18 @@ int rt_mutex_getprio(struct task_struct *task)
+@@ -239,6 +239,18 @@ int rt_mutex_getprio(struct task_struct *task)
+ 		   task->normal_prio);
  }
  
- /*
++/*
 + * Called by sched_setscheduler() to check whether the priority change
 + * is overruled by a possible priority boosting.
 + */
@@ -66,10 +67,9 @@ index 1042825820d6..7e0c4d7a0b5b 100644
 +	return task_top_pi_waiter(task)->pi_list_entry.prio <= newprio;
 +}
 +
-+/*
+ /*
   * Adjust the priority of a task, after its pi_waiters got modified.
   *
-  * This can be both boosting and unboosting. task->pi_lock must be held.
 diff --git a/kernel/sched.c b/kernel/sched.c
 index 3135cdee8d5d..047d2b918244 100644
 --- a/kernel/sched.c
@@ -122,7 +122,7 @@ index 3135cdee8d5d..047d2b918244 100644
  	int retval, oldprio, oldpolicy = -1, on_rq, running;
  	unsigned long flags;
  	const struct sched_class *prev_class;
-@@ -5786,6 +5793,25 @@ recheck:
+@@ -5786,6 +5793,25 @@ static int __sched_setscheduler(struct task_struct *p, int policy,
  		task_rq_unlock(rq, p, &flags);
  		goto recheck;
  	}
@@ -148,7 +148,7 @@ index 3135cdee8d5d..047d2b918244 100644
  	on_rq = p->on_rq;
  	running = task_current(rq, p);
  	if (on_rq)
-@@ -5793,9 +5819,6 @@ recheck:
+@@ -5793,9 +5819,6 @@ static int __sched_setscheduler(struct task_struct *p, int policy,
  	if (running)
  		p->sched_class->put_prev_task(rq, p);
  
