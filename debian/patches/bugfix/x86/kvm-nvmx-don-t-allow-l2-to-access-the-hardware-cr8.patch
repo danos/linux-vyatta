@@ -1,0 +1,35 @@
+From: Jim Mattson <jmattson@google.com>
+Date: Tue, 12 Sep 2017 13:02:54 -0700
+Subject: kvm: nVMX: Don't allow L2 to access the hardware CR8
+Origin: https://git.kernel.org/linus/51aa68e7d57e3217192d88ce90fd5b8ef29ec94f
+Bug-Debian-Security: https://security-tracker.debian.org/tracker/CVE-2017-12154
+
+If L1 does not specify the "use TPR shadow" VM-execution control in
+vmcs12, then L0 must specify the "CR8-load exiting" and "CR8-store
+exiting" VM-execution controls in vmcs02. Failure to do so will give
+the L2 VM unrestricted read/write access to the hardware CR8.
+
+This fixes CVE-2017-12154.
+
+Signed-off-by: Jim Mattson <jmattson@google.com>
+Reviewed-by: David Hildenbrand <david@redhat.com>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+[bwh: Backported to 3.16: adjust context]
+---
+--- a/arch/x86/kvm/vmx.c
++++ b/arch/x86/kvm/vmx.c
+@@ -8040,6 +8040,14 @@ static void prepare_vmcs02(struct kvm_vc
+ 	exec_control &= ~CPU_BASED_VIRTUAL_NMI_PENDING;
+ 	exec_control &= ~CPU_BASED_TPR_SHADOW;
+ 	exec_control |= vmcs12->cpu_based_vm_exec_control;
++
++ 	if (!(exec_control & CPU_BASED_TPR_SHADOW)) {
++#ifdef CONFIG_X86_64
++		exec_control |= CPU_BASED_CR8_LOAD_EXITING |
++				CPU_BASED_CR8_STORE_EXITING;
++#endif
++	}
++
+ 	/*
+ 	 * Merging of IO and MSR bitmaps not currently supported.
+ 	 * Rather, exit every time.
