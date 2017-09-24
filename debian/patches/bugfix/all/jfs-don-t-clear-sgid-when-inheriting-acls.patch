@@ -1,0 +1,64 @@
+From: Jan Kara <jack@suse.cz>
+Date: Thu, 22 Jun 2017 15:31:10 +0200
+Subject: jfs: Don't clear SGID when inheriting ACLs
+Origin: https://git.kernel.org/linus/9bcf66c72d726322441ec82962994e69157613e4
+Bug-Debian: https://bugs.debian.org/873026
+
+When new directory 'DIR1' is created in a directory 'DIR0' with SGID bit
+set, DIR1 is expected to have SGID bit set (and owning group equal to
+the owning group of 'DIR0'). However when 'DIR0' also has some default
+ACLs that 'DIR1' inherits, setting these ACLs will result in SGID bit on
+'DIR1' to get cleared if user is not member of the owning group.
+
+Fix the problem by moving posix_acl_update_mode() out of
+__jfs_set_acl() into jfs_set_acl(). That way the function will not be
+called when inheriting ACLs which is what we want as it prevents SGID
+bit clearing and the mode has been properly set by posix_acl_create()
+anyway.
+
+Fixes: 073931017b49d9458aa351605b43a7e34598caef
+CC: stable@vger.kernel.org
+CC: jfs-discussion@lists.sourceforge.net
+Signed-off-by: Jan Kara <jack@suse.cz>
+Signed-off-by: Dave Kleikamp <dave.kleikamp@oracle.com>
+[bwh: Backported to 3.16:
+ - Keep using CURRENT_TIME
+ - Adjust context]
+---
+ fs/jfs/acl.c | 15 ++++++++-------
+ 1 file changed, 8 insertions(+), 7 deletions(-)
+
+--- a/fs/jfs/acl.c
++++ b/fs/jfs/acl.c
+@@ -83,13 +83,6 @@ static int __jfs_set_acl(tid_t tid, stru
+ 	switch (type) {
+ 	case ACL_TYPE_ACCESS:
+ 		ea_name = POSIX_ACL_XATTR_ACCESS;
+-		if (acl) {
+-			rc = posix_acl_update_mode(inode, &inode->i_mode, &acl);
+-			if (rc)
+-				return rc;
+-			inode->i_ctime = CURRENT_TIME;
+-			mark_inode_dirty(inode);
+-		}
+ 		break;
+ 	case ACL_TYPE_DEFAULT:
+ 		ea_name = POSIX_ACL_XATTR_DEFAULT;
+@@ -124,9 +117,17 @@ int jfs_set_acl(struct inode *inode, str
+ 
+ 	tid = txBegin(inode->i_sb, 0);
+ 	mutex_lock(&JFS_IP(inode)->commit_mutex);
++	if (type == ACL_TYPE_ACCESS && acl) {
++		rc = posix_acl_update_mode(inode, &inode->i_mode, &acl);
++		if (rc)
++			goto end_tx;
++		inode->i_ctime = CURRENT_TIME;
++		mark_inode_dirty(inode);
++	}
+ 	rc = __jfs_set_acl(tid, inode, type, acl);
+ 	if (!rc)
+ 		rc = txCommit(tid, 1, &inode, 0);
++end_tx:
+ 	txEnd(tid);
+ 	mutex_unlock(&JFS_IP(inode)->commit_mutex);
+ 	return rc;

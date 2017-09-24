@@ -1,0 +1,79 @@
+From: Jan Kara <jack@suse.cz>
+Date: Mon, 26 Jun 2017 08:48:18 -0700
+Subject: xfs: Don't clear SGID when inheriting ACLs
+Origin: https://git.kernel.org/linus/8ba358756aa08414fa9e65a1a41d28304ed6fd7f
+Bug-Debian: https://bugs.debian.org/873026
+
+When new directory 'DIR1' is created in a directory 'DIR0' with SGID bit
+set, DIR1 is expected to have SGID bit set (and owning group equal to
+the owning group of 'DIR0'). However when 'DIR0' also has some default
+ACLs that 'DIR1' inherits, setting these ACLs will result in SGID bit on
+'DIR1' to get cleared if user is not member of the owning group.
+
+Fix the problem by calling __xfs_set_acl() instead of xfs_set_acl() when
+setting up inode in xfs_generic_create(). That prevents SGID bit
+clearing and mode is properly set by posix_acl_create() anyway. We also
+reorder arguments of __xfs_set_acl() to match the ordering of
+xfs_set_acl() to make things consistent.
+
+Fixes: 073931017b49d9458aa351605b43a7e34598caef
+CC: stable@vger.kernel.org
+CC: Darrick J. Wong <darrick.wong@oracle.com>
+CC: linux-xfs@vger.kernel.org
+Signed-off-by: Jan Kara <jack@suse.cz>
+Reviewed-by: Darrick J. Wong <darrick.wong@oracle.com>
+Signed-off-by: Darrick J. Wong <darrick.wong@oracle.com>
+[bwh: Backported to 3.16: adjust context]
+---
+ fs/xfs/xfs_acl.c  | 6 +++---
+ fs/xfs/xfs_acl.h  | 1 +
+ fs/xfs/xfs_iops.c | 4 ++--
+ 3 files changed, 6 insertions(+), 5 deletions(-)
+
+--- a/fs/xfs/xfs_acl.c
++++ b/fs/xfs/xfs_acl.c
+@@ -176,8 +176,8 @@ out:
+ 	return acl;
+ }
+ 
+-STATIC int
+-__xfs_set_acl(struct inode *inode, int type, struct posix_acl *acl)
++int
++__xfs_set_acl(struct inode *inode, struct posix_acl *acl, int type)
+ {
+ 	struct xfs_inode *ip = XFS_I(inode);
+ 	unsigned char *ea_name;
+@@ -297,5 +297,5 @@ xfs_set_acl(struct inode *inode, struct
+ 	}
+ 
+  set_acl:
+-	return __xfs_set_acl(inode, type, acl);
++	return __xfs_set_acl(inode, acl, type);
+ }
+--- a/fs/xfs/xfs_acl.h
++++ b/fs/xfs/xfs_acl.h
+@@ -61,6 +61,7 @@ struct xfs_acl {
+ #ifdef CONFIG_XFS_POSIX_ACL
+ extern struct posix_acl *xfs_get_acl(struct inode *inode, int type);
+ extern int xfs_set_acl(struct inode *inode, struct posix_acl *acl, int type);
++extern int __xfs_set_acl(struct inode *inode, struct posix_acl *acl, int type);
+ extern int posix_acl_access_exists(struct inode *inode);
+ extern int posix_acl_default_exists(struct inode *inode);
+ #else
+--- a/fs/xfs/xfs_iops.c
++++ b/fs/xfs/xfs_iops.c
+@@ -173,12 +173,12 @@ xfs_generic_create(
+ 
+ #ifdef CONFIG_XFS_POSIX_ACL
+ 	if (default_acl) {
+-		error = -xfs_set_acl(inode, default_acl, ACL_TYPE_DEFAULT);
++		error = -__xfs_set_acl(inode, default_acl, ACL_TYPE_DEFAULT);
+ 		if (error)
+ 			goto out_cleanup_inode;
+ 	}
+ 	if (acl) {
+-		error = -xfs_set_acl(inode, acl, ACL_TYPE_ACCESS);
++		error = -__xfs_set_acl(inode, acl, ACL_TYPE_ACCESS);
+ 		if (error)
+ 			goto out_cleanup_inode;
+ 	}

@@ -1,0 +1,90 @@
+From: Jan Kara <jack@suse.cz>
+Date: Wed, 21 Jun 2017 15:02:47 +0200
+Subject: hfsplus: Don't clear SGID when inheriting ACLs
+Origin: https://git.kernel.org/linus/84969465ddc4f8aeb3b993123b571aa01c5f2683
+Bug-Debian: https://bugs.debian.org/873026
+
+When new directory 'DIR1' is created in a directory 'DIR0' with SGID bit
+set, DIR1 is expected to have SGID bit set (and owning group equal to
+the owning group of 'DIR0'). However when 'DIR0' also has some default
+ACLs that 'DIR1' inherits, setting these ACLs will result in SGID bit on
+'DIR1' to get cleared if user is not member of the owning group.
+
+Fix the problem by creating __hfsplus_set_posix_acl() function that does
+not call posix_acl_update_mode() and use it when inheriting ACLs. That
+prevents SGID bit clearing and the mode has been properly set by
+posix_acl_create() anyway.
+
+Fixes: 073931017b49d9458aa351605b43a7e34598caef
+CC: stable@vger.kernel.org
+Signed-off-by: Jan Kara <jack@suse.cz>
+[bwh: Backported to 3.16: adjust context]
+---
+ fs/hfsplus/posix_acl.c | 30 ++++++++++++++++++------------
+ 1 file changed, 18 insertions(+), 12 deletions(-)
+
+--- a/fs/hfsplus/posix_acl.c
++++ b/fs/hfsplus/posix_acl.c
+@@ -54,8 +54,8 @@ struct posix_acl *hfsplus_get_posix_acl(
+ 	return acl;
+ }
+ 
+-int hfsplus_set_posix_acl(struct inode *inode, struct posix_acl *acl,
+-		int type)
++static int __hfsplus_set_posix_acl(struct inode *inode, struct posix_acl *acl,
++				   int type)
+ {
+ 	int err;
+ 	char *xattr_name;
+@@ -67,12 +67,6 @@ int hfsplus_set_posix_acl(struct inode *
+ 	switch (type) {
+ 	case ACL_TYPE_ACCESS:
+ 		xattr_name = POSIX_ACL_XATTR_ACCESS;
+-		if (acl) {
+-			err = posix_acl_update_mode(inode, &inode->i_mode, &acl);
+-			if (err)
+-				return err;
+-		}
+-		err = 0;
+ 		break;
+ 
+ 	case ACL_TYPE_DEFAULT:
+@@ -108,6 +102,18 @@ end_set_acl:
+ 	return err;
+ }
+ 
++int hfsplus_set_posix_acl(struct inode *inode, struct posix_acl *acl, int type)
++{
++	int err;
++
++	if (type == ACL_TYPE_ACCESS && acl) {
++		err = posix_acl_update_mode(inode, &inode->i_mode, &acl);
++		if (err)
++			return err;
++	}
++	return __hfsplus_set_posix_acl(inode, acl, type);
++}
++
+ int hfsplus_init_posix_acl(struct inode *inode, struct inode *dir)
+ {
+ 	int err = 0;
+@@ -125,15 +131,15 @@ int hfsplus_init_posix_acl(struct inode
+ 		return err;
+ 
+ 	if (default_acl) {
+-		err = hfsplus_set_posix_acl(inode, default_acl,
+-					    ACL_TYPE_DEFAULT);
++		err = __hfsplus_set_posix_acl(inode, default_acl,
++					      ACL_TYPE_DEFAULT);
+ 		posix_acl_release(default_acl);
+ 	}
+ 
+ 	if (acl) {
+ 		if (!err)
+-			err = hfsplus_set_posix_acl(inode, acl,
+-						    ACL_TYPE_ACCESS);
++			err = __hfsplus_set_posix_acl(inode, acl,
++						      ACL_TYPE_ACCESS);
+ 		posix_acl_release(acl);
+ 	}
+ 	return err;
