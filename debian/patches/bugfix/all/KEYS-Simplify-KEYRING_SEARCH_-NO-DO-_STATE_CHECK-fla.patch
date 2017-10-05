@@ -1,0 +1,96 @@
+From: David Howells <dhowells@redhat.com>
+Date: Mon, 1 Dec 2014 22:52:50 +0000
+Subject: KEYS: Simplify KEYRING_SEARCH_{NO,DO}_STATE_CHECK flags
+Origin: https://git.kernel.org/linus/054f6180d8b5602b431b5924976c956e760488b1
+
+Simplify KEYRING_SEARCH_{NO,DO}_STATE_CHECK flags to be two variations of the
+same flag.  They are effectively mutually exclusive and one or the other
+should be provided, but not both.
+
+Keyring cycle detection and key possession determination are the only things
+that set NO_STATE_CHECK, except that neither flag really does anything there
+because neither purpose makes use of the keyring_search_iterator() function,
+but rather provides their own.
+
+For cycle detection we definitely want to check inside of expired keyrings,
+just so that we don't create a cycle we can't get rid of.  Revoked keyrings
+are cleared at revocation time and can't then be reused, so shouldn't be a
+problem either way.
+
+For possession determination, we *might* want to validate each keyring before
+searching it: do you possess a key that's hidden behind an expired or just
+plain inaccessible keyring?  Currently, the answer is yes.  Note that you
+cannot, however, possess a key behind a revoked keyring because they are
+cleared on revocation.
+
+keyring_search() sets DO_STATE_CHECK, which is correct.
+
+request_key_and_link() currently doesn't specify whether to check the key
+state or not - but it should set DO_STATE_CHECK.
+
+key_get_instantiation_authkey() also currently doesn't specify whether to
+check the key state or not - but it probably should also set DO_STATE_CHECK.
+
+Signed-off-by: David Howells <dhowells@redhat.com>
+Tested-by: Chuck Lever <chuck.lever@oracle.com>
+[carnil: Backported to 3.16: Adjust context]
+---
+ security/keys/keyring.c          | 7 ++++---
+ security/keys/request_key.c      | 1 +
+ security/keys/request_key_auth.c | 1 +
+ 3 files changed, 6 insertions(+), 3 deletions(-)
+
+--- a/security/keys/keyring.c
++++ b/security/keys/keyring.c
+@@ -609,6 +609,10 @@ static bool search_nested_keyrings(struc
+ 	       ctx->index_key.type->name,
+ 	       ctx->index_key.description);
+ 
++#define STATE_CHECKS (KEYRING_SEARCH_NO_STATE_CHECK | KEYRING_SEARCH_DO_STATE_CHECK)
++	BUG_ON((ctx->flags & STATE_CHECKS) == 0 ||
++	       (ctx->flags & STATE_CHECKS) == STATE_CHECKS);
++
+ 	if (ctx->index_key.description)
+ 		ctx->index_key.desc_len = strlen(ctx->index_key.description);
+ 
+@@ -618,7 +622,6 @@ static bool search_nested_keyrings(struc
+ 	if (ctx->flags & KEYRING_SEARCH_LOOKUP_ITERATE ||
+ 	    keyring_compare_object(keyring, &ctx->index_key)) {
+ 		ctx->skipped_ret = 2;
+-		ctx->flags |= KEYRING_SEARCH_DO_STATE_CHECK;
+ 		switch (ctx->iterator(keyring_key_to_ptr(keyring), ctx)) {
+ 		case 1:
+ 			goto found;
+@@ -630,8 +633,6 @@ static bool search_nested_keyrings(struc
+ 	}
+ 
+ 	ctx->skipped_ret = 0;
+-	if (ctx->flags & KEYRING_SEARCH_NO_STATE_CHECK)
+-		ctx->flags &= ~KEYRING_SEARCH_DO_STATE_CHECK;
+ 
+ 	/* Start processing a new keyring */
+ descend_to_keyring:
+--- a/security/keys/request_key.c
++++ b/security/keys/request_key.c
+@@ -536,7 +536,8 @@ struct key *request_key_and_link(struct
+ 		.cred			= current_cred(),
+ 		.match			= type->match,
+ 		.match_data		= description,
+-		.flags			= KEYRING_SEARCH_LOOKUP_DIRECT,
++		.flags			= (KEYRING_SEARCH_LOOKUP_DIRECT |
++					   KEYRING_SEARCH_DO_STATE_CHECK),
+ 	};
+ 	struct key *key;
+ 	key_ref_t key_ref;
+--- a/security/keys/request_key_auth.c
++++ b/security/keys/request_key_auth.c
+@@ -235,7 +235,8 @@ struct key *key_get_instantiation_authke
+ 		.cred			= current_cred(),
+ 		.match			= user_match,
+ 		.match_data		= description,
+-		.flags			= KEYRING_SEARCH_LOOKUP_DIRECT,
++		.flags			= (KEYRING_SEARCH_LOOKUP_DIRECT |
++					   KEYRING_SEARCH_DO_STATE_CHECK),
+ 	};
+ 	struct key *authkey;
+ 	key_ref_t authkey_ref;
