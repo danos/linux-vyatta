@@ -1,7 +1,7 @@
 From: Thomas Gleixner <tglx@linutronix.de>
 Date: Fri, 3 Jul 2009 08:44:56 -0500
 Subject: [PATCH 035/397] signals: Allow rt tasks to cache one sigqueue struct
-Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=a284f648c9617aa4b6b33f6bae2e6a1c448f080d
+Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=dd663e3522625fd442bf6fab2cf89ef207bf9305
 
 To avoid allocation allow rt tasks to cache one sigqueue struct in
 task struct.
@@ -15,6 +15,8 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  kernel/signal.c        | 83 +++++++++++++++++++++++++++++++++++++++++++++++---
  5 files changed, 83 insertions(+), 5 deletions(-)
 
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index abeb57c537be..d7f91166a110 100644
 --- a/include/linux/sched.h
 +++ b/include/linux/sched.h
 @@ -1400,6 +1400,7 @@ struct task_struct {
@@ -25,9 +27,11 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	sigset_t blocked, real_blocked;
  	sigset_t saved_sigmask;	/* restored if set_restore_sigmask() was used */
+diff --git a/include/linux/signal.h b/include/linux/signal.h
+index a822300a253b..a4489006a5bb 100644
 --- a/include/linux/signal.h
 +++ b/include/linux/signal.h
-@@ -229,6 +229,7 @@ static inline void init_sigpending(struc
+@@ -229,6 +229,7 @@ static inline void init_sigpending(struct sigpending *sig)
  }
  
  extern void flush_sigqueue(struct sigpending *queue);
@@ -35,9 +39,11 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  /* Test if 'sig' is valid signal. Use this instead of testing _NSIG directly */
  static inline int valid_signal(unsigned long sig)
+diff --git a/kernel/exit.c b/kernel/exit.c
+index ee5a8786c3d2..adb477acf4b3 100644
 --- a/kernel/exit.c
 +++ b/kernel/exit.c
-@@ -141,7 +141,7 @@ static void __exit_signal(struct task_st
+@@ -141,7 +141,7 @@ static void __exit_signal(struct task_struct *tsk)
  	 * Do this under ->siglock, we can race with another thread
  	 * doing sigqueue_free() if we have SIGQUEUE_PREALLOC signals.
  	 */
@@ -46,9 +52,11 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	tsk->sighand = NULL;
  	spin_unlock(&sighand->siglock);
  
+diff --git a/kernel/fork.c b/kernel/fork.c
+index 29b460431c12..24887a0fddad 100644
 --- a/kernel/fork.c
 +++ b/kernel/fork.c
-@@ -1138,6 +1138,7 @@ static struct task_struct *copy_process(
+@@ -1138,6 +1138,7 @@ static struct task_struct *copy_process(unsigned long clone_flags,
  	spin_lock_init(&p->alloc_lock);
  
  	init_sigpending(&p->pending);
@@ -56,9 +64,11 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  
  	p->utime = cputime_zero;
  	p->stime = cputime_zero;
+diff --git a/kernel/signal.c b/kernel/signal.c
+index e22067433293..91bb51d3bd01 100644
 --- a/kernel/signal.c
 +++ b/kernel/signal.c
-@@ -344,13 +344,45 @@ static bool task_participate_group_stop(
+@@ -344,13 +344,45 @@ static bool task_participate_group_stop(struct task_struct *task)
  	return false;
  }
  
@@ -105,7 +115,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  {
  	struct sigqueue *q = NULL;
  	struct user_struct *user;
-@@ -367,7 +399,10 @@ __sigqueue_alloc(int sig, struct task_st
+@@ -367,7 +399,10 @@ __sigqueue_alloc(int sig, struct task_struct *t, gfp_t flags, int override_rlimi
  	if (override_rlimit ||
  	    atomic_read(&user->sigpending) <=
  			task_rlimit(t, RLIMIT_SIGPENDING)) {
@@ -117,7 +127,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	} else {
  		print_dropped_signal(sig);
  	}
-@@ -384,6 +419,13 @@ __sigqueue_alloc(int sig, struct task_st
+@@ -384,6 +419,13 @@ __sigqueue_alloc(int sig, struct task_struct *t, gfp_t flags, int override_rlimi
  	return q;
  }
  
@@ -131,7 +141,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  static void __sigqueue_free(struct sigqueue *q)
  {
  	if (q->flags & SIGQUEUE_PREALLOC)
-@@ -393,6 +435,21 @@ static void __sigqueue_free(struct sigqu
+@@ -393,6 +435,21 @@ static void __sigqueue_free(struct sigqueue *q)
  	kmem_cache_free(sigqueue_cachep, q);
  }
  
@@ -153,10 +163,11 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  void flush_sigqueue(struct sigpending *queue)
  {
  	struct sigqueue *q;
-@@ -406,6 +463,21 @@ void flush_sigqueue(struct sigpending *q
+@@ -405,6 +462,21 @@ void flush_sigqueue(struct sigpending *queue)
+ 	}
  }
  
- /*
++/*
 + * Called from __exit_signal. Flush tsk->pending and
 + * tsk->sigqueue_cache
 + */
@@ -171,11 +182,10 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 +		kmem_cache_free(sigqueue_cachep, q);
 +}
 +
-+/*
+ /*
   * Flush all pending signals for a task.
   */
- void __flush_signals(struct task_struct *t)
-@@ -564,7 +636,7 @@ still_pending:
+@@ -564,7 +636,7 @@ static void collect_signal(int sig, struct sigpending *list, siginfo_t *info,
  			(info->si_code == SI_TIMER) &&
  			(info->si_sys_private);
  
@@ -184,7 +194,7 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  	} else {
  		/*
  		 * Ok, it wasn't in the queue.  This must be
-@@ -611,6 +683,8 @@ int dequeue_signal(struct task_struct *t
+@@ -611,6 +683,8 @@ int dequeue_signal(struct task_struct *tsk, sigset_t *mask, siginfo_t *info)
  	bool resched_timer = false;
  	int signr;
  
