@@ -1,0 +1,54 @@
+From: Jeff Layton <jlayton@primarydata.com>
+Date: Mon, 1 Sep 2014 14:27:43 -0400
+Subject: locks: remove i_have_this_lease check from __break_lease
+Origin: https://git.kernel.org/linus/843c6b2f4cef384af8e0de6b7ac7191675030e3a
+
+I think that the intent of this code was to ensure that a process won't
+deadlock if it has one fd open with a lease on it and then breaks that
+lease by opening another fd. In that case it'll treat the __break_lease
+call as if it were non-blocking.
+
+This seems wrong -- the process could (for instance) be multithreaded
+and managing different fds via different threads. I also don't see any
+mention of this limitation in the (somewhat sketchy) documentation.
+
+Remove the check and the non-blocking behavior when i_have_this_lease
+is true.
+
+Signed-off-by: Jeff Layton <jlayton@primarydata.com>
+[carnil: Backport for 3.16:
+ - adjust context
+]
+---
+ fs/locks.c | 6 ++----
+ 1 file changed, 2 insertions(+), 4 deletions(-)
+
+--- a/fs/locks.c
++++ b/fs/locks.c
+@@ -1326,7 +1326,6 @@ int __break_lease(struct inode *inode, u
+ 	struct file_lock *new_fl, *flock;
+ 	struct file_lock *fl;
+ 	unsigned long break_time;
+-	int i_have_this_lease = 0;
+ 	bool lease_conflict = false;
+ 	int want_write = (mode & O_ACCMODE) != O_RDONLY;
+ 
+@@ -1346,8 +1345,7 @@ int __break_lease(struct inode *inode, u
+ 	for (fl = flock; fl && IS_LEASE(fl); fl = fl->fl_next) {
+ 		if (leases_conflict(fl, new_fl)) {
+ 			lease_conflict = true;
+-			if (fl->fl_owner == current->files)
+-				i_have_this_lease = 1;
++			break;
+ 		}
+ 	}
+ 	if (!lease_conflict)
+@@ -1377,7 +1375,7 @@ int __break_lease(struct inode *inode, u
+ 		fl->fl_lmops->lm_break(fl);
+ 	}
+ 
+-	if (i_have_this_lease || (mode & O_NONBLOCK)) {
++	if (mode & O_NONBLOCK) {
+ 		trace_break_lease_noblock(inode, new_fl);
+ 		error = -EWOULDBLOCK;
+ 		goto out;
