@@ -1,0 +1,73 @@
+From: Andy Lutomirski <luto@kernel.org>
+Date: Tue, 26 Apr 2016 09:39:06 -0700
+Subject: sched/core: Add switch_mm_irqs_off() and use it in the  scheduler
+
+commit f98db6013c557c216da5038d9c52045be55cd039 upstream.
+
+By default, this is the same thing as switch_mm().
+
+x86 will override it as an optimization.
+
+Signed-off-by: Andy Lutomirski <luto@kernel.org>
+Reviewed-by: Borislav Petkov <bp@suse.de>
+Cc: Borislav Petkov <bp@alien8.de>
+Cc: Linus Torvalds <torvalds@linux-foundation.org>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Thomas Gleixner <tglx@linutronix.de>
+Link: http://lkml.kernel.org/r/df401df47bdd6be3e389c6f1e3f5310d70e81b2c.1461688545.git.luto@kernel.org
+Signed-off-by: Ingo Molnar <mingo@kernel.org>
+Signed-off-by: Hugh Dickins <hughd@google.com>
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+ include/linux/mmu_context.h | 7 +++++++
+ kernel/sched.c              | 6 +++---
+ 2 files changed, 10 insertions(+), 3 deletions(-)
+
+--- a/include/linux/mmu_context.h
++++ b/include/linux/mmu_context.h
+@@ -1,9 +1,16 @@
+ #ifndef _LINUX_MMU_CONTEXT_H
+ #define _LINUX_MMU_CONTEXT_H
+ 
++#include <asm/mmu_context.h>
++
+ struct mm_struct;
+ 
+ void use_mm(struct mm_struct *mm);
+ void unuse_mm(struct mm_struct *mm);
+ 
++/* Architectures that care about IRQ state in switch_mm can override this. */
++#ifndef switch_mm_irqs_off
++# define switch_mm_irqs_off switch_mm
++#endif
++
+ #endif
+--- a/kernel/sched.c
++++ b/kernel/sched.c
+@@ -32,7 +32,7 @@
+ #include <linux/init.h>
+ #include <linux/uaccess.h>
+ #include <linux/highmem.h>
+-#include <asm/mmu_context.h>
++#include <linux/mmu_context.h>
+ #include <linux/interrupt.h>
+ #include <linux/capability.h>
+ #include <linux/completion.h>
+@@ -3331,7 +3331,7 @@ context_switch(struct rq *rq, struct tas
+ 		atomic_inc(&oldmm->mm_count);
+ 		enter_lazy_tlb(oldmm, next);
+ 	} else
+-		switch_mm(oldmm, mm, next);
++		switch_mm_irqs_off(oldmm, mm, next);
+ 
+ 	if (!prev->mm) {
+ 		prev->active_mm = NULL;
+@@ -6553,7 +6553,7 @@ void idle_task_exit(void)
+ 	BUG_ON(cpu_online(smp_processor_id()));
+ 
+ 	if (mm != &init_mm)
+-		switch_mm(mm, &init_mm, current);
++		switch_mm_irqs_off(mm, &init_mm, current);
+ 	mmdrop(mm);
+ }
+ 

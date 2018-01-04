@@ -1,0 +1,131 @@
+From: Borislav Petkov <bp@suse.de>
+Date: Mon, 19 May 2014 20:59:16 +0200
+Subject: x86, boot: Carve out early cmdline parsing function
+
+commit 1b1ded57a4f2f4420b4de7c395d1b841d8b3c41a upstream.
+
+Carve out early cmdline parsing function into .../lib/cmdline.c so it
+can be used by early code in the kernel proper as well.
+
+Adapted from arch/x86/boot/cmdline.c.
+
+Signed-off-by: Borislav Petkov <bp@suse.de>
+Link: http://lkml.kernel.org/r/1400525957-11525-2-git-send-email-bp@alien8.de
+Signed-off-by: H. Peter Anvin <hpa@zytor.com>
+[bwh: Backported to 3.2: adjust context]
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+ arch/x86/include/asm/cmdline.h |  6 +++
+ arch/x86/lib/Makefile          |  2 +-
+ arch/x86/lib/cmdline.c         | 84 ++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 91 insertions(+), 1 deletion(-)
+ create mode 100644 arch/x86/include/asm/cmdline.h
+ create mode 100644 arch/x86/lib/cmdline.c
+
+--- /dev/null
++++ b/arch/x86/include/asm/cmdline.h
+@@ -0,0 +1,6 @@
++#ifndef _ASM_X86_CMDLINE_H
++#define _ASM_X86_CMDLINE_H
++
++int cmdline_find_option_bool(const char *cmdline_ptr, const char *option);
++
++#endif /* _ASM_X86_CMDLINE_H */
+--- a/arch/x86/lib/Makefile
++++ b/arch/x86/lib/Makefile
+@@ -16,7 +16,7 @@ clean-files := inat-tables.c
+ 
+ obj-$(CONFIG_SMP) += msr-smp.o cache-smp.o
+ 
+-lib-y := delay.o
++lib-y := delay.o cmdline.o
+ lib-y += thunk_$(BITS).o
+ lib-y += usercopy_$(BITS).o usercopy.o getuser.o putuser.o
+ lib-y += memcpy_$(BITS).o
+--- /dev/null
++++ b/arch/x86/lib/cmdline.c
+@@ -0,0 +1,84 @@
++/*
++ * This file is part of the Linux kernel, and is made available under
++ * the terms of the GNU General Public License version 2.
++ *
++ * Misc librarized functions for cmdline poking.
++ */
++#include <linux/kernel.h>
++#include <linux/string.h>
++#include <linux/ctype.h>
++#include <asm/setup.h>
++
++static inline int myisspace(u8 c)
++{
++	return c <= ' ';	/* Close enough approximation */
++}
++
++/**
++ * Find a boolean option (like quiet,noapic,nosmp....)
++ *
++ * @cmdline: the cmdline string
++ * @option: option string to look for
++ *
++ * Returns the position of that @option (starts counting with 1)
++ * or 0 on not found.
++ */
++int cmdline_find_option_bool(const char *cmdline, const char *option)
++{
++	char c;
++	int len, pos = 0, wstart = 0;
++	const char *opptr = NULL;
++	enum {
++		st_wordstart = 0,	/* Start of word/after whitespace */
++		st_wordcmp,	/* Comparing this word */
++		st_wordskip,	/* Miscompare, skip */
++	} state = st_wordstart;
++
++	if (!cmdline)
++		return -1;      /* No command line */
++
++	len = min_t(int, strlen(cmdline), COMMAND_LINE_SIZE);
++	if (!len)
++		return 0;
++
++	while (len--) {
++		c = *(char *)cmdline++;
++		pos++;
++
++		switch (state) {
++		case st_wordstart:
++			if (!c)
++				return 0;
++			else if (myisspace(c))
++				break;
++
++			state = st_wordcmp;
++			opptr = option;
++			wstart = pos;
++			/* fall through */
++
++		case st_wordcmp:
++			if (!*opptr)
++				if (!c || myisspace(c))
++					return wstart;
++				else
++					state = st_wordskip;
++			else if (!c)
++				return 0;
++			else if (c != *opptr++)
++				state = st_wordskip;
++			else if (!len)		/* last word and is matching */
++				return wstart;
++			break;
++
++		case st_wordskip:
++			if (!c)
++				return 0;
++			else if (myisspace(c))
++				state = st_wordstart;
++			break;
++		}
++	}
++
++	return 0;	/* Buffer overrun */
++}

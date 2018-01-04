@@ -1,0 +1,348 @@
+From: Borislav Petkov <bp@suse.de>
+Date: Sat, 27 Dec 2014 10:41:52 +0100
+Subject: x86/alternatives: Add instruction padding
+
+commit 4332195c5615bf748624094ce4ff6797e475024d upstream.
+
+Up until now we have always paid attention to make sure the length of
+the new instruction replacing the old one is at least less or equal to
+the length of the old instruction. If the new instruction is longer, at
+the time it replaces the old instruction it will overwrite the beginning
+of the next instruction in the kernel image and cause your pants to
+catch fire.
+
+So instead of having to pay attention, teach the alternatives framework
+to pad shorter old instructions with NOPs at buildtime - but only in the
+case when
+
+  len(old instruction(s)) < len(new instruction(s))
+
+and add nothing in the >= case. (In that case we do add_nops() when
+patching).
+
+This way the alternatives user shouldn't have to care about instruction
+sizes and simply use the macros.
+
+Add asm ALTERNATIVE* flavor macros too, while at it.
+
+Also, we need to save the pad length in a separate struct alt_instr
+member for NOP optimization and the way to do that reliably is to carry
+the pad length instead of trying to detect whether we're looking at
+single-byte NOPs or at pathological instruction offsets like e9 90 90 90
+90, for example, which is a valid instruction.
+
+Thanks to Michael Matz for the great help with toolchain questions.
+
+Signed-off-by: Borislav Petkov <bp@suse.de>
+Signed-off-by: Hugh Dickins <hughd@google.com>
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+ arch/x86/include/asm/alternative-asm.h | 43 +++++++++++++++++-
+ arch/x86/include/asm/alternative.h     | 80 ++++++++++++++++++++++++++--------
+ arch/x86/include/asm/cpufeature.h      |  4 +-
+ arch/x86/kernel/alternative.c          |  6 +--
+ arch/x86/kernel/entry_32.S             |  2 +-
+ arch/x86/lib/clear_page_64.S           |  4 +-
+ arch/x86/lib/copy_page_64.S            |  2 +-
+ arch/x86/lib/copy_user_64.S            |  4 +-
+ arch/x86/lib/memcpy_64.S               |  8 ++--
+ arch/x86/lib/memmove_64.S              |  2 +-
+ arch/x86/lib/memset_64.S               |  8 ++--
+ 11 files changed, 126 insertions(+), 37 deletions(-)
+
+--- a/arch/x86/include/asm/alternative-asm.h
++++ b/arch/x86/include/asm/alternative-asm.h
+@@ -15,12 +15,53 @@
+ 	.endm
+ #endif
+ 
+-.macro altinstruction_entry orig alt feature orig_len alt_len
++.macro altinstruction_entry orig alt feature orig_len alt_len pad_len
+ 	.long \orig - .
+ 	.long \alt - .
+ 	.word \feature
+ 	.byte \orig_len
+ 	.byte \alt_len
++	.byte \pad_len
++.endm
++
++.macro ALTERNATIVE oldinstr, newinstr, feature
++140:
++	\oldinstr
++141:
++	.skip -(((144f-143f)-(141b-140b)) > 0) * ((144f-143f)-(141b-140b)),0x90
++142:
++
++	.pushsection .altinstructions,"a"
++	altinstruction_entry 140b,143f,\feature,142b-140b,144f-143f,142b-141b
++	.popsection
++
++	.pushsection .altinstr_replacement,"ax"
++143:
++	\newinstr
++144:
++	.popsection
++.endm
++
++.macro ALTERNATIVE_2 oldinstr, newinstr1, feature1, newinstr2, feature2
++140:
++	\oldinstr
++141:
++	.skip -(((144f-143f)-(141b-140b)) > 0) * ((144f-143f)-(141b-140b)),0x90
++	.skip -(((145f-144f)-(144f-143f)-(141b-140b)) > 0) * ((145f-144f)-(144f-143f)-(141b-140b)),0x90
++142:
++
++	.pushsection .altinstructions,"a"
++	altinstruction_entry 140b,143f,\feature1,142b-140b,144f-143f,142b-141b
++	altinstruction_entry 140b,144f,\feature2,142b-140b,145f-144f,142b-141b
++	.popsection
++
++	.pushsection .altinstr_replacement,"ax"
++143:
++	\newinstr1
++144:
++	\newinstr2
++145:
++	.popsection
+ .endm
+ 
+ #endif  /*  __ASSEMBLY__  */
+--- a/arch/x86/include/asm/alternative.h
++++ b/arch/x86/include/asm/alternative.h
+@@ -47,8 +47,9 @@ struct alt_instr {
+ 	s32 repl_offset;	/* offset to replacement instruction */
+ 	u16 cpuid;		/* cpuid bit set for replacement */
+ 	u8  instrlen;		/* length of original instruction */
+-	u8  replacementlen;	/* length of new instruction, <= instrlen */
+-};
++	u8  replacementlen;	/* length of new instruction */
++	u8  padlen;		/* length of build-time padding */
++} __packed;
+ 
+ extern void alternative_instructions(void);
+ extern void apply_alternatives(struct alt_instr *start, struct alt_instr *end);
+@@ -75,23 +76,65 @@ static inline int alternatives_text_rese
+ }
+ #endif	/* CONFIG_SMP */
+ 
++#define b_replacement(num)	"664"#num
++#define e_replacement(num)	"665"#num
++
++#define alt_end_marker		"663"
++#define alt_slen		"662b-661b"
++#define alt_pad_len		alt_end_marker"b-662b"
++#define alt_total_slen		alt_end_marker"b-661b"
++#define alt_rlen(num)		e_replacement(num)"f-"b_replacement(num)"f"
++
++#define __OLDINSTR(oldinstr, num)					\
++	"661:\n\t" oldinstr "\n662:\n"					\
++	".skip -(((" alt_rlen(num) ")-(" alt_slen ")) > 0) * "		\
++		"((" alt_rlen(num) ")-(" alt_slen ")),0x90\n"
++
++#define OLDINSTR(oldinstr, num)						\
++	__OLDINSTR(oldinstr, num)					\
++	alt_end_marker ":\n"
++
++/*
++ * Pad the second replacement alternative with additional NOPs if it is
++ * additionally longer than the first replacement alternative.
++ */
++#define OLDINSTR_2(oldinstr, num1, num2)					\
++	__OLDINSTR(oldinstr, num1)						\
++	".skip -(((" alt_rlen(num2) ")-(" alt_rlen(num1) ")-(662b-661b)) > 0) * " \
++		"((" alt_rlen(num2) ")-(" alt_rlen(num1) ")-(662b-661b)),0x90\n"  \
++	alt_end_marker ":\n"
++
++#define ALTINSTR_ENTRY(feature, num)					      \
++	" .long 661b - .\n"				/* label           */ \
++	" .long " b_replacement(num)"f - .\n"		/* new instruction */ \
++	" .word " __stringify(feature) "\n"		/* feature bit     */ \
++	" .byte " alt_total_slen "\n"			/* source len      */ \
++	" .byte " alt_rlen(num) "\n"			/* replacement len */ \
++	" .byte " alt_pad_len "\n"			/* pad len */
++
++#define ALTINSTR_REPLACEMENT(newinstr, feature, num)	/* replacement */     \
++	b_replacement(num)":\n\t" newinstr "\n" e_replacement(num) ":\n\t"
++
+ /* alternative assembly primitive: */
+ #define ALTERNATIVE(oldinstr, newinstr, feature)			\
+-									\
+-      "661:\n\t" oldinstr "\n662:\n"					\
+-      ".section .altinstructions,\"a\"\n"				\
+-      "	 .long 661b - .\n"			/* label           */	\
+-      "	 .long 663f - .\n"			/* new instruction */	\
+-      "	 .word " __stringify(feature) "\n"	/* feature bit     */	\
+-      "	 .byte 662b-661b\n"			/* sourcelen       */	\
+-      "	 .byte 664f-663f\n"			/* replacementlen  */	\
+-      ".previous\n"							\
+-      ".section .discard,\"aw\",@progbits\n"				\
+-      "	 .byte 0xff + (664f-663f) - (662b-661b)\n" /* rlen <= slen */	\
+-      ".previous\n"							\
+-      ".section .altinstr_replacement, \"ax\"\n"			\
+-      "663:\n\t" newinstr "\n664:\n"		/* replacement     */	\
+-      ".previous"
++	OLDINSTR(oldinstr, 1)						\
++	".pushsection .altinstructions,\"a\"\n"				\
++	ALTINSTR_ENTRY(feature, 1)					\
++	".popsection\n"							\
++	".pushsection .altinstr_replacement, \"ax\"\n"			\
++	ALTINSTR_REPLACEMENT(newinstr, feature, 1)			\
++	".popsection"
++
++#define ALTERNATIVE_2(oldinstr, newinstr1, feature1, newinstr2, feature2)\
++	OLDINSTR_2(oldinstr, 1, 2)					\
++	".pushsection .altinstructions,\"a\"\n"				\
++	ALTINSTR_ENTRY(feature1, 1)					\
++	ALTINSTR_ENTRY(feature2, 2)					\
++	".popsection\n"							\
++	".pushsection .altinstr_replacement, \"ax\"\n"			\
++	ALTINSTR_REPLACEMENT(newinstr1, feature1, 1)			\
++	ALTINSTR_REPLACEMENT(newinstr2, feature2, 2)			\
++	".popsection"
+ 
+ /*
+  * This must be included *after* the definition of ALTERNATIVE due to
+@@ -114,6 +157,9 @@ static inline int alternatives_text_rese
+ #define alternative(oldinstr, newinstr, feature)			\
+ 	asm volatile (ALTERNATIVE(oldinstr, newinstr, feature) : : : "memory")
+ 
++#define alternative_2(oldinstr, newinstr1, feature1, newinstr2, feature2) \
++	asm volatile(ALTERNATIVE_2(oldinstr, newinstr1, feature1, newinstr2, feature2) ::: "memory")
++
+ /*
+  * Alternative inline assembly with input.
+  *
+--- a/arch/x86/include/asm/cpufeature.h
++++ b/arch/x86/include/asm/cpufeature.h
+@@ -339,7 +339,7 @@ extern const char * const x86_power_flag
+  */
+ static __always_inline __pure bool __static_cpu_has(u16 bit)
+ {
+-#if __GNUC__ > 4 || __GNUC_MINOR__ >= 5
++#ifdef CC_HAVE_ASM_GOTO
+ 		asm_volatile_goto("1: jmp %l[t_no]\n"
+ 			 "2:\n"
+ 			 ".section .altinstructions,\"a\"\n"
+@@ -348,6 +348,7 @@ static __always_inline __pure bool __sta
+ 			 " .word %P0\n"		/* feature bit */
+ 			 " .byte 2b - 1b\n"	/* source len */
+ 			 " .byte 0\n"		/* replacement len */
++			 " .byte 0\n"		/* pad len */
+ 			 ".previous\n"
+ 			 /* skipping size check since replacement size = 0 */
+ 			 : : "i" (bit) : : t_no);
+@@ -365,6 +366,7 @@ static __always_inline __pure bool __sta
+ 			     " .word %P1\n"		/* feature bit */
+ 			     " .byte 2b - 1b\n"		/* source len */
+ 			     " .byte 4f - 3f\n"		/* replacement len */
++			     " .byte 0\n"		/* pad len */
+ 			     ".previous\n"
+ 			     ".section .discard,\"aw\",@progbits\n"
+ 			     " .byte 0xff + (4f-3f) - (2b-1b)\n" /* size check */
+--- a/arch/x86/kernel/alternative.c
++++ b/arch/x86/kernel/alternative.c
+@@ -281,7 +281,6 @@ void __init_or_module apply_alternatives
+ 	for (a = start; a < end; a++) {
+ 		instr = (u8 *)&a->instr_offset + a->instr_offset;
+ 		replacement = (u8 *)&a->repl_offset + a->repl_offset;
+-		BUG_ON(a->replacementlen > a->instrlen);
+ 		BUG_ON(a->instrlen > sizeof(insnbuf));
+ 		BUG_ON(a->cpuid >= NCAPINTS*32);
+ 		if (!boot_cpu_has(a->cpuid))
+@@ -301,8 +300,9 @@ void __init_or_module apply_alternatives
+ 			DPRINTK("Fix CALL offset: 0x%x", *(s32 *)(insnbuf + 1));
+ 		}
+ 
+-		add_nops(insnbuf + a->replacementlen,
+-			 a->instrlen - a->replacementlen);
++		if (a->instrlen > a->replacementlen)
++			add_nops(insnbuf + a->replacementlen,
++				 a->instrlen - a->replacementlen);
+ 
+ 		text_poke_early(instr, insnbuf, a->instrlen);
+ 	}
+--- a/arch/x86/kernel/entry_32.S
++++ b/arch/x86/kernel/entry_32.S
+@@ -887,7 +887,7 @@ ENTRY(simd_coprocessor_error)
+ 661:	pushl_cfi $do_general_protection
+ 662:
+ .section .altinstructions,"a"
+-	altinstruction_entry 661b, 663f, X86_FEATURE_XMM, 662b-661b, 664f-663f
++	altinstruction_entry 661b, 663f, X86_FEATURE_XMM, 662b-661b, 664f-663f, 0
+ .previous
+ .section .altinstr_replacement,"ax"
+ 663:	pushl $do_simd_coprocessor_error
+--- a/arch/x86/lib/clear_page_64.S
++++ b/arch/x86/lib/clear_page_64.S
+@@ -67,7 +67,7 @@ ENDPROC(clear_page)
+ 	.previous
+ 	.section .altinstructions,"a"
+ 	altinstruction_entry clear_page,1b,X86_FEATURE_REP_GOOD,\
+-			     .Lclear_page_end-clear_page, 2b-1b
++			     .Lclear_page_end-clear_page, 2b-1b, 0
+ 	altinstruction_entry clear_page,2b,X86_FEATURE_ERMS,   \
+-			     .Lclear_page_end-clear_page,3b-2b
++			     .Lclear_page_end-clear_page,3b-2b, 0
+ 	.previous
+--- a/arch/x86/lib/copy_page_64.S
++++ b/arch/x86/lib/copy_page_64.S
+@@ -112,5 +112,5 @@ ENDPROC(copy_page)
+ 	.previous
+ 	.section .altinstructions,"a"
+ 	altinstruction_entry copy_page, 1b, X86_FEATURE_REP_GOOD,	\
+-		.Lcopy_page_end-copy_page, 2b-1b
++		.Lcopy_page_end-copy_page, 2b-1b, 0
+ 	.previous
+--- a/arch/x86/lib/copy_user_64.S
++++ b/arch/x86/lib/copy_user_64.S
+@@ -37,8 +37,8 @@
+ 	.previous
+ 
+ 	.section .altinstructions,"a"
+-	altinstruction_entry 0b,2b,\feature1,5,5
+-	altinstruction_entry 0b,3b,\feature2,5,5
++	altinstruction_entry 0b,2b,\feature1,5,5,0
++	altinstruction_entry 0b,3b,\feature2,5,5,0
+ 	.previous
+ 	.endm
+ 
+--- a/arch/x86/lib/memcpy_64.S
++++ b/arch/x86/lib/memcpy_64.S
+@@ -203,8 +203,8 @@ ENDPROC(__memcpy)
+ 	 * only outcome...
+ 	 */
+ 	.section .altinstructions, "a"
+-	altinstruction_entry memcpy,.Lmemcpy_c,X86_FEATURE_REP_GOOD,\
+-			     .Lmemcpy_e-.Lmemcpy_c,.Lmemcpy_e-.Lmemcpy_c
+-	altinstruction_entry memcpy,.Lmemcpy_c_e,X86_FEATURE_ERMS, \
+-			     .Lmemcpy_e_e-.Lmemcpy_c_e,.Lmemcpy_e_e-.Lmemcpy_c_e
++	altinstruction_entry __memcpy,.Lmemcpy_c,X86_FEATURE_REP_GOOD,\
++			     .Lmemcpy_e-.Lmemcpy_c,.Lmemcpy_e-.Lmemcpy_c,0
++	altinstruction_entry __memcpy,.Lmemcpy_c_e,X86_FEATURE_ERMS, \
++			     .Lmemcpy_e_e-.Lmemcpy_c_e,.Lmemcpy_e_e-.Lmemcpy_c_e,0
+ 	.previous
+--- a/arch/x86/lib/memmove_64.S
++++ b/arch/x86/lib/memmove_64.S
+@@ -218,6 +218,6 @@ ENTRY(memmove)
+ 	altinstruction_entry .Lmemmove_begin_forward,		\
+ 		.Lmemmove_begin_forward_efs,X86_FEATURE_ERMS,	\
+ 		.Lmemmove_end_forward-.Lmemmove_begin_forward,	\
+-		.Lmemmove_end_forward_efs-.Lmemmove_begin_forward_efs
++		.Lmemmove_end_forward_efs-.Lmemmove_begin_forward_efs,0
+ 	.previous
+ ENDPROC(memmove)
+--- a/arch/x86/lib/memset_64.S
++++ b/arch/x86/lib/memset_64.S
+@@ -150,8 +150,8 @@ ENDPROC(__memset)
+          * feature to implement the right patch order.
+ 	 */
+ 	.section .altinstructions,"a"
+-	altinstruction_entry memset,.Lmemset_c,X86_FEATURE_REP_GOOD,\
+-			     .Lfinal-memset,.Lmemset_e-.Lmemset_c
+-	altinstruction_entry memset,.Lmemset_c_e,X86_FEATURE_ERMS, \
+-			     .Lfinal-memset,.Lmemset_e_e-.Lmemset_c_e
++	altinstruction_entry __memset,.Lmemset_c,X86_FEATURE_REP_GOOD,\
++			     .Lfinal-__memset,.Lmemset_e-.Lmemset_c,0
++	altinstruction_entry __memset,.Lmemset_c_e,X86_FEATURE_ERMS, \
++			     .Lfinal-__memset,.Lmemset_e_e-.Lmemset_c_e,0
+ 	.previous

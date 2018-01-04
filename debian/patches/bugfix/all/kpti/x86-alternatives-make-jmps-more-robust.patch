@@ -1,0 +1,257 @@
+From: Borislav Petkov <bp@suse.de>
+Date: Mon, 5 Jan 2015 13:48:41 +0100
+Subject: x86/alternatives: Make JMPs more robust
+
+commit 48c7a2509f9e237d8465399d9cdfe487d3212a23 upstream.
+
+Up until now we had to pay attention to relative JMPs in alternatives
+about how their relative offset gets computed so that the jump target
+is still correct. Or, as it is the case for near CALLs (opcode e8), we
+still have to go and readjust the offset at patching time.
+
+What is more, the static_cpu_has_safe() facility had to forcefully
+generate 5-byte JMPs since we couldn't rely on the compiler to generate
+properly sized ones so we had to force the longest ones. Worse than
+that, sometimes it would generate a replacement JMP which is longer than
+the original one, thus overwriting the beginning of the next instruction
+at patching time.
+
+So, in order to alleviate all that and make using JMPs more
+straight-forward we go and pad the original instruction in an
+alternative block with NOPs at build time, should the replacement(s) be
+longer. This way, alternatives users shouldn't pay special attention
+so that original and replacement instruction sizes are fine but the
+assembler would simply add padding where needed and not do anything
+otherwise.
+
+As a second aspect, we go and recompute JMPs at patching time so that we
+can try to make 5-byte JMPs into two-byte ones if possible. If not, we
+still have to recompute the offsets as the replacement JMP gets put far
+away in the .altinstr_replacement section leading to a wrong offset if
+copied verbatim.
+
+For example, on a locally generated kernel image
+
+  old insn VA: 0xffffffff810014bd, CPU feat: X86_FEATURE_ALWAYS, size: 2
+  __switch_to:
+   ffffffff810014bd:      eb 21                   jmp ffffffff810014e0
+  repl insn: size: 5
+  ffffffff81d0b23c:       e9 b1 62 2f ff          jmpq ffffffff810014f2
+
+gets corrected to a 2-byte JMP:
+
+  apply_alternatives: feat: 3*32+21, old: (ffffffff810014bd, len: 2), repl: (ffffffff81d0b23c, len: 5)
+  alt_insn: e9 b1 62 2f ff
+  recompute_jumps: next_rip: ffffffff81d0b241, tgt_rip: ffffffff810014f2, new_displ: 0x00000033, ret len: 2
+  converted to: eb 33 90 90 90
+
+and a 5-byte JMP:
+
+  old insn VA: 0xffffffff81001516, CPU feat: X86_FEATURE_ALWAYS, size: 2
+  __switch_to:
+   ffffffff81001516:      eb 30                   jmp ffffffff81001548
+  repl insn: size: 5
+   ffffffff81d0b241:      e9 10 63 2f ff          jmpq ffffffff81001556
+
+gets shortened into a two-byte one:
+
+  apply_alternatives: feat: 3*32+21, old: (ffffffff81001516, len: 2), repl: (ffffffff81d0b241, len: 5)
+  alt_insn: e9 10 63 2f ff
+  recompute_jumps: next_rip: ffffffff81d0b246, tgt_rip: ffffffff81001556, new_displ: 0x0000003e, ret len: 2
+  converted to: eb 3e 90 90 90
+
+... and so on.
+
+This leads to a net win of around
+
+40ish replacements * 3 bytes savings =~ 120 bytes of I$
+
+on an AMD guest which means some savings of precious instruction cache
+bandwidth. The padding to the shorter 2-byte JMPs are single-byte NOPs
+which on smart microarchitectures means discarding NOPs at decode time
+and thus freeing up execution bandwidth.
+
+Signed-off-by: Borislav Petkov <bp@suse.de>
+Signed-off-by: Hugh Dickins <hughd@google.com>
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+ arch/x86/kernel/alternative.c | 103 ++++++++++++++++++++++++++++++++++++++++--
+ arch/x86/lib/copy_user_64.S   |  11 ++---
+ 2 files changed, 103 insertions(+), 11 deletions(-)
+
+--- a/arch/x86/kernel/alternative.c
++++ b/arch/x86/kernel/alternative.c
+@@ -69,6 +69,21 @@ do {									\
+ 		printk(KERN_DEBUG "%s: " fmt "\n", __func__, ##args);	\
+ } while (0)
+ 
++#define DUMP_BYTES(buf, len, fmt, args...)				\
++do {									\
++	if (unlikely(debug_alternative)) {				\
++		int j;							\
++									\
++		if (!(len))						\
++			break;						\
++									\
++		printk(KERN_DEBUG fmt, ##args);				\
++		for (j = 0; j < (len) - 1; j++)				\
++			printk(KERN_CONT "%02hhx ", buf[j]);		\
++		printk(KERN_CONT "%02hhx\n", buf[j]);			\
++	}								\
++} while (0)
++
+ /*
+  * Each GENERIC_NOPX is of X bytes, and defined as an array of bytes
+  * that correspond to that nop. Getting from one nop to the next, we
+@@ -255,6 +270,71 @@ extern s32 __smp_locks[], __smp_locks_en
+ void *text_poke_early(void *addr, const void *opcode, size_t len);
+ 
+ /*
++ * Are we looking at a near JMP with a 1 or 4-byte displacement.
++ */
++static inline bool is_jmp(const u8 opcode)
++{
++	return opcode == 0xeb || opcode == 0xe9;
++}
++
++static void __init_or_module
++recompute_jump(struct alt_instr *a, u8 *orig_insn, u8 *repl_insn, u8 *insnbuf)
++{
++	u8 *next_rip, *tgt_rip;
++	s32 n_dspl, o_dspl;
++	int repl_len;
++
++	if (a->replacementlen != 5)
++		return;
++
++	o_dspl = *(s32 *)(insnbuf + 1);
++
++	/* next_rip of the replacement JMP */
++	next_rip = repl_insn + a->replacementlen;
++	/* target rip of the replacement JMP */
++	tgt_rip  = next_rip + o_dspl;
++	n_dspl = tgt_rip - orig_insn;
++
++	DPRINTK("target RIP: %p, new_displ: 0x%x", tgt_rip, n_dspl);
++
++	if (tgt_rip - orig_insn >= 0) {
++		if (n_dspl - 2 <= 127)
++			goto two_byte_jmp;
++		else
++			goto five_byte_jmp;
++	/* negative offset */
++	} else {
++		if (((n_dspl - 2) & 0xff) == (n_dspl - 2))
++			goto two_byte_jmp;
++		else
++			goto five_byte_jmp;
++	}
++
++two_byte_jmp:
++	n_dspl -= 2;
++
++	insnbuf[0] = 0xeb;
++	insnbuf[1] = (s8)n_dspl;
++	add_nops(insnbuf + 2, 3);
++
++	repl_len = 2;
++	goto done;
++
++five_byte_jmp:
++	n_dspl -= 5;
++
++	insnbuf[0] = 0xe9;
++	*(s32 *)&insnbuf[1] = n_dspl;
++
++	repl_len = 5;
++
++done:
++
++	DPRINTK("final displ: 0x%08x, JMP 0x%lx",
++		n_dspl, (unsigned long)orig_insn + n_dspl + repl_len);
++}
++
++/*
+  * Replace instructions with better alternatives for this CPU type. This runs
+  * before SMP is initialized to avoid SMP problems with self modifying code.
+  * This implies that asymmetric systems where APs have less capabilities than
+@@ -279,6 +359,8 @@ void __init_or_module apply_alternatives
+ 	 * order.
+ 	 */
+ 	for (a = start; a < end; a++) {
++		int insnbuf_sz = 0;
++
+ 		instr = (u8 *)&a->instr_offset + a->instr_offset;
+ 		replacement = (u8 *)&a->repl_offset + a->repl_offset;
+ 		BUG_ON(a->instrlen > sizeof(insnbuf));
+@@ -292,24 +374,35 @@ void __init_or_module apply_alternatives
+ 			instr, a->instrlen,
+ 			replacement, a->replacementlen);
+ 
++		DUMP_BYTES(instr, a->instrlen, "%p: old_insn: ", instr);
++		DUMP_BYTES(replacement, a->replacementlen, "%p: rpl_insn: ", replacement);
++
+ 		memcpy(insnbuf, replacement, a->replacementlen);
++		insnbuf_sz = a->replacementlen;
+ 
+ 		/* 0xe8 is a relative jump; fix the offset. */
+ 		if (*insnbuf == 0xe8 && a->replacementlen == 5) {
+ 			*(s32 *)(insnbuf + 1) += replacement - instr;
+-			DPRINTK("Fix CALL offset: 0x%x", *(s32 *)(insnbuf + 1));
++			DPRINTK("Fix CALL offset: 0x%x, CALL 0x%lx",
++				*(s32 *)(insnbuf + 1),
++				(unsigned long)instr + *(s32 *)(insnbuf + 1) + 5);
+ 		}
+ 
+-		if (a->instrlen > a->replacementlen)
++		if (a->replacementlen && is_jmp(replacement[0]))
++			recompute_jump(a, instr, replacement, insnbuf);
++
++		if (a->instrlen > a->replacementlen) {
+ 			add_nops(insnbuf + a->replacementlen,
+ 				 a->instrlen - a->replacementlen);
++			insnbuf_sz += a->instrlen - a->replacementlen;
++		}
++		DUMP_BYTES(insnbuf, insnbuf_sz, "%p: final_insn: ", instr);
+ 
+-		text_poke_early(instr, insnbuf, a->instrlen);
++		text_poke_early(instr, insnbuf, insnbuf_sz);
+ 	}
+ }
+ 
+ #ifdef CONFIG_SMP
+-
+ static void alternatives_smp_lock(const s32 *start, const s32 *end,
+ 				  u8 *text, u8 *text_end)
+ {
+@@ -495,7 +588,7 @@ int alternatives_text_reserved(void *sta
+ 
+ 	return 0;
+ }
+-#endif
++#endif /* CONFIG_SMP */
+ 
+ #ifdef CONFIG_PARAVIRT
+ void __init_or_module apply_paravirt(struct paravirt_patch_site *start,
+--- a/arch/x86/lib/copy_user_64.S
++++ b/arch/x86/lib/copy_user_64.S
+@@ -26,14 +26,13 @@
+  */
+ 	.macro ALTERNATIVE_JUMP feature1,feature2,orig,alt1,alt2
+ 0:
+-	.byte 0xe9	/* 32bit jump */
+-	.long \orig-1f	/* by default jump to orig */
++	jmp \orig
+ 1:
+ 	.section .altinstr_replacement,"ax"
+-2:	.byte 0xe9			/* near jump with 32bit immediate */
+-	.long \alt1-1b /* offset */   /* or alternatively to alt1 */
+-3:	.byte 0xe9			/* near jump with 32bit immediate */
+-	.long \alt2-1b /* offset */   /* or alternatively to alt2 */
++2:
++	jmp \alt1
++3:
++	jmp \alt2
+ 	.previous
+ 
+ 	.section .altinstructions,"a"

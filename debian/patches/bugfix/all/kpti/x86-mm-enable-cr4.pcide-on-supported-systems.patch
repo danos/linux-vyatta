@@ -1,0 +1,135 @@
+From: Andy Lutomirski <luto@kernel.org>
+Date: Thu, 29 Jun 2017 08:53:21 -0700
+Subject: x86/mm: Enable CR4.PCIDE on supported systems
+
+commit 660da7c9228f685b2ebe664f9fd69aaddcc420b5 upstream.
+
+We can use PCID if the CPU has PCID and PGE and we're not on Xen.
+
+By itself, this has no effect. A followup patch will start using PCID.
+
+Signed-off-by: Andy Lutomirski <luto@kernel.org>
+Reviewed-by: Nadav Amit <nadav.amit@gmail.com>
+Reviewed-by: Boris Ostrovsky <boris.ostrovsky@oracle.com>
+Reviewed-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: Andrew Morton <akpm@linux-foundation.org>
+Cc: Arjan van de Ven <arjan@linux.intel.com>
+Cc: Borislav Petkov <bp@alien8.de>
+Cc: Dave Hansen <dave.hansen@intel.com>
+Cc: Juergen Gross <jgross@suse.com>
+Cc: Linus Torvalds <torvalds@linux-foundation.org>
+Cc: Mel Gorman <mgorman@suse.de>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Rik van Riel <riel@redhat.com>
+Cc: linux-mm@kvack.org
+Link: http://lkml.kernel.org/r/6327ecd907b32f79d5aa0d466f04503bbec5df88.1498751203.git.luto@kernel.org
+Signed-off-by: Ingo Molnar <mingo@kernel.org>
+[Hugh Dickins: Backported to 3.2:
+ - arch/x86/xen/enlighten_pv.c (not in this tree)
+ - arch/x86/xen/enlighten.c (patched instead of that)]
+Signed-off-by: Hugh Dickins <hughd@google.com>
+[Borislav Petkov: Fix bad backport to disable PCID on Xen]
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+ arch/x86/include/asm/processor-flags.h |  1 +
+ arch/x86/include/asm/tlbflush.h        |  8 ++++++++
+ arch/x86/kernel/cpu/common.c           | 31 ++++++++++++++++++++++++++-----
+ arch/x86/xen/enlighten.c               |  6 ++++++
+ 4 files changed, 41 insertions(+), 5 deletions(-)
+
+--- a/arch/x86/include/asm/processor-flags.h
++++ b/arch/x86/include/asm/processor-flags.h
+@@ -60,6 +60,7 @@
+ #define X86_CR4_OSXMMEXCPT 0x00000400 /* enable unmasked SSE exceptions */
+ #define X86_CR4_VMXE	0x00002000 /* enable VMX virtualization */
+ #define X86_CR4_RDWRGSFS 0x00010000 /* enable RDWRGSFS support */
++#define X86_CR4_PCIDE	0x00020000 /* enable PCID support */
+ #define X86_CR4_OSXSAVE 0x00040000 /* enable xsave and xrestore */
+ #define X86_CR4_SMEP	0x00100000 /* enable SMEP support */
+ 
+--- a/arch/x86/include/asm/tlbflush.h
++++ b/arch/x86/include/asm/tlbflush.h
+@@ -117,6 +117,14 @@ static inline void __flush_tlb_all(void)
+ 		__flush_tlb_global();
+ 	else
+ 		__flush_tlb();
++
++	/*
++	 * Note: if we somehow had PCID but not PGE, then this wouldn't work --
++	 * we'd end up flushing kernel translations for the current ASID but
++	 * we might fail to flush kernel translations for other cached ASIDs.
++	 *
++	 * To avoid this issue, we force PCID off if PGE is off.
++	 */
+ }
+ 
+ static inline void __flush_tlb_one(unsigned long addr)
+--- a/arch/x86/kernel/cpu/common.c
++++ b/arch/x86/kernel/cpu/common.c
+@@ -310,6 +310,29 @@ static __cpuinit void setup_smep(struct
+ 	}
+ }
+ 
++static void setup_pcid(struct cpuinfo_x86 *c)
++{
++	if (cpu_has(c, X86_FEATURE_PCID)) {
++		if (cpu_has(c, X86_FEATURE_PGE) && IS_ENABLED(CONFIG_X86_64)) {
++			/*
++			 * Regardless of whether PCID is enumerated, the
++			 * SDM says that it can't be enabled in 32-bit mode.
++			 */
++			set_in_cr4(X86_CR4_PCIDE);
++		} else {
++			/*
++			 * flush_tlb_all(), as currently implemented, won't
++			 * work if PCID is on but PGE is not.  Since that
++			 * combination doesn't exist on real hardware, there's
++			 * no reason to try to fully support it, but it's
++			 * polite to avoid corrupting data if we're on
++			 * an improperly configured VM.
++			 */
++			clear_cpu_cap(c, X86_FEATURE_PCID);
++		}
++	}
++}
++
+ /*
+  * Some CPU features depend on higher CPUID levels, which may not always
+  * be available due to CPUID level capping or broken virtualization
+@@ -867,6 +890,9 @@ static void __cpuinit identify_cpu(struc
+ 	/* Disable the PN if appropriate */
+ 	squash_the_stupid_serial_number(c);
+ 
++	/* Set up PCID */
++	setup_pcid(c);
++
+ 	/*
+ 	 * The vendor-specific functions might have changed features.
+ 	 * Now we do "generic changes."
+@@ -952,11 +978,6 @@ void __cpuinit identify_secondary_cpu(st
+ 	BUG_ON(c == &boot_cpu_data);
+ 	identify_cpu(c);
+ #ifdef CONFIG_X86_32
+-	/*
+-	 * Regardless of whether PCID is enumerated, the SDM says
+-	 * that it can't be enabled in 32-bit mode.
+-	 */
+-	clear_cpu_cap(c, X86_FEATURE_PCID);
+ 	enable_sep_cpu();
+ #endif
+ 	mtrr_ap_init();
+--- a/arch/x86/xen/enlighten.c
++++ b/arch/x86/xen/enlighten.c
+@@ -270,6 +270,12 @@ static void __init xen_init_cpuid_mask(v
+ 		  (1 << X86_FEATURE_MTRR) |  /* disable MTRR */
+ 		  (1 << X86_FEATURE_ACC));   /* thermal monitoring */
+ 
++	/*
++	 * Xen PV would need some work to support PCID: CR3 handling as well
++	 * as xen_flush_tlb_others() would need updating.
++	 */
++	cpuid_leaf1_ecx_mask &= ~(1 << (X86_FEATURE_PCID % 32));  /* disable PCID */
++
+ 	if (!xen_initial_domain())
+ 		cpuid_leaf1_edx_mask &=
+ 			~((1 << X86_FEATURE_APIC) |  /* disable local APIC */

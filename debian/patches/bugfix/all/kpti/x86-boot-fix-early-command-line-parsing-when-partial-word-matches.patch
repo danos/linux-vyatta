@@ -1,0 +1,100 @@
+From: Dave Hansen <dave.hansen@linux.intel.com>
+Date: Tue, 22 Dec 2015 14:52:39 -0800
+Subject: x86/boot: Fix early command-line parsing when partial  word matches
+
+commit abcdc1c694fa4055323cbec1cde4c2cb6b68398c upstream.
+
+cmdline_find_option_bool() keeps track of position in two strings:
+
+ 1. the command-line
+ 2. the option we are searchign for in the command-line
+
+We plow through each character in the command-line one at a time, always
+moving forward. We move forward in the option ('opptr') when we match
+characters in 'cmdline'. We reset the 'opptr' only when we go in to the
+'st_wordstart' state.
+
+But, if we fail to match an option because we see a space
+(state=st_wordcmp, *opptr='\0',c=' '), we set state='st_wordskip' and
+'break', moving to the next character. But, that move to the next
+character is the one *after* the ' '. This means that we will miss a
+'st_wordstart' state.
+
+For instance, if we have
+
+  cmdline = "foo fool";
+
+and are searching for "fool", we have:
+
+	  "fool"
+  opptr = ----^
+
+           "foo fool"
+   c = --------^
+
+We see that 'l' != ' ', set state=st_wordskip, break, and then move 'c', so:
+
+          "foo fool"
+  c = ---------^
+
+and are still in state=st_wordskip. We will stay in wordskip until we
+have skipped "fool", thus missing the option we were looking for. This
+*only* happens when you have a partially- matching word followed by a
+matching one.
+
+To fix this, we always fall *into* the 'st_wordskip' state when we set
+it.
+
+Signed-off-by: Dave Hansen <dave.hansen@linux.intel.com>
+Signed-off-by: Borislav Petkov <bp@suse.de>
+Cc: Andy Lutomirski <luto@amacapital.net>
+Cc: Borislav Petkov <bp@alien8.de>
+Cc: Brian Gerst <brgerst@gmail.com>
+Cc: Denys Vlasenko <dvlasenk@redhat.com>
+Cc: H. Peter Anvin <hpa@zytor.com>
+Cc: Linus Torvalds <torvalds@linux-foundation.org>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Thomas Gleixner <tglx@linutronix.de>
+Cc: fenghua.yu@intel.com
+Cc: yu-cheng.yu@intel.com
+Link: http://lkml.kernel.org/r/20151222225239.8E1DCA58@viggo.jf.intel.com
+Signed-off-by: Ingo Molnar <mingo@kernel.org>
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+ arch/x86/lib/cmdline.c | 18 +++++++++++++-----
+ 1 file changed, 13 insertions(+), 5 deletions(-)
+
+--- a/arch/x86/lib/cmdline.c
++++ b/arch/x86/lib/cmdline.c
+@@ -72,18 +72,26 @@ int cmdline_find_option_bool(const char
+ 				 */
+ 				if (!c || myisspace(c))
+ 					return wstart;
+-				else
+-					state = st_wordskip;
++				/*
++				 * We hit the end of the option, but _not_
++				 * the end of a word on the cmdline.  Not
++				 * a match.
++				 */
+ 			} else if (!c) {
+ 				/*
+ 				 * Hit the NULL terminator on the end of
+ 				 * cmdline.
+ 				 */
+ 				return 0;
+-			} else if (c != *opptr++) {
+-				state = st_wordskip;
++			} else if (c == *opptr++) {
++				/*
++				 * We are currently matching, so continue
++				 * to the next character on the cmdline.
++				 */
++				break;
+ 			}
+-			break;
++			state = st_wordskip;
++			/* fall through */
+ 
+ 		case st_wordskip:
+ 			if (!c)
