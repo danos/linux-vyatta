@@ -2,7 +2,7 @@ From: Thomas Gleixner <tglx@linutronix.de>
 Date: Fri, 3 Jul 2009 08:44:31 -0500
 Subject: [PATCH 134/397] hrtimer: fixup hrtimer callback changes for
  preempt-rt
-Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=9c6e4c2fac922c2c12196486b4136440450b0c62
+Origin: https://git.kernel.org/cgit/linux/kernel/git/rt/linux-stable-rt.git/commit?id=cd41f12c8ee21f434414ebc2c0f312566eaf1fa8
 
 In preempt-rt we can not call the callbacks which take sleeping locks
 from the timer interrupt context.
@@ -12,7 +12,6 @@ delivery problem for real.
 
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
 Signed-off-by: Ingo Molnar <mingo@elte.hu>
-[bwh: Adjust context to apply after Debian's ABI fix to struct hrtimer]
 ---
  include/linux/hrtimer.h  |   3 +
  kernel/hrtimer.c         | 197 +++++++++++++++++++++++++++++++++++++++++------
@@ -21,12 +20,14 @@ Signed-off-by: Ingo Molnar <mingo@elte.hu>
  kernel/watchdog.c        |   1 +
  5 files changed, 182 insertions(+), 22 deletions(-)
 
+diff --git a/include/linux/hrtimer.h b/include/linux/hrtimer.h
+index dfc3bd58f806..b4ab8e17293a 100644
 --- a/include/linux/hrtimer.h
 +++ b/include/linux/hrtimer.h
-@@ -117,6 +117,8 @@ struct hrtimer {
- #else
- 	unsigned long			state;
- #endif
+@@ -113,6 +113,8 @@ struct hrtimer {
+ 	struct hrtimer_clock_base	*base;
+ 	u8				state;
+ 	u8				is_rel;
 +	struct list_head		cb_entry;
 +	int				irqsafe;
  #ifdef CONFIG_TIMER_STATS
@@ -378,7 +379,7 @@ index 31b6dbc13876..da61f5fd2bb8 100644
  
  /**
 diff --git a/kernel/sched.c b/kernel/sched.c
-index 83053216867b..a11bf4ce9251 100644
+index 4e2197c894fa..3c19259c2433 100644
 --- a/kernel/sched.c
 +++ b/kernel/sched.c
 @@ -189,6 +189,7 @@ void init_rt_bandwidth(struct rt_bandwidth *rt_b, u64 period, u64 runtime)
