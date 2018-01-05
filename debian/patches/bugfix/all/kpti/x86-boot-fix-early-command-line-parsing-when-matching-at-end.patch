@@ -1,0 +1,120 @@
+From: Dave Hansen <dave.hansen@linux.intel.com>
+Date: Tue, 22 Dec 2015 14:52:38 -0800
+Subject: x86/boot: Fix early command-line parsing when matching  at end
+
+commit 02afeaae9843733a39cd9b11053748b2d1dc5ae7 upstream.
+
+The x86 early command line parsing in cmdline_find_option_bool() is
+buggy. If it matches a specified 'option' all the way to the end of the
+command-line, it will consider it a match.
+
+For instance,
+
+  cmdline = "foo";
+  cmdline_find_option_bool(cmdline, "fool");
+
+will return 1. This is particularly annoying since we have actual FPU
+options like "noxsave" and "noxsaves" So, command-line "foo bar noxsave"
+will match *BOTH* a "noxsave" and "noxsaves". (This turns out not to be
+an actual problem because "noxsave" implies "noxsaves", but it's still
+confusing.)
+
+To fix this, we simplify the code and stop tracking 'len'. 'len'
+was trying to indicate either the NULL terminator *OR* the end of a
+non-NULL-terminated command line at 'COMMAND_LINE_SIZE'. But, each of the
+three states is *already* checking 'cmdline' for a NULL terminator.
+
+We _only_ need to check if we have overrun 'COMMAND_LINE_SIZE', and that
+we can do without keeping 'len' around.
+
+Also add some commends to clarify what is going on.
+
+Signed-off-by: Dave Hansen <dave.hansen@linux.intel.com>
+Signed-off-by: Borislav Petkov <bp@suse.de>
+Cc: Andy Lutomirski <luto@amacapital.net>
+Cc: Borislav Petkov <bp@alien8.de>
+Cc: Brian Gerst <brgerst@gmail.com>
+Cc: Denys Vlasenko <dvlasenk@redhat.com>
+Cc: H. Peter Anvin <hpa@zytor.com>
+Cc: Linus Torvalds <torvalds@linux-foundation.org>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Thomas Gleixner <tglx@linutronix.de>
+Cc: fenghua.yu@intel.com
+Cc: yu-cheng.yu@intel.com
+Link: http://lkml.kernel.org/r/20151222225238.9AEB560C@viggo.jf.intel.com
+Signed-off-by: Ingo Molnar <mingo@kernel.org>
+Cc: Hugh Dickins <hughd@google.com>
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+ arch/x86/lib/cmdline.c | 34 ++++++++++++++++++++++++----------
+ 1 file changed, 24 insertions(+), 10 deletions(-)
+
+--- a/arch/x86/lib/cmdline.c
++++ b/arch/x86/lib/cmdline.c
+@@ -21,12 +21,14 @@ static inline int myisspace(u8 c)
+  * @option: option string to look for
+  *
+  * Returns the position of that @option (starts counting with 1)
+- * or 0 on not found.
++ * or 0 on not found.  @option will only be found if it is found
++ * as an entire word in @cmdline.  For instance, if @option="car"
++ * then a cmdline which contains "cart" will not match.
+  */
+ int cmdline_find_option_bool(const char *cmdline, const char *option)
+ {
+ 	char c;
+-	int len, pos = 0, wstart = 0;
++	int pos = 0, wstart = 0;
+ 	const char *opptr = NULL;
+ 	enum {
+ 		st_wordstart = 0,	/* Start of word/after whitespace */
+@@ -37,11 +39,14 @@ int cmdline_find_option_bool(const char
+ 	if (!cmdline)
+ 		return -1;      /* No command line */
+ 
+-	len = min_t(int, strlen(cmdline), COMMAND_LINE_SIZE);
+-	if (!len)
++	if (!strlen(cmdline))
+ 		return 0;
+ 
+-	while (len--) {
++	/*
++	 * This 'pos' check ensures we do not overrun
++	 * a non-NULL-terminated 'cmdline'
++	 */
++	while (pos < COMMAND_LINE_SIZE) {
+ 		c = *(char *)cmdline++;
+ 		pos++;
+ 
+@@ -58,17 +63,26 @@ int cmdline_find_option_bool(const char
+ 			/* fall through */
+ 
+ 		case st_wordcmp:
+-			if (!*opptr)
++			if (!*opptr) {
++				/*
++				 * We matched all the way to the end of the
++				 * option we were looking for.  If the
++				 * command-line has a space _or_ ends, then
++				 * we matched!
++				 */
+ 				if (!c || myisspace(c))
+ 					return wstart;
+ 				else
+ 					state = st_wordskip;
+-			else if (!c)
++			} else if (!c) {
++				/*
++				 * Hit the NULL terminator on the end of
++				 * cmdline.
++				 */
+ 				return 0;
+-			else if (c != *opptr++)
++			} else if (c != *opptr++) {
+ 				state = st_wordskip;
+-			else if (!len)		/* last word and is matching */
+-				return wstart;
++			}
+ 			break;
+ 
+ 		case st_wordskip:

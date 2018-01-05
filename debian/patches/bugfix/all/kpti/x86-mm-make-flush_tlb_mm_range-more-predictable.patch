@@ -1,0 +1,77 @@
+From: Andy Lutomirski <luto@kernel.org>
+Date: Sat, 22 Apr 2017 00:01:21 -0700
+Subject: x86/mm: Make flush_tlb_mm_range() more predictable
+
+commit ce27374fabf553153c3f53efcaa9bfab9216bd8c upstream.
+
+I'm about to rewrite the function almost completely, but first I
+want to get a functional change out of the way.  Currently, if
+flush_tlb_mm_range() does not flush the local TLB at all, it will
+never do individual page flushes on remote CPUs.  This seems to be
+an accident, and preserving it will be awkward.  Let's change it
+first so that any regressions in the rewrite will be easier to
+bisect and so that the rewrite can attempt to change no visible
+behavior at all.
+
+The fix is simple: we can simply avoid short-circuiting the
+calculation of base_pages_to_flush.
+
+As a side effect, this also eliminates a potential corner case: if
+tlb_single_page_flush_ceiling == TLB_FLUSH_ALL, flush_tlb_mm_range()
+could have ended up flushing the entire address space one page at a
+time.
+
+Signed-off-by: Andy Lutomirski <luto@kernel.org>
+Acked-by: Dave Hansen <dave.hansen@intel.com>
+Cc: Andrew Morton <akpm@linux-foundation.org>
+Cc: Borislav Petkov <bp@alien8.de>
+Cc: Brian Gerst <brgerst@gmail.com>
+Cc: Denys Vlasenko <dvlasenk@redhat.com>
+Cc: H. Peter Anvin <hpa@zytor.com>
+Cc: Josh Poimboeuf <jpoimboe@redhat.com>
+Cc: Linus Torvalds <torvalds@linux-foundation.org>
+Cc: Michal Hocko <mhocko@suse.com>
+Cc: Nadav Amit <namit@vmware.com>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Rik van Riel <riel@redhat.com>
+Cc: Thomas Gleixner <tglx@linutronix.de>
+Link: http://lkml.kernel.org/r/4b29b771d9975aad7154c314534fec235618175a.1492844372.git.luto@kernel.org
+Signed-off-by: Ingo Molnar <mingo@kernel.org>
+Cc: Hugh Dickins <hughd@google.com>
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+ arch/x86/mm/tlb.c | 16 +++++++++++-----
+ 1 file changed, 11 insertions(+), 5 deletions(-)
+
+--- a/arch/x86/mm/tlb.c
++++ b/arch/x86/mm/tlb.c
+@@ -257,6 +257,12 @@ void flush_tlb_mm_range(struct mm_struct
+ 	unsigned long base_pages_to_flush = TLB_FLUSH_ALL;
+ 
+ 	preempt_disable();
++
++	if ((end != TLB_FLUSH_ALL) && !(vmflag & VM_HUGETLB))
++		base_pages_to_flush = (end - start) >> PAGE_SHIFT;
++	if (base_pages_to_flush > tlb_single_page_flush_ceiling)
++		base_pages_to_flush = TLB_FLUSH_ALL;
++
+ 	if (current->active_mm != mm) {
+ 		/* Synchronize with switch_mm. */
+ 		smp_mb();
+@@ -273,11 +279,11 @@ void flush_tlb_mm_range(struct mm_struct
+ 		goto out;
+ 	}
+ 
+-	if ((end != TLB_FLUSH_ALL) && !(vmflag & VM_HUGETLB))
+-		base_pages_to_flush = (end - start) >> PAGE_SHIFT;
+-
+-	if (base_pages_to_flush > tlb_single_page_flush_ceiling) {
+-		base_pages_to_flush = TLB_FLUSH_ALL;
++	/*
++	 * Both branches below are implicit full barriers (MOV to CR or
++	 * INVLPG) that synchronize with switch_mm.
++	 */
++	if (base_pages_to_flush == TLB_FLUSH_ALL) {
+ 		count_vm_tlb_event(NR_TLB_LOCAL_FLUSH_ALL);
+ 		local_flush_tlb();
+ 	} else {
