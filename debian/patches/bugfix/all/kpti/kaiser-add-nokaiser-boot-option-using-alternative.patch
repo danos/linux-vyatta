@@ -36,9 +36,7 @@ BSP and auxiliaries - BSP alone was adding PSE, in probe_page_size_mask().
 (cherry picked from Change-Id: I8e5bec716944444359cbd19f6729311eff943e9a)
 
 Signed-off-by: Hugh Dickins <hughd@google.com>
-[bwh: Backported to 3.16:
- - Use set_in_cr4()
- - Adjust context]
+[bwh: Backported to 3.16: adjust context]
 Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
 ---
  Documentation/kernel-parameters.txt  |  2 ++
@@ -240,7 +238,7 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  #define _PAGE_PAT	(_AT(pteval_t, 1) << _PAGE_BIT_PAT)
 --- a/arch/x86/include/asm/tlbflush.h
 +++ b/arch/x86/include/asm/tlbflush.h
-@@ -69,9 +69,11 @@ static inline void invpcid_flush_all_non
+@@ -106,9 +106,11 @@ static inline void cr4_set_bits_and_upda
   * to avoid the need for asm/kaiser.h in unexpected places.
   */
  #ifdef CONFIG_KAISER
@@ -252,7 +250,7 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  static inline void kaiser_setup_pcid(void)
  {
  }
-@@ -96,7 +98,7 @@ static inline void __native_flush_tlb(vo
+@@ -133,7 +135,7 @@ static inline void __native_flush_tlb(vo
  	 * back:
  	 */
  	preempt_disable();
@@ -261,7 +259,7 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  		kaiser_flush_tlb_on_return_to_user();
  	native_write_cr3(native_read_cr3());
  	preempt_enable();
-@@ -107,20 +109,30 @@ static inline void __native_flush_tlb_gl
+@@ -144,20 +146,30 @@ static inline void __native_flush_tlb_gl
  	unsigned long cr4;
  
  	cr4 = native_read_cr4();
@@ -300,7 +298,7 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	if (this_cpu_has(X86_FEATURE_INVPCID)) {
  		/*
  		 * Using INVPCID is considerably faster than a pair of writes
-@@ -140,7 +152,6 @@ static inline void __native_flush_tlb_gl
+@@ -177,7 +189,6 @@ static inline void __native_flush_tlb_gl
  	raw_local_irq_save(flags);
  	__native_flush_tlb_global_irq_disabled();
  	raw_local_irq_restore(flags);
@@ -308,7 +306,7 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  }
  
  static inline void __native_flush_tlb_single(unsigned long addr)
-@@ -155,7 +166,7 @@ static inline void __native_flush_tlb_si
+@@ -192,7 +203,7 @@ static inline void __native_flush_tlb_si
  	 */
  
  	if (!this_cpu_has(X86_FEATURE_INVPCID_SINGLE)) {
@@ -317,7 +315,7 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  			kaiser_flush_tlb_on_return_to_user();
  		asm volatile("invlpg (%0)" ::"r" (addr) : "memory");
  		return;
-@@ -170,9 +181,9 @@ static inline void __native_flush_tlb_si
+@@ -207,9 +218,9 @@ static inline void __native_flush_tlb_si
  	 * Make sure to do only a single invpcid when KAISER is
  	 * disabled and we have only a single ASID.
  	 */
@@ -359,7 +357,7 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	if (cpu_has(c, X86_FEATURE_PCID)) {
 -		if (cpu_has(c, X86_FEATURE_PGE)) {
 +		if (cpu_has(c, X86_FEATURE_PGE) || kaiser_enabled) {
- 			set_in_cr4(X86_CR4_PCIDE);
+ 			cr4_set_bits(X86_CR4_PCIDE);
  			/*
  			 * INVPCID has two "groups" of types:
 @@ -719,6 +733,10 @@ void get_cpu_cap(struct cpuinfo_x86 *c)
@@ -383,7 +381,7 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
 +		 * probe_page_size_mask() sets it on the boot cpu,
 +		 * but it needs to be set on each secondary cpu.
 +		 */
-+		set_in_cr4(X86_CR4_PGE);
++		cr4_set_bits(X86_CR4_PGE);
 +	}
 +
  	/*
@@ -490,12 +488,12 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
 --- a/arch/x86/mm/init.c
 +++ b/arch/x86/mm/init.c
 @@ -140,7 +140,7 @@ static void __init probe_page_size_mask(
- 		set_in_cr4(X86_CR4_PSE);
+ 		cr4_set_bits_and_update_boot(X86_CR4_PSE);
  
  	/* Enable PGE if available */
 -	if (cpu_has_pge) {
 +	if (cpu_has_pge && !kaiser_enabled) {
- 		set_in_cr4(X86_CR4_PGE);
+ 		cr4_set_bits_and_update_boot(X86_CR4_PGE);
  		__supported_pte_mask |= _PAGE_GLOBAL;
  	}
 --- a/arch/x86/mm/init_64.c

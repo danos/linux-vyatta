@@ -1,0 +1,423 @@
+From: Andy Lutomirski <luto@amacapital.net>
+Date: Fri, 24 Oct 2014 15:58:07 -0700
+Subject: x86: Clean up cr4 manipulation
+
+commit 375074cc736ab1d89a708c0a8d7baa4a70d5d476 upstream.
+
+CR4 manipulation was split, seemingly at random, between direct
+(write_cr4) and using a helper (set/clear_in_cr4).  Unfortunately,
+the set_in_cr4 and clear_in_cr4 helpers also poke at the boot code,
+which only a small subset of users actually wanted.
+
+This patch replaces all cr4 access in functions that don't leave cr4
+exactly the way they found it with new helpers cr4_set_bits,
+cr4_clear_bits, and cr4_set_bits_and_update_boot.
+
+Signed-off-by: Andy Lutomirski <luto@amacapital.net>
+Reviewed-by: Thomas Gleixner <tglx@linutronix.de>
+Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+Cc: Andrea Arcangeli <aarcange@redhat.com>
+Cc: Vince Weaver <vince@deater.net>
+Cc: "hillf.zj" <hillf.zj@alibaba-inc.com>
+Cc: Valdis Kletnieks <Valdis.Kletnieks@vt.edu>
+Cc: Paul Mackerras <paulus@samba.org>
+Cc: Arnaldo Carvalho de Melo <acme@kernel.org>
+Cc: Kees Cook <keescook@chromium.org>
+Cc: Linus Torvalds <torvalds@linux-foundation.org>
+Link: http://lkml.kernel.org/r/495a10bdc9e67016b8fd3945700d46cfd5c12c2f.1414190806.git.luto@amacapital.net
+Signed-off-by: Ingo Molnar <mingo@kernel.org>
+[bwh: Backported to 3.16: adjust context]
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+ arch/x86/include/asm/processor.h     | 33 --------------------------------
+ arch/x86/include/asm/tlbflush.h      | 37 ++++++++++++++++++++++++++++++++++++
+ arch/x86/include/asm/virtext.h       |  3 ++-
+ arch/x86/kernel/cpu/common.c         | 10 +++++-----
+ arch/x86/kernel/cpu/mcheck/mce.c     |  3 ++-
+ arch/x86/kernel/cpu/mcheck/p5.c      |  3 ++-
+ arch/x86/kernel/cpu/mcheck/winchip.c |  3 ++-
+ arch/x86/kernel/cpu/perf_event.c     |  7 ++++---
+ arch/x86/kernel/i387.c               |  3 ++-
+ arch/x86/kernel/process.c            |  5 +++--
+ arch/x86/kernel/xsave.c              |  3 ++-
+ arch/x86/kvm/vmx.c                   |  4 ++--
+ arch/x86/mm/init.c                   |  4 ++--
+ arch/x86/xen/enlighten.c             |  4 ++--
+ drivers/lguest/x86/core.c            |  5 +++--
+ 15 files changed, 70 insertions(+), 57 deletions(-)
+
+--- a/arch/x86/include/asm/processor.h
++++ b/arch/x86/include/asm/processor.h
+@@ -578,39 +578,6 @@ static inline void load_sp0(struct tss_s
+ #define set_iopl_mask native_set_iopl_mask
+ #endif /* CONFIG_PARAVIRT */
+ 
+-/*
+- * Save the cr4 feature set we're using (ie
+- * Pentium 4MB enable and PPro Global page
+- * enable), so that any CPU's that boot up
+- * after us can get the correct flags.
+- */
+-extern unsigned long mmu_cr4_features;
+-extern u32 *trampoline_cr4_features;
+-
+-static inline void set_in_cr4(unsigned long mask)
+-{
+-	unsigned long cr4;
+-
+-	mmu_cr4_features |= mask;
+-	if (trampoline_cr4_features)
+-		*trampoline_cr4_features = mmu_cr4_features;
+-	cr4 = read_cr4();
+-	cr4 |= mask;
+-	write_cr4(cr4);
+-}
+-
+-static inline void clear_in_cr4(unsigned long mask)
+-{
+-	unsigned long cr4;
+-
+-	mmu_cr4_features &= ~mask;
+-	if (trampoline_cr4_features)
+-		*trampoline_cr4_features = mmu_cr4_features;
+-	cr4 = read_cr4();
+-	cr4 &= ~mask;
+-	write_cr4(cr4);
+-}
+-
+ typedef struct {
+ 	unsigned long		seg;
+ } mm_segment_t;
+--- a/arch/x86/include/asm/tlbflush.h
++++ b/arch/x86/include/asm/tlbflush.h
+@@ -15,6 +15,43 @@
+ #define __flush_tlb_single(addr) __native_flush_tlb_single(addr)
+ #endif
+ 
++/* Set in this cpu's CR4. */
++static inline void cr4_set_bits(unsigned long mask)
++{
++	unsigned long cr4;
++
++	cr4 = read_cr4();
++	cr4 |= mask;
++	write_cr4(cr4);
++}
++
++/* Clear in this cpu's CR4. */
++static inline void cr4_clear_bits(unsigned long mask)
++{
++	unsigned long cr4;
++
++	cr4 = read_cr4();
++	cr4 &= ~mask;
++	write_cr4(cr4);
++}
++
++/*
++ * Save some of cr4 feature set we're using (e.g.  Pentium 4MB
++ * enable and PPro Global page enable), so that any CPU's that boot
++ * up after us can get the correct flags.  This should only be used
++ * during boot on the boot cpu.
++ */
++extern unsigned long mmu_cr4_features;
++extern u32 *trampoline_cr4_features;
++
++static inline void cr4_set_bits_and_update_boot(unsigned long mask)
++{
++	mmu_cr4_features |= mask;
++	if (trampoline_cr4_features)
++		*trampoline_cr4_features = mmu_cr4_features;
++	cr4_set_bits(mask);
++}
++
+ static inline void __native_flush_tlb(void)
+ {
+ 	/*
+--- a/arch/x86/include/asm/virtext.h
++++ b/arch/x86/include/asm/virtext.h
+@@ -19,6 +19,7 @@
+ 
+ #include <asm/vmx.h>
+ #include <asm/svm.h>
++#include <asm/tlbflush.h>
+ 
+ /*
+  * VMX functions:
+@@ -40,7 +41,7 @@ static inline int cpu_has_vmx(void)
+ static inline void cpu_vmxoff(void)
+ {
+ 	asm volatile (ASM_VMX_VMXOFF : : : "cc");
+-	write_cr4(read_cr4() & ~X86_CR4_VMXE);
++	cr4_clear_bits(X86_CR4_VMXE);
+ }
+ 
+ static inline int cpu_vmx_enabled(void)
+--- a/arch/x86/kernel/cpu/common.c
++++ b/arch/x86/kernel/cpu/common.c
+@@ -270,7 +270,7 @@ __setup("nosmep", setup_disable_smep);
+ static __always_inline void setup_smep(struct cpuinfo_x86 *c)
+ {
+ 	if (cpu_has(c, X86_FEATURE_SMEP))
+-		set_in_cr4(X86_CR4_SMEP);
++		cr4_set_bits(X86_CR4_SMEP);
+ }
+ 
+ static __init int setup_disable_smap(char *arg)
+@@ -289,9 +289,9 @@ static __always_inline void setup_smap(s
+ 
+ 	if (cpu_has(c, X86_FEATURE_SMAP)) {
+ #ifdef CONFIG_X86_SMAP
+-		set_in_cr4(X86_CR4_SMAP);
++		cr4_set_bits(X86_CR4_SMAP);
+ #else
+-		clear_in_cr4(X86_CR4_SMAP);
++		cr4_clear_bits(X86_CR4_SMAP);
+ #endif
+ 	}
+ }
+@@ -1291,7 +1291,7 @@ void cpu_init(void)
+ 
+ 	pr_debug("Initializing CPU#%d\n", cpu);
+ 
+-	clear_in_cr4(X86_CR4_VME|X86_CR4_PVI|X86_CR4_TSD|X86_CR4_DE);
++	cr4_clear_bits(X86_CR4_VME|X86_CR4_PVI|X86_CR4_TSD|X86_CR4_DE);
+ 
+ 	/*
+ 	 * Initialize the per-CPU GDT with the boot GDT,
+@@ -1376,7 +1376,7 @@ void cpu_init(void)
+ 	printk(KERN_INFO "Initializing CPU#%d\n", cpu);
+ 
+ 	if (cpu_has_vme || cpu_has_tsc || cpu_has_de)
+-		clear_in_cr4(X86_CR4_VME|X86_CR4_PVI|X86_CR4_TSD|X86_CR4_DE);
++		cr4_clear_bits(X86_CR4_VME|X86_CR4_PVI|X86_CR4_TSD|X86_CR4_DE);
+ 
+ 	load_current_idt();
+ 	switch_to_new_gdt(cpu);
+--- a/arch/x86/kernel/cpu/mcheck/mce.c
++++ b/arch/x86/kernel/cpu/mcheck/mce.c
+@@ -43,6 +43,7 @@
+ #include <linux/export.h>
+ 
+ #include <asm/processor.h>
++#include <asm/tlbflush.h>
+ #include <asm/mce.h>
+ #include <asm/msr.h>
+ 
+@@ -1470,7 +1471,7 @@ static void __mcheck_cpu_init_generic(vo
+ 	bitmap_fill(all_banks, MAX_NR_BANKS);
+ 	machine_check_poll(MCP_UC | m_fl, &all_banks);
+ 
+-	set_in_cr4(X86_CR4_MCE);
++	cr4_set_bits(X86_CR4_MCE);
+ 
+ 	rdmsrl(MSR_IA32_MCG_CAP, cap);
+ 	if (cap & MCG_CTL_P)
+--- a/arch/x86/kernel/cpu/mcheck/p5.c
++++ b/arch/x86/kernel/cpu/mcheck/p5.c
+@@ -8,6 +8,7 @@
+ #include <linux/smp.h>
+ 
+ #include <asm/processor.h>
++#include <asm/tlbflush.h>
+ #include <asm/mce.h>
+ #include <asm/msr.h>
+ 
+@@ -59,7 +60,7 @@ void intel_p5_mcheck_init(struct cpuinfo
+ 	       "Intel old style machine check architecture supported.\n");
+ 
+ 	/* Enable MCE: */
+-	set_in_cr4(X86_CR4_MCE);
++	cr4_set_bits(X86_CR4_MCE);
+ 	printk(KERN_INFO
+ 	       "Intel old style machine check reporting enabled on CPU#%d.\n",
+ 	       smp_processor_id());
+--- a/arch/x86/kernel/cpu/mcheck/winchip.c
++++ b/arch/x86/kernel/cpu/mcheck/winchip.c
+@@ -7,6 +7,7 @@
+ #include <linux/types.h>
+ 
+ #include <asm/processor.h>
++#include <asm/tlbflush.h>
+ #include <asm/mce.h>
+ #include <asm/msr.h>
+ 
+@@ -31,7 +32,7 @@ void winchip_mcheck_init(struct cpuinfo_
+ 	lo &= ~(1<<4);	/* Enable MCE */
+ 	wrmsr(MSR_IDT_FCR1, lo, hi);
+ 
+-	set_in_cr4(X86_CR4_MCE);
++	cr4_set_bits(X86_CR4_MCE);
+ 
+ 	printk(KERN_INFO
+ 	       "Winchip machine check reporting enabled on CPU#0.\n");
+--- a/arch/x86/kernel/cpu/perf_event.c
++++ b/arch/x86/kernel/cpu/perf_event.c
+@@ -31,6 +31,7 @@
+ #include <asm/nmi.h>
+ #include <asm/smp.h>
+ #include <asm/alternative.h>
++#include <asm/tlbflush.h>
+ #include <asm/mmu_context.h>
+ #include <asm/timer.h>
+ #include <asm/desc.h>
+@@ -1340,7 +1341,7 @@ x86_pmu_notifier(struct notifier_block *
+ 
+ 	case CPU_STARTING:
+ 		if (x86_pmu.attr_rdpmc)
+-			set_in_cr4(X86_CR4_PCE);
++			cr4_set_bits(X86_CR4_PCE);
+ 		if (x86_pmu.cpu_starting)
+ 			x86_pmu.cpu_starting(cpu);
+ 		break;
+@@ -1855,9 +1856,9 @@ static void change_rdpmc(void *info)
+ 	bool enable = !!(unsigned long)info;
+ 
+ 	if (enable)
+-		set_in_cr4(X86_CR4_PCE);
++		cr4_set_bits(X86_CR4_PCE);
+ 	else
+-		clear_in_cr4(X86_CR4_PCE);
++		cr4_clear_bits(X86_CR4_PCE);
+ }
+ 
+ static ssize_t set_attr_rdpmc(struct device *cdev,
+--- a/arch/x86/kernel/i387.c
++++ b/arch/x86/kernel/i387.c
+@@ -13,6 +13,7 @@
+ #include <asm/sigcontext.h>
+ #include <asm/processor.h>
+ #include <asm/math_emu.h>
++#include <asm/tlbflush.h>
+ #include <asm/uaccess.h>
+ #include <asm/ptrace.h>
+ #include <asm/i387.h>
+@@ -181,7 +182,7 @@ void fpu_init(void)
+ 	if (cpu_has_xmm)
+ 		cr4_mask |= X86_CR4_OSXMMEXCPT;
+ 	if (cr4_mask)
+-		set_in_cr4(cr4_mask);
++		cr4_set_bits(cr4_mask);
+ 
+ 	cr0 = read_cr0();
+ 	cr0 &= ~(X86_CR0_TS|X86_CR0_EM); /* clear TS and EM */
+--- a/arch/x86/kernel/process.c
++++ b/arch/x86/kernel/process.c
+@@ -29,6 +29,7 @@
+ #include <asm/fpu-internal.h>
+ #include <asm/debugreg.h>
+ #include <asm/nmi.h>
++#include <asm/tlbflush.h>
+ 
+ /*
+  * per-CPU TSS segments. Threads are completely 'soft' on Linux,
+@@ -139,7 +140,7 @@ void flush_thread(void)
+ 
+ static void hard_disable_TSC(void)
+ {
+-	write_cr4(read_cr4() | X86_CR4_TSD);
++	cr4_set_bits(X86_CR4_TSD);
+ }
+ 
+ void disable_TSC(void)
+@@ -156,7 +157,7 @@ void disable_TSC(void)
+ 
+ static void hard_enable_TSC(void)
+ {
+-	write_cr4(read_cr4() & ~X86_CR4_TSD);
++	cr4_clear_bits(X86_CR4_TSD);
+ }
+ 
+ static void enable_TSC(void)
+--- a/arch/x86/kernel/xsave.c
++++ b/arch/x86/kernel/xsave.c
+@@ -11,6 +11,7 @@
+ #include <asm/i387.h>
+ #include <asm/fpu-internal.h>
+ #include <asm/sigframe.h>
++#include <asm/tlbflush.h>
+ #include <asm/xcr.h>
+ 
+ /*
+@@ -450,7 +451,7 @@ static void prepare_fx_sw_frame(void)
+  */
+ static inline void xstate_enable(void)
+ {
+-	set_in_cr4(X86_CR4_OSXSAVE);
++	cr4_set_bits(X86_CR4_OSXSAVE);
+ 	xsetbv(XCR_XFEATURE_ENABLED_MASK, pcntxt_mask);
+ }
+ 
+--- a/arch/x86/kvm/vmx.c
++++ b/arch/x86/kvm/vmx.c
+@@ -2738,7 +2738,7 @@ static int hardware_enable(void *garbage
+ 		/* enable and lock */
+ 		wrmsrl(MSR_IA32_FEATURE_CONTROL, old | test_bits);
+ 	}
+-	write_cr4(read_cr4() | X86_CR4_VMXE); /* FIXME: not cpu hotplug safe */
++	cr4_set_bits(X86_CR4_VMXE);
+ 
+ 	if (vmm_exclusive) {
+ 		kvm_cpu_vmxon(phys_addr);
+@@ -2775,7 +2775,7 @@ static void hardware_disable(void *garba
+ 		vmclear_local_loaded_vmcss();
+ 		kvm_cpu_vmxoff();
+ 	}
+-	write_cr4(read_cr4() & ~X86_CR4_VMXE);
++	cr4_clear_bits(X86_CR4_VMXE);
+ }
+ 
+ static __init int adjust_vmx_controls(u32 ctl_min, u32 ctl_opt,
+--- a/arch/x86/mm/init.c
++++ b/arch/x86/mm/init.c
+@@ -137,11 +137,11 @@ static void __init probe_page_size_mask(
+ 
+ 	/* Enable PSE if available */
+ 	if (cpu_has_pse)
+-		set_in_cr4(X86_CR4_PSE);
++		cr4_set_bits_and_update_boot(X86_CR4_PSE);
+ 
+ 	/* Enable PGE if available */
+ 	if (cpu_has_pge) {
+-		set_in_cr4(X86_CR4_PGE);
++		cr4_set_bits_and_update_boot(X86_CR4_PGE);
+ 		__supported_pte_mask |= _PAGE_GLOBAL;
+ 	}
+ }
+--- a/arch/x86/xen/enlighten.c
++++ b/arch/x86/xen/enlighten.c
+@@ -1526,10 +1526,10 @@ static void xen_pvh_set_cr_flags(int cpu
+ 	 * set them here. For all, OSFXSR OSXMMEXCPT are set in fpu_init.
+ 	*/
+ 	if (cpu_has_pse)
+-		set_in_cr4(X86_CR4_PSE);
++		cr4_set_bits_and_update_boot(X86_CR4_PSE);
+ 
+ 	if (cpu_has_pge)
+-		set_in_cr4(X86_CR4_PGE);
++		cr4_set_bits_and_update_boot(X86_CR4_PGE);
+ }
+ 
+ /*
+--- a/drivers/lguest/x86/core.c
++++ b/drivers/lguest/x86/core.c
+@@ -47,6 +47,7 @@
+ #include <asm/lguest.h>
+ #include <asm/uaccess.h>
+ #include <asm/i387.h>
++#include <asm/tlbflush.h>
+ #include "../lg.h"
+ 
+ static int cpu_had_pge;
+@@ -452,9 +453,9 @@ void lguest_arch_handle_trap(struct lg_c
+ static void adjust_pge(void *on)
+ {
+ 	if (on)
+-		write_cr4(read_cr4() | X86_CR4_PGE);
++		cr4_set_bits(X86_CR4_PGE);
+ 	else
+-		write_cr4(read_cr4() & ~X86_CR4_PGE);
++		cr4_clear_bits(X86_CR4_PGE);
+ }
+ 
+ /*H:020
