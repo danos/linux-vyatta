@@ -1,0 +1,103 @@
+From: Aaron Lu <aaron.lu@intel.com>
+Date: Thu, 11 Aug 2016 15:44:30 +0800
+Subject: x86/irq: Do not substract irq_tlb_count from  irq_call_count
+
+commit 82ba4faca1bffad429f15c90c980ffd010366c25 upstream.
+
+Since commit:
+
+  52aec3308db8 ("x86/tlb: replace INVALIDATE_TLB_VECTOR by CALL_FUNCTION_VECTOR")
+
+the TLB remote shootdown is done through call function vector. That
+commit didn't take care of irq_tlb_count, which a later commit:
+
+  fd0f5869724f ("x86: Distinguish TLB shootdown interrupts from other functions call interrupts")
+
+... tried to fix.
+
+The fix assumes every increase of irq_tlb_count has a corresponding
+increase of irq_call_count. So the irq_call_count is always bigger than
+irq_tlb_count and we could substract irq_tlb_count from irq_call_count.
+
+Unfortunately this is not true for the smp_call_function_single() case.
+The IPI is only sent if the target CPU's call_single_queue is empty when
+adding a csd into it in generic_exec_single. That means if two threads
+are both adding flush tlb csds to the same CPU's call_single_queue, only
+one IPI is sent. In other words, the irq_call_count is incremented by 1
+but irq_tlb_count is incremented by 2. Over time, irq_tlb_count will be
+bigger than irq_call_count and the substract will produce a very large
+irq_call_count value due to overflow.
+
+Considering that:
+
+  1) it's not worth to send more IPIs for the sake of accurate counting of
+     irq_call_count in generic_exec_single();
+
+  2) it's not easy to tell if the call function interrupt is for TLB
+     shootdown in __smp_call_function_single_interrupt().
+
+Not to exclude TLB shootdown from call function count seems to be the
+simplest fix and this patch just does that.
+
+This bug was found by LKP's cyclic performance regression tracking recently
+with the vm-scalability test suite. I have bisected to commit:
+
+  3dec0ba0be6a ("mm/rmap: share the i_mmap_rwsem")
+
+This commit didn't do anything wrong but revealed the irq_call_count
+problem. IIUC, the commit makes rwc->remap_one in rmap_walk_file
+concurrent with multiple threads.  When remap_one is try_to_unmap_one(),
+then multiple threads could queue flush TLB to the same CPU but only
+one IPI will be sent.
+
+Since the commit was added in Linux v3.19, the counting problem only
+shows up from v3.19 onwards.
+
+Signed-off-by: Aaron Lu <aaron.lu@intel.com>
+Cc: Alex Shi <alex.shi@linaro.org>
+Cc: Andy Lutomirski <luto@kernel.org>
+Cc: Borislav Petkov <bp@alien8.de>
+Cc: Brian Gerst <brgerst@gmail.com>
+Cc: Davidlohr Bueso <dave@stgolabs.net>
+Cc: Denys Vlasenko <dvlasenk@redhat.com>
+Cc: H. Peter Anvin <hpa@zytor.com>
+Cc: Huang Ying <ying.huang@intel.com>
+Cc: Josh Poimboeuf <jpoimboe@redhat.com>
+Cc: Linus Torvalds <torvalds@linux-foundation.org>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Thomas Gleixner <tglx@linutronix.de>
+Cc: Tomoki Sekiyama <tomoki.sekiyama.qu@hitachi.com>
+Link: http://lkml.kernel.org/r/20160811074430.GA18163@aaronlu.sh.intel.com
+Signed-off-by: Ingo Molnar <mingo@kernel.org>
+Cc: Hugh Dickins <hughd@google.com>
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+ arch/x86/include/asm/hardirq.h | 4 ----
+ arch/x86/kernel/irq.c          | 3 +--
+ 2 files changed, 1 insertion(+), 6 deletions(-)
+
+--- a/arch/x86/include/asm/hardirq.h
++++ b/arch/x86/include/asm/hardirq.h
+@@ -21,10 +21,6 @@ typedef struct {
+ #ifdef CONFIG_SMP
+ 	unsigned int irq_resched_count;
+ 	unsigned int irq_call_count;
+-	/*
+-	 * irq_tlb_count is double-counted in irq_call_count, so it must be
+-	 * subtracted from irq_call_count when displaying irq_call_count
+-	 */
+ 	unsigned int irq_tlb_count;
+ #endif
+ #ifdef CONFIG_X86_THERMAL_VECTOR
+--- a/arch/x86/kernel/irq.c
++++ b/arch/x86/kernel/irq.c
+@@ -96,8 +96,7 @@ int arch_show_interrupts(struct seq_file
+ 	seq_printf(p, "  Rescheduling interrupts\n");
+ 	seq_printf(p, "%*s: ", prec, "CAL");
+ 	for_each_online_cpu(j)
+-		seq_printf(p, "%10u ", irq_stats(j)->irq_call_count -
+-					irq_stats(j)->irq_tlb_count);
++		seq_printf(p, "%10u ", irq_stats(j)->irq_call_count);
+ 	seq_printf(p, "  Function call interrupts\n");
+ 	seq_printf(p, "%*s: ", prec, "TLB");
+ 	for_each_online_cpu(j)

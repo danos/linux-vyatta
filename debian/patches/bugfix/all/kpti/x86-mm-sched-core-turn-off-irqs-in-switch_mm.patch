@@ -1,0 +1,64 @@
+From: Andy Lutomirski <luto@kernel.org>
+Date: Tue, 26 Apr 2016 09:39:09 -0700
+Subject: x86/mm, sched/core: Turn off IRQs in switch_mm()
+
+commit 078194f8e9fe3cf54c8fd8bded48a1db5bd8eb8a upstream.
+
+Potential races between switch_mm() and TLB-flush or LDT-flush IPIs
+could be very messy.  AFAICT the code is currently okay, whether by
+accident or by careful design, but enabling PCID will make it
+considerably more complicated and will no longer be obviously safe.
+
+Fix it with a big hammer: run switch_mm() with IRQs off.
+
+To avoid a performance hit in the scheduler, we take advantage of
+our knowledge that the scheduler already has IRQs disabled when it
+calls switch_mm().
+
+Signed-off-by: Andy Lutomirski <luto@kernel.org>
+Reviewed-by: Borislav Petkov <bp@suse.de>
+Cc: Borislav Petkov <bp@alien8.de>
+Cc: Linus Torvalds <torvalds@linux-foundation.org>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Thomas Gleixner <tglx@linutronix.de>
+Link: http://lkml.kernel.org/r/f19baf759693c9dcae64bbff76189db77cb13398.1461688545.git.luto@kernel.org
+Signed-off-by: Ingo Molnar <mingo@kernel.org>
+Cc: Hugh Dickins <hughd@google.com>
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+ arch/x86/include/asm/mmu_context.h |  4 ++++
+ arch/x86/mm/tlb.c                  | 10 ++++++++++
+ 2 files changed, 14 insertions(+)
+
+--- a/arch/x86/include/asm/mmu_context.h
++++ b/arch/x86/include/asm/mmu_context.h
+@@ -77,6 +77,10 @@ static inline void enter_lazy_tlb(struct
+ extern void switch_mm(struct mm_struct *prev, struct mm_struct *next,
+ 		      struct task_struct *tsk);
+ 
++extern void switch_mm_irqs_off(struct mm_struct *prev, struct mm_struct *next,
++			       struct task_struct *tsk);
++#define switch_mm_irqs_off switch_mm_irqs_off
++
+ #define activate_mm(prev, next)			\
+ do {						\
+ 	paravirt_activate_mm((prev), (next));	\
+--- a/arch/x86/mm/tlb.c
++++ b/arch/x86/mm/tlb.c
+@@ -60,6 +60,16 @@ EXPORT_SYMBOL_GPL(leave_mm);
+ void switch_mm(struct mm_struct *prev, struct mm_struct *next,
+ 	       struct task_struct *tsk)
+ {
++	unsigned long flags;
++
++	local_irq_save(flags);
++	switch_mm_irqs_off(prev, next, tsk);
++	local_irq_restore(flags);
++}
++
++void switch_mm_irqs_off(struct mm_struct *prev, struct mm_struct *next,
++			struct task_struct *tsk)
++{
+ 	unsigned cpu = smp_processor_id();
+ 
+ 	if (likely(prev != next)) {

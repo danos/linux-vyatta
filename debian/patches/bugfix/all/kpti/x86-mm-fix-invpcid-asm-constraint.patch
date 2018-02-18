@@ -1,0 +1,66 @@
+From: Borislav Petkov <bp@suse.de>
+Date: Wed, 10 Feb 2016 15:51:16 +0100
+Subject: x86/mm: Fix INVPCID asm constraint
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+commit e2c7698cd61f11d4077fdb28148b2d31b82ac848 upstream.
+
+So we want to specify the dependency on both @pcid and @addr so that the
+compiler doesn't reorder accesses to them *before* the TLB flush. But
+for that to work, we need to express this properly in the inline asm and
+deref the whole desc array, not the pointer to it. See clwb() for an
+example.
+
+This fixes the build error on 32-bit:
+
+  arch/x86/include/asm/tlbflush.h: In function ‘__invpcid’:
+  arch/x86/include/asm/tlbflush.h:26:18: error: memory input 0 is not directly addressable
+
+which gcc4.7 caught but 5.x didn't. Which is strange. :-\
+
+Signed-off-by: Borislav Petkov <bp@suse.de>
+Cc: Andrew Morton <akpm@linux-foundation.org>
+Cc: Andrey Ryabinin <aryabinin@virtuozzo.com>
+Cc: Andy Lutomirski <luto@amacapital.net>
+Cc: Borislav Petkov <bp@alien8.de>
+Cc: Brian Gerst <brgerst@gmail.com>
+Cc: Dave Hansen <dave.hansen@linux.intel.com>
+Cc: Denys Vlasenko <dvlasenk@redhat.com>
+Cc: H. Peter Anvin <hpa@zytor.com>
+Cc: Linus Torvalds <torvalds@linux-foundation.org>
+Cc: Luis R. Rodriguez <mcgrof@suse.com>
+Cc: Michael Matz <matz@suse.de>
+Cc: Oleg Nesterov <oleg@redhat.com>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Thomas Gleixner <tglx@linutronix.de>
+Cc: Toshi Kani <toshi.kani@hp.com>
+Cc: linux-mm@kvack.org
+Signed-off-by: Ingo Molnar <mingo@kernel.org>
+Cc: Hugh Dickins <hughd@google.com>
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+ arch/x86/include/asm/tlbflush.h | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+--- a/arch/x86/include/asm/tlbflush.h
++++ b/arch/x86/include/asm/tlbflush.h
+@@ -10,7 +10,7 @@
+ static inline void __invpcid(unsigned long pcid, unsigned long addr,
+ 			     unsigned long type)
+ {
+-	u64 desc[2] = { pcid, addr };
++	struct { u64 d[2]; } desc = { { pcid, addr } };
+ 
+ 	/*
+ 	 * The memory clobber is because the whole point is to invalidate
+@@ -22,7 +22,7 @@ static inline void __invpcid(unsigned lo
+ 	 * invpcid (%rcx), %rax in long mode.
+ 	 */
+ 	asm volatile (".byte 0x66, 0x0f, 0x38, 0x82, 0x01"
+-		      : : "m" (desc), "a" (type), "c" (desc) : "memory");
++		      : : "m" (desc), "a" (type), "c" (&desc) : "memory");
+ }
+ 
+ #define INVPCID_TYPE_INDIV_ADDR		0

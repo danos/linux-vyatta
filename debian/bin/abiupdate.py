@@ -21,6 +21,7 @@ from debian_linux.debian import *
 default_url_base = "http://ftp.de.debian.org/debian/"
 default_url_base_incoming = "http://incoming.debian.org/"
 default_url_base_ports = "http://ftp.debian-ports.org/debian/"
+default_url_base_security = "http://security.debian.org/"
 
 
 class url_debian_flat(object):
@@ -44,6 +45,11 @@ class url_debian_ports_pool(url_debian_pool):
         if arch == 'all':
             return url_debian_pool.__call__(self, source, filename, arch)
         return self.base + "pool-" + arch + "/main/" + source[0] + "/" + source + "/" + filename
+
+
+class url_debian_security_pool(url_debian_pool):
+    def __call__(self, source, filename, arch):
+        return self.base + "pool/updates/main/" + source[0] + "/" + source + "/" + filename
 
 
 class Main(object):
@@ -113,13 +119,10 @@ class Main(object):
         return version_abi, s
 
     def get_config(self):
-        filename = "linux-support-%s_%s_all.deb" % (self.version_abi, self.version_source)
-        f = self.retrieve_package(self.url_config, filename, 'all')
-        d = self.extract_package(f, "linux-support")
-        c = d + "/usr/src/linux-support-" + self.version_abi + "/config.defines.dump"
-        config = ConfigCoreDump(fp=open(c, "rb"))
-        shutil.rmtree(d)
-        return config
+        # XXX We used to fetch the previous version of linux-support here,
+        # but until we authenticate downloads we should not do that as
+        # pickle.load allows running arbitrary code.
+        return self.config
 
     def retrieve_package(self, url, filename, arch):
         u = url(self.source, filename, arch)
@@ -190,9 +193,11 @@ if __name__ == '__main__':
     options.add_option("-i", "--incoming", action="store_true", dest="incoming")
     options.add_option("--incoming-config", action="store_true", dest="incoming_config")
     options.add_option("--ports", action="store_true", dest="ports")
+    options.add_option("--security", action="store_true", dest="security")
     options.add_option("-u", "--url-base", dest="url_base", default=default_url_base)
     options.add_option("--url-base-incoming", dest="url_base_incoming", default=default_url_base_incoming)
     options.add_option("--url-base-ports", dest="url_base_ports", default=default_url_base_ports)
+    options.add_option("--url-base-security", dest="url_base_security", default=default_url_base_security)
 
     opts, args = options.parse_args()
 
@@ -207,11 +212,14 @@ if __name__ == '__main__':
     url_base = url_debian_pool(opts.url_base)
     url_base_incoming = url_debian_flat(opts.url_base_incoming)
     url_base_ports = url_debian_ports_pool(opts.url_base_ports)
+    url_base_security = url_debian_security_pool(opts.url_base_security)
     if opts.incoming_config:
         url = url_config = url_base_incoming
     else:
         url_config = url_base
-        if opts.incoming:
+        if opts.security:
+            url = url_base_security
+        elif opts.incoming:
             url = url_base_incoming
         elif opts.ports:
             url = url_base_ports

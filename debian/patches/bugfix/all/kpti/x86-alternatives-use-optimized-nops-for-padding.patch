@@ -1,0 +1,50 @@
+From: Borislav Petkov <bp@suse.de>
+Date: Sat, 10 Jan 2015 20:34:07 +0100
+Subject: x86/alternatives: Use optimized NOPs for padding
+
+commit 4fd4b6e5537cec5b56db0b22546dd439ebb26830 upstream.
+
+Alternatives allow now for an empty old instruction. In this case we go
+and pad the space with NOPs at assembly time. However, there are the
+optimal, longer NOPs which should be used. Do that at patching time by
+adding alt_instr.padlen-sized NOPs at the old instruction address.
+
+Cc: Andy Lutomirski <luto@amacapital.net>
+Signed-off-by: Borislav Petkov <bp@suse.de>
+Cc: Hugh Dickins <hughd@google.com>
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+ arch/x86/kernel/alternative.c | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+--- a/arch/x86/kernel/alternative.c
++++ b/arch/x86/kernel/alternative.c
+@@ -323,6 +323,14 @@ done:
+ 		n_dspl, (unsigned long)orig_insn + n_dspl + repl_len);
+ }
+ 
++static void __init_or_module optimize_nops(struct alt_instr *a, u8 *instr)
++{
++	add_nops(instr + (a->instrlen - a->padlen), a->padlen);
++
++	DUMP_BYTES(instr, a->instrlen, "%p: [%d:%d) optimized NOPs: ",
++		   instr, a->instrlen - a->padlen, a->padlen);
++}
++
+ /*
+  * Replace instructions with better alternatives for this CPU type. This runs
+  * before SMP is initialized to avoid SMP problems with self modifying code.
+@@ -354,8 +362,12 @@ void __init_or_module apply_alternatives
+ 		replacement = (u8 *)&a->repl_offset + a->repl_offset;
+ 		BUG_ON(a->instrlen > sizeof(insnbuf));
+ 		BUG_ON(a->cpuid >= (NCAPINTS + NBUGINTS) * 32);
+-		if (!boot_cpu_has(a->cpuid))
++		if (!boot_cpu_has(a->cpuid)) {
++			if (a->padlen > 1)
++				optimize_nops(a, instr);
++
+ 			continue;
++		}
+ 
+ 		DPRINTK("feat: %d*32+%d, old: (%p, len: %d), repl: (%p, len: %d)",
+ 			a->cpuid >> 5,
