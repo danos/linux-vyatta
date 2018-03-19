@@ -7,29 +7,29 @@ Posix timers should not send broadcast signals and kernel only
 signals. Prevent it.
 
 Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+[bwh: Adjusted to apply on top of backported  commit cef31d9af908
+ "posix-timer: Properly check sigevent->sigev_notify"]
 ---
  kernel/posix-timers.c | 4 +++-
  1 file changed, 3 insertions(+), 1 deletion(-)
 
-diff --git a/kernel/posix-timers.c b/kernel/posix-timers.c
-index 67661832ac2b..687c0ac3d663 100644
 --- a/kernel/posix-timers.c
 +++ b/kernel/posix-timers.c
-@@ -439,6 +439,7 @@ static enum hrtimer_restart posix_timer_fn(struct hrtimer *timer)
+@@ -439,6 +439,7 @@ static enum hrtimer_restart posix_timer_
  static struct pid *good_sigevent(sigevent_t * event)
  {
  	struct task_struct *rtn = current->group_leader;
 +	int sig = event->sigev_signo;
  
- 	if ((event->sigev_notify & SIGEV_THREAD_ID ) &&
- 		(!(rtn = find_task_by_vpid(event->sigev_notify_thread_id)) ||
-@@ -447,7 +448,8 @@ static struct pid *good_sigevent(sigevent_t * event)
- 		return NULL;
- 
- 	if (((event->sigev_notify & ~SIGEV_THREAD_ID) != SIGEV_NONE) &&
--	    ((event->sigev_signo <= 0) || (event->sigev_signo > SIGRTMAX)))
-+	    (sig <= 0 || sig > SIGRTMAX || sig_kernel_only(sig) ||
-+	     sig_kernel_coredump(sig)))
- 		return NULL;
- 
- 	return task_pid(rtn);
+ 	switch (event->sigev_notify) {
+ 	case SIGEV_SIGNAL | SIGEV_THREAD_ID:
+@@ -448,7 +449,8 @@ static struct pid *good_sigevent(sigeven
+ 		/* FALLTHRU */
+ 	case SIGEV_SIGNAL:
+ 	case SIGEV_THREAD:
+-		if (event->sigev_signo <= 0 || event->sigev_signo > SIGRTMAX)
++		if (sig <= 0 || sig > SIGRTMAX || sig_kernel_only(sig) ||
++		    sig_kernel_coredump(sig))
+ 			return NULL;
+ 		/* FALLTHRU */
+ 	case SIGEV_NONE:

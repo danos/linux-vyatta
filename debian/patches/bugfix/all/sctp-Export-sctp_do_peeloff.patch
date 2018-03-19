@@ -12,8 +12,9 @@ Acked-by: Vlad Yasevich <vladislav.yasevich@hp.com>
 Signed-off-by: David S. Miller <davem@davemloft.net>
 [bwh: Adjust context to apply after backports of 299ee123e198 ("sctp: Fixup
  v4mapped behaviour to comply with Sock API"), dfcb9f4f99f1
- ("sctp: deny peeloff operation on asocs with threads sleeping on it"), and
- df80cd9b28b9 ("sctp: do not peel off an assoc from one netns to another one")
+ ("sctp: deny peeloff operation on asocs with threads sleeping on it"),
+ df80cd9b28b9 ("sctp: do not peel off an assoc from one netns to another one"),
+ cea0cc80a677 ("sctp: use the right sk after waking up from wait_buf sleep")]
 ---
  include/net/sctp/sctp.h |    1 +
  net/sctp/socket.c       |   24 +++++++++---------------
@@ -31,7 +32,7 @@ Signed-off-by: David S. Miller <davem@davemloft.net>
  #define sctp_skb_for_each(pos, head, tmp) \
 --- a/net/sctp/socket.c
 +++ b/net/sctp/socket.c
-@@ -4235,10 +4235,9 @@ static int sctp_getsockopt_autoclose(str
+@@ -4234,10 +4234,9 @@ static int sctp_getsockopt_autoclose(str
  }
  
  /* Helper routine to branch off an association to a new socket.  */
@@ -44,17 +45,17 @@ Signed-off-by: David S. Miller <davem@davemloft.net>
  	struct sctp_sock *sp = sctp_sk(sk);
  	struct socket *sock;
  	int err = 0;
-@@ -4247,6 +4246,9 @@ SCTP_STATIC int sctp_do_peeloff(struct s
+@@ -4246,6 +4245,9 @@ SCTP_STATIC int sctp_do_peeloff(struct s
  	if (!net_eq(current->nsproxy->net_ns, sock_net(sk)))
  		return -EINVAL;
  
 +	if (!asoc)
 +		return -EINVAL;
 +
- 	/* If there is a thread waiting on more sndbuf space for
- 	 * sending on this asoc, it cannot be peeled.
+ 	/* An association cannot be branched off from an already peeled-off
+ 	 * socket, nor is this supported for tcp style sockets.
  	 */
-@@ -4280,13 +4282,13 @@ SCTP_STATIC int sctp_do_peeloff(struct s
+@@ -4273,13 +4275,13 @@ SCTP_STATIC int sctp_do_peeloff(struct s
  
  	return err;
  }
@@ -69,7 +70,7 @@ Signed-off-by: David S. Miller <davem@davemloft.net>
  
  	if (len < sizeof(sctp_peeloff_arg_t))
  		return -EINVAL;
-@@ -4294,15 +4296,7 @@ static int sctp_getsockopt_peeloff(struc
+@@ -4287,15 +4289,7 @@ static int sctp_getsockopt_peeloff(struc
  	if (copy_from_user(&peeloff, optval, len))
  		return -EFAULT;
  
@@ -86,7 +87,7 @@ Signed-off-by: David S. Miller <davem@davemloft.net>
  	if (retval < 0)
  		goto out;
  
-@@ -4313,8 +4307,8 @@ static int sctp_getsockopt_peeloff(struc
+@@ -4306,8 +4300,8 @@ static int sctp_getsockopt_peeloff(struc
  		goto out;
  	}
  

@@ -16,20 +16,9 @@ cleanups.
 Signed-off-by: Bruce Allan <bruce.w.allan@intel.com>
 Tested-by: Aaron Brown <aaron.f.brown@intel.com>
 Signed-off-by: Jeff Kirsher <jeffrey.t.kirsher@intel.com>
+[bwh: Adjusted to apply on top of backported commit 19110cfbb34d
+ "e1000e: Separate signaling for link check/link up"]
 ---
- drivers/net/ethernet/intel/e1000e/Makefile |    3 +-
- drivers/net/ethernet/intel/e1000e/lib.c    | 2686 ----------------------------
- drivers/net/ethernet/intel/e1000e/mac.c    | 1717 ++++++++++++++++++
- drivers/net/ethernet/intel/e1000e/manage.c |  377 ++++
- drivers/net/ethernet/intel/e1000e/nvm.c    |  647 +++++++
- 5 files changed, 2743 insertions(+), 2687 deletions(-)
- delete mode 100644 drivers/net/ethernet/intel/e1000e/lib.c
- create mode 100644 drivers/net/ethernet/intel/e1000e/mac.c
- create mode 100644 drivers/net/ethernet/intel/e1000e/manage.c
- create mode 100644 drivers/net/ethernet/intel/e1000e/nvm.c
-
-diff --git a/drivers/net/ethernet/intel/e1000e/Makefile b/drivers/net/ethernet/intel/e1000e/Makefile
-index 948c05d..8b888e5 100644
 --- a/drivers/net/ethernet/intel/e1000e/Makefile
 +++ b/drivers/net/ethernet/intel/e1000e/Makefile
 @@ -33,5 +33,6 @@
@@ -40,12 +29,9 @@ index 948c05d..8b888e5 100644
 +	       mac.o manage.o nvm.o phy.o \
 +	       param.o ethtool.o netdev.o
  
-diff --git a/drivers/net/ethernet/intel/e1000e/lib.c b/drivers/net/ethernet/intel/e1000e/lib.c
-deleted file mode 100644
-index e2678bd..0000000
 --- a/drivers/net/ethernet/intel/e1000e/lib.c
 +++ /dev/null
-@@ -1,2686 +0,0 @@
+@@ -1,2691 +0,0 @@
 -/*******************************************************************************
 -
 -  Intel PRO/1000 Linux driver
@@ -480,6 +466,9 @@ index e2678bd..0000000
 - *  Checks to see of the link status of the hardware has changed.  If a
 - *  change in link status has been detected, then we read the PHY registers
 - *  to get the current speed/duplex if link exists.
+- *
+- *  Returns a negative error code (-E1000_ERR_*) or 0 (link down) or 1 (link
+- *  up).
 - **/
 -s32 e1000e_check_for_copper_link(struct e1000_hw *hw)
 -{
@@ -494,7 +483,7 @@ index e2678bd..0000000
 -	 * Change or Rx Sequence Error interrupt.
 -	 */
 -	if (!mac->get_link_status)
--		return 0;
+-		return 1;
 -
 -	/*
 -	 * First we want to see if the MII Status Register reports
@@ -539,10 +528,12 @@ index e2678bd..0000000
 -	 * different link partner.
 -	 */
 -	ret_val = e1000e_config_fc_after_link_up(hw);
--	if (ret_val)
+-	if (ret_val) {
 -		e_dbg("Error configuring flow control\n");
+-		return ret_val;
+-	}
 -
--	return ret_val;
+-	return 1;
 -}
 -
 -/**
@@ -2732,12 +2723,9 @@ index e2678bd..0000000
 -out:
 -	return ret_val;
 -}
-diff --git a/drivers/net/ethernet/intel/e1000e/mac.c b/drivers/net/ethernet/intel/e1000e/mac.c
-new file mode 100644
-index 0000000..64b6f43
 --- /dev/null
 +++ b/drivers/net/ethernet/intel/e1000e/mac.c
-@@ -0,0 +1,1717 @@
+@@ -0,0 +1,1722 @@
 +/*******************************************************************************
 +
 +  Intel PRO/1000 Linux driver
@@ -3158,6 +3146,9 @@ index 0000000..64b6f43
 + *  Checks to see of the link status of the hardware has changed.  If a
 + *  change in link status has been detected, then we read the PHY registers
 + *  to get the current speed/duplex if link exists.
++ *
++ *  Returns a negative error code (-E1000_ERR_*) or 0 (link down) or 1 (link
++ *  up).
 + **/
 +s32 e1000e_check_for_copper_link(struct e1000_hw *hw)
 +{
@@ -3172,7 +3163,7 @@ index 0000000..64b6f43
 +	 * Change or Rx Sequence Error interrupt.
 +	 */
 +	if (!mac->get_link_status)
-+		return 0;
++		return 1;
 +
 +	/*
 +	 * First we want to see if the MII Status Register reports
@@ -3217,10 +3208,12 @@ index 0000000..64b6f43
 +	 * different link partner.
 +	 */
 +	ret_val = e1000e_config_fc_after_link_up(hw);
-+	if (ret_val)
++	if (ret_val) {
 +		e_dbg("Error configuring flow control\n");
++		return ret_val;
++	}
 +
-+	return ret_val;
++	return 1;
 +}
 +
 +/**
@@ -4455,9 +4448,6 @@ index 0000000..64b6f43
 +out:
 +	return;
 +}
-diff --git a/drivers/net/ethernet/intel/e1000e/manage.c b/drivers/net/ethernet/intel/e1000e/manage.c
-new file mode 100644
-index 0000000..3dae265
 --- /dev/null
 +++ b/drivers/net/ethernet/intel/e1000e/manage.c
 @@ -0,0 +1,377 @@
@@ -4838,9 +4828,6 @@ index 0000000..3dae265
 +out:
 +	return ret_val;
 +}
-diff --git a/drivers/net/ethernet/intel/e1000e/nvm.c b/drivers/net/ethernet/intel/e1000e/nvm.c
-new file mode 100644
-index 0000000..dbdaa00
 --- /dev/null
 +++ b/drivers/net/ethernet/intel/e1000e/nvm.c
 @@ -0,0 +1,647 @@

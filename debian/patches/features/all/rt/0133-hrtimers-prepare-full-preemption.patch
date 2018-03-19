@@ -15,21 +15,19 @@ Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
  kernel/posix-timers.c   | 33 +++++++++++++++++++++++++++++++++
  4 files changed, 76 insertions(+), 1 deletion(-)
 
-diff --git a/include/linux/hrtimer.h b/include/linux/hrtimer.h
-index 9942977e5a06..dfc3bd58f806 100644
 --- a/include/linux/hrtimer.h
 +++ b/include/linux/hrtimer.h
-@@ -190,6 +190,9 @@ struct hrtimer_cpu_base {
- 	unsigned long			nr_retries;
+@@ -191,6 +191,9 @@ struct hrtimer_cpu_base {
  	unsigned long			nr_hangs;
  	ktime_t				max_hang_time;
-+#endif
+ #endif
 +#ifdef CONFIG_PREEMPT_RT_BASE
 +	wait_queue_head_t		wait;
- #endif
++#endif
  	struct hrtimer_clock_base	clock_base[HRTIMER_MAX_CLOCK_BASES];
  };
-@@ -407,6 +410,13 @@ static inline int hrtimer_restart(struct hrtimer *timer)
+ 
+@@ -407,6 +410,13 @@ static inline int hrtimer_restart(struct
  	return hrtimer_start_expires(timer, HRTIMER_MODE_ABS);
  }
  
@@ -43,11 +41,9 @@ index 9942977e5a06..dfc3bd58f806 100644
  /* Query timers: */
  extern ktime_t __hrtimer_get_remaining(const struct hrtimer *timer, bool adjust);
  
-diff --git a/kernel/hrtimer.c b/kernel/hrtimer.c
-index a2374e6b255a..31b6dbc13876 100644
 --- a/kernel/hrtimer.c
 +++ b/kernel/hrtimer.c
-@@ -874,6 +874,32 @@ u64 hrtimer_forward(struct hrtimer *timer, ktime_t now, ktime_t interval)
+@@ -875,6 +875,32 @@ u64 hrtimer_forward(struct hrtimer *time
  }
  EXPORT_SYMBOL_GPL(hrtimer_forward);
  
@@ -80,7 +76,7 @@ index a2374e6b255a..31b6dbc13876 100644
  /*
   * enqueue_hrtimer - internal function to (re)start a timer
   *
-@@ -1120,7 +1146,7 @@ int hrtimer_cancel(struct hrtimer *timer)
+@@ -1121,7 +1147,7 @@ int hrtimer_cancel(struct hrtimer *timer
  
  		if (ret >= 0)
  			return ret;
@@ -89,7 +85,7 @@ index a2374e6b255a..31b6dbc13876 100644
  	}
  }
  EXPORT_SYMBOL_GPL(hrtimer_cancel);
-@@ -1554,6 +1580,8 @@ void hrtimer_run_queues(void)
+@@ -1555,6 +1581,8 @@ void hrtimer_run_queues(void)
  		}
  		raw_spin_unlock(&cpu_base->lock);
  	}
@@ -98,9 +94,9 @@ index a2374e6b255a..31b6dbc13876 100644
  }
  
  /*
-@@ -1714,6 +1742,9 @@ static void __cpuinit init_hrtimers_cpu(int cpu)
- 	}
+@@ -1716,6 +1744,9 @@ static void __cpuinit init_hrtimers_cpu(
  
+ 	cpu_base->active_bases = 0;
  	hrtimer_init_hres(cpu_base);
 +#ifdef CONFIG_PREEMPT_RT_BASE
 +	init_waitqueue_head(&cpu_base->wait);
@@ -108,11 +104,9 @@ index a2374e6b255a..31b6dbc13876 100644
  }
  
  #ifdef CONFIG_HOTPLUG_CPU
-diff --git a/kernel/itimer.c b/kernel/itimer.c
-index c6f948960a51..e5637de17d72 100644
 --- a/kernel/itimer.c
 +++ b/kernel/itimer.c
-@@ -214,6 +214,7 @@ int do_setitimer(int which, struct itimerval *value, struct itimerval *ovalue)
+@@ -214,6 +214,7 @@ again:
  		/* We are sharing ->siglock with it_real_fn() */
  		if (hrtimer_try_to_cancel(timer) < 0) {
  			spin_unlock_irq(&tsk->sighand->siglock);
@@ -120,11 +114,9 @@ index c6f948960a51..e5637de17d72 100644
  			goto again;
  		}
  		expires = timeval_to_ktime(value->it_value);
-diff --git a/kernel/posix-timers.c b/kernel/posix-timers.c
-index 687c0ac3d663..39e2b0ec39da 100644
 --- a/kernel/posix-timers.c
 +++ b/kernel/posix-timers.c
-@@ -774,6 +774,20 @@ SYSCALL_DEFINE1(timer_getoverrun, timer_t, timer_id)
+@@ -779,6 +779,20 @@ SYSCALL_DEFINE1(timer_getoverrun, timer_
  	return overrun;
  }
  
@@ -145,7 +137,7 @@ index 687c0ac3d663..39e2b0ec39da 100644
  /* Set a POSIX.1b interval timer. */
  /* timr->it_lock is taken. */
  static int
-@@ -851,6 +865,7 @@ SYSCALL_DEFINE4(timer_settime, timer_t, timer_id, int, flags,
+@@ -856,6 +870,7 @@ retry:
  	if (!timr)
  		return -EINVAL;
  
@@ -153,7 +145,7 @@ index 687c0ac3d663..39e2b0ec39da 100644
  	kc = clockid_to_kclock(timr->it_clock);
  	if (WARN_ON_ONCE(!kc || !kc->timer_set))
  		error = -EINVAL;
-@@ -859,9 +874,12 @@ SYSCALL_DEFINE4(timer_settime, timer_t, timer_id, int, flags,
+@@ -864,9 +879,12 @@ retry:
  
  	unlock_timer(timr, flag);
  	if (error == TIMER_RETRY) {
@@ -166,7 +158,7 @@ index 687c0ac3d663..39e2b0ec39da 100644
  
  	if (old_setting && !error &&
  	    copy_to_user(old_setting, &old_spec, sizeof (old_spec)))
-@@ -899,10 +917,15 @@ SYSCALL_DEFINE1(timer_delete, timer_t, timer_id)
+@@ -904,10 +922,15 @@ retry_delete:
  	if (!timer)
  		return -EINVAL;
  
@@ -182,7 +174,7 @@ index 687c0ac3d663..39e2b0ec39da 100644
  
  	spin_lock(&current->sighand->siglock);
  	list_del(&timer->list);
-@@ -928,8 +951,18 @@ static void itimer_delete(struct k_itimer *timer)
+@@ -933,8 +956,18 @@ static void itimer_delete(struct k_itime
  retry_delete:
  	spin_lock_irqsave(&timer->it_lock, flags);
  
