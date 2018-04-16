@@ -212,6 +212,10 @@ class Gencontrol(Base):
                 item.arches = [arch]
         packages['source']['Build-Depends'].extend(relations_compiler_build_dep)
 
+        relations_kbuild = PackageRelation(
+            config_entry_relations.get(
+                'linux-kbuild', 'linux-kbuild-' + self.version.linux_version))
+
         image_fields = {'Description': PackageDescription()}
         for field in 'Depends', 'Provides', 'Suggests', 'Recommends', 'Conflicts', 'Breaks':
             image_fields[field] = PackageRelation(config_entry_image.get(field.lower(), None), override_arches=(arch,))
@@ -280,6 +284,7 @@ class Gencontrol(Base):
             makeflags['MODULES'] = True
             package_headers = self.process_package(headers[0], vars)
             package_headers['Depends'].extend(relations_compiler)
+            package_headers['Depends'].extend(relations_kbuild)
             packages_own.append(package_headers)
             extra['headers_arch_depends'].append('%s (= ${binary:Version})' % packages_own[-1]['Package'])
 
