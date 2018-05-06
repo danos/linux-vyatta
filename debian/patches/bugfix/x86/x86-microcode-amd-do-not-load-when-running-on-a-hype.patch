@@ -1,0 +1,102 @@
+From: Borislav Petkov <bp@suse.de>
+Date: Sun, 18 Dec 2016 17:44:13 +0100
+Subject: x86/microcode/AMD: Do not load when running on a hypervisor
+Origin: https://git.kernel.org/linus/a15a753539eca8ba243d576f02e7ca9c4b7d7042
+Bug-Debian: https://bugs.debian.org/898067
+
+Doing so is completely void of sense for multiple reasons so prevent
+it. Set dis_ucode_ldr to true and thus disable the microcode loader by
+default to address xen pv guests which execute the AP path but not the
+BSP path.
+
+By having it turned off by default, the APs won't run into the loader
+either.
+
+Also, check CPUID(1).ECX[31] which hypervisors set. Well almost, not the
+xen pv one. That one gets the aforementioned "fix".
+
+Also, improve the detection method by caching the final decision whether
+to continue loading in dis_ucode_ldr and do it once on the BSP. The APs
+then simply test that value.
+
+Signed-off-by: Borislav Petkov <bp@suse.de>
+Tested-by: Juergen Gross <jgross@suse.com>
+Tested-by: Boris Ostrovsky <boris.ostrovsky@oracle.com>
+Acked-by: Juergen Gross <jgross@suse.com>
+Link: http://lkml.kernel.org/r/20161218164414.9649-4-bp@alien8.de
+Signed-off-by: Thomas Gleixner <tglx@linutronix.de>
+Cc: Rolf Neugebauer <rolf.neugebauer@docker.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+[bwh: Backported to 3.16:
+ - Early microcode loader is optional, so only set dis_ucode_ldr by default
+   if it is enabled
+ - Adjust context, filename]
+---
+--- a/arch/x86/kernel/cpu/microcode/core.c
++++ b/arch/x86/kernel/cpu/microcode/core.c
+@@ -97,7 +97,7 @@ MODULE_LICENSE("GPL");
+ 
+ static struct microcode_ops	*microcode_ops;
+ 
+-bool dis_ucode_ldr;
++bool dis_ucode_ldr = IS_ENABLED(CONFIG_MICROCODE_EARLY);
+ module_param(dis_ucode_ldr, bool, 0);
+ 
+ /*
+--- a/arch/x86/kernel/cpu/microcode/core_early.c
++++ b/arch/x86/kernel/cpu/microcode/core_early.c
+@@ -76,6 +76,8 @@ static int x86_family(void)
+ 
+ static bool __init check_loader_disabled_bsp(void)
+ {
++	u32 a, b, c, d;
++
+ #ifdef CONFIG_X86_32
+ 	const char *cmdline = (const char *)__pa_nodebug(boot_command_line);
+ 	const char *opt	    = "dis_ucode_ldr";
+@@ -88,8 +90,23 @@ static bool __init check_loader_disabled
+ 	bool *res = &dis_ucode_ldr;
+ #endif
+ 
+-	if (cmdline_find_option_bool(cmdline, option))
+-		*res = true;
++	if (!have_cpuid_p())
++		return *res;
++
++	a = 1;
++	c = 0;
++	native_cpuid(&a, &b, &c, &d);
++
++	/*
++	 * CPUID(1).ECX[31]: reserved for hypervisor use. This is still not
++	 * completely accurate as xen pv guests don't see that CPUID bit set but
++	 * that's good enough as they don't land on the BSP path anyway.
++	 */
++	if (c & BIT(31))
++		return *res;
++
++	if (cmdline_find_option_bool(cmdline, option) <= 0)
++		*res = false;
+ 
+ 	return *res;
+ }
+@@ -101,9 +118,6 @@ void __init load_ucode_bsp(void)
+ 	if (check_loader_disabled_bsp())
+ 		return;
+ 
+-	if (!have_cpuid_p())
+-		return;
+-
+ 	vendor = x86_vendor();
+ 	x86 = x86_family();
+ 
+@@ -137,9 +151,6 @@ void load_ucode_ap(void)
+ 	if (check_loader_disabled_ap())
+ 		return;
+ 
+-	if (!have_cpuid_p())
+-		return;
+-
+ 	vendor = x86_vendor();
+ 	x86 = x86_family();
+ 
