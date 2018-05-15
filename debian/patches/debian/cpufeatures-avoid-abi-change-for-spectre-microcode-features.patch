@@ -1,6 +1,6 @@
 From: Ben Hutchings <ben@decadent.org.uk>
-Date: Fri, 18 May 2018 10:10:47 +0100
-Subject: cpufeatures: Avoid ABI change for Spectre v2 microcode features
+Date: Sun, 20 May 2018 13:30:14 +0200
+Subject: cpufeatures: Avoid ABI change for Spectre microcode features
 Forwarded: not-needed
 
 Adding new cpufeature words is an ABI change, since the cpufeature arrays
@@ -22,10 +22,11 @@ arch/x86/kvm/cpuid.{c,h}.
  #define NBUGINTS	1	/* N 32-bit bug flags */
  
  /*
-@@ -192,6 +192,14 @@
- #define X86_FEATURE_USE_IBPB	(7*32+12) /* "" Indirect Branch Prediction Barrier enabled */
- #define X86_FEATURE_USE_IBRS_FW (7*32+13) /* "" Use IBRS during runtime firmware calls */
+@@ -194,6 +194,15 @@
+ #define X86_FEATURE_SPEC_STORE_BYPASS_DISABLE (7*32+14) /* "" Disable Speculative Store Bypass. */
+ #define X86_FEATURE_AMD_SSBD	(7*32+15)  /* "" AMD SSBD implementation */
  
++#define X86_FEATURE_SSBD		(7*32+22) /* Speculative Store Bypass Disable */
 +#define X86_FEATURE_SPEC_CTRL	(7*32+23) /* "" Speculation Control (IBRS + IBPB) */
 +#define X86_FEATURE_INTEL_STIBP	(7*32+24) /* "" Single Thread Indirect Branch Predictors */
 +#define X86_FEATURE_ARCH_CAPABILITIES (7*32+25) /* IA32_ARCH_CAPABILITIES MSR (Intel) */
@@ -37,7 +38,7 @@ arch/x86/kvm/cpuid.{c,h}.
  #define X86_FEATURE_RETPOLINE	(7*32+29) /* "" Generic Retpoline mitigation for Spectre variant 2 */
  #define X86_FEATURE_RETPOLINE_AMD (7*32+30) /* "" AMD Retpoline mitigation for Spectre variant 2 */
  /* Because the ALTERNATIVE scheme is for members of the X86_FEATURE club... */
-@@ -237,16 +245,6 @@
+@@ -239,17 +248,6 @@
  #define X86_FEATURE_AVX512ER	(9*32+27) /* AVX-512 Exponential and Reciprocal */
  #define X86_FEATURE_AVX512CD	(9*32+28) /* AVX-512 Conflict Detection */
  
@@ -45,6 +46,7 @@ arch/x86/kvm/cpuid.{c,h}.
 -#define X86_FEATURE_SPEC_CTRL		(10*32+26) /* "" Speculation Control (IBRS + IBPB) */
 -#define X86_FEATURE_INTEL_STIBP		(10*32+27) /* "" Single Thread Indirect Branch Predictors */
 -#define X86_FEATURE_ARCH_CAPABILITIES	(10*32+29) /* IA32_ARCH_CAPABILITIES MSR (Intel) */
+-#define X86_FEATURE_SSBD		(10*32+31) /* Speculative Store Bypass Disable */
 -
 -/* AMD-defined CPU features, CPUID level 0x80000008 (EBX), word 11 */
 -#define X86_FEATURE_IBPB		(11*32+12) /* Indirect Branch Prediction Barrier */
@@ -74,13 +76,14 @@ arch/x86/kvm/cpuid.{c,h}.
  	else if (cpu_has(c, X86_FEATURE_PAE) || cpu_has(c, X86_FEATURE_PSE36))
 --- a/arch/x86/kernel/cpu/scattered.c
 +++ b/arch/x86/kernel/cpu/scattered.c
-@@ -38,10 +38,16 @@ void init_scattered_cpuid_features(struc
+@@ -38,10 +38,17 @@ void init_scattered_cpuid_features(struc
  		{ X86_FEATURE_PTS,		CR_EAX, 6, 0x00000006, 0 },
  		{ X86_FEATURE_APERFMPERF,	CR_ECX, 0, 0x00000006, 0 },
  		{ X86_FEATURE_EPB,		CR_ECX, 3, 0x00000006, 0 },
 +		{ X86_FEATURE_SPEC_CTRL,	CR_EDX,26, 0x00000007, 0 },
 +		{ X86_FEATURE_INTEL_STIBP,	CR_EDX,27, 0x00000007, 0 },
 +		{ X86_FEATURE_ARCH_CAPABILITIES,CR_EDX,29, 0x00000007, 0 },
++		{ X86_FEATURE_SSBD,		CR_EDX,31, 0x00000007, 0 },
  		{ X86_FEATURE_XSAVEOPT,		CR_EAX,	0, 0x0000000d, 1 },
  		{ X86_FEATURE_HW_PSTATE,	CR_EDX, 7, 0x80000007, 0 },
  		{ X86_FEATURE_CPB,		CR_EDX, 9, 0x80000007, 0 },
@@ -110,12 +113,12 @@ arch/x86/kvm/cpuid.{c,h}.
  
 -	/* cpuid 7.0.edx*/
 -	const u32 kvm_cpuid_7_0_edx_x86_features =
--		F(SPEC_CTRL) | F(ARCH_CAPABILITIES);
+-		F(SPEC_CTRL) | F(SSBD) | F(ARCH_CAPABILITIES);
 -
  	/* all calls to cpuid_count() should be made on the same cpu */
  	get_cpu();
  
-@@ -391,8 +383,9 @@ static inline int __do_cpuid_ent(struct
+@@ -391,8 +383,10 @@ static inline int __do_cpuid_ent(struct
  			cpuid_mask(&entry->ebx, 9);
  			// TSC_ADJUST is emulated
  			entry->ebx |= F(TSC_ADJUST);
@@ -123,11 +126,12 @@ arch/x86/kvm/cpuid.{c,h}.
 -			cpuid_mask(&entry->edx, 10);
 +			entry->edx &=
 +				(boot_cpu_has(X86_FEATURE_SPEC_CTRL) ? BIT(26) : 0) |
-+				(boot_cpu_has(X86_FEATURE_ARCH_CAPABILITIES) ? BIT(29) : 0);
++				(boot_cpu_has(X86_FEATURE_ARCH_CAPABILITIES) ? BIT(29) : 0) |
++				(boot_cpu_has(X86_FEATURE_SSBD) ? BIT(31) : 0);
  		} else {
  			entry->ebx = 0;
  			entry->edx = 0;
-@@ -525,12 +518,9 @@ static inline int __do_cpuid_ent(struct
+@@ -525,12 +519,9 @@ static inline int __do_cpuid_ent(struct
  		entry->eax = g_phys_as | (virt_as << 8);
  		entry->edx = 0;
  		/* IBRS and IBPB aren't necessarily present in hardware cpuid */
@@ -158,7 +162,7 @@ arch/x86/kvm/cpuid.{c,h}.
  }
  
  static inline bool guest_cpuid_has_ibrs(struct kvm_vcpu *vcpu)
-@@ -120,10 +120,10 @@ static inline bool guest_cpuid_has_ibrs(
+@@ -120,11 +120,10 @@ static inline bool guest_cpuid_has_ibrs(
  	struct kvm_cpuid_entry2 *best;
  
  	best = kvm_find_cpuid_entry(vcpu, 0x80000008, 0);
@@ -166,12 +170,13 @@ arch/x86/kvm/cpuid.{c,h}.
 +	if (best && (best->ebx & BIT(14)))
  		return true;
  	best = kvm_find_cpuid_entry(vcpu, 7, 0);
--	return best && (best->edx & bit(X86_FEATURE_SPEC_CTRL));
-+	return best && (best->edx & BIT(26));
+-	return best && (best->edx &
+-			(bit(X86_FEATURE_SPEC_CTRL) | bit(X86_FEATURE_SSBD)));
++	return best && (best->edx & (BIT(26) | BIT(31)));
  }
  
  static inline bool guest_cpuid_has_arch_capabilities(struct kvm_vcpu *vcpu)
-@@ -131,7 +131,7 @@ static inline bool guest_cpuid_has_arch_
+@@ -132,7 +131,7 @@ static inline bool guest_cpuid_has_arch_
  	struct kvm_cpuid_entry2 *best;
  
  	best = kvm_find_cpuid_entry(vcpu, 7, 0);
