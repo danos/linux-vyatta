@@ -26,29 +26,51 @@ Cc: gregkh@linux-foundation.org
 Link: https://lkml.kernel.org/r/1516896855-7642-4-git-send-email-dwmw@amazon.co.uk
 Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
 Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
-[bwh: Backported to 3.16: Add to scattered features]
+[bwh: Backported to 3.16: This CPUID word wasn't used at all yet, so
+ add it as feature word 11]
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
 ---
+ arch/x86/include/asm/cpufeature.h | 7 ++++++-
+ arch/x86/kernel/cpu/common.c      | 5 ++++-
+ 2 files changed, 10 insertions(+), 2 deletions(-)
+
 --- a/arch/x86/include/asm/cpufeature.h
 +++ b/arch/x86/include/asm/cpufeature.h
-@@ -191,6 +191,9 @@
- #define X86_FEATURE_SPEC_CTRL	(7*32+12) /* Speculation Control (IBRS + IBPB) */
- #define X86_FEATURE_STIBP	(7*32+13) /* Single Thread Indirect Branch Predictors */
- #define X86_FEATURE_ARCH_CAPABILITIES (7*32+14) /* IA32_ARCH_CAPABILITIES MSR (Intel) */
-+#define X86_FEATURE_AMD_PRED_CMD (7*32+15) /* Prediction Command MSR (AMD) */
-+#define X86_FEATURE_AMD_SPEC_CTRL (7*32+16) /* Speculation Control MSR only (AMD) */
-+#define X86_FEATURE_AMD_STIBP	(7*32+17) /* Single Thread Indirect Branch Predictors (AMD) */
+@@ -8,7 +8,7 @@
+ #include <asm/required-features.h>
+ #endif
  
- #define X86_FEATURE_RETPOLINE	(7*32+29) /* "" Generic Retpoline mitigation for Spectre variant 2 */
- #define X86_FEATURE_RETPOLINE_AMD (7*32+30) /* "" AMD Retpoline mitigation for Spectre variant 2 */
---- a/arch/x86/kernel/cpu/scattered.c
-+++ b/arch/x86/kernel/cpu/scattered.c
-@@ -45,6 +45,9 @@ void init_scattered_cpuid_features(struc
- 		{ X86_FEATURE_HW_PSTATE,	CR_EDX, 7, 0x80000007, 0 },
- 		{ X86_FEATURE_CPB,		CR_EDX, 9, 0x80000007, 0 },
- 		{ X86_FEATURE_PROC_FEEDBACK,	CR_EDX,11, 0x80000007, 0 },
-+		{ X86_FEATURE_AMD_PRED_CMD,	CR_EBX,12, 0x80000008, 0 },
-+		{ X86_FEATURE_AMD_PRED_CTRL,	CR_EBX,14, 0x80000008, 0 },
-+		{ X86_FEATURE_AMD_STIBP,	CR_EBX,15, 0x80000008, 0 },
- 		{ X86_FEATURE_NPT,		CR_EDX, 0, 0x8000000a, 0 },
- 		{ X86_FEATURE_LBRV,		CR_EDX, 1, 0x8000000a, 0 },
- 		{ X86_FEATURE_SVML,		CR_EDX, 2, 0x8000000a, 0 },
+-#define NCAPINTS	11	/* N 32-bit words worth of info */
++#define NCAPINTS	12	/* N 32-bit words worth of info */
+ #define NBUGINTS	1	/* N 32-bit bug flags */
+ 
+ /*
+@@ -239,6 +239,11 @@
+ #define X86_FEATURE_STIBP		(10*32+27) /* Single Thread Indirect Branch Predictors */
+ #define X86_FEATURE_ARCH_CAPABILITIES	(10*32+29) /* IA32_ARCH_CAPABILITIES MSR (Intel) */
+ 
++/* AMD-defined CPU features, CPUID level 0x80000008 (EBX), word 11 */
++#define X86_FEATURE_AMD_PRED_CMD	(11*32+12) /* Prediction Command MSR (AMD) */
++#define X86_FEATURE_AMD_SPEC_CTRL	(11*32+14) /* Speculation Control MSR only (AMD) */
++#define X86_FEATURE_AMD_STIBP		(11*32+15) /* Single Thread Indirect Branch Predictors (AMD) */
++
+ /*
+  * BUG word(s)
+  */
+--- a/arch/x86/kernel/cpu/common.c
++++ b/arch/x86/kernel/cpu/common.c
+@@ -718,10 +718,13 @@ void get_cpu_cap(struct cpuinfo_x86 *c)
+ 	}
+ 
+ 	if (c->extended_cpuid_level >= 0x80000008) {
+-		u32 eax = cpuid_eax(0x80000008);
++		u32 eax, ebx, ecx, edx;
++
++		cpuid(0x80000008, &eax, &ebx, &ecx, &edx);
+ 
+ 		c->x86_virt_bits = (eax >> 8) & 0xff;
+ 		c->x86_phys_bits = eax & 0xff;
++		c->x86_capability[11] = ebx;
+ 	}
+ #ifdef CONFIG_X86_32
+ 	else if (cpu_has(c, X86_FEATURE_PAE) || cpu_has(c, X86_FEATURE_PSE36))

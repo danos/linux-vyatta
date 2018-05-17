@@ -35,9 +35,16 @@ Link: https://lkml.kernel.org/r/1517522386-18410-4-git-send-email-karahmed@amazo
 Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
 Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
 [bwh: Backported to 3.16:
- - Feature bit numbers don't match CPUID bits, so use literal bit numbers
+ - Add mapping of the relevant CPUID word
  - Adjust context]
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
 ---
+ arch/x86/kvm/cpuid.c | 11 +++++++++--
+ arch/x86/kvm/cpuid.h |  8 ++++++++
+ arch/x86/kvm/vmx.c   | 15 +++++++++++++++
+ arch/x86/kvm/x86.c   |  3 ++-
+ 4 files changed, 34 insertions(+), 3 deletions(-)
+
 --- a/arch/x86/kvm/cpuid.c
 +++ b/arch/x86/kvm/cpuid.c
 @@ -316,6 +316,10 @@ static inline int __do_cpuid_ent(struct
@@ -46,20 +53,18 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
  
 +	/* cpuid 7.0.edx*/
 +	const u32 kvm_cpuid_7_0_edx_x86_features =
-+		BIT(29); /* ARCH_CAPABILITIES */
++		F(ARCH_CAPABILITIES);
 +
  	/* all calls to cpuid_count() should be made on the same cpu */
  	get_cpu();
  
-@@ -387,11 +391,16 @@ static inline int __do_cpuid_ent(struct
+@@ -387,11 +391,14 @@ static inline int __do_cpuid_ent(struct
  			cpuid_mask(&entry->ebx, 9);
  			// TSC_ADJUST is emulated
  			entry->ebx |= F(TSC_ADJUST);
 -		} else
 +			entry->edx &= kvm_cpuid_7_0_edx_x86_features;
-+			entry->edx &=
-+				(boot_cpu_has(X86_FEATURE_ARCH_CAPABILITIES) ?
-+				 BIT(29) : 0);
++			cpuid_mask(&entry->edx, 10);
 +		} else {
  			entry->ebx = 0;
 +			entry->edx = 0;
@@ -81,7 +86,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
 +	struct kvm_cpuid_entry2 *best;
 +
 +	best = kvm_find_cpuid_entry(vcpu, 7, 0);
-+	return best && (best->edx & BIT(29));
++	return best && (best->edx & bit(X86_FEATURE_ARCH_CAPABILITIES));
 +}
 +
  

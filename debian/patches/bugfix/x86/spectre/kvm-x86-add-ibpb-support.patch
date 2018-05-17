@@ -84,9 +84,16 @@ Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
 Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
 [bwh: Backported to 3.16:
  - No support for nested MSR bitmaps in VMX
- - Feature bit numbers don't match CPUID bits, so use literal bit numbers
+ - Use literal number for CPU feature word
  - Adjust context]
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
 ---
+ arch/x86/kvm/cpuid.c | 11 ++++++++-
+ arch/x86/kvm/cpuid.h | 12 ++++++++++
+ arch/x86/kvm/svm.c   | 28 +++++++++++++++++++++++
+ arch/x86/kvm/vmx.c   | 54 ++++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 104 insertions(+), 1 deletion(-)
+
 --- a/arch/x86/kvm/cpuid.c
 +++ b/arch/x86/kvm/cpuid.c
 @@ -300,6 +300,10 @@ static inline int __do_cpuid_ent(struct
@@ -95,12 +102,12 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
  
 +	/* cpuid 0x80000008.ebx */
 +	const u32 kvm_cpuid_8000_0008_ebx_x86_features =
-+		BIT(12); /* IBPB */
++		F(IBPB);
 +
  	/* cpuid 0xC0000001.edx */
  	const u32 kvm_supported_word5_x86_features =
  		F(XSTORE) | F(XSTORE_EN) | F(XCRYPT) | F(XCRYPT_EN) |
-@@ -512,7 +516,14 @@ static inline int __do_cpuid_ent(struct
+@@ -512,7 +516,12 @@ static inline int __do_cpuid_ent(struct
  		if (!g_phys_as)
  			g_phys_as = phys_as;
  		entry->eax = g_phys_as | (virt_as << 8);
@@ -108,11 +115,9 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
 +		entry->edx = 0;
 +		/* IBPB isn't necessarily present in hardware cpuid */
 +		if (boot_cpu_has(X86_FEATURE_IBPB))
-+			entry->ebx |= BIT(12);
++			entry->ebx |= F(IBPB);
 +		entry->ebx &= kvm_cpuid_8000_0008_ebx_x86_features;
-+		entry->ebx &= ((boot_cpu_has(X86_FEATURE_IBPB) ? BIT(12) : 0) |
-+			       (boot_cpu_has(X86_FEATURE_IBRS) ? BIT(14) : 0) |
-+			       (boot_cpu_has(X86_FEATURE_STIBP) ? BIT(15) : 0));
++		cpuid_mask(&entry->ebx, 11);
  		break;
  	}
  	case 0x80000019:
@@ -127,7 +132,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
 +	struct kvm_cpuid_entry2 *best;
 +
 +	best = kvm_find_cpuid_entry(vcpu, 0x80000008, 0);
-+	if (best && (best->ebx & BIT(12)))
++	if (best && (best->ebx & bit(X86_FEATURE_IBPB)))
 +		return true;
 +	best = kvm_find_cpuid_entry(vcpu, 7, 0);
 +	return best && (best->edx & bit(X86_FEATURE_SPEC_CTRL));
