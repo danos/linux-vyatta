@@ -1,0 +1,56 @@
+From: Paolo Bonzini <pbonzini@redhat.com>
+Date: Thu, 22 Feb 2018 16:43:18 +0100
+Subject: KVM/VMX: Optimize vmx_vcpu_run() and svm_vcpu_run() by marking the
+ RDMSR path as unlikely()
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+Origin: https://git.kernel.org/linus/946fbbc13dce68902f64515b610eeb2a6c3d7a64
+
+vmx_vcpu_run() and svm_vcpu_run() are large functions, and giving
+branch hints to the compiler can actually make a substantial cycle
+difference by keeping the fast path contiguous in memory.
+
+With this optimization, the retpoline-guest/retpoline-host case is
+about 50 cycles faster.
+
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+Reviewed-by: Jim Mattson <jmattson@google.com>
+Cc: David Woodhouse <dwmw@amazon.co.uk>
+Cc: KarimAllah Ahmed <karahmed@amazon.de>
+Cc: Linus Torvalds <torvalds@linux-foundation.org>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Radim Krčmář <rkrcmar@redhat.com>
+Cc: Thomas Gleixner <tglx@linutronix.de>
+Cc: kvm@vger.kernel.org
+Cc: stable@vger.kernel.org
+Link: http://lkml.kernel.org/r/20180222154318.20361-3-pbonzini@redhat.com
+Signed-off-by: Ingo Molnar <mingo@kernel.org>
+[bwh: Backported to 3.16: adjust context]
+---
+ arch/x86/kvm/svm.c | 2 +-
+ arch/x86/kvm/vmx.c | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+--- a/arch/x86/kvm/svm.c
++++ b/arch/x86/kvm/svm.c
+@@ -4077,7 +4077,7 @@ static void svm_vcpu_run(struct kvm_vcpu
+ 	 * If the L02 MSR bitmap does not intercept the MSR, then we need to
+ 	 * save it.
+ 	 */
+-	if (!msr_write_intercepted(vcpu, MSR_IA32_SPEC_CTRL))
++	if (unlikely(!msr_write_intercepted(vcpu, MSR_IA32_SPEC_CTRL)))
+ 		svm->spec_ctrl = native_read_msr(MSR_IA32_SPEC_CTRL);
+ 
+ 	if (svm->spec_ctrl)
+--- a/arch/x86/kvm/vmx.c
++++ b/arch/x86/kvm/vmx.c
+@@ -7673,7 +7673,7 @@ static void __noclone vmx_vcpu_run(struc
+ 	 * If the L01 MSR bitmap does not intercept the MSR, then we need to
+ 	 * save it.
+ 	 */
+-	if (!msr_write_intercepted_l01(vcpu, MSR_IA32_SPEC_CTRL))
++	if (unlikely(!msr_write_intercepted_l01(vcpu, MSR_IA32_SPEC_CTRL)))
+ 		vmx->spec_ctrl = native_read_msr(MSR_IA32_SPEC_CTRL);
+ 
+ 	if (vmx->spec_ctrl)
