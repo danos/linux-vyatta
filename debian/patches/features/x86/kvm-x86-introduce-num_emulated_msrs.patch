@@ -1,0 +1,113 @@
+From: Paolo Bonzini <pbonzini@redhat.com>
+Date: Tue, 5 May 2015 12:08:55 +0200
+Subject: KVM: x86: introduce num_emulated_msrs
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+Origin: https://git.kernel.org/linus/62ef68bb4d00f1a662e487f3fc44ce8521c416aa
+
+We will want to filter away MSR_IA32_SMBASE from the emulated_msrs if
+the host CPU does not support SMM virtualization.  Introduce the
+logic to do that, and also move paravirt MSRs to emulated_msrs for
+simplicity and to get rid of KVM_SAVE_MSRS_BEGIN.
+
+Reviewed-by: Radim Krčmář <rkrcmar@redhat.com>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ arch/x86/kvm/x86.c | 40 +++++++++++++++++++++++++++-------------
+ 1 file changed, 27 insertions(+), 13 deletions(-)
+
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -876,17 +876,11 @@ EXPORT_SYMBOL_GPL(kvm_rdpmc);
+  *
+  * This list is modified at module load time to reflect the
+  * capabilities of the host cpu. This capabilities test skips MSRs that are
+- * kvm-specific. Those are put in the beginning of the list.
++ * kvm-specific. Those are put in emulated_msrs; filtering of emulated_msrs
++ * may depend on host virtualization features rather than host cpu features.
+  */
+ 
+-#define KVM_SAVE_MSRS_BEGIN	12
+ static u32 msrs_to_save[] = {
+-	MSR_KVM_SYSTEM_TIME, MSR_KVM_WALL_CLOCK,
+-	MSR_KVM_SYSTEM_TIME_NEW, MSR_KVM_WALL_CLOCK_NEW,
+-	HV_X64_MSR_GUEST_OS_ID, HV_X64_MSR_HYPERCALL,
+-	HV_X64_MSR_TIME_REF_COUNT, HV_X64_MSR_REFERENCE_TSC,
+-	HV_X64_MSR_APIC_ASSIST_PAGE, MSR_KVM_ASYNC_PF_EN, MSR_KVM_STEAL_TIME,
+-	MSR_KVM_PV_EOI_EN,
+ 	MSR_IA32_SYSENTER_CS, MSR_IA32_SYSENTER_ESP, MSR_IA32_SYSENTER_EIP,
+ 	MSR_STAR,
+ #ifdef CONFIG_X86_64
+@@ -899,7 +893,14 @@ static u32 msrs_to_save[] = {
+ 
+ static unsigned num_msrs_to_save;
+ 
+-static const u32 emulated_msrs[] = {
++static u32 emulated_msrs[] = {
++	MSR_KVM_SYSTEM_TIME, MSR_KVM_WALL_CLOCK,
++	MSR_KVM_SYSTEM_TIME_NEW, MSR_KVM_WALL_CLOCK_NEW,
++	HV_X64_MSR_GUEST_OS_ID, HV_X64_MSR_HYPERCALL,
++	HV_X64_MSR_TIME_REF_COUNT, HV_X64_MSR_REFERENCE_TSC,
++	HV_X64_MSR_APIC_ASSIST_PAGE, MSR_KVM_ASYNC_PF_EN, MSR_KVM_STEAL_TIME,
++	MSR_KVM_PV_EOI_EN,
++
+ 	MSR_IA32_TSC_ADJUST,
+ 	MSR_IA32_TSCDEADLINE,
+ 	MSR_IA32_MISC_ENABLE,
+@@ -907,6 +908,8 @@ static const u32 emulated_msrs[] = {
+ 	MSR_IA32_MCG_CTL,
+ };
+ 
++static unsigned num_emulated_msrs;
++
+ bool kvm_valid_efer(struct kvm_vcpu *vcpu, u64 efer)
+ {
+ 	if (efer & efer_reserved_bits)
+@@ -2774,7 +2777,7 @@ long kvm_arch_dev_ioctl(struct file *fil
+ 		if (copy_from_user(&msr_list, user_msr_list, sizeof msr_list))
+ 			goto out;
+ 		n = msr_list.nmsrs;
+-		msr_list.nmsrs = num_msrs_to_save + ARRAY_SIZE(emulated_msrs);
++		msr_list.nmsrs = num_msrs_to_save + num_emulated_msrs;
+ 		if (copy_to_user(user_msr_list, &msr_list, sizeof msr_list))
+ 			goto out;
+ 		r = -E2BIG;
+@@ -2786,7 +2789,7 @@ long kvm_arch_dev_ioctl(struct file *fil
+ 			goto out;
+ 		if (copy_to_user(user_msr_list->indices + num_msrs_to_save,
+ 				 &emulated_msrs,
+-				 ARRAY_SIZE(emulated_msrs) * sizeof(u32)))
++				 num_emulated_msrs * sizeof(u32)))
+ 			goto out;
+ 		r = 0;
+ 		break;
+@@ -4009,8 +4012,7 @@ static void kvm_init_msr_list(void)
+ 	u32 dummy[2];
+ 	unsigned i, j;
+ 
+-	/* skip the first msrs in the list. KVM-specific */
+-	for (i = j = KVM_SAVE_MSRS_BEGIN; i < ARRAY_SIZE(msrs_to_save); i++) {
++	for (i = j = 0; i < ARRAY_SIZE(msrs_to_save); i++) {
+ 		if (rdmsr_safe(msrs_to_save[i], &dummy[0], &dummy[1]) < 0)
+ 			continue;
+ 
+@@ -4035,6 +4037,18 @@ static void kvm_init_msr_list(void)
+ 		j++;
+ 	}
+ 	num_msrs_to_save = j;
++
++	for (i = j = 0; i < ARRAY_SIZE(emulated_msrs); i++) {
++		switch (emulated_msrs[i]) {
++		default:
++			break;
++		}
++
++		if (j < i)
++			emulated_msrs[j] = emulated_msrs[i];
++		j++;
++	}
++	num_emulated_msrs = j;
+ }
+ 
+ static int vcpu_mmio_write(struct kvm_vcpu *vcpu, gpa_t addr, int len,
