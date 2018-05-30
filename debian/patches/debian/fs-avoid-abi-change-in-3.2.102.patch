@@ -1,0 +1,82 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Thu, 31 May 2018 00:28:39 +0100
+Subject: fs: Avoid ABI change in 3.2.102
+Forwarded: not-needed
+
+The backport of commit 95dd77580ccd "fs: Teach path_connected to
+handle nfs filesystems with multiple roots." adds the field
+super_block::s_iflags.
+
+struct super_block is always allocated by the core kernel
+(alloc_super() function) and not embedded in other structures,
+so we can safely add fields at the end.  Move the new field
+there and hide it from genksyms.
+
+The field still needs to be set by the nfs module, so we need to
+prevent loading the updated nfs module on an old kernel which doesn't
+allocate enough memory for that field.  To ensure that, add a trivial
+wrapper around sget() and make nfs call that.
+
+---
+--- a/fs/nfs/super.c
++++ b/fs/nfs/super.c
+@@ -2267,7 +2267,7 @@ static struct dentry *nfs_fs_mount(struc
+ 		sb_mntdata.mntflags |= MS_SYNCHRONOUS;
+ 
+ 	/* Get a superblock - note that we may end up sharing one that already exists */
+-	s = sget(fs_type, compare_super, nfs_set_super, &sb_mntdata);
++	s = sget_iflags(fs_type, compare_super, nfs_set_super, &sb_mntdata);
+ 	if (IS_ERR(s)) {
+ 		mntroot = ERR_CAST(s);
+ 		goto out_err_nosb;
+--- a/fs/super.c
++++ b/fs/super.c
+@@ -473,6 +473,15 @@ retry:
+ 
+ EXPORT_SYMBOL(sget);
+ 
++struct super_block *sget_iflags(struct file_system_type *type,
++				int (*test)(struct super_block *,void *),
++				int (*set)(struct super_block *,void *),
++				void *data)
++{
++	return sget(type, test, set, data);
++}
++EXPORT_SYMBOL(sget_iflags);
++
+ void drop_super(struct super_block *sb)
+ {
+ 	up_read(&sb->s_umount);
+--- a/include/linux/fs.h
++++ b/include/linux/fs.h
+@@ -1438,7 +1438,6 @@ struct super_block {
+ 	const struct quotactl_ops	*s_qcop;
+ 	const struct export_operations *s_export_op;
+ 	unsigned long		s_flags;
+-	unsigned long		s_iflags;	/* internal SB_I_* flags */
+ 	unsigned long		s_magic;
+ 	struct dentry		*s_root;
+ 	struct rw_semaphore	s_umount;
+@@ -1515,6 +1514,11 @@ struct super_block {
+ 	 * Indicates how deep in a filesystem stack this SB is
+ 	 */
+ 	int s_stack_depth;
++
++#ifndef __GENKSYMS__
++	/* Only guaranteed to be present if you call sget_iflags() */
++	unsigned long		s_iflags;	/* internal SB_I_* flags */
++#endif
+ };
+ 
+ /* superblock cache pruning functions */
+@@ -1935,6 +1939,10 @@ struct super_block *sget(struct file_sys
+ 			int (*test)(struct super_block *,void *),
+ 			int (*set)(struct super_block *,void *),
+ 			void *data);
++struct super_block *sget_iflags(struct file_system_type *type,
++				int (*test)(struct super_block *,void *),
++				int (*set)(struct super_block *,void *),
++				void *data);
+ extern struct dentry *mount_pseudo(struct file_system_type *, char *,
+ 	const struct super_operations *ops,
+ 	const struct dentry_operations *dops,

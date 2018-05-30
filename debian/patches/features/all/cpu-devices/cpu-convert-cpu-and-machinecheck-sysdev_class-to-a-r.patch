@@ -49,6 +49,9 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
  - Fix to powerpc purr attribute has been backported]
 [bwh: Also update attributes added in backport of commit 87590ce6e373
  "sysfs/cpu: Add vulnerability folder"]
+[bwh: Refresh after backport of commits fa94d0c6e0f3 "x86/MCE: Save microcode
+ revision in machine check records" and e139058058eb "powerpc/numa: Invalidate
+ numa_cpu_lookup_table on cpu remove"]
 ---
 --- a/arch/avr32/kernel/cpu.c
 +++ b/arch/avr32/kernel/cpu.c
@@ -470,7 +473,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
  struct device_node;
  
  #ifdef CONFIG_NUMA
-@@ -86,19 +86,19 @@ extern int __node_distance(int, int);
+@@ -86,8 +86,8 @@ extern int __node_distance(int, int);
  
  extern void __init dump_numa_cpu_topology(void);
  
@@ -479,7 +482,9 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
 +extern int sysfs_add_device_to_node(struct device *dev, int nid);
 +extern void sysfs_remove_device_from_node(struct device *dev, int nid);
  
- #else
+ static inline void update_numa_cpu_lookup_table(unsigned int cpu, int node)
+ {
+@@ -98,12 +98,12 @@ static inline void update_numa_cpu_looku
  
  static inline void dump_numa_cpu_topology(void) {}
  
@@ -2418,7 +2423,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
  	create_hv_attr(config_version);
 --- a/arch/x86/include/asm/mce.h
 +++ b/arch/x86/include/asm/mce.h
-@@ -149,7 +149,7 @@ static inline void enable_p5_mce(void) {
+@@ -153,7 +153,7 @@ static inline void enable_p5_mce(void) {
  
  void mce_setup(struct mce *m);
  void mce_log(struct mce *m);
@@ -2534,7 +2539,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
  #include <linux/syscore_ops.h>
  #include <linux/delay.h>
  #include <linux/ctype.h>
-@@ -1781,7 +1781,7 @@ static struct syscore_ops mce_syscore_op
+@@ -1786,7 +1786,7 @@ static struct syscore_ops mce_syscore_op
  };
  
  /*
@@ -2543,7 +2548,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
   */
  
  static void mce_cpu_restart(void *data)
-@@ -1817,27 +1817,28 @@ static void mce_enable_ce(void *all)
+@@ -1822,27 +1822,28 @@ static void mce_enable_ce(void *all)
  		__mcheck_cpu_init_timer();
  }
  
@@ -2577,7 +2582,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
  			const char *buf, size_t size)
  {
  	u64 new;
-@@ -1852,14 +1853,14 @@ static ssize_t set_bank(struct sys_devic
+@@ -1857,14 +1858,14 @@ static ssize_t set_bank(struct sys_devic
  }
  
  static ssize_t
@@ -2594,7 +2599,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
  				const char *buf, size_t siz)
  {
  	char *p;
-@@ -1874,8 +1875,8 @@ static ssize_t set_trigger(struct sys_de
+@@ -1879,8 +1880,8 @@ static ssize_t set_trigger(struct sys_de
  	return strlen(mce_helper) + !!p;
  }
  
@@ -2605,7 +2610,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
  			     const char *buf, size_t size)
  {
  	u64 new;
-@@ -1898,8 +1899,8 @@ static ssize_t set_ignore_ce(struct sys_
+@@ -1906,8 +1907,8 @@ static ssize_t set_ignore_ce(struct sys_
  	return size;
  }
  
@@ -2616,7 +2621,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
  				 const char *buf, size_t size)
  {
  	u64 new;
-@@ -1921,108 +1922,107 @@ static ssize_t set_cmci_disabled(struct
+@@ -1932,12 +1933,12 @@ static ssize_t set_cmci_disabled(struct
  	return size;
  }
  
@@ -2626,9 +2631,13 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
 +				      struct device_attribute *attr,
  				      const char *buf, size_t size)
  {
--	ssize_t ret = sysdev_store_int(s, attr, buf, size);
-+	ssize_t ret = device_store_int(s, attr, buf, size);
- 	mce_restart();
+ 	unsigned long old_check_interval = check_interval;
+-	ssize_t ret = sysdev_store_ulong(s, attr, buf, size);
++	ssize_t ret = device_store_ulong(s, attr, buf, size);
+ 
+ 	if (check_interval == old_check_interval)
+ 		return ret;
+@@ -1952,99 +1953,98 @@ static ssize_t store_int_with_restart(st
  	return ret;
  }
  
@@ -2770,7 +2779,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
  }
  
  /* Make sure there are no machine checks on offlined CPUs. */
-@@ -2072,7 +2072,7 @@ mce_cpu_callback(struct notifier_block *
+@@ -2094,7 +2094,7 @@ mce_cpu_callback(struct notifier_block *
  	switch (action) {
  	case CPU_ONLINE:
  	case CPU_ONLINE_FROZEN:
@@ -2779,7 +2788,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
  		if (threshold_cpu_callback)
  			threshold_cpu_callback(action, cpu);
  		break;
-@@ -2080,7 +2080,7 @@ mce_cpu_callback(struct notifier_block *
+@@ -2102,7 +2102,7 @@ mce_cpu_callback(struct notifier_block *
  	case CPU_DEAD_FROZEN:
  		if (threshold_cpu_callback)
  			threshold_cpu_callback(action, cpu);
@@ -2788,7 +2797,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
  		break;
  	case CPU_DOWN_PREPARE:
  	case CPU_DOWN_PREPARE_FROZEN:
-@@ -2114,7 +2114,7 @@ static __init void mce_init_banks(void)
+@@ -2136,7 +2136,7 @@ static __init void mce_init_banks(void)
  
  	for (i = 0; i < banks; i++) {
  		struct mce_bank *b = &mce_banks[i];
@@ -2797,7 +2806,7 @@ Signed-off-by: Greg Kroah-Hartman <gregkh@suse.de>
  
  		sysfs_attr_init(&a->attr);
  		a->attr.name	= b->attrname;
-@@ -2134,16 +2134,16 @@ static __init int mcheck_init_device(voi
+@@ -2156,16 +2156,16 @@ static __init int mcheck_init_device(voi
  	if (!mce_available(&boot_cpu_data))
  		return -EIO;
  
