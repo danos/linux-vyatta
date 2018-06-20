@@ -48,11 +48,9 @@ Signed-off-by: Alexander Graf <agraf@suse.de>
  include/uapi/linux/kvm.h                |    1 +
  10 files changed, 193 insertions(+), 2 deletions(-)
 
-diff --git a/Documentation/virtual/kvm/api.txt b/Documentation/virtual/kvm/api.txt
-index 0fe3649..5c54d19 100644
 --- a/Documentation/virtual/kvm/api.txt
 +++ b/Documentation/virtual/kvm/api.txt
-@@ -2863,8 +2863,8 @@ The fields in each entry are defined as follows:
+@@ -2869,8 +2869,8 @@ The fields in each entry are defined as
           this function/index combination
  
  
@@ -63,7 +61,7 @@ index 0fe3649..5c54d19 100644
  
  There are certain capabilities that change the behavior of the virtual CPU when
  enabled. To enable them, please see section 4.37. Below you can find a list of
-@@ -3002,3 +3002,40 @@ Parameters: args[0] is the XICS device fd
+@@ -3008,3 +3008,40 @@ Parameters: args[0] is the XICS device f
              args[1] is the XICS CPU number (server ID) for this vcpu
  
  This capability connects the vcpu to an in-kernel XICS device.
@@ -104,20 +102,16 @@ index 0fe3649..5c54d19 100644
 +to handle it.  Note that it may not make sense to enable some and
 +disable others of a group of related hcalls, but KVM does not prevent
 +userspace from doing that.
-diff --git a/arch/powerpc/include/asm/kvm_book3s.h b/arch/powerpc/include/asm/kvm_book3s.h
-index a20cc0b..052ab2a 100644
 --- a/arch/powerpc/include/asm/kvm_book3s.h
 +++ b/arch/powerpc/include/asm/kvm_book3s.h
-@@ -187,6 +187,7 @@ extern void kvmppc_hv_entry_trampoline(void);
+@@ -190,6 +190,7 @@ extern void kvmppc_hv_entry_trampoline(v
  extern u32 kvmppc_alignment_dsisr(struct kvm_vcpu *vcpu, unsigned int inst);
  extern ulong kvmppc_alignment_dar(struct kvm_vcpu *vcpu, unsigned int inst);
  extern int kvmppc_h_pr(struct kvm_vcpu *vcpu, unsigned long cmd);
 +extern void kvmppc_pr_init_default_hcalls(struct kvm *kvm);
- extern void kvmppc_copy_to_svcpu(struct kvmppc_book3s_shadow_vcpu *svcpu,
- 				 struct kvm_vcpu *vcpu);
- extern void kvmppc_copy_from_svcpu(struct kvm_vcpu *vcpu,
-diff --git a/arch/powerpc/include/asm/kvm_host.h b/arch/powerpc/include/asm/kvm_host.h
-index f9ae696..62b2cee 100644
+ extern void kvmppc_copy_to_svcpu(struct kvm_vcpu *vcpu);
+ extern void kvmppc_copy_from_svcpu(struct kvm_vcpu *vcpu);
+ 
 --- a/arch/powerpc/include/asm/kvm_host.h
 +++ b/arch/powerpc/include/asm/kvm_host.h
 @@ -34,6 +34,7 @@
@@ -136,8 +130,6 @@ index f9ae696..62b2cee 100644
  #endif
  #ifdef CONFIG_KVM_MPIC
  	struct openpic *mpic;
-diff --git a/arch/powerpc/kernel/asm-offsets.c b/arch/powerpc/kernel/asm-offsets.c
-index f5995a9..17ffcb4 100644
 --- a/arch/powerpc/kernel/asm-offsets.c
 +++ b/arch/powerpc/kernel/asm-offsets.c
 @@ -493,6 +493,7 @@ int main(void)
@@ -148,8 +140,6 @@ index f5995a9..17ffcb4 100644
  	DEFINE(KVM_LPCR, offsetof(struct kvm, arch.lpcr));
  	DEFINE(KVM_RMOR, offsetof(struct kvm, arch.rmor));
  	DEFINE(KVM_VRMA_SLB_V, offsetof(struct kvm, arch.vrma_slb_v));
-diff --git a/arch/powerpc/kvm/book3s_hv.c b/arch/powerpc/kvm/book3s_hv.c
-index 1562acf..cf445d2 100644
 --- a/arch/powerpc/kvm/book3s_hv.c
 +++ b/arch/powerpc/kvm/book3s_hv.c
 @@ -67,6 +67,8 @@
@@ -161,7 +151,7 @@ index 1562acf..cf445d2 100644
  static void kvmppc_end_cede(struct kvm_vcpu *vcpu);
  static int kvmppc_hv_setup_htab_rma(struct kvm_vcpu *vcpu);
  
-@@ -562,6 +564,10 @@ int kvmppc_pseries_do_hcall(struct kvm_vcpu *vcpu)
+@@ -568,6 +570,10 @@ int kvmppc_pseries_do_hcall(struct kvm_v
  	struct kvm_vcpu *tvcpu;
  	int idx, rc;
  
@@ -172,7 +162,7 @@ index 1562acf..cf445d2 100644
  	switch (req) {
  	case H_ENTER:
  		idx = srcu_read_lock(&vcpu->kvm->srcu);
-@@ -2269,6 +2275,10 @@ static int kvmppc_core_init_vm_hv(struct kvm *kvm)
+@@ -2341,6 +2347,10 @@ static int kvmppc_core_init_vm_hv(struct
  	 */
  	cpumask_setall(&kvm->arch.need_tlb_flush);
  
@@ -183,7 +173,7 @@ index 1562acf..cf445d2 100644
  	kvm->arch.rma = NULL;
  
  	kvm->arch.host_sdr1 = mfspr(SPRN_SDR1);
-@@ -2407,6 +2417,45 @@ static long kvm_arch_vm_ioctl_hv(struct file *filp,
+@@ -2479,6 +2489,45 @@ static long kvm_arch_vm_ioctl_hv(struct
  	return r;
  }
  
@@ -229,7 +219,7 @@ index 1562acf..cf445d2 100644
  static struct kvmppc_ops kvm_ops_hv = {
  	.get_sregs = kvm_arch_vcpu_ioctl_get_sregs_hv,
  	.set_sregs = kvm_arch_vcpu_ioctl_set_sregs_hv,
-@@ -2454,6 +2503,8 @@ static int kvmppc_book3s_init_hv(void)
+@@ -2526,6 +2575,8 @@ static int kvmppc_book3s_init_hv(void)
  	kvm_ops_hv.owner = THIS_MODULE;
  	kvmppc_hv_ops = &kvm_ops_hv;
  
@@ -238,11 +228,9 @@ index 1562acf..cf445d2 100644
  	r = kvmppc_mmu_hv_init();
  	return r;
  }
-diff --git a/arch/powerpc/kvm/book3s_hv_rmhandlers.S b/arch/powerpc/kvm/book3s_hv_rmhandlers.S
-index 64ac56f..33aaade 100644
 --- a/arch/powerpc/kvm/book3s_hv_rmhandlers.S
 +++ b/arch/powerpc/kvm/book3s_hv_rmhandlers.S
-@@ -1909,6 +1909,17 @@ hcall_try_real_mode:
+@@ -1715,6 +1715,17 @@ hcall_try_real_mode:
  	clrrdi	r3,r3,2
  	cmpldi	r3,hcall_real_table_end - hcall_real_table
  	bge	guest_exit_cont
@@ -260,11 +248,9 @@ index 64ac56f..33aaade 100644
  	LOAD_REG_ADDR(r4, hcall_real_table)
  	lwax	r3,r3,r4
  	cmpwi	r3,0
-diff --git a/arch/powerpc/kvm/book3s_pr.c b/arch/powerpc/kvm/book3s_pr.c
-index 3b82e86..123ac7d 100644
 --- a/arch/powerpc/kvm/book3s_pr.c
 +++ b/arch/powerpc/kvm/book3s_pr.c
-@@ -1597,6 +1597,11 @@ static int kvmppc_core_init_vm_pr(struct kvm *kvm)
+@@ -1587,6 +1587,11 @@ static int kvmppc_core_init_vm_pr(struct
  {
  	mutex_init(&kvm->arch.hpt_mutex);
  
@@ -276,11 +262,9 @@ index 3b82e86..123ac7d 100644
  	if (firmware_has_feature(FW_FEATURE_SET_MODE)) {
  		spin_lock(&kvm_global_user_count_lock);
  		if (++kvm_global_user_count == 1)
-diff --git a/arch/powerpc/kvm/book3s_pr_papr.c b/arch/powerpc/kvm/book3s_pr_papr.c
-index f7c25c6..eacaa6e 100644
 --- a/arch/powerpc/kvm/book3s_pr_papr.c
 +++ b/arch/powerpc/kvm/book3s_pr_papr.c
-@@ -267,6 +267,10 @@ static int kvmppc_h_pr_xics_hcall(struct kvm_vcpu *vcpu, u32 cmd)
+@@ -267,6 +267,10 @@ static int kvmppc_h_pr_xics_hcall(struct
  
  int kvmppc_h_pr(struct kvm_vcpu *vcpu, unsigned long cmd)
  {
@@ -291,7 +275,7 @@ index f7c25c6..eacaa6e 100644
  	switch (cmd) {
  	case H_ENTER:
  		return kvmppc_h_pr_enter(vcpu);
-@@ -304,3 +308,36 @@ int kvmppc_h_pr(struct kvm_vcpu *vcpu, unsigned long cmd)
+@@ -304,3 +308,36 @@ int kvmppc_h_pr(struct kvm_vcpu *vcpu, u
  
  	return EMULATE_FAIL;
  }
@@ -328,11 +312,9 @@ index f7c25c6..eacaa6e 100644
 +	for (i = 0; default_hcall_list[i]; ++i)
 +		__set_bit(default_hcall_list[i] / 4, kvm->arch.enabled_hcalls);
 +}
-diff --git a/arch/powerpc/kvm/powerpc.c b/arch/powerpc/kvm/powerpc.c
-index 61c738a..3222a4d 100644
 --- a/arch/powerpc/kvm/powerpc.c
 +++ b/arch/powerpc/kvm/powerpc.c
-@@ -387,6 +387,7 @@ int kvm_dev_ioctl_check_extension(long ext)
+@@ -387,6 +387,7 @@ int kvm_dev_ioctl_check_extension(long e
  	case KVM_CAP_PPC_UNSET_IRQ:
  	case KVM_CAP_PPC_IRQ_LEVEL:
  	case KVM_CAP_ENABLE_CAP:
@@ -340,7 +322,7 @@ index 61c738a..3222a4d 100644
  	case KVM_CAP_ONE_REG:
  	case KVM_CAP_IOEVENTFD:
  	case KVM_CAP_DEVICE_CTRL:
-@@ -417,6 +418,7 @@ int kvm_dev_ioctl_check_extension(long ext)
+@@ -417,6 +418,7 @@ int kvm_dev_ioctl_check_extension(long e
  	case KVM_CAP_PPC_ALLOC_HTAB:
  	case KVM_CAP_PPC_RTAS:
  	case KVM_CAP_PPC_FIXUP_HCALL:
@@ -348,7 +330,7 @@ index 61c738a..3222a4d 100644
  #ifdef CONFIG_KVM_XICS
  	case KVM_CAP_IRQ_XICS:
  #endif
-@@ -1099,6 +1101,40 @@ int kvm_vm_ioctl_irq_line(struct kvm *kvm, struct kvm_irq_level *irq_event,
+@@ -1099,6 +1101,40 @@ int kvm_vm_ioctl_irq_line(struct kvm *kv
  	return 0;
  }
  
@@ -389,7 +371,7 @@ index 61c738a..3222a4d 100644
  long kvm_arch_vm_ioctl(struct file *filp,
                         unsigned int ioctl, unsigned long arg)
  {
-@@ -1118,6 +1154,15 @@ long kvm_arch_vm_ioctl(struct file *filp,
+@@ -1118,6 +1154,15 @@ long kvm_arch_vm_ioctl(struct file *filp
  
  		break;
  	}
@@ -405,11 +387,9 @@ index 61c738a..3222a4d 100644
  #ifdef CONFIG_PPC_BOOK3S_64
  	case KVM_CREATE_SPAPR_TCE: {
  		struct kvm_create_spapr_tce create_tce;
-diff --git a/include/uapi/linux/kvm.h b/include/uapi/linux/kvm.h
-index e11d8f1..0418b74 100644
 --- a/include/uapi/linux/kvm.h
 +++ b/include/uapi/linux/kvm.h
-@@ -758,6 +758,7 @@ struct kvm_ppc_smmu_info {
+@@ -759,6 +759,7 @@ struct kvm_ppc_smmu_info {
  #define KVM_CAP_VM_ATTRIBUTES 101
  #define KVM_CAP_ARM_PSCI_0_2 102
  #define KVM_CAP_PPC_FIXUP_HCALL 103
@@ -417,6 +397,3 @@ index e11d8f1..0418b74 100644
  
  #ifdef KVM_CAP_IRQ_ROUTING
  
--- 
-1.7.10.4
-
