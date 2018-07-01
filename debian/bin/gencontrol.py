@@ -106,6 +106,7 @@ class Gencontrol(Base):
         makeflags = makeflags.copy()
         makeflags['ALL_FEATURESETS'] = ' '.join(fs_enabled)
         makeflags['ALL_TRIPLETS'] = ' '.join(triplet_enabled)
+        makeflags['SOURCE_BASENAME'] = self.vars['source_basename']
         if not self.config.merge('packages').get('docs', True):
             makeflags['DO_DOCS'] = False
         super(Gencontrol, self).do_main_makefile(makefile, makeflags, extra)
