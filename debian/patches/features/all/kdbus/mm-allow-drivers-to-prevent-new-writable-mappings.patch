@@ -49,16 +49,16 @@ Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
  	mapping->backing_dev_info = &default_backing_dev_info;
 --- a/include/linux/fs.h
 +++ b/include/linux/fs.h
-@@ -387,7 +387,7 @@ struct address_space {
+@@ -393,7 +393,7 @@ struct address_space {
  	struct inode		*host;		/* owner: inode, block_device */
  	struct radix_tree_root	page_tree;	/* radix tree of all pages */
  	spinlock_t		tree_lock;	/* and lock protecting it */
 -	unsigned int		i_mmap_writable;/* count VM_SHARED mappings */
 +	atomic_t		i_mmap_writable;/* count VM_SHARED mappings */
  	struct rb_root		i_mmap;		/* tree of private and shared mappings */
- 	struct list_head	i_mmap_nonlinear;/*list VM_NONLINEAR mappings */
  	struct mutex		i_mmap_mutex;	/* protect tree, count, list */
-@@ -470,10 +470,35 @@ static inline int mapping_mapped(struct
+ 	/* Protected by tree_lock together with the radix tree */
+@@ -474,10 +474,35 @@ static inline int mapping_mapped(struct
   * Note that i_mmap_writable counts all VM_SHARED vmas: do_mmap_pgoff
   * marks vma as VM_SHARED if it is shared, and the file was opened for
   * writing i.e. vma may be mprotected writable even if now readonly.
@@ -97,7 +97,7 @@ Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
  /*
 --- a/kernel/fork.c
 +++ b/kernel/fork.c
-@@ -426,7 +426,7 @@ static int dup_mmap(struct mm_struct *mm
+@@ -432,7 +432,7 @@ static int dup_mmap(struct mm_struct *mm
  				atomic_dec(&inode->i_writecount);
  			mutex_lock(&mapping->i_mmap_mutex);
  			if (tmp->vm_flags & VM_SHARED)
@@ -105,7 +105,7 @@ Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
 +				atomic_inc(&mapping->i_mmap_writable);
  			flush_dcache_mmap_lock(mapping);
  			/* insert tmp into the share list, just after mpnt */
- 			if (unlikely(tmp->vm_flags & VM_NONLINEAR))
+ 			vma_interval_tree_insert_after(tmp, mpnt,
 --- a/mm/mmap.c
 +++ b/mm/mmap.c
 @@ -216,7 +216,7 @@ static void __remove_shared_vm_struct(st
@@ -116,8 +116,8 @@ Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
 +		mapping_unmap_writable(mapping);
  
  	flush_dcache_mmap_lock(mapping);
- 	if (unlikely(vma->vm_flags & VM_NONLINEAR))
-@@ -617,7 +617,7 @@ static void __vma_link_file(struct vm_ar
+ 	vma_interval_tree_remove(vma, &mapping->i_mmap);
+@@ -633,7 +633,7 @@ static void __vma_link_file(struct vm_ar
  		if (vma->vm_flags & VM_DENYWRITE)
  			atomic_dec(&file_inode(file)->i_writecount);
  		if (vma->vm_flags & VM_SHARED)
@@ -125,8 +125,8 @@ Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
 +			atomic_inc(&mapping->i_mmap_writable);
  
  		flush_dcache_mmap_lock(mapping);
- 		if (unlikely(vma->vm_flags & VM_NONLINEAR))
-@@ -1572,6 +1572,17 @@ munmap_back:
+ 		vma_interval_tree_insert(vma, &mapping->i_mmap);
+@@ -1585,6 +1585,17 @@ munmap_back:
  			if (error)
  				goto free_vma;
  		}
@@ -144,7 +144,7 @@ Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
  		vma->vm_file = get_file(file);
  		error = file->f_op->mmap(file, vma);
  		if (error)
-@@ -1611,8 +1622,12 @@ munmap_back:
+@@ -1624,8 +1635,12 @@ munmap_back:
  
  	vma_link(mm, vma, prev, rb_link, rb_parent);
  	/* Once vma denies write, undo our temporary denial count */
@@ -159,7 +159,7 @@ Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
  	file = vma->vm_file;
  out:
  	perf_event_mmap(vma);
-@@ -1641,14 +1656,17 @@ out:
+@@ -1654,14 +1669,17 @@ out:
  	return addr;
  
  unmap_and_free_vma:
