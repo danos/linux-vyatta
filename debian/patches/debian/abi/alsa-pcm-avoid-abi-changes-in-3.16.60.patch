@@ -1,0 +1,130 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Tue, 20 Nov 2018 20:39:42 +0000
+Subject: ALSA: pcm: Avoid ABI changes in 3.16.60
+Forwarded: not-needed
+
+Commit 0dbf5ca731eb "ALSA: pcm: Return -EBUSY for OSS ioctls changing
+busy streams" added a new structure member snd_pcm_oss_runtime::rw_ref.
+struct snd_pcm_oss_runtime is always allocated as part of struct
+snd_pcm_runtime, and the latter is always allocated in the pcm core.
+So we can safely add fields at the end of the latter, but not the
+former.  Move the new member up into struct snd_pcm_runtime and hide
+it from genksyms.
+
+Commit bdeb296a5258 "ALSA: pcm: Fix UAF at PCM release via PCM timer
+access" added a #include to sound/core/pcm.c which changes ABI for
+symbols declared there.  Hide this from genksyms.
+
+---
+--- a/include/sound/pcm.h
++++ b/include/sound/pcm.h
+@@ -361,6 +361,10 @@ struct snd_pcm_runtime {
+ #ifdef CONFIG_SND_PCM_XRUN_DEBUG
+ 	struct snd_pcm_hwptr_log *hwptr_log;
+ #endif
++
++#if IS_ENABLED(CONFIG_SND_PCM_OSS) && !defined(__GENKSYMS__)
++	atomic_t oss_rw_ref;		/* concurrent read/write accesses */
++#endif
+ };
+ 
+ struct snd_pcm_group {		/* keep linked substreams */
+--- a/include/sound/pcm_oss.h
++++ b/include/sound/pcm_oss.h
+@@ -57,7 +57,6 @@ struct snd_pcm_oss_runtime {
+ 	char *buffer;				/* vmallocated period */
+ 	size_t buffer_used;			/* used length from period buffer */
+ 	struct mutex params_lock;
+-	atomic_t rw_ref;		/* concurrent read/write accesses */
+ #ifdef CONFIG_SND_PCM_OSS_PLUGINS
+ 	struct snd_pcm_plugin *plugin_first;
+ 	struct snd_pcm_plugin *plugin_last;
+--- a/sound/core/oss/pcm_oss.c
++++ b/sound/core/oss/pcm_oss.c
+@@ -838,7 +838,7 @@ static int lock_params(struct snd_pcm_ru
+ {
+ 	if (mutex_lock_interruptible(&runtime->oss.params_lock))
+ 		return -ERESTARTSYS;
+-	if (atomic_read(&runtime->oss.rw_ref)) {
++	if (atomic_read(&runtime->oss_rw_ref)) {
+ 		mutex_unlock(&runtime->oss.params_lock);
+ 		return -EBUSY;
+ 	}
+@@ -1424,7 +1424,7 @@ static ssize_t snd_pcm_oss_write1(struct
+ 	if (atomic_read(&substream->mmap_count))
+ 		return -ENXIO;
+ 
+-	atomic_inc(&runtime->oss.rw_ref);
++	atomic_inc(&runtime->oss_rw_ref);
+ 	while (bytes > 0) {
+ 		if (mutex_lock_interruptible(&runtime->oss.params_lock)) {
+ 			tmp = -ERESTARTSYS;
+@@ -1488,7 +1488,7 @@ static ssize_t snd_pcm_oss_write1(struct
+ 		}
+ 		tmp = 0;
+ 	}
+-	atomic_dec(&runtime->oss.rw_ref);
++	atomic_dec(&runtime->oss_rw_ref);
+ 	return xfer > 0 ? (snd_pcm_sframes_t)xfer : tmp;
+ }
+ 
+@@ -1534,7 +1534,7 @@ static ssize_t snd_pcm_oss_read1(struct
+ 	if (atomic_read(&substream->mmap_count))
+ 		return -ENXIO;
+ 
+-	atomic_inc(&runtime->oss.rw_ref);
++	atomic_inc(&runtime->oss_rw_ref);
+ 	while (bytes > 0) {
+ 		if (mutex_lock_interruptible(&runtime->oss.params_lock)) {
+ 			tmp = -ERESTARTSYS;
+@@ -1583,7 +1583,7 @@ static ssize_t snd_pcm_oss_read1(struct
+ 		}
+ 		tmp = 0;
+ 	}
+-	atomic_dec(&runtime->oss.rw_ref);
++	atomic_dec(&runtime->oss_rw_ref);
+ 	return xfer > 0 ? (snd_pcm_sframes_t)xfer : tmp;
+ }
+ 
+@@ -1690,9 +1690,9 @@ static int snd_pcm_oss_sync(struct snd_p
+ 			goto __direct;
+ 		if ((err = snd_pcm_oss_make_ready(substream)) < 0)
+ 			return err;
+-		atomic_inc(&runtime->oss.rw_ref);
++		atomic_inc(&runtime->oss_rw_ref);
+ 		if (mutex_lock_interruptible(&runtime->oss.params_lock)) {
+-			atomic_dec(&runtime->oss.rw_ref);
++			atomic_dec(&runtime->oss_rw_ref);
+ 			return -ERESTARTSYS;
+ 		}
+ 		format = snd_pcm_oss_format_from(runtime->oss.format);
+@@ -1751,7 +1751,7 @@ static int snd_pcm_oss_sync(struct snd_p
+ 		}
+ unlock:
+ 		mutex_unlock(&runtime->oss.params_lock);
+-		atomic_dec(&runtime->oss.rw_ref);
++		atomic_dec(&runtime->oss_rw_ref);
+ 		if (err < 0)
+ 			return err;
+ 		/*
+@@ -2419,7 +2419,7 @@ static void snd_pcm_oss_init_substream(s
+ 	runtime->oss.maxfrags = 0;
+ 	runtime->oss.subdivision = 0;
+ 	substream->pcm_release = snd_pcm_oss_release_substream;
+-	atomic_set(&runtime->oss.rw_ref, 0);
++	atomic_set(&runtime->oss_rw_ref, 0);
+ }
+ 
+ static int snd_pcm_oss_release_file(struct snd_pcm_oss_file *pcm_oss_file)
+--- a/sound/core/pcm.c
++++ b/sound/core/pcm.c
+@@ -28,7 +28,9 @@
+ #include <sound/core.h>
+ #include <sound/minors.h>
+ #include <sound/pcm.h>
++#ifndef __GENKSYMS__
+ #include <sound/timer.h>
++#endif
+ #include <sound/control.h>
+ #include <sound/info.h>
+ 
