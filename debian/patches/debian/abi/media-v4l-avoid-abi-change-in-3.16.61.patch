@@ -26,16 +26,23 @@ replace the per-file-handle mutex with a global mutex.
  	unsigned int		navailable;
 --- a/drivers/media/v4l2-core/v4l2-event.c
 +++ b/drivers/media/v4l2-core/v4l2-event.c
-@@ -194,6 +194,8 @@ int v4l2_event_pending(struct v4l2_fh *f
+@@ -194,12 +194,14 @@ int v4l2_event_pending(struct v4l2_fh *f
  }
  EXPORT_SYMBOL_GPL(v4l2_event_pending);
  
 +static DEFINE_MUTEX(v4l2_event_subscribe_lock);
 +
- int v4l2_event_subscribe(struct v4l2_fh *fh,
- 			 const struct v4l2_event_subscription *sub, unsigned elems,
- 			 const struct v4l2_subscribed_event_ops *ops)
-@@ -221,7 +223,7 @@ int v4l2_event_subscribe(struct v4l2_fh
+ static void __v4l2_event_unsubscribe(struct v4l2_subscribed_event *sev)
+ {
+ 	struct v4l2_fh *fh = sev->fh;
+ 	unsigned int i;
+ 
+-	lockdep_assert_held(&fh->subscribe_lock);
++	lockdep_assert_held(&v4l2_event_subscribe_lock);
+ 	assert_spin_locked(&fh->vdev->fh_lock);
+ 
+ 	/* Remove any pending events for this subscription */
+@@ -237,7 +239,7 @@ int v4l2_event_subscribe(struct v4l2_fh
  	sev->ops = ops;
  	sev->elems = elems;
  
@@ -44,16 +51,16 @@ replace the per-file-handle mutex with a global mutex.
  
  	spin_lock_irqsave(&fh->vdev->fh_lock, flags);
  	found_ev = v4l2_event_subscribed(fh, sub->type, sub->id);
-@@ -246,7 +248,7 @@ int v4l2_event_subscribe(struct v4l2_fh
- 	spin_unlock_irqrestore(&fh->vdev->fh_lock, flags);
+@@ -258,7 +260,7 @@ int v4l2_event_subscribe(struct v4l2_fh
+ 		}
+ 	}
  
- out_unlock:
 -	mutex_unlock(&fh->subscribe_lock);
 +	mutex_unlock(&v4l2_event_subscribe_lock);
  
  	return ret;
  }
-@@ -287,7 +289,7 @@ int v4l2_event_unsubscribe(struct v4l2_f
+@@ -298,7 +300,7 @@ int v4l2_event_unsubscribe(struct v4l2_f
  		return 0;
  	}
  
@@ -62,7 +69,7 @@ replace the per-file-handle mutex with a global mutex.
  
  	spin_lock_irqsave(&fh->vdev->fh_lock, flags);
  
-@@ -306,7 +308,7 @@ int v4l2_event_unsubscribe(struct v4l2_f
+@@ -311,7 +313,7 @@ int v4l2_event_unsubscribe(struct v4l2_f
  	if (sev && sev->ops && sev->ops->del)
  		sev->ops->del(sev);
  
