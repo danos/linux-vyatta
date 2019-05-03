@@ -1,0 +1,168 @@
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Sat, 04 May 2019 00:23:43 +0100
+Subject: Revert "perf/x86: Add check_period PMU callback"
+Forwarded: not-needed
+
+This reverts commit a55df84bd5b9fd442c0c3ffab3197d02d8800573, which
+was commit 81ec3f3c4c4d78f2d3b6689c9816bfbdf7417dbb upstream, as it
+introduces a kernel ABI change.
+
+The bug is low priority for jessie as (a) I think there are lots of
+other unfixed crash bugs in perf events in this kernel version and (b)
+we don't allow unprivileged users to use them.
+
+---
+--- a/arch/x86/kernel/cpu/perf_event.c
++++ b/arch/x86/kernel/cpu/perf_event.c
+@@ -1920,14 +1920,6 @@ void perf_check_microcode(void)
+ }
+ EXPORT_SYMBOL_GPL(perf_check_microcode);
+ 
+-static int x86_pmu_check_period(struct perf_event *event, u64 value)
+-{
+-	if (x86_pmu.check_period && x86_pmu.check_period(event, value))
+-		return -EINVAL;
+-
+-	return 0;
+-}
+-
+ static struct pmu pmu = {
+ 	.pmu_enable		= x86_pmu_enable,
+ 	.pmu_disable		= x86_pmu_disable,
+@@ -1948,7 +1940,6 @@ static struct pmu pmu = {
+ 
+ 	.event_idx		= x86_pmu_event_idx,
+ 	.flush_branch_stack	= x86_pmu_flush_branch_stack,
+-	.check_period		= x86_pmu_check_period,
+ };
+ 
+ void arch_perf_update_userpage(struct perf_event_mmap_page *userpg, u64 now)
+--- a/arch/x86/kernel/cpu/perf_event.h
++++ b/arch/x86/kernel/cpu/perf_event.h
+@@ -473,11 +473,6 @@ struct x86_pmu {
+ 	 * Intel host/guest support (KVM)
+ 	 */
+ 	struct perf_guest_switch_msr *(*guest_get_msrs)(int *nr);
+-
+-	/*
+-	 * Check period value for PERF_EVENT_IOC_PERIOD ioctl.
+-	 */
+-	int (*check_period) (struct perf_event *event, u64 period);
+ };
+ 
+ #define x86_add_quirk(func_)						\
+@@ -639,22 +634,6 @@ static inline int amd_pmu_init(void)
+ 
+ #ifdef CONFIG_CPU_SUP_INTEL
+ 
+-static inline bool intel_pmu_has_bts_period(struct perf_event *event, u64 period)
+-{
+-	if (event->attr.config == PERF_COUNT_HW_BRANCH_INSTRUCTIONS &&
+-	    !event->attr.freq && period == 1)
+-		return true;
+-
+-	return false;
+-}
+-
+-static inline bool intel_pmu_has_bts(struct perf_event *event)
+-{
+-	struct hw_perf_event *hwc = &event->hw;
+-
+-	return intel_pmu_has_bts_period(event, hwc->sample_period);
+-}
+-
+ int intel_pmu_save_and_restart(struct perf_event *event);
+ 
+ struct event_constraint *
+--- a/arch/x86/kernel/cpu/perf_event_intel.c
++++ b/arch/x86/kernel/cpu/perf_event_intel.c
+@@ -1969,11 +1969,6 @@ ssize_t intel_event_sysfs_show(char *pag
+ 	return x86_event_sysfs_show(page, config, event);
+ }
+ 
+-static int intel_pmu_check_period(struct perf_event *event, u64 value)
+-{
+-	return intel_pmu_has_bts_period(event, value) ? -EINVAL : 0;
+-}
+-
+ static __initconst const struct x86_pmu core_pmu = {
+ 	.name			= "core",
+ 	.handle_irq		= x86_pmu_handle_irq,
+@@ -2000,8 +1995,6 @@ static __initconst const struct x86_pmu
+ 	.guest_get_msrs		= core_guest_get_msrs,
+ 	.format_attrs		= intel_arch_formats_attr,
+ 	.events_sysfs_show	= intel_event_sysfs_show,
+-
+-	.check_period		= intel_pmu_check_period,
+ };
+ 
+ struct intel_shared_regs *allocate_shared_regs(int cpu)
+@@ -2152,8 +2145,6 @@ static __initconst const struct x86_pmu
+ 	.cpu_dying		= intel_pmu_cpu_dying,
+ 	.guest_get_msrs		= intel_guest_get_msrs,
+ 	.flush_branch_stack	= intel_pmu_flush_branch_stack,
+-
+-	.check_period		= intel_pmu_check_period,
+ };
+ 
+ static __init void intel_clovertown_quirk(void)
+--- a/include/linux/perf_event.h
++++ b/include/linux/perf_event.h
+@@ -262,11 +262,6 @@ struct pmu {
+ 	 * flush branch stack on context-switches (needed in cpu-wide mode)
+ 	 */
+ 	void (*flush_branch_stack)	(void);
+-
+-	/*
+-	 * Check period value for PERF_EVENT_IOC_PERIOD ioctl.
+-	 */
+-	int (*check_period)		(struct perf_event *event, u64 value); /* optional */
+ };
+ 
+ /**
+--- a/kernel/events/core.c
++++ b/kernel/events/core.c
+@@ -3801,11 +3801,6 @@ static int __perf_event_period(void *inf
+ 	return 0;
+ }
+ 
+-static int perf_event_check_period(struct perf_event *event, u64 value)
+-{
+-	return event->pmu->check_period(event, value);
+-}
+-
+ static int perf_event_period(struct perf_event *event, u64 __user *arg)
+ {
+ 	struct period_event pe = { .event = event, };
+@@ -3825,9 +3820,6 @@ static int perf_event_period(struct perf
+ 	if (event->attr.freq && value > sysctl_perf_event_sample_rate)
+ 		return -EINVAL;
+ 
+-	if (perf_event_check_period(event, value))
+-		return -EINVAL;
+-
+ 	task = ctx->task;
+ 	pe.value = value;
+ 
+@@ -6653,11 +6645,6 @@ static int perf_pmu_nop_int(struct pmu *
+ 	return 0;
+ }
+ 
+-static int perf_event_nop_int(struct perf_event *event, u64 value)
+-{
+-	return 0;
+-}
+-
+ static void perf_pmu_start_txn(struct pmu *pmu)
+ {
+ 	perf_pmu_disable(pmu);
+@@ -6912,9 +6899,6 @@ got_cpu_context:
+ 		pmu->pmu_disable = perf_pmu_nop_void;
+ 	}
+ 
+-	if (!pmu->check_period)
+-		pmu->check_period = perf_event_nop_int;
+-
+ 	if (!pmu->event_idx)
+ 		pmu->event_idx = perf_event_idx_default;
+ 
