@@ -185,14 +185,22 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  #endif
 --- a/arch/x86/kernel/entry_32.S
 +++ b/arch/x86/kernel/entry_32.S
-@@ -354,6 +354,7 @@ ENTRY(resume_userspace)
- 	andl $_TIF_WORK_MASK, %ecx	# is there any work to be done on
- 					# int/exception return?
- 	jne work_pending
+@@ -443,6 +443,7 @@ sysenter_after_call:
+ 	testl $_TIF_ALLWORK_MASK, %ecx
+ 	jne sysexit_audit
+ sysenter_exit:
 +	MDS_USER_CLEAR_CPU_BUFFERS
- 	jmp restore_all
- END(ret_from_exception)
+ /* if something modifies registers it must also disable sysexit */
+ 	movl PT_EIP(%esp), %edx
+ 	movl PT_OLDESP(%esp), %ecx
+@@ -531,6 +532,7 @@ syscall_exit:
+ 	jne syscall_exit_work
  
+ restore_all:
++	MDS_USER_CLEAR_CPU_BUFFERS
+ 	TRACE_IRQS_IRET
+ restore_all_notrace:
+ #ifdef CONFIG_X86_ESPFIX32
 --- a/arch/x86/kernel/entry_64.S
 +++ b/arch/x86/kernel/entry_64.S
 @@ -475,6 +475,7 @@ sysret_check:
@@ -211,6 +219,25 @@ Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
  	TRACE_IRQS_IRETQ
  	/*
  	 * This opens a window where we have a user CR3, but are
+@@ -1384,7 +1386,7 @@ paranoid_userspace:
+ 	GET_THREAD_INFO(%rcx)
+ 	movl TI_flags(%rcx),%ebx
+ 	andl $_TIF_WORK_MASK,%ebx
+-	jz paranoid_kernel
++	jz paranoid_userspace_done
+ 	movq %rsp,%rdi			/* &pt_regs */
+ 	call sync_regs
+ 	movq %rax,%rsp			/* switch stack for scheduling */
+@@ -1406,6 +1408,9 @@ paranoid_schedule:
+ 	DISABLE_INTERRUPTS(CLBR_ANY)
+ 	TRACE_IRQS_OFF
+ 	jmp paranoid_userspace
++paranoid_userspace_done:
++	MDS_USER_CLEAR_CPU_BUFFERS
++	jmp paranoid_kernel
+ 	CFI_ENDPROC
+ END(paranoid_exit)
+ 
 --- a/arch/x86/ia32/ia32entry.S
 +++ b/arch/x86/ia32/ia32entry.S
 @@ -188,6 +188,7 @@ sysenter_dispatch:
