@@ -1,0 +1,77 @@
+From: Wanpeng Li <wanpeng.li@hotmail.com>
+Date: Fri, 30 Sep 2016 09:01:06 +0800
+Subject: x86/entry/64: Fix context tracking state warning when load_gs_index
+ fails
+Origin: https://git.kernel.org/linus/2fa5f04f85730d0c4f49f984b7efeb4f8d5bd1fc
+
+This warning:
+
+ WARNING: CPU: 0 PID: 3331 at arch/x86/entry/common.c:45 enter_from_user_mode+0x32/0x50
+ CPU: 0 PID: 3331 Comm: ldt_gdt_64 Not tainted 4.8.0-rc7+ #13
+ Call Trace:
+  dump_stack+0x99/0xd0
+  __warn+0xd1/0xf0
+  warn_slowpath_null+0x1d/0x20
+  enter_from_user_mode+0x32/0x50
+  error_entry+0x6d/0xc0
+  ? general_protection+0x12/0x30
+  ? native_load_gs_index+0xd/0x20
+  ? do_set_thread_area+0x19c/0x1f0
+  SyS_set_thread_area+0x24/0x30
+  do_int80_syscall_32+0x7c/0x220
+  entry_INT80_compat+0x38/0x50
+
+... can be reproduced by running the GS testcase of the ldt_gdt test unit in
+the x86 selftests.
+
+do_int80_syscall_32() will call enter_form_user_mode() to convert context
+tracking state from user state to kernel state. The load_gs_index() call
+can fail with user gsbase, gsbase will be fixed up and proceed if this
+happen.
+
+However, enter_from_user_mode() will be called again in the fixed up path
+though it is context tracking kernel state currently.
+
+This patch fixes it by just fixing up gsbase and telling lockdep that IRQs
+are off once load_gs_index() failed with user gsbase.
+
+Signed-off-by: Wanpeng Li <wanpeng.li@hotmail.com>
+Acked-by: Andy Lutomirski <luto@kernel.org>
+Cc: Borislav Petkov <bp@alien8.de>
+Cc: Brian Gerst <brgerst@gmail.com>
+Cc: Denys Vlasenko <dvlasenk@redhat.com>
+Cc: H. Peter Anvin <hpa@zytor.com>
+Cc: Josh Poimboeuf <jpoimboe@redhat.com>
+Cc: Linus Torvalds <torvalds@linux-foundation.org>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Thomas Gleixner <tglx@linutronix.de>
+Link: http://lkml.kernel.org/r/1475197266-3440-1-git-send-email-wanpeng.li@hotmail.com
+Signed-off-by: Ingo Molnar <mingo@kernel.org>
+[bwh: Backported to 3.16 as dependency of commit 18ec54fdd6d1
+ "x86/speculation: Prepare entry code for Spectre v1 swapgs mitigations":
+ - Adjust filename]
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+ arch/x86/kernel/entry_64.S | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+--- a/arch/x86/kernel/entry_64.S
++++ b/arch/x86/kernel/entry_64.S
+@@ -1465,7 +1465,6 @@ ENTRY(error_entry)
+ 	testl $3,CS+8(%rsp)
+ 	jz	.Lerror_kernelspace
+ 
+-.Lerror_entry_from_usermode_swapgs:
+ 	/*
+ 	 * We entered from user mode or we're pretending to have entered
+ 	 * from user mode due to an IRET fault.
+@@ -1498,7 +1497,8 @@ ENTRY(error_entry)
+ 	 * gsbase and proceed.  We'll fix up the exception and land in
+ 	 * gs_change's error handler with kernel gsbase.
+ 	 */
+-	jmp	.Lerror_entry_from_usermode_swapgs
++	SWAPGS
++	jmp .Lerror_entry_done
+ 
+ .Lbstep_iret:
+ 	/* Fix truncated RIP */

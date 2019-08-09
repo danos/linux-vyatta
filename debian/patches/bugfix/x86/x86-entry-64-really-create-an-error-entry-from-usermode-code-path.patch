@@ -1,0 +1,110 @@
+From: Andy Lutomirski <luto@kernel.org>
+Date: Fri, 3 Jul 2015 12:44:27 -0700
+Subject: x86/entry/64: Really create an error-entry-from-usermode code path
+Origin: https://git.kernel.org/linus/cb6f64ed5a04036eef07e70b57dd5dd78f2fbcef
+
+In 539f51136500 ("x86/asm/entry/64: Disentangle error_entry/exit
+gsbase/ebx/usermode code"), I arranged the code slightly wrong
+-- IRET faults would skip the code path that was intended to
+execute on all error entries from user mode.  Fix it up.
+
+While we're at it, make all the labels in error_entry local.
+
+This does not fix a bug, but we'll need it, and it slightly
+shrinks the code.
+
+Signed-off-by: Andy Lutomirski <luto@kernel.org>
+Cc: Andy Lutomirski <luto@amacapital.net>
+Cc: Borislav Petkov <bp@alien8.de>
+Cc: Brian Gerst <brgerst@gmail.com>
+Cc: Denys Vlasenko <dvlasenk@redhat.com>
+Cc: Denys Vlasenko <vda.linux@googlemail.com>
+Cc: Frederic Weisbecker <fweisbec@gmail.com>
+Cc: H. Peter Anvin <hpa@zytor.com>
+Cc: Kees Cook <keescook@chromium.org>
+Cc: Linus Torvalds <torvalds@linux-foundation.org>
+Cc: Oleg Nesterov <oleg@redhat.com>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Rik van Riel <riel@redhat.com>
+Cc: Thomas Gleixner <tglx@linutronix.de>
+Cc: paulmck@linux.vnet.ibm.com
+Link: http://lkml.kernel.org/r/91e17891e49fa3d61357eadc451529ad48143ee1.1435952415.git.luto@kernel.org
+Signed-off-by: Ingo Molnar <mingo@kernel.org>
+[bwh: Backported to 3.16 as dependency of commit 18ec54fdd6d1
+ "x86/speculation: Prepare entry code for Spectre v1 swapgs mitigations":
+ - Adjust filename, context]
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+ arch/x86/kernel/entry_64.S | 28 ++++++++++++++++------------
+ 1 file changed, 16 insertions(+), 12 deletions(-)
+
+--- a/arch/x86/kernel/entry_64.S
++++ b/arch/x86/kernel/entry_64.S
+@@ -1463,12 +1463,17 @@ ENTRY(error_entry)
+ 	 */
+ 	SWITCH_KERNEL_CR3
+ 	testl $3,CS+8(%rsp)
+-	je error_kernelspace
++	jz	.Lerror_kernelspace
+ 
+-	/* We entered from user mode */
++.Lerror_entry_from_usermode_swapgs:
++	/*
++	 * We entered from user mode or we're pretending to have entered
++	 * from user mode due to an IRET fault.
++	 */
+ 	SWAPGS
+ 
+-error_entry_done:
++.Lerror_entry_from_usermode_after_swapgs:
++.Lerror_entry_done:
+ 	TRACE_IRQS_OFF
+ 	ret
+ 
+@@ -1478,30 +1483,29 @@ error_entry_done:
+  * truncated RIP for IRET exceptions returning to compat mode. Check
+  * for these here too.
+  */
+-error_kernelspace:
++.Lerror_kernelspace:
+ 	leaq native_irq_return_iret(%rip),%rcx
+ 	cmpq %rcx,RIP+8(%rsp)
+-	je error_bad_iret
++	je	.Lerror_bad_iret
+ 	movl %ecx,%eax	/* zero extend */
+ 	cmpq %rax,RIP+8(%rsp)
+-	je bstep_iret
++	je	.Lbstep_iret
+ 	cmpq $gs_change,RIP+8(%rsp)
+-	jne	error_entry_done
++	jne	.Lerror_entry_done
+ 
+ 	/*
+ 	 * hack: gs_change can fail with user gsbase.  If this happens, fix up
+ 	 * gsbase and proceed.  We'll fix up the exception and land in
+ 	 * gs_change's error handler with kernel gsbase.
+ 	 */
+-	SWAPGS
+-	jmp	error_entry_done
++	jmp	.Lerror_entry_from_usermode_swapgs
+ 
+-bstep_iret:
++.Lbstep_iret:
+ 	/* Fix truncated RIP */
+ 	movq %rcx,RIP+8(%rsp)
+ 	/* fall through */
+ 
+-error_bad_iret:
++.Lerror_bad_iret:
+ 	/*
+ 	 * We came from an IRET to user mode, so we have user gsbase.
+ 	 * Switch to kernel gsbase:
+@@ -1515,7 +1519,7 @@ error_bad_iret:
+ 	mov %rsp,%rdi
+ 	call fixup_bad_iret
+ 	mov %rax,%rsp
+-	jmp	error_entry_done
++	jmp	.Lerror_entry_from_usermode_after_swapgs
+ 	CFI_ENDPROC
+ END(error_entry)
+ 

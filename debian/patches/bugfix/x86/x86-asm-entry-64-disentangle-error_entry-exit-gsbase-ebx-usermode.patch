@@ -1,0 +1,97 @@
+From: Andy Lutomirski <luto@kernel.org>
+Date: Tue, 9 Jun 2015 12:36:01 -0700
+Subject: x86/asm/entry/64: Disentangle error_entry/exit gsbase/ebx/usermode
+ code
+Origin: https://git.kernel.org/linus/539f5113650068ba221197f190267ab727296ef5
+
+The error_entry/error_exit code to handle gsbase and whether we
+return to user mdoe was a mess:
+
+ - error_sti was misnamed.  In particular, it did not enable interrupts.
+
+ - Error handling for gs_change was hopelessly tangled the normal
+   usermode path.  Separate it out.  This saves a branch in normal
+   entries from kernel mode.
+
+ - The comments were bad.
+
+Fix it up.  As a nice side effect, there's now a code path that
+happens on error entries from user mode.  We'll use it soon.
+
+Signed-off-by: Andy Lutomirski <luto@kernel.org>
+Cc: Andrew Morton <akpm@linux-foundation.org>
+Cc: Andy Lutomirski <luto@amacapital.net>
+Cc: Borislav Petkov <bp@alien8.de>
+Cc: Brian Gerst <brgerst@gmail.com>
+Cc: Denys Vlasenko <dvlasenk@redhat.com>
+Cc: H. Peter Anvin <hpa@zytor.com>
+Cc: Linus Torvalds <torvalds@linux-foundation.org>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Thomas Gleixner <tglx@linutronix.de>
+Link: http://lkml.kernel.org/r/f1be898ab93360169fb845ab85185948832209ee.1433878454.git.luto@kernel.org
+[ Prettified it, clarified comments some more. ]
+Signed-off-by: Ingo Molnar <mingo@kernel.org>
+[bwh: Backported to 3.16 as dependency of commit 18ec54fdd6d1
+ "x86/speculation: Prepare entry code for Spectre v1 swapgs mitigations":
+ - We do not use %ebx as a flag since we already have a backport of commit
+   b3681dd548d0 "x86/entry/64: Remove %ebx handling from error_entry/exit",
+   so don't add the comments about that
+ - Adjust filename, context]
+Signed-off-by: Ben Hutchings <ben@decadent.org.uk>
+---
+--- a/arch/x86/kernel/entry_64.S
++++ b/arch/x86/kernel/entry_64.S
+@@ -1464,9 +1464,11 @@ ENTRY(error_entry)
+ 	SWITCH_KERNEL_CR3
+ 	testl $3,CS+8(%rsp)
+ 	je error_kernelspace
+-error_swapgs:
++
++	/* We entered from user mode */
+ 	SWAPGS
+-error_sti:
++
++error_entry_done:
+ 	TRACE_IRQS_OFF
+ 	ret
+ 
+@@ -1484,8 +1486,15 @@ error_kernelspace:
+ 	cmpq %rax,RIP+8(%rsp)
+ 	je bstep_iret
+ 	cmpq $gs_change,RIP+8(%rsp)
+-	je error_swapgs
+-	jmp error_sti
++	jne	error_entry_done
++
++	/*
++	 * hack: gs_change can fail with user gsbase.  If this happens, fix up
++	 * gsbase and proceed.  We'll fix up the exception and land in
++	 * gs_change's error handler with kernel gsbase.
++	 */
++	SWAPGS
++	jmp	error_entry_done
+ 
+ bstep_iret:
+ 	/* Fix truncated RIP */
+@@ -1493,11 +1502,20 @@ bstep_iret:
+ 	/* fall through */
+ 
+ error_bad_iret:
++	/*
++	 * We came from an IRET to user mode, so we have user gsbase.
++	 * Switch to kernel gsbase:
++	 */
+ 	SWAPGS
++
++	/*
++	 * Pretend that the exception came from user mode: set up pt_regs
++	 * as if we faulted immediately after IRET.
++	 */
+ 	mov %rsp,%rdi
+ 	call fixup_bad_iret
+ 	mov %rax,%rsp
+-	jmp error_sti
++	jmp	error_entry_done
+ 	CFI_ENDPROC
+ END(error_entry)
+ 
