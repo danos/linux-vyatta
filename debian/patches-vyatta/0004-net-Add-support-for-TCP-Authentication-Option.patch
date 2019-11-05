@@ -1,0 +1,4192 @@
+From b298b75555a852ed075507b26d451941038bf544 Mon Sep 17 00:00:00 2001
+From: Duncan Eastoe <deastoe@vyatta.att-mail.com>
+Date: Tue, 27 Aug 2019 13:40:01 +0100
+Subject: [PATCH 4/6] net: Add support for TCP Authentication Option
+
+This commit adds initial support for TCP-AO as defined by RFC5925
+using AES-128-CMAC-96 as defined by RFC5926.
+
+See Documentation/networking/tcp-ao.txt for a fuller description.
+
+Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
+---
+ Documentation/networking/tcp-ao.txt |  131 +++
+ include/linux/tcp.h                 |   11 +
+ include/net/tcp.h                   |  430 ++++++-
+ include/uapi/linux/tcp.h            |   35 +
+ net/ipv4/Makefile                   |    2 +-
+ net/ipv4/af_inet.c                  |    3 +
+ net/ipv4/tcp.c                      |    3 +
+ net/ipv4/tcp_auth.c                 | 1647 +++++++++++++++++++++++++++
+ net/ipv4/tcp_input.c                |  126 ++
+ net/ipv4/tcp_ipv4.c                 |  304 ++++-
+ net/ipv4/tcp_minisocks.c            |   33 +
+ net/ipv4/tcp_output.c               |  287 ++++-
+ net/ipv6/tcp_ipv6.c                 |  316 ++++-
+ 13 files changed, 3249 insertions(+), 79 deletions(-)
+ create mode 100644 Documentation/networking/tcp-ao.txt
+ create mode 100644 net/ipv4/tcp_auth.c
+
+--- /dev/null
++++ b/Documentation/networking/tcp-ao.txt
+@@ -0,0 +1,131 @@
++Socket structures
++=================
++The parameters used for TCP-AO are maintained in per-socket RCU
++protected data structures in a similar manner to those required for
++the TCP MD5 Signature Option.
++
++On a tcp_sock enabled for authentication a list of master key lists
++are maintained, keyed by remote IP address and prefix length.
++
++Each master key holds a send and receive ID, these are each unique
++within the key's list. The master key also holds pointers to the
++keystring (for AES-128-CMAC-96 this is likely a derived keystring,
++unless the user provided a keystring of exactly 16 bytes) and up to
++4 cached traffic keys (Send_SYN, Send_Other, Recv_SYN, Recv_Other).
++
++Additionally the master key contains flags which indicate the
++directional validity of the key ("flags" field), whether TCP options
++(other than the AO) are excluded from the MAC calculation ("options"
++field), and whether calculated traffic keys should be cached
++("internal_flags" field).
++
++UAPI
++====
++The Authentication Option is configured via a new TCP socket option,
++TCP_AUTH, with parameters specified via the tcp_auth struct.
++
++For any update via the socket API the remote IP address and prefix
++length must be provided. As mentioned in the previous section master
++key lists are maintained for each IP address/prefix length pair.
++By the time the connection becomes established an IP address/prefix
++and associated master key list will have been selected by longest
++prefix match in a process called "collapsing".
++
++Each update must also specify a send and recv ID for the key which
++must be unique within a single master key list, otherwise an error
++will be returned.
++
++To install a new master key a pointer to the keystring and the length
++of that allocated memory must be provided along with an algorithm ID
++and any appropriate flags and/or options.
++
++To update the flags for an existing master key the same parameters
++should be provided, with the updated flags value.
++
++To remove a master key the IDs must be provided along with a key
++length and flags value of 0.
++
++It is not possible to change the IDs, algorithm, keystring, or
++options field of a key which is currently installed. It is however
++possible to remove a key and re-install it with new parameters. Note
++that taking this approach may prevent the socket from transmitting or
++receiving segments until the new key is installed.
++
++It is not allowed to add TCP authentication to an established socket.
++Authentication may be added before connect() is called, or to a
++listening socket.
++
++It is also not allowed to remove TCP authentication from an
++established socket. However authentication may be removed before
++connect() is called, or from a listening socket. When authentication
++is removed from an open listening socket it is possible for
++connections still in the handshake phase to fail.
++
++To remove authentication from a socket send an update with the
++algorithm ID set to TCP_AUTH_ALG_NONE.
++
++Note however that it is possible to remove all keys from an
++established socket. If this situation occurs then the socket will
++no longer be able to transmit or receive segments. If keys are later
++installed such outbound segments should be transmitted by the
++retransmission code, authenticated by the new keys.
++
++Preferred keys
++==============
++As described above preferred keys are indicated by setting the
++TCP_AUTH_FLAG_KEY_PREF_SEND and/or TCP_AUTH_FLAG_KEY_PREF_RECV flags.
++
++The preferred receive key indicates to our connection peer which key
++we would prefer is used to authenticate messages sent to us in
++future. The ID of the preferred receive key is included in the
++RNextKeyID field of every transmitted segment. This allows for
++seamless key changeover during a connection.
++
++The preferred send key is used only for SYN and SYN/ACK segments. The
++preferred send key is always used to authenticate the SYN. On receipt
++of a SYN the peer will attempt to authenticate the SYN/ACK using the
++key with the receive ID indicated by the RNextKeyID field of the SYN
++segment. If this key is not available then it will fallback to using
++its own preferred send key. This may or may not be acceptable to the
++active peer; if not acceptable the connection handshake simply does
++not complete.
++
++Pointers to the currently preferred send and receive key are kept on
++the collapsed master key list.
++
++A preferred key is still subject to the TCP_AUTH_FLAG_KEY_SEND and
++TCP_AUTH_FLAG_KEY_RECV flag behaviour.
++
++A key remains preferred until a different key is installed with the
++corresponding PREF flag set. Sending an update for a preferred key
++with the PREF flags unset has *no effect*.
++
++Collapsing
++==========
++This is the process of selecting a single master key list which will
++be maintained on the socket for its lifetime. This selection is
++performed by longest prefix match of the remote IP address.
++
++This behaviour gives the flexibility of being able to specify
++multiple master key lists, on a listening socket for example, with
++no memory or processing overhead once the connection becomes
++established.
++
++The collapsing process for an active socket is very simple. When
++connect() is called we remove all key lists other than the selected
++one from the socket.
++
++For a passive socket collapsing occurs once the handshake has
++completed and a full socket is created, just before it is placed in
++the accept() backlog queue. At this point we select the longest
++prefix match key list from the parent listening socket and make a
++complete copy on the new socket.
++
++Once a socket contains a collapsed authentication database, updates
++made via the socket API must specify the address and prefix length
++corresponding to the single entry in the collapsed database. An error
++will be returned from setsockopt() otherwise.
++
++Once the authentication database is collapsed it becomes valid to
++cache generated traffic keys on the respective master key. This is
++triggered by setting the TCP_AUTH_MASTER_FLAG_CACHE_TKEYS flag.
+--- a/include/linux/tcp.h
++++ b/include/linux/tcp.h
+@@ -104,6 +104,8 @@ struct tcp_options_received {
+ 	u8	num_sacks;	/* Number of SACK blocks		*/
+ 	u16	user_mss;	/* mss requested by user in ioctl	*/
+ 	u16	mss_clamp;	/* Maximal mss, negotiated at connection setup */
++	u8	auth_seen;	/* RFC5925 authentication option	*/
++	u8	next_auth_key;	/* RFC5925 authentication next key ID	*/
+ };
+ 
+ static inline void tcp_clear_options(struct tcp_options_received *rx_opt)
+@@ -113,6 +115,7 @@ static inline void tcp_clear_options(str
+ #if IS_ENABLED(CONFIG_SMC)
+ 	rx_opt->smc_ok = 0;
+ #endif
++	rx_opt->auth_seen = 0;
+ }
+ 
+ /* This is the max number of SACKS that we'll generate and process. It's safe
+@@ -137,6 +140,8 @@ struct tcp_request_sock {
+ 						  * FastOpen it's the seq#
+ 						  * after data-in-SYN.
+ 						  */
++
++	struct tcp_auth_req_params	__rcu *auth_params;
+ };
+ 
+ static inline struct tcp_request_sock *tcp_rsk(const struct request_sock *req)
+@@ -383,6 +388,8 @@ struct tcp_sock {
+ 			   * while socket was owned by user.
+ 			   */
+ 
++	struct tcp_auth_params	__rcu *auth_params;
++
+ #ifdef CONFIG_TCP_MD5SIG
+ /* TCP AF-Specific parts; only used by MD5 Signature support so far */
+ 	const struct tcp_sock_af_ops	*af_specific;
+@@ -425,6 +432,8 @@ static inline struct tcp_sock *tcp_sk(co
+ 	return (struct tcp_sock *)sk;
+ }
+ 
++struct tcp_sock_auth_af_ops;
++
+ struct tcp_timewait_sock {
+ 	struct inet_timewait_sock tw_sk;
+ #define tw_rcv_nxt tw_sk.__tw_common.skc_tw_rcv_nxt
+@@ -440,6 +449,8 @@ struct tcp_timewait_sock {
+ #ifdef CONFIG_TCP_MD5SIG
+ 	struct tcp_md5sig_key	  *tw_md5_key;
+ #endif
++	struct tcp_auth_params			__rcu *auth_params;
++	const struct tcp_sock_auth_af_ops	*auth_ops;
+ };
+ 
+ static inline struct tcp_timewait_sock *tcp_twsk(const struct sock *sk)
+--- a/include/net/tcp.h
++++ b/include/net/tcp.h
+@@ -185,6 +185,7 @@ void tcp_time_wait(struct sock *sk, int
+ #define TCPOPT_SACK             5       /* SACK Block */
+ #define TCPOPT_TIMESTAMP	8	/* Better RTT estimations/PAWS */
+ #define TCPOPT_MD5SIG		19	/* MD5 Signature (RFC2385) */
++#define TCPOPT_AUTH		29	/* Authentication Option (RFC5925) */
+ #define TCPOPT_FASTOPEN		34	/* Fast open (RFC7413) */
+ #define TCPOPT_EXP		254	/* Experimental */
+ /* Magic number to be after the option value for sharing TCP
+@@ -217,6 +218,17 @@ void tcp_time_wait(struct sock *sk, int
+ #define TCPOLEN_MSS_ALIGNED		4
+ #define TCPOLEN_EXP_SMC_BASE_ALIGNED	8
+ 
++/*
++ * The Authentication Option has a variable length MAC field.
++ * TCPOLEN_AUTH_HDR is the fixed length of the four fields preceding the MAC.
++ * TCP_AUTH_ALG_MAX_MAC_LEN is the maximum MAC field length we support.
++ */
++#define TCPOLEN_AUTH_HDR		4
++#define TCP_AUTH_ALG_MAX_MAC_LEN	12
++#define TCPOLEN_AUTH_MAX		(TCPOLEN_AUTH_HDR + \
++					 TCP_AUTH_ALG_MAX_MAC_LEN)
++#define TCPOLEN_AUTH(a)		(TCPOLEN_AUTH_HDR + (a)->mac_length)
++
+ /* Flags in tp->nonagle */
+ #define TCP_NAGLE_OFF		1	/* Nagle's algo is disabled */
+ #define TCP_NAGLE_CORK		2	/* Socket is corked	    */
+@@ -1475,31 +1487,107 @@ static inline void tcp_clear_all_retrans
+ 	tp->retransmit_skb_hint = NULL;
+ }
+ 
+-union tcp_md5_addr {
++/* RFC5925 Authentication Option */
++struct tcp_auth_opt {
++	u8	kind;
++	u8	length;
++	u8	key_id;
++	u8	recv_next_key_id;
++	u8	mac[0];
++};
++
++union tcp_auth_addr {
+ 	struct in_addr  a4;
+ #if IS_ENABLED(CONFIG_IPV6)
+ 	struct in6_addr	a6;
+ #endif
+ };
+ 
+-/* - key database */
+-struct tcp_md5sig_key {
+-	struct hlist_node	node;
+-	u8			keylen;
+-	u8			family; /* AF_INET or AF_INET6 */
+-	union tcp_md5_addr	addr;
+-	u8			prefixlen;
+-	u8			key[TCP_MD5SIG_MAXKEYLEN];
+-	struct rcu_head		rcu;
++struct tcp_auth_traffic_key {
++	bool					owned;
++	const u8				*key;
++	const struct tcp_auth_master_key	*master;
+ };
+ 
+-/* - sock block */
+-struct tcp_md5sig_info {
++enum tcp_auth_direction {
++	TCP_AUTH_SEND = 0,
++	TCP_AUTH_RECV,
++};
++
++enum tcp_auth_traffic_key_type {
++	TCP_AUTH_TRAFFIC_KEY_SEND_SYN = 0,
++	TCP_AUTH_TRAFFIC_KEY_RECV_SYN,
++	TCP_AUTH_TRAFFIC_KEY_SEND_OTHER,
++	TCP_AUTH_TRAFFIC_KEY_RECV_OTHER,
++};
++
++/* Flags for tcp_auth_master_key.internal_flags */
++#define TCP_AUTH_MASTER_FLAG_CACHE_TKEYS	(1 << 0)
++
++struct tcp_auth_master_key {
++	struct hlist_node		node;
++
++	u8				id[2];
++	u8				*key;
++	u8				keylen;
++
++	spinlock_t			update_lock;
++	u8				__rcu *traffic_key[4];
++
++	const struct tcp_auth_alg_dfn	*alg;
++	u8				flags;
++	u8				options;
++	u8				internal_flags;
++
++	struct rcu_head			rcu;
++};
++
++struct tcp_auth_db_entry {
++	struct hlist_node		node;
++	spinlock_t			update_lock;
++
++	union tcp_auth_addr		addr;
++	u8				prefixlen;
++	u8				family;
++	const struct tcp_auth_alg_dfn	*alg;
++
++	struct hlist_head		keys_head;
++	struct tcp_auth_master_key	__rcu *pref_send_key;
++	struct tcp_auth_master_key	__rcu *pref_recv_key;
++	struct tcp_auth_master_key	__rcu *current_key;
++
++	struct rcu_head			rcu;
++};
++
++struct tcp_auth_sne {
++	bool		flag;
++	spinlock_t	lock;
++
++	u32		sne;
++	__be32		prev_seq;
++};
++
++struct tcp_auth_params {
+ 	struct hlist_head	head;
++	refcount_t		ref_count;
++	bool			collapsed;
++
++	u32			snt_isn;
++	u32			rcv_isn;
++	struct tcp_auth_sne	send_sne;
++	struct tcp_auth_sne	recv_sne;
++
++	struct rcu_head		rcu;
++};
++
++struct tcp_auth_req_params {
++	spinlock_t		update_lock;
++	u8			current_key;
++	struct tcp_auth_sne	send_sne;
++	struct tcp_auth_sne	recv_sne;
+ 	struct rcu_head		rcu;
+ };
+ 
+-/* - pseudo header */
+ struct tcp4_pseudohdr {
+ 	__be32		saddr;
+ 	__be32		daddr;
+@@ -1515,13 +1603,227 @@ struct tcp6_pseudohdr {
+ 	__be32		protocol;	/* including padding */
+ };
+ 
+-union tcp_md5sum_block {
++union tcp_pseudohdr {
+ 	struct tcp4_pseudohdr ip4;
+ #if IS_ENABLED(CONFIG_IPV6)
+ 	struct tcp6_pseudohdr ip6;
+ #endif
+ };
+ 
++struct tcp_v4_auth_kdf_context {
++	__be32		saddr;
++	__be32		daddr;
++	__be16		sport;
++	__be16		dport;
++	__be32		sisn;
++	__be32		disn;
++};
++
++struct tcp_v6_auth_kdf_context {
++	struct in6_addr	saddr;
++	struct in6_addr	daddr;
++	__be16		sport;
++	__be16		dport;
++	__be32		sisn;
++	__be32		disn;
++};
++
++union tcp_auth_kdf_context {
++	struct tcp_v4_auth_kdf_context v4_ctx;
++	struct tcp_v6_auth_kdf_context v6_ctx;
++};
++
++struct tcp_auth_alg_dfn {
++	const enum tcp_auth_alg id;
++	const char *name;
++	const u8 key_length;
++	const u8 output_length;
++	const u8 mac_length;
++
++	struct tcp_auth_pool __percpu *pool;
++	bool pool_alloced;
++
++	int (*init)(const struct tcp_auth_alg_dfn *alg);
++	int (*gen_derived_master_key)(const struct tcp_auth_alg_dfn *alg,
++				      const u8 *in,
++				      u16 inlen,
++				      u8 **out,
++				      gfp_t gfp);
++};
++
++struct tcp_auth_debug_ctx {
++	struct __kernel_sockaddr_storage src;
++	struct __kernel_sockaddr_storage dst;
++	const struct sock *sk;
++	const struct sk_buff *skb;
++	const struct tcp_sock_auth_af_ops *ops;
++};
++
++int tcp_auth_debug_sockaddrs(const struct tcp_sock_auth_af_ops *ops,
++			     const struct sock *sk,
++			     const struct sk_buff *skb,
++			     __be16 sport, __be16 dport,
++			     struct __kernel_sockaddr_storage *src_sa_out,
++			     struct __kernel_sockaddr_storage *dst_sa_out);
++
++#define tcp_auth_log(lvl, ctx, fmt, ...)			\
++	printk(lvl "TCP AO for %pISpc -> %pISpc\n" fmt "\n",	\
++		&ctx.src, &ctx.dst, ##__VA_ARGS__)
++
++#define tcp_auth_log_ratelimit_cond(lvl, cond, spt, dpt, fmt, ...)	 \
++	do {								 \
++		if (!(cond) || !net_ratelimit())			 \
++			break;						 \
++									 \
++		tcp_auth_debug_sockaddrs(__auth_debug_ctx.ops,		 \
++					 __auth_debug_ctx.sk,		 \
++					 __auth_debug_ctx.skb,		 \
++					 spt, dpt,			 \
++					 &__auth_debug_ctx.src,		 \
++					 &__auth_debug_ctx.dst);	 \
++		tcp_auth_log(lvl, __auth_debug_ctx, fmt, ##__VA_ARGS__); \
++	} while (0)
++
++#define tcp_auth_log_ratelimit(lvl, spt, dpt, fmt, ...) \
++	tcp_auth_log_ratelimit_cond(lvl, true, spt, dpt, fmt, ##__VA_ARGS__)
++
++#define tcp_auth_outbound_log_init(s, o) \
++	struct tcp_auth_debug_ctx __auth_debug_ctx = { .sk = (s), .ops = (o) }
++
++#define tcp_auth_inbound_log_init(s, o) \
++	struct tcp_auth_debug_ctx __auth_debug_ctx = { .skb = (s), .ops = (o) }
++
++int tcp_parse_auth_option(const struct tcphdr *th,
++			  const struct tcp_auth_opt **opt);
++
++/* IPv4 functions exported for IPv4 mapped IPv6 address support */
++int tcp_v4_addrs_for_auth_hash(const struct sock *sk,
++			       const struct sk_buff *skb,
++			       const void **saddr, const void **daddr);
++
++int tcp_v4_auth_hash_headers(void *buf,
++			     __be32 sne,
++			     const void *saddr,
++			     const void *daddr,
++			     const struct tcphdr *th,
++			     int nbytes);
++
++int tcp_v4_auth_get_send_traffic_key(struct tcp_auth_master_key *master,
++				     const struct sock *sk,
++				     __be16 sport, __be16 dport,
++				     __be32 snd_isn, __be32 rcv_isn,
++				     struct tcp_auth_traffic_key *out);
++
++int tcp_v4_auth_get_recv_traffic_key(struct tcp_auth_master_key *master,
++				     const struct sk_buff *skb,
++				     __be16 sport, __be16 dport,
++				     __be32 snd_isn, __be32 rcv_isn,
++				     struct tcp_auth_traffic_key *out);
++
++struct tcp_auth_db_entry *tcp_v4_auth_lookup_db_entry(
++	const struct sock *sk, const struct sk_buff *skb);
++
++struct tcp_auth_db_entry *tcp_v4_auth_lookup_db_entry_sk(
++	const struct sock *sk, const struct sock *addr_sk);
++
++/* From tcp_auth.c */
++int tcp_parse_auth(struct sock *sk,
++		   struct tcp_auth *tca,
++		   const union tcp_auth_addr *addr,
++		   int family);
++
++int tcp_auth_destroy(struct sock *sk);
++
++int tcp_auth_alloc_req_params(struct request_sock *req, gfp_t gfp);
++
++int tcp_auth_accept_queue_add_cb(struct sock *sk,
++				 struct request_sock *req,
++				 struct sock *child);
++
++struct tcp_auth_db_entry *tcp_auth_lookup_db(const struct sock *sk,
++					     const union tcp_auth_addr *addr,
++					     int family);
++
++struct tcp_auth_master_key *tcp_auth_lookup_db_entry_key(
++	const struct tcp_auth_db_entry *entry,
++	u8 id, enum tcp_auth_direction dir);
++
++inline struct tcp_auth_db_entry *
++tcp_auth_get_collapsed_entry(const struct tcp_auth_params *params);
++
++int tcp_auth_master_get_traffic_key(struct tcp_auth_master_key *master,
++				    const void *ctx, int ctx_len,
++				    enum tcp_auth_traffic_key_type type,
++				    struct tcp_auth_traffic_key *output);
++
++void tcp_auth_master_put_traffic_key(struct tcp_auth_traffic_key *key);
++
++int tcp_auth_get_collapsed_tx_master_keys(
++	const struct tcp_auth_params *params,
++	struct tcp_auth_master_key **current_key,
++	struct tcp_auth_master_key **next_key);
++
++int tcp_auth_get_req_tx_master_keys(const struct sock *sk,
++				    struct request_sock *req,
++				    struct tcp_auth_master_key **current_key,
++				    struct tcp_auth_master_key **next_key);
++
++int tcp_auth_hash_skb(const struct tcp_sock_auth_af_ops *ops,
++		      u8 *auth_mac,
++		      const struct tcp_auth_traffic_key *key,
++		      const struct sock *sk,
++		      const struct sk_buff *skb,
++		      __be32 sne);
++
++int tcp_auth_hash_hdr(const struct tcp_sock_auth_af_ops *ops,
++		      u8 *auth_mac, const struct tcp_auth_traffic_key *key,
++		      const struct sk_buff *skb, const struct tcphdr *th,
++		      __be32 sne);
++
++inline bool tcp_auth_inbound_validate(struct sock *sk,
++				      struct request_sock *req,
++				      const struct sk_buff *skb);
++
++inline bool tcp_auth_tw_inbound_validate(struct sock *sk,
++					 const struct sk_buff *skb);
++
++__be32 tcp_auth_get_sne(struct tcp_auth_sne *sne, __be32 seq);
++
++int tcp_auth_lookup_traffic_key(const struct tcp_auth_master_key *master,
++				enum tcp_auth_traffic_key_type type,
++				struct tcp_auth_traffic_key *output);
++
++int tcp_auth_collapse(const struct sock *src, struct sock *dst,
++		      const struct tcp_auth_db_entry *entry);
++
++struct tcp_auth_send_args;
++int tcp_auth_send_fill_opt(const struct sock *sk,
++			   const struct sk_buff *skb,
++			   struct tcp_auth_send_args *auth,
++			   struct tcphdr *out_th,
++			   struct tcp_auth_opt *opt);
++
++/* RFC2385 MD5 Signature Option */
++#define tcp_md5_addr	 tcp_auth_addr
++#define tcp_md5sum_block tcp_pseudohdr
++
++/* - key database */
++struct tcp_md5sig_key {
++	struct hlist_node	node;
++	u8			keylen;
++	u8			family; /* AF_INET or AF_INET6 */
++	union tcp_md5_addr	addr;
++	u8			prefixlen;
++	u8			key[TCP_MD5SIG_MAXKEYLEN];
++	struct rcu_head		rcu;
++};
++
++/* - sock block */
++struct tcp_md5sig_info {
++	struct hlist_head	head;
++	struct rcu_head		rcu;
++};
++
+ /* - pool: digest algorithm, hash description and scratch buffer */
+ struct tcp_md5sig_pool {
+ 	struct ahash_request	*md5_req;
+@@ -1866,6 +2168,41 @@ int tcp_conn_request(struct request_sock
+ 		     const struct tcp_request_sock_ops *af_ops,
+ 		     struct sock *sk, struct sk_buff *skb);
+ 
++struct tcp_sock_auth_af_ops {
++	int		(*auth_parse)(struct sock *sk,
++					char __user *optval,
++					int optlen);
++
++	int (*addrs_for_auth_hash)(const struct sock *sk,
++				   const struct sk_buff *skb,
++				   const void **saddr, const void **daddr);
++
++	int (*auth_hash_headers)(void *buf,
++				 __be32 sne,
++				 const void *saddr,
++				 const void *daddr,
++				 const struct tcphdr *th,
++				 int nbytes);
++
++	int (*get_send_traffic_key)(struct tcp_auth_master_key *master,
++				    const struct sock *sk,
++				    __be16 sport, __be16 dport,
++				    __be32 snd_isn, __be32 rcv_isn,
++				    struct tcp_auth_traffic_key *out);
++
++	int (*get_recv_traffic_key)(struct tcp_auth_master_key *master,
++				    const struct sk_buff *skb,
++				    __be16 sport, __be16 dport,
++				    __be32 snd_isn, __be32 rcv_isn,
++				    struct tcp_auth_traffic_key *out);
++
++	struct tcp_auth_db_entry *(*lookup_db_entry)(
++		const struct sock *sk, const struct sk_buff *skb);
++
++	struct tcp_auth_db_entry *(*lookup_db_entry_sk)(
++		const struct sock *sk, const struct sock *addr_sk);
++};
++
+ /* TCP af-specific functions */
+ struct tcp_sock_af_ops {
+ #ifdef CONFIG_TCP_MD5SIG
+@@ -1880,6 +2217,8 @@ struct tcp_sock_af_ops {
+ 				     char __user *optval,
+ 				     int optlen);
+ #endif
++
++	struct tcp_sock_auth_af_ops auth_ops;
+ };
+ 
+ struct tcp_request_sock_ops {
+@@ -1927,6 +2266,69 @@ static inline __u32 cookie_init_sequence
+ }
+ #endif
+ 
++struct tcp_auth_send_args {
++	struct tcp_auth_master_key		*current_key;
++	struct tcp_auth_master_key		*next_key;
++	__be32					snt_isn;
++	__be32					rcv_isn;
++	struct tcp_auth_sne			*sne;
++	const struct tcp_sock_auth_af_ops	*ops;
++};
++
++static inline void tcp_get_auth_send_args(struct tcp_auth_params *auth_params,
++					  struct tcp_auth_send_args *auth_args)
++{
++	tcp_auth_get_collapsed_tx_master_keys(
++		auth_params, &auth_args->current_key, &auth_args->next_key);
++	auth_args->snt_isn = htonl(auth_params->snt_isn);
++	auth_args->rcv_isn = htonl(auth_params->rcv_isn);
++	auth_args->sne = &auth_params->send_sne;
++}
++
++static inline void tcp_sk_get_auth_send_args(
++	const struct sock *sk, struct tcp_auth_send_args *auth_args)
++{
++	struct tcp_auth_params *auth_params;
++
++	auth_params = rcu_dereference(tcp_sk(sk)->auth_params);
++	if (auth_params) {
++		tcp_get_auth_send_args(auth_params, auth_args);
++		auth_args->ops = &tcp_sk(sk)->af_specific->auth_ops;
++	}
++}
++
++static inline void tcp_timewait_get_auth_send_args(
++	const struct sock *sk, struct tcp_auth_send_args *auth_args)
++{
++	struct tcp_auth_params *auth_params;
++
++	auth_params = rcu_dereference(tcp_twsk(sk)->auth_params);
++	if (auth_params) {
++		tcp_get_auth_send_args(auth_params, auth_args);
++		auth_args->ops = tcp_twsk(sk)->auth_ops;
++	}
++}
++
++static inline void tcp_reqsk_get_auth_send_args(
++	const struct sock *sk,
++	struct request_sock *req,
++	struct tcp_auth_send_args *auth_args)
++{
++	struct tcp_auth_req_params *auth_params;
++
++	auth_params = rcu_dereference(tcp_rsk(req)->auth_params);
++	if (!auth_params)
++		return;
++
++	tcp_auth_get_req_tx_master_keys(
++		sk, req, &auth_args->current_key, &auth_args->next_key);
++
++	auth_args->snt_isn = htonl(tcp_rsk(req)->snt_isn);
++	auth_args->rcv_isn = htonl(tcp_rsk(req)->rcv_isn);
++	auth_args->sne = &auth_params->send_sne;
++	auth_args->ops = &tcp_sk(sk)->af_specific->auth_ops;
++}
++
+ int tcpv4_offload_init(void);
+ 
+ void tcp_v4_init(void);
+--- a/include/uapi/linux/tcp.h
++++ b/include/uapi/linux/tcp.h
+@@ -124,6 +124,7 @@ enum {
+ #define TCP_FASTOPEN_NO_COOKIE	34	/* Enable TFO without a TFO cookie */
+ #define TCP_ZEROCOPY_RECEIVE	35
+ #define TCP_INQ			36	/* Notify bytes available to read as a cmsg on read */
++#define TCP_AUTH		37	/* TCP authentication (RFC5925) */
+ 
+ #define TCP_CM_INQ		TCP_INQ
+ 
+@@ -292,6 +293,40 @@ struct tcp_diag_md5sig {
+ 	__u8	tcpm_key[TCP_MD5SIG_MAXKEYLEN];
+ };
+ 
++enum tcp_auth_alg {
++	TCP_AUTH_ALG_NONE,
++	TCP_AUTH_ALG_AES_128_CMAC_96,
++};
++
++/* Flags indicating the directional validity of a key */
++#define TCP_AUTH_FLAG_KEY_SEND		(1 << 0)
++#define TCP_AUTH_FLAG_KEY_RECV		(1 << 1)
++#define TCP_AUTH_FLAG_KEY_SEND_RECV	(TCP_AUTH_FLAG_KEY_SEND | \
++					 TCP_AUTH_FLAG_KEY_RECV)
++
++/* Set to indicate that this is the new preferred key */
++#define TCP_AUTH_FLAG_KEY_PREF_SEND	(1 << 2 | TCP_AUTH_FLAG_KEY_SEND)
++#define TCP_AUTH_FLAG_KEY_PREF_RECV	(1 << 3 | TCP_AUTH_FLAG_KEY_RECV)
++
++/* By default all TCP options are included in the AO MAC calculation.
++ * Set this option to include only the Authentication Option itself.
++ */
++#define TCP_AUTH_OPT_EXCL_OPTIONS	(1 << 0)
++
++struct tcp_auth {
++	struct __kernel_sockaddr_storage addr;
++	__u8	prefixlen;
++
++	__u8			send_id;
++	__u8			recv_id;
++	const __u8		*key;
++	__u16			keylen;
++	enum tcp_auth_alg	alg;
++	__u8			flags;
++	__u8			options;
++
++};
++
+ /* setsockopt(fd, IPPROTO_TCP, TCP_ZEROCOPY_RECEIVE, ...) */
+ 
+ struct tcp_zerocopy_receive {
+--- a/net/ipv4/Makefile
++++ b/net/ipv4/Makefile
+@@ -9,7 +9,7 @@ obj-y     := route.o inetpeer.o protocol
+ 	     inet_timewait_sock.o inet_connection_sock.o \
+ 	     tcp.o tcp_input.o tcp_output.o tcp_timer.o tcp_ipv4.o \
+ 	     tcp_minisocks.o tcp_cong.o tcp_metrics.o tcp_fastopen.o \
+-	     tcp_rate.o tcp_recovery.o tcp_ulp.o \
++	     tcp_auth.o tcp_rate.o tcp_recovery.o tcp_ulp.o \
+ 	     tcp_offload.o datagram.o raw.o udp.o udplite.o \
+ 	     udp_offload.o arp.o icmp.o devinet.o af_inet.o igmp.o \
+ 	     fib_frontend.o fib_semantics.o fib_trie.o fib_notifier.o \
+--- a/net/ipv4/af_inet.c
++++ b/net/ipv4/af_inet.c
+@@ -226,6 +226,9 @@ int inet_listen(struct socket *sock, int
+ 			tcp_fastopen_init_key_once(sock_net(sk));
+ 		}
+ 
++		WARN_ON(inet_csk(sk)->accept_queue_cb);
++		inet_csk(sk)->accept_queue_cb = tcp_auth_accept_queue_add_cb;
++
+ 		err = inet_csk_listen_start(sk, backlog);
+ 		if (err)
+ 			goto out;
+--- a/net/ipv4/tcp.c
++++ b/net/ipv4/tcp.c
+@@ -3000,6 +3000,9 @@ static int do_tcp_setsockopt(struct sock
+ 			err = -EINVAL;
+ 		break;
+ #endif
++	case TCP_AUTH:
++		err = tp->af_specific->auth_ops.auth_parse(sk, optval, optlen);
++		break;
+ 	case TCP_USER_TIMEOUT:
+ 		/* Cap the max time in ms TCP will retry or probe the window
+ 		 * before giving up and aborting (ETIMEDOUT) a connection.
+--- /dev/null
++++ b/net/ipv4/tcp_auth.c
+@@ -0,0 +1,1647 @@
++// SPDX-License-Identifier: GPL-2.0
++
++#include <net/tcp.h>
++#include <linux/inetdevice.h>
++#include <crypto/hash.h>
++
++/* ( i || Label ("TCP-AO") || Context || Output_Length ) */
++#define TCP_AUTH_KDF_INPUT_LEN (1 + 6 + sizeof(union tcp_auth_kdf_context) + 2)
++
++/* +4 bytes for the SNE field */
++#define TCP_AUTH_POOL_SCRATCH_BUFLEN \
++	max(TCP_AUTH_KDF_INPUT_LEN, (sizeof(union tcp_pseudohdr) + 4))
++
++#define DEFINE_TCP_AUTH_ALG(						    \
++		v, i, n, key_len, out_len, mac_len, init_fn, gen_master_fn) \
++	static struct tcp_auth_alg_dfn v = {				    \
++		.id				= i,			    \
++		.name				= n,			    \
++		.key_length			= key_len,		    \
++		.output_length			= out_len,		    \
++		.mac_length			= mac_len,		    \
++		.init				= init_fn,		    \
++		.gen_derived_master_key		= gen_master_fn,	    \
++		.pool_alloced			= false,		    \
++	}
++
++struct tcp_auth_pool {
++	struct ahash_request	*req;
++	void			*scratch;
++};
++
++static struct tcp_auth_pool *
++tcp_auth_get_pool(const struct tcp_auth_alg_dfn *alg)
++{
++	local_bh_disable();
++
++	if (alg->pool_alloced) {
++		/* coupled with smp_wmb() in __tcp_alloc_auth_pool() */
++		smp_rmb();
++		return this_cpu_ptr(alg->pool);
++	}
++	local_bh_enable();
++	return NULL;
++}
++
++static inline void
++tcp_auth_put_pool(const struct tcp_auth_alg_dfn *alg)
++{
++	local_bh_enable();
++}
++
++static int tcp_auth_alg_init(struct tcp_auth_alg_dfn *alg,
++			     const char *crypto_alg_name)
++{
++	struct crypto_ahash *hash;
++	int cpu;
++
++	if (unlikely(alg->pool_alloced))
++		return 0;
++
++	hash = crypto_alloc_ahash(crypto_alg_name, 0, CRYPTO_ALG_ASYNC);
++	if (IS_ERR(hash))
++		return PTR_ERR(hash);
++
++	alg->pool = alloc_percpu(struct tcp_auth_pool);
++	if (!alg->pool)
++		return -ENOMEM;
++
++	for_each_possible_cpu(cpu) {
++		void *scratch = per_cpu_ptr(alg->pool, cpu)->scratch;
++		struct ahash_request *req;
++
++		if (!scratch) {
++			scratch = kmalloc_node(TCP_AUTH_POOL_SCRATCH_BUFLEN,
++					       GFP_KERNEL,
++					       cpu_to_node(cpu));
++			if (!scratch)
++				return -ENOMEM;
++
++			per_cpu_ptr(alg->pool, cpu)->scratch = scratch;
++		}
++		if (per_cpu_ptr(alg->pool, cpu)->req)
++			continue;
++
++		req = ahash_request_alloc(hash, GFP_KERNEL);
++		if (!req)
++			return -ENOMEM;
++
++		ahash_request_set_callback(req, 0, NULL, NULL);
++
++		per_cpu_ptr(alg->pool, cpu)->req = req;
++	}
++
++	/* before setting tcp_auth_pool_populated, we must commit all writes
++	 * to memory. See smp_rmb() in tcp_get_auth_pool()
++	 */
++	smp_wmb();
++
++	alg->pool_alloced = true;
++	return 0;
++}
++
++static int tcp_auth_aes_cmac_init(const struct tcp_auth_alg_dfn *alg)
++{
++	static DEFINE_MUTEX(tcp_auth_aes_cmac_init_mutex);
++	int ret;
++
++	if (likely(alg->pool_alloced))
++		return 0;
++
++	mutex_lock(&tcp_auth_aes_cmac_init_mutex);
++	ret = tcp_auth_alg_init((struct tcp_auth_alg_dfn *)alg, "cmac(aes)");
++	mutex_unlock(&tcp_auth_aes_cmac_init_mutex);
++
++	return ret;
++}
++
++/* Derive a fixed length key from variable length key provided by user.
++ * RFC 5926 section 3.1.1.2
++ */
++static int
++tcp_auth_aes_cmac_gen_derived_master_key(const struct tcp_auth_alg_dfn *alg,
++					 const u8 *in,
++					 u16 inlen,
++					 u8 **out,
++					 gfp_t gfp)
++{
++	struct scatterlist s;
++	struct tcp_auth_pool *pool;
++	int ret;
++
++	*out = kzalloc(alg->key_length, gfp);
++	if (!*out)
++		return -ENOMEM;
++
++	/* If the input already matches the length required for the
++	 * algorithm then there is nothing to do.
++	 */
++	if (inlen == alg->key_length) {
++		memcpy(*out, in, inlen);
++		return alg->key_length;
++	}
++
++	pool = tcp_auth_get_pool(alg);
++	if (!pool) {
++		kfree(*out);
++		*out = NULL;
++		return -ENOMEM;
++	}
++
++	crypto_ahash_setkey(crypto_ahash_reqtfm(pool->req),
++			    *out, alg->key_length);
++
++	ret = crypto_ahash_init(pool->req);
++	if (ret)
++		goto fail;
++
++	sg_init_one(&s, in, inlen);
++	ahash_request_set_crypt(pool->req, &s, *out, s.length);
++	ret = crypto_ahash_update(pool->req);
++	if (ret)
++		goto fail;
++
++	ret = crypto_ahash_final(pool->req);
++	if (ret)
++		goto fail;
++
++	ret = alg->key_length;
++	goto done;
++
++fail:
++	kfree(*out);
++	*out = NULL;
++done:
++	tcp_auth_put_pool(alg);
++	return ret;
++}
++
++DEFINE_TCP_AUTH_ALG(tcp_auth_aes_128_cmac_96,
++		    TCP_AUTH_ALG_AES_128_CMAC_96,
++		    "AES-128-CMAC-96",
++		    16, 16, 12,
++		    tcp_auth_aes_cmac_init,
++		    tcp_auth_aes_cmac_gen_derived_master_key);
++
++#define TCP_AUTH_ALG_MAX_OUT_LEN tcp_auth_aes_128_cmac_96.output_length
++
++static const struct tcp_auth_alg_dfn *tcp_auth_get_alg(enum tcp_auth_alg alg)
++{
++	const struct tcp_auth_alg_dfn *alg_dfn;
++
++	switch (alg) {
++	case TCP_AUTH_ALG_AES_128_CMAC_96:
++		alg_dfn = &tcp_auth_aes_128_cmac_96;
++		break;
++	default:
++		return NULL;
++	}
++
++	if (WARN_ON(alg_dfn->mac_length > TCP_AUTH_ALG_MAX_MAC_LEN ||
++		    alg_dfn->output_length > TCP_AUTH_ALG_MAX_OUT_LEN))
++		return NULL;
++
++	return alg_dfn;
++}
++
++static int tcp_auth_generate_traffic_key(const struct tcp_auth_alg_dfn *alg,
++					 const u8 *key, u8 keylen,
++					 const void *ctx, u8 ctxlen, u8 **out)
++{
++	/* TCP Authentication uses iteration-mode KDFs yet RFC 5926 does not
++	 * specify any algorithm where the PRF output length differs from the
++	 * desired output length (therefore requiring multiple iterations).
++	 *
++	 * Hence iteration is not currently implemented.
++	 *
++	 * RFC 5926 Section 3.1.1
++	 */
++	static const u8 const_kdf_input[7] = {1, 'T', 'C', 'P', '-', 'A', 'O'};
++
++	struct tcp_auth_pool *pool;
++	struct scatterlist sg;
++	void *kdf_input;
++	__be16 *output_length;
++	int ret;
++
++	*out = kzalloc(keylen, GFP_ATOMIC);
++	if (!*out)
++		return -ENOMEM;
++
++	pool = tcp_auth_get_pool(alg);
++	if (!pool)
++		return -ENOMEM;
++
++	ret = crypto_ahash_setkey(crypto_ahash_reqtfm(pool->req), key, keylen);
++	if (ret)
++		goto done;
++
++	ret = crypto_ahash_init(pool->req);
++	if (ret)
++		goto done;
++
++	kdf_input = pool->scratch;
++
++	memcpy(kdf_input, const_kdf_input, sizeof(const_kdf_input));
++	kdf_input += sizeof(const_kdf_input);
++	memcpy(kdf_input, ctx, ctxlen);
++	kdf_input += ctxlen;
++	output_length = kdf_input;
++	*output_length = cpu_to_be16(alg->key_length * 8);
++	kdf_input += sizeof(*output_length);
++
++	sg_init_one(&sg, pool->scratch, (kdf_input - pool->scratch));
++	ahash_request_set_crypt(pool->req, &sg, *out, sg.length);
++	ret = crypto_ahash_update(pool->req);
++	if (ret)
++		goto done;
++
++	ret = crypto_ahash_final(pool->req);
++
++done:
++	tcp_auth_put_pool(alg);
++	return ret;
++}
++
++int tcp_auth_alloc_req_params(struct request_sock *req, gfp_t gfp)
++{
++	struct tcp_auth_req_params *params;
++
++	if (rcu_access_pointer(tcp_rsk(req)->auth_params))
++		return 0;
++
++	params = kzalloc(sizeof(*params), gfp);
++	if (!params)
++		return -ENOMEM;
++
++	spin_lock_init(&params->update_lock);
++	spin_lock_init(&params->send_sne.lock);
++	spin_lock_init(&params->recv_sne.lock);
++
++	rcu_assign_pointer(tcp_rsk(req)->auth_params, params);
++
++	return 0;
++};
++
++static inline void tcp_auth_copy_sne(struct tcp_auth_sne *src,
++				     struct tcp_auth_sne *dst)
++{
++	spin_lock_bh(&src->lock);
++	dst->flag = src->flag;
++	dst->sne = src->sne;
++	dst->prev_seq = src->prev_seq;
++	spin_unlock_bh(&src->lock);
++}
++
++static int tcp_auth_alloc_params(struct sock *sk, gfp_t gfp);
++
++int tcp_auth_accept_queue_add_cb(struct sock *sk,
++				 struct request_sock *req,
++				 struct sock *child)
++{
++	struct tcp_auth_params *child_auth_params;
++	struct tcp_auth_req_params *req_params;
++	struct tcp_auth_master_key *key;
++	struct tcp_auth_db_entry *entry;
++	int ret;
++	struct sock *rsk = req_to_sk(req);
++
++	req_params = rcu_dereference(tcp_rsk(req)->auth_params);
++	if (likely(!req_params))
++		return 0;
++
++	ret = tcp_auth_alloc_params(child, GFP_ATOMIC);
++	if (unlikely(ret < 0))
++		return -ENOMEM;
++
++	entry = tcp_sk(sk)->af_specific->auth_ops.lookup_db_entry_sk(sk, rsk);
++	ret = tcp_auth_collapse(sk, child, entry);
++	if (unlikely(ret < 0))
++		return ret;
++
++	child_auth_params = rcu_dereference(tcp_sk(child)->auth_params);
++	entry = tcp_auth_get_collapsed_entry(child_auth_params);
++
++	/* Copy ISNs and SNEs which were used during the handshake */
++	child_auth_params->snt_isn = tcp_rsk(req)->snt_isn;
++	child_auth_params->rcv_isn = tcp_rsk(req)->rcv_isn;
++	tcp_auth_copy_sne(&req_params->send_sne, &child_auth_params->send_sne);
++	tcp_auth_copy_sne(&req_params->recv_sne, &child_auth_params->recv_sne);
++
++	key = tcp_auth_lookup_db_entry_key(entry,
++					   req_params->current_key,
++					   TCP_AUTH_SEND);
++	rcu_assign_pointer(entry->current_key, key);
++
++	return 0;
++}
++
++struct tcp_auth_db_entry *
++tcp_auth_lookup_db(const struct sock *sk,
++		   const union tcp_auth_addr *addr,
++		   int family)
++{
++	const struct tcp_sock *tp = tcp_sk(sk);
++	struct tcp_auth_db_entry *entry;
++	const struct tcp_auth_params *params;
++	__be32 mask;
++	struct tcp_auth_db_entry *best_match = NULL;
++	bool match;
++
++	if (sk_fullsock(sk))
++		params = rcu_dereference_check(tp->auth_params,
++					       lockdep_sock_is_held(sk));
++	else
++		params = rcu_dereference(tcp_twsk(sk)->auth_params);
++
++	if (!params)
++		return NULL;
++
++	hlist_for_each_entry_rcu(entry, &params->head, node) {
++		if (entry->family != family)
++			continue;
++
++		if (family == AF_INET) {
++			mask = inet_make_mask(entry->prefixlen);
++			match = (entry->addr.a4.s_addr & mask) ==
++				(addr->a4.s_addr & mask);
++#if IS_ENABLED(CONFIG_IPV6)
++		} else if (family == AF_INET6) {
++			match = ipv6_prefix_equal(&entry->addr.a6, &addr->a6,
++						  entry->prefixlen);
++#endif
++		} else {
++			match = false;
++		}
++
++		if (match && (!best_match ||
++			      entry->prefixlen > best_match->prefixlen))
++			best_match = entry;
++	}
++
++	return best_match;
++}
++
++struct tcp_auth_master_key *
++tcp_auth_lookup_db_entry_key(const struct tcp_auth_db_entry *entry,
++			     u8 id, enum tcp_auth_direction dir)
++{
++	struct tcp_auth_master_key *master;
++
++	if (!entry)
++		return NULL;
++
++	hlist_for_each_entry_rcu(master, &entry->keys_head, node) {
++		if (master->id[dir] == id)
++			return master;
++	}
++
++	return NULL;
++}
++
++static struct tcp_auth_db_entry *
++tcp_auth_lookup_db_exact(const struct sock *sk,
++			 const union tcp_auth_addr *addr,
++			 u8 prefixlen, int family)
++{
++	const struct tcp_sock *tp = tcp_sk(sk);
++	struct tcp_auth_db_entry *entry;
++	unsigned int size = sizeof(struct in_addr);
++	const struct tcp_auth_params *params;
++
++	if (sk_fullsock(sk))
++		params = rcu_dereference_check(tp->auth_params,
++					       lockdep_sock_is_held(sk));
++	else
++		params = rcu_dereference(tcp_twsk(sk)->auth_params);
++
++	if (!params)
++		return NULL;
++
++#if IS_ENABLED(CONFIG_IPV6)
++	if (family == AF_INET6)
++		size = sizeof(struct in6_addr);
++#endif
++
++	hlist_for_each_entry_rcu(entry, &params->head, node) {
++		if (entry->family != family)
++			continue;
++
++		if (!memcmp(&entry->addr, addr, size) &&
++		    entry->prefixlen == prefixlen)
++			return entry;
++	}
++
++	return NULL;
++}
++
++static struct tcp_auth_db_entry *
++tcp_auth_new_db_entry(struct sock *sk,
++		      const union tcp_auth_addr *addr,
++		      u8 prefixlen,
++		      int family,
++		      const struct tcp_auth_alg_dfn *alg,
++		      gfp_t gfp)
++{
++	struct tcp_auth_db_entry *entry;
++
++	entry = sock_kmalloc(sk, sizeof(*entry), gfp | __GFP_ZERO);
++	if (!entry)
++		return NULL;
++
++	INIT_HLIST_HEAD(&entry->keys_head);
++	spin_lock_init(&entry->update_lock);
++
++	entry->family = family;
++	entry->prefixlen = prefixlen;
++	memcpy(&entry->addr, addr,
++	       (family == AF_INET6) ? sizeof(struct in6_addr) :
++				      sizeof(struct in_addr));
++	entry->alg = alg;
++
++	return entry;
++}
++
++static struct tcp_auth_master_key *tcp_auth_new_master_key(struct sock *sk,
++							   u8 send_id,
++							   u8 recv_id,
++							   u8 *key,
++							   u8 len,
++							   gfp_t gfp)
++{
++	struct tcp_auth_master_key *master_key;
++
++	master_key = sock_kmalloc(sk, sizeof(*master_key), gfp | __GFP_ZERO);
++	if (!master_key)
++		return NULL;
++
++	master_key->id[TCP_AUTH_SEND] = send_id;
++	master_key->id[TCP_AUTH_RECV] = recv_id;
++	master_key->key = key;
++	master_key->keylen = len;
++
++	spin_lock_init(&master_key->update_lock);
++
++	return master_key;
++}
++
++static void tcp_auth_master_key_rcu_free(struct rcu_head *rh)
++{
++	struct tcp_auth_master_key *master;
++	int i;
++
++	master = container_of(rh, struct tcp_auth_master_key, rcu);
++
++	for (i = 0; i < ARRAY_SIZE(master->traffic_key); i++) {
++		if (master->traffic_key[i]) {
++			memzero_explicit(master->traffic_key[i],
++					 master->alg->key_length);
++			kfree(master->traffic_key[i]);
++		}
++	}
++
++	memzero_explicit(master->key, master->keylen);
++	kfree(master->key);
++	kfree(master);
++}
++
++static int tcp_auth_entry_del_key(struct sock *sk,
++				  struct tcp_auth_db_entry *entry,
++				  struct tcp_auth_master_key *key)
++{
++	hlist_del_rcu(&key->node);
++
++	spin_lock_bh(&entry->update_lock);
++	if (key == rcu_dereference_protected(entry->current_key, 1))
++		rcu_assign_pointer(entry->current_key, NULL);
++
++	if (key == rcu_dereference_protected(entry->pref_send_key, 1))
++		rcu_assign_pointer(entry->pref_send_key, NULL);
++
++	if (key == rcu_dereference_protected(entry->pref_recv_key, 1))
++		rcu_assign_pointer(entry->pref_recv_key, NULL);
++	spin_unlock_bh(&entry->update_lock);
++
++	call_rcu(&key->rcu, tcp_auth_master_key_rcu_free);
++	atomic_sub(sizeof(*key), &sk->sk_omem_alloc);
++	return 0;
++}
++
++static int tcp_auth_del_key(struct sock *sk,
++			    const union tcp_auth_addr *addr, u8 prefixlen,
++			    int family, u8 send_id, u8 recv_id)
++{
++	struct tcp_auth_db_entry *entry;
++	struct tcp_auth_master_key *send_key, *recv_key;
++
++	entry = tcp_auth_lookup_db_exact(sk, addr, prefixlen, family);
++	if (!entry)
++		return -ENOENT;
++
++	send_key = tcp_auth_lookup_db_entry_key(entry, send_id, TCP_AUTH_SEND);
++	recv_key = tcp_auth_lookup_db_entry_key(entry, recv_id, TCP_AUTH_RECV);
++	if (send_key != recv_key || !send_key)
++		return -ENOKEY;
++
++	tcp_auth_entry_del_key(sk, entry, send_key);
++	return 0;
++}
++
++static int tcp_auth_delete(struct sock *sk,
++			   struct tcp_auth *tca,
++			   const union tcp_auth_addr *addr,
++			   int family)
++{
++	int ret;
++
++	if (tca->flags)
++		return -EINVAL;
++
++	ret = tcp_auth_del_key(sk, addr, tca->prefixlen, family,
++			       tca->send_id, tca->recv_id);
++	if (ret)
++		return ret;
++
++	/* We need to perform the same operation on any sockets on the accept
++	 * backlog, if this is a listening socket. This ensures consistent
++	 * auth state when those sockets get delivered to userspace.
++	 */
++	if (sk->sk_state == TCP_LISTEN) {
++		struct request_sock *req;
++
++		spin_lock_bh(&inet_csk(sk)->icsk_accept_queue.rskq_lock);
++
++		req = inet_csk(sk)->icsk_accept_queue.rskq_accept_head;
++		while (req) {
++			ret = tcp_auth_del_key(req->sk, addr,
++					       tca->prefixlen, family,
++					       tca->send_id, tca->recv_id);
++			if (ret)
++				break;
++			req = req->dl_next;
++		}
++
++		spin_unlock_bh(&inet_csk(sk)->icsk_accept_queue.rskq_lock);
++	}
++
++	return ret;
++}
++
++static int tcp_auth_alloc_params(struct sock *sk, gfp_t gfp)
++{
++	struct tcp_auth_params *params;
++
++	if (rcu_access_pointer(tcp_sk(sk)->auth_params))
++		return 0;
++
++	params = sock_kmalloc(sk, sizeof(*params), gfp | __GFP_ZERO);
++
++	if (!params)
++		return -ENOMEM;
++
++	sk_nocaps_add(sk, NETIF_F_GSO_MASK);
++
++	INIT_HLIST_HEAD(&params->head);
++	spin_lock_init(&params->send_sne.lock);
++	spin_lock_init(&params->recv_sne.lock);
++	params->collapsed = false;
++	refcount_set(&params->ref_count, 1);
++
++	rcu_assign_pointer(tcp_sk(sk)->auth_params, params);
++	return 0;
++}
++
++static bool tcp_auth_add_rem_sock_state_is_valid(const struct sock *sk)
++{
++	return !!(sk->sk_state == TCP_CLOSE || sk->sk_state == TCP_LISTEN);
++}
++
++static int tcp_auth_add_key(struct sock *sk, const union tcp_auth_addr *addr,
++			    u8 prefixlen, int family, u8 send_id, u8 recv_id,
++			    enum tcp_auth_alg alg_id, const u8 *key, u16 keylen,
++			    u8 flags, u8 options, gfp_t gfp, bool force)
++{
++	struct tcp_sock *tp = tcp_sk(sk);
++	struct tcp_auth_db_entry *entry = NULL;
++	struct tcp_auth_master_key *master_key = NULL;
++	struct tcp_auth_params *params = NULL;
++	const struct tcp_auth_alg_dfn *alg;
++	int ret;
++
++	if (!sk_fullsock(sk))
++		return -EOPNOTSUPP;
++
++	params = rcu_dereference_protected(tp->auth_params,
++					   lockdep_sock_is_held(sk));
++	if (!params) {
++		if (!force && !tcp_auth_add_rem_sock_state_is_valid(sk))
++			return -EOPNOTSUPP;
++
++		ret = tcp_auth_alloc_params(sk, gfp);
++		if (ret)
++			return ret;
++
++		params = rcu_dereference_protected(tp->auth_params,
++						   lockdep_sock_is_held(sk));
++	}
++
++	entry = tcp_auth_lookup_db_exact(sk, addr, prefixlen, family);
++	if (entry) {
++		struct tcp_auth_master_key *snd_master_key, *rcv_master_key;
++
++		if (alg_id != entry->alg->id)
++			return -EINVAL;
++
++		snd_master_key = tcp_auth_lookup_db_entry_key(entry,
++							      send_id,
++							      TCP_AUTH_SEND);
++		rcv_master_key = tcp_auth_lookup_db_entry_key(entry,
++							      recv_id,
++							      TCP_AUTH_RECV);
++
++		/* snd_master_key and rcv_master_key are either both NULL
++		 * (in which case we are installing a new master key) or both
++		 * point to the same struct (in which case we are updating an
++		 * existing key).
++		 *
++		 * Any other case indicates that a duplicate ID is being
++		 * installed.
++		 */
++		if (snd_master_key != rcv_master_key)
++			return -EINVAL;
++
++		/* We already asserted snd_master_key == rcv_master_key */
++		master_key = snd_master_key;
++	} else if (!params->collapsed) {
++		if (!force && !tcp_auth_add_rem_sock_state_is_valid(sk))
++			return -EOPNOTSUPP;
++
++		alg = tcp_auth_get_alg(alg_id);
++		if (!alg)
++			return -EINVAL;
++
++		ret = alg->init(alg);
++		if (ret)
++			return ret;
++
++		entry = tcp_auth_new_db_entry(sk, addr, prefixlen,
++					      family, alg, gfp);
++		if (!entry)
++			return -ENOMEM;
++
++		hlist_add_head_rcu(&entry->node, &params->head);
++	} else {
++		/* Once collapsed (ie. socket is connected) updates are only
++		 * accepted for the same address/prefix/family.
++		 */
++		return -EINVAL;
++	}
++
++	if (master_key) {
++		/* For existing keys we only allow changes to flags, so assume
++		 * that if the flags are the same something else has been
++		 * changed and return an error.
++		 */
++		if (flags == master_key->flags)
++			return -EINVAL;
++	} else {
++		int dev_keylen;
++		u8 *dev_key;
++
++		if (!key || !keylen)
++			return -EINVAL;
++
++		dev_keylen = entry->alg->gen_derived_master_key(entry->alg,
++								key, keylen,
++								&dev_key, gfp);
++		if (dev_keylen < 0)
++			return dev_keylen;
++
++		master_key = tcp_auth_new_master_key(sk, send_id, recv_id,
++						     dev_key, dev_keylen, gfp);
++		if (!master_key) {
++			kfree(dev_key);
++			return -ENOMEM;
++		}
++
++		master_key->alg = entry->alg;
++		master_key->options = options;
++
++		hlist_add_head_rcu(&master_key->node, &entry->keys_head);
++	}
++
++	master_key->flags = flags;
++
++	/* Update the preferred keys */
++	if (TCP_AUTH_FLAG_KEY_PREF_RECV ==
++	    (flags & TCP_AUTH_FLAG_KEY_PREF_RECV))
++		rcu_assign_pointer(entry->pref_recv_key, master_key);
++
++	if (TCP_AUTH_FLAG_KEY_PREF_SEND ==
++	    (flags & TCP_AUTH_FLAG_KEY_PREF_SEND)) {
++		rcu_assign_pointer(entry->pref_send_key, master_key);
++
++		if (params->collapsed && sk->sk_state == TCP_ESTABLISHED) {
++			spin_lock_bh(&entry->update_lock);
++			if (!entry->current_key)
++				rcu_assign_pointer(entry->current_key,
++						   master_key);
++			spin_unlock_bh(&entry->update_lock);
++		}
++	}
++
++	/* Traffic keys may be cached on a collapsed DB */
++	if (params->collapsed)
++		master_key->internal_flags |= TCP_AUTH_MASTER_FLAG_CACHE_TKEYS;
++
++	return 0;
++}
++
++static int tcp_auth_add(struct sock *sk,
++			const struct tcp_auth *tca,
++			const union tcp_auth_addr *addr,
++			int family)
++{
++	int ret;
++
++	ret = tcp_auth_add_key(sk, addr, tca->prefixlen, family, tca->send_id,
++			       tca->recv_id, tca->alg, tca->key, tca->keylen,
++			       tca->flags, tca->options, GFP_KERNEL, false);
++	if (ret)
++		return ret;
++
++	/* We need to perform the same operation on any sockets on the accept
++	 * backlog, if this is a listening socket. This ensures consistent
++	 * auth state when those sockets get delivered to userspace.
++	 */
++	if (sk->sk_state == TCP_LISTEN) {
++		struct request_sock *req;
++
++		spin_lock_bh(&inet_csk(sk)->icsk_accept_queue.rskq_lock);
++
++		req = inet_csk(sk)->icsk_accept_queue.rskq_accept_head;
++		while (req) {
++			ret = tcp_auth_add_key(req->sk, addr, tca->prefixlen,
++					       family, tca->send_id,
++					       tca->recv_id, tca->alg, tca->key,
++					       tca->keylen, tca->flags,
++					       tca->options, GFP_ATOMIC, false);
++			if (ret)
++				break;
++			req = req->dl_next;
++		}
++
++		spin_unlock_bh(&inet_csk(sk)->icsk_accept_queue.rskq_lock);
++	}
++
++	return ret;
++}
++
++static void tcp_auth_del_entry(struct sock *sk, struct tcp_auth_db_entry *entry)
++{
++	struct tcp_auth_master_key *key;
++	struct hlist_node *key_n;
++
++	hlist_del_rcu(&entry->node);
++
++	hlist_for_each_entry_safe(key, key_n, &entry->keys_head, node)
++		tcp_auth_entry_del_key(sk, entry, key);
++
++	atomic_sub(sizeof(*entry), &sk->sk_omem_alloc);
++	kfree_rcu(entry, rcu);
++}
++
++static int tcp_auth_remove(struct sock *sk, bool destroy)
++{
++	struct tcp_auth_params *params;
++	struct tcp_auth_db_entry *entry;
++	struct hlist_node *entry_n;
++
++	if (sk_fullsock(sk))
++		params = rcu_dereference_protected(tcp_sk(sk)->auth_params,
++						   destroy ||
++						   lockdep_sock_is_held(sk));
++	else
++		params = rcu_dereference_protected(tcp_twsk(sk)->auth_params,
++						   destroy);
++
++	if (!params)
++		return -ENOENT;
++
++	if (!destroy && !tcp_auth_add_rem_sock_state_is_valid(sk))
++		return -EOPNOTSUPP;
++
++	if (sk_fullsock(sk))
++		rcu_assign_pointer(tcp_sk(sk)->auth_params, NULL);
++	else
++		rcu_assign_pointer(tcp_twsk(sk)->auth_params, NULL);
++
++	if (!refcount_dec_and_test(&params->ref_count))
++		return 0;
++
++	hlist_for_each_entry_safe(entry, entry_n, &params->head, node)
++		tcp_auth_del_entry(sk, entry);
++
++	kfree_rcu(params, rcu);
++	return 0;
++}
++
++int tcp_parse_auth(struct sock *sk,
++		   struct tcp_auth *tca,
++		   const union tcp_auth_addr *addr,
++		   int family)
++{
++	int ret;
++
++	/* Complete removal of TCP-AO */
++	if (tca->alg == TCP_AUTH_ALG_NONE)
++		return tcp_auth_remove(sk, false);
++
++	/* Key length of 0 indicates the individual key should be removed */
++	if (!tca->keylen)
++		return tcp_auth_delete(sk, tca, addr, family);
++
++	/* Otherwise we are installing a key */
++	tca->key = memdup_user(tca->key, tca->keylen);
++	if (IS_ERR(tca->key))
++		return -EFAULT;
++
++	ret = tcp_auth_add(sk, tca, addr, family);
++
++	memzero_explicit((u8 *)tca->key, tca->keylen);
++	kfree(tca->key);
++	return ret;
++}
++
++int tcp_auth_destroy(struct sock *sk)
++{
++	return tcp_auth_remove(sk, true);
++}
++
++int tcp_auth_lookup_traffic_key(const struct tcp_auth_master_key *master,
++				enum tcp_auth_traffic_key_type type,
++				struct tcp_auth_traffic_key *output)
++{
++	output->key = rcu_dereference(master->traffic_key[type]);
++	if (!output->key)
++		return -ENOKEY;
++
++	output->owned = false;
++	output->master = rcu_dereference(master);
++	return 0;
++}
++
++int tcp_auth_master_get_traffic_key(struct tcp_auth_master_key *master,
++				    const void *ctx, int ctx_len,
++				    enum tcp_auth_traffic_key_type type,
++				    struct tcp_auth_traffic_key *output)
++{
++	int ret;
++	u8 *gen_key;
++
++	/* Return cached key if available */
++	ret = tcp_auth_lookup_traffic_key(master, type, output);
++	if (ret == 0)
++		return 0;
++
++	ret = tcp_auth_generate_traffic_key(master->alg, master->key,
++					    master->keylen, ctx,
++					    ctx_len, &gen_key);
++	if (ret) {
++		kfree(gen_key);
++		return ret;
++	}
++
++	output->master = rcu_dereference(master);
++
++	if (master->internal_flags & TCP_AUTH_MASTER_FLAG_CACHE_TKEYS) {
++		spin_lock_bh(&master->update_lock);
++		if (!rcu_access_pointer(master->traffic_key[type]))
++			rcu_assign_pointer(master->traffic_key[type], gen_key);
++		else
++			kfree(gen_key);
++		spin_unlock_bh(&master->update_lock);
++		output->owned = false;
++		output->key = rcu_dereference(master->traffic_key[type]);
++	} else {
++		output->owned = true;
++		output->key = gen_key;
++	}
++
++	return 0;
++}
++
++void tcp_auth_master_put_traffic_key(struct tcp_auth_traffic_key *key)
++{
++	if (key->owned) {
++		memzero_explicit((void *)key->key,
++				 key->master->alg->key_length);
++		kfree(key->key);
++		key->key = NULL;
++	}
++}
++
++/* Collapse the authentication database to the single provided entry or a
++ * copy of that entry. This is done once the connection becomes established
++ * since there is now no need for multiple entries relating to different
++ * addresses/prefix lengths.
++ *
++ * Collapsing occurs either on connect() or when a listening socket creates
++ * a socket for the accept() backlog. In the first case src == dst and we
++ * simply remove any additional entries from the DB. In the second case we
++ * call tcp_auth_do_add() to setup an entirely new auth DB on the new socket.
++ */
++int tcp_auth_collapse(const struct sock *src, struct sock *dst,
++		      const struct tcp_auth_db_entry *entry)
++{
++	struct tcp_auth_params *dst_params;
++	struct tcp_auth_master_key *master_key;
++	struct tcp_auth_db_entry *collapsed_entry;
++
++	if (dst->sk_state == TCP_LISTEN)
++		return -EINVAL;
++
++	dst_params = rcu_dereference_protected(tcp_sk(dst)->auth_params,
++					       lockdep_sock_is_held(dst));
++	if (!dst_params)
++		return -ENOENT;
++
++	if (src == dst) {
++		struct hlist_node *entry_n;
++		struct tcp_auth_db_entry *i;
++
++		hlist_for_each_entry_safe(i, entry_n, &dst_params->head, node)
++			if (i != entry)
++				tcp_auth_del_entry(dst, i);
++	} else {
++		const struct tcp_auth_master_key *key;
++		int ret;
++
++		hlist_for_each_entry_rcu(key, &entry->keys_head, node) {
++			ret = tcp_auth_add_key(dst, &entry->addr,
++					       entry->prefixlen, entry->family,
++					       key->id[TCP_AUTH_SEND],
++					       key->id[TCP_AUTH_RECV],
++					       key->alg->id, key->key,
++					       key->keylen, key->flags,
++					       key->options, GFP_ATOMIC, true);
++			if (ret)
++				return ret;
++		}
++	}
++
++	dst_params->collapsed = true;
++
++	collapsed_entry = tcp_auth_get_collapsed_entry(dst_params);
++	hlist_for_each_entry_rcu(master_key, &collapsed_entry->keys_head, node)
++		master_key->internal_flags |= TCP_AUTH_MASTER_FLAG_CACHE_TKEYS;
++
++	return 0;
++}
++
++inline struct tcp_auth_db_entry *
++tcp_auth_get_collapsed_entry(const struct tcp_auth_params *params)
++{
++	if (WARN_ON(!params->collapsed))
++		return NULL;
++	return (struct tcp_auth_db_entry *)hlist_first_rcu(&params->head);
++}
++
++int
++tcp_auth_get_collapsed_tx_master_keys(const struct tcp_auth_params *params,
++				      struct tcp_auth_master_key **current_key,
++				      struct tcp_auth_master_key **next_key)
++{
++	struct tcp_auth_db_entry *entry;
++	struct tcp_auth_master_key *curr;
++	struct tcp_auth_master_key *next;
++
++	*current_key = *next_key = NULL;
++
++	entry = tcp_auth_get_collapsed_entry(params);
++	if (unlikely(!entry))
++		return -ENOENT;
++
++	curr = rcu_dereference(entry->current_key);
++	next = rcu_dereference(entry->pref_recv_key);
++
++	if (unlikely(!curr || !next))
++		return -ENOKEY;
++
++	if (unlikely(!(READ_ONCE(curr->flags) & TCP_AUTH_FLAG_KEY_SEND) ||
++		     !(READ_ONCE(next->flags) & TCP_AUTH_FLAG_KEY_RECV)))
++		return -ENOKEY;
++
++	*current_key = curr;
++	*next_key = next;
++	return 0;
++}
++
++int tcp_auth_get_req_tx_master_keys(const struct sock *sk,
++				    struct request_sock *req,
++				    struct tcp_auth_master_key **current_key,
++				    struct tcp_auth_master_key **next_key)
++{
++	struct tcp_auth_db_entry *entry;
++	struct tcp_auth_master_key *curr;
++	struct tcp_auth_master_key *next;
++	struct tcp_auth_req_params *params;
++	struct sock *rsk = req_to_sk(req);
++
++	*current_key = *next_key = NULL;
++
++	params = rcu_dereference(tcp_rsk(req)->auth_params);
++	if (likely(!params))
++		return 0;
++
++	entry = tcp_sk(sk)->af_specific->auth_ops.lookup_db_entry_sk(sk, rsk);
++	if (unlikely(!entry))
++		return -ENOENT;
++
++	curr = tcp_auth_lookup_db_entry_key(entry,
++					    params->current_key,
++					    TCP_AUTH_SEND);
++	next = rcu_dereference(entry->pref_recv_key);
++
++	if (unlikely(!curr || !next))
++		return -ENOKEY;
++
++	if (unlikely(!(READ_ONCE(curr->flags) & TCP_AUTH_FLAG_KEY_SEND) ||
++		     !(READ_ONCE(next->flags) & TCP_AUTH_FLAG_KEY_RECV)))
++		return -ENOKEY;
++
++	*current_key = curr;
++	*next_key = next;
++	return 0;
++}
++
++int tcp_auth_hash_skb_data(struct tcp_auth_pool *p,
++			   const struct sk_buff *skb,
++			   unsigned int header_len)
++{
++	struct scatterlist sg;
++	const struct tcphdr *tp = tcp_hdr(skb);
++	struct ahash_request *req = p->req;
++	unsigned int i;
++	const unsigned int head_data_len = skb_headlen(skb) > header_len ?
++					   skb_headlen(skb) - header_len : 0;
++	const struct skb_shared_info *shi = skb_shinfo(skb);
++	struct sk_buff *frag_iter;
++
++	sg_init_table(&sg, 1);
++
++	sg_set_buf(&sg, ((u8 *)tp) + header_len, head_data_len);
++	ahash_request_set_crypt(req, &sg, NULL, head_data_len);
++	if (crypto_ahash_update(req))
++		return 1;
++
++	for (i = 0; i < shi->nr_frags; ++i) {
++		const struct skb_frag_struct *f = &shi->frags[i];
++		unsigned int offset = f->page_offset;
++		struct page *page = skb_frag_page(f) + (offset >> PAGE_SHIFT);
++
++		sg_set_page(&sg, page, skb_frag_size(f),
++			    offset_in_page(offset));
++		ahash_request_set_crypt(req, &sg, NULL, skb_frag_size(f));
++		if (crypto_ahash_update(req))
++			return 1;
++	}
++
++	skb_walk_frags(skb, frag_iter)
++		if (tcp_auth_hash_skb_data(p, frag_iter, 0))
++			return 1;
++
++	return 0;
++}
++
++static int tcp_auth_hash_headers(struct tcp_auth_pool *p,
++				 const struct tcp_sock_auth_af_ops *ops,
++				 const struct sock *sk,
++				 const struct sk_buff *skb,
++				 const struct tcphdr *th,
++				 __be32 sne,
++				 int nbytes,
++				 bool incl_options,
++				 bool swap_addrs)
++{
++	struct scatterlist sg;
++	union tcp_word_hdr *twh;
++	int ret;
++	int th_len;
++	__sum16 check;
++	const struct tcp_auth_opt *ao;
++	const void *saddr, *daddr;
++	int pseudohdr_len;
++
++	if (swap_addrs)
++		ops->addrs_for_auth_hash(sk, skb, &daddr, &saddr);
++	else
++		ops->addrs_for_auth_hash(sk, skb, &saddr, &daddr);
++
++	pseudohdr_len = ops->auth_hash_headers(p->scratch, sne, saddr,
++					       daddr, th, nbytes);
++	if (pseudohdr_len < 0)
++		return pseudohdr_len;
++
++	sg_init_one(&sg, p->scratch, pseudohdr_len);
++	ahash_request_set_crypt(p->req, &sg, NULL, sg.length);
++	ret = crypto_ahash_update(p->req);
++	if (ret)
++		return ret;
++
++	ret = tcp_parse_auth_option(th, &ao);
++	if (ret || !ao)
++		return -EINVAL;
++
++	th_len = (th->doff << 2);
++
++	/* Our contract with callers is that th is not modified yet for the
++	 * MAC calculation the checksum field must be zeroed. Therefore stash
++	 * any checksum and restore it before returning.
++	 *
++	 * The MAC field of the TCP-AO option in the th buffer must also be
++	 * zeroed for MAC calculation. It is the responsibility of the caller
++	 * to ensure this is the case.
++	 */
++	twh = (union tcp_word_hdr *)th;
++	check = th->check;
++	twh->hdr.check = 0;
++
++	sg_init_one(&sg, th, incl_options ? th_len : 20);
++	ahash_request_set_crypt(p->req, &sg, NULL, sg.length);
++	ret = crypto_ahash_update(p->req);
++
++	twh->hdr.check = check;
++	if (ret || incl_options)
++		return ret;
++
++	sg_init_one(&sg, ao, ao->length);
++	ahash_request_set_crypt(p->req, &sg, NULL, sg.length);
++	return crypto_ahash_update(p->req);
++}
++
++static inline int do_tcp_auth_hash(const struct tcp_sock_auth_af_ops *ops,
++				   u8 *auth_mac,
++				   const struct tcp_auth_traffic_key *key,
++				   const struct sock *sk,
++				   const struct sk_buff *skb,
++				   const struct tcphdr *th,
++				   __be32 sne,
++				   int nbytes,
++				   bool hash_data)
++{
++	struct tcp_auth_pool *pool;
++	u8 mac[TCP_AUTH_ALG_MAX_OUT_LEN];
++	bool incl_options = !(key->master->options & TCP_AUTH_OPT_EXCL_OPTIONS);
++
++	memset(auth_mac, 0, key->master->alg->mac_length);
++
++	pool = tcp_auth_get_pool(key->master->alg);
++	if (!pool)
++		goto clear_hash_noput;
++
++	if (crypto_ahash_setkey(crypto_ahash_reqtfm(pool->req), key->key,
++				key->master->alg->key_length))
++		goto clear_hash;
++
++	if (crypto_ahash_init(pool->req))
++		goto clear_hash;
++
++	if (tcp_auth_hash_headers(pool, ops, sk, skb, th, sne,
++				  nbytes, incl_options, !hash_data))
++		goto clear_hash;
++
++	if (hash_data && tcp_auth_hash_skb_data(pool, skb, th->doff << 2))
++		goto clear_hash;
++
++	ahash_request_set_crypt(pool->req, NULL, mac, 0);
++	if (crypto_ahash_final(pool->req))
++		goto clear_hash;
++
++	tcp_auth_put_pool(key->master->alg);
++
++	memcpy(auth_mac, mac, key->master->alg->mac_length);
++	return 0;
++
++clear_hash:
++	tcp_auth_put_pool(key->master->alg);
++clear_hash_noput:
++	memset(auth_mac, 0, key->master->alg->mac_length);
++	return 1;
++}
++
++int tcp_auth_hash_skb(const struct tcp_sock_auth_af_ops *ops,
++		      u8 *auth_mac,
++		      const struct tcp_auth_traffic_key *key,
++		      const struct sock *sk,
++		      const struct sk_buff *skb,
++		      __be32 sne)
++{
++	return do_tcp_auth_hash(ops, auth_mac, key, sk, skb,
++				tcp_hdr(skb), sne, skb->len, true);
++}
++
++/* Determine the sequence number extension (SNE) based upon the current
++ * incoming/outgoing sequence number.
++ *
++ * This function is derived from the pseudocode in RFC 5925 Section 6.2.
++ */
++__be32 tcp_auth_get_sne(struct tcp_auth_sne *sne, __be32 seq)
++{
++	u32 ret_sne;
++
++	spin_lock_bh(&sne->lock);
++
++	if (!sne->flag &&
++	    ntohl(sne->prev_seq) > 0x7fff &&
++	    ntohl(seq) < 0x7fff) {
++		sne->sne += 1;
++		sne->flag = true;
++	}
++
++	ret_sne = sne->sne;
++	if (sne->flag && ntohl(seq) > 0x7fff)
++		ret_sne -= 1;
++
++	if (ntohl(sne->prev_seq) < 0x7fff && ntohl(seq) > 0x7fff)
++		sne->flag = false;
++
++	sne->prev_seq = seq;
++
++	spin_unlock_bh(&sne->lock);
++	return htonl(ret_sne);
++}
++
++static inline bool
++tcp_auth_get_inbound_traffic_key(const struct tcp_sock_auth_af_ops *ops,
++				 const struct request_sock *req,
++				 const struct tcp_auth_params *params,
++				 const struct sk_buff *skb,
++				 struct tcp_auth_master_key *master_key,
++				 bool syn,
++				 struct tcp_auth_traffic_key *tkey)
++{
++	const struct tcphdr *th = tcp_hdr(skb);
++	enum tcp_auth_traffic_key_type type;
++	__be32 sisn, disn;
++	int ret;
++
++	tcp_auth_inbound_log_init(skb, ops);
++
++	if (unlikely(syn)) {
++		sisn = th->seq;
++		disn = 0;
++		type = TCP_AUTH_TRAFFIC_KEY_RECV_SYN;
++	} else {
++		if (req) {
++			sisn = htonl(tcp_rsk(req)->rcv_isn);
++			disn = htonl(tcp_rsk(req)->snt_isn);
++		} else {
++			sisn = (th->syn && th->ack) ? th->seq :
++						      htonl(params->rcv_isn);
++			disn = htonl(params->snt_isn);
++		}
++		type = TCP_AUTH_TRAFFIC_KEY_RECV_OTHER;
++	}
++
++	tcp_auth_lookup_traffic_key(master_key, type, tkey);
++	if (unlikely(!tkey->key)) {
++		/* No cached traffic key - generate one which *may* be cached */
++		ret = ops->get_recv_traffic_key(master_key, skb, th->source,
++						th->dest, sisn, disn, tkey);
++
++		if (unlikely(!tkey->key || ret)) {
++			tcp_auth_log_ratelimit(KERN_INFO, th->source, th->dest,
++					       "Failed to get traffic key %u for inbound validation: %d",
++						master_key->id[TCP_AUTH_RECV],
++						ret);
++
++			return false;
++		}
++	}
++
++	return true;
++}
++
++static inline bool
++tcp_auth_hash_skb_and_compare(const struct tcp_sock_auth_af_ops *ops,
++			      const struct sk_buff *skb,
++			      const struct tcp_auth_opt *ao,
++			      struct tcp_auth_sne *sne,
++			      const struct tcp_auth_traffic_key *tkey)
++{
++	const struct tcphdr *th = tcp_hdr(skb);
++	u8 recvd_mac[TCP_AUTH_ALG_MAX_MAC_LEN];
++	__be32 sne_val;
++	int ret;
++
++	tcp_auth_inbound_log_init(skb, ops);
++
++	if (likely(sne))
++		sne_val = tcp_auth_get_sne(sne, th->seq);
++	else
++		sne_val = 0;
++
++	/* Cache received MAC and zero out the MAC field (required to
++	 * calculate the MAC value).
++	 */
++	memcpy(recvd_mac, ao->mac, tkey->master->alg->mac_length);
++	memset((void *)ao->mac, 0, tkey->master->alg->mac_length);
++
++	/* Place calculated MAC back into the buffer, if it matches then
++	 * we need it in place for the TCP checksum calculation.
++	 */
++	ret = tcp_auth_hash_skb(ops, (u8 *)ao->mac, tkey, NULL, skb, sne_val);
++
++	if (unlikely(ret)) {
++		tcp_auth_log_ratelimit(KERN_INFO, th->source, th->dest,
++				       "Failed to compute MAC: %d", ret);
++		return false;
++	}
++
++	if (unlikely(memcmp(ao->mac, recvd_mac,
++			    tkey->master->alg->mac_length))) {
++		tcp_auth_log_ratelimit(KERN_INFO, th->source, th->dest,
++				       "MAC computed using key with receive ID %u (0x%02X...) does not match received MAC",
++					tkey->master->id[TCP_AUTH_RECV],
++					tkey->key[0]);
++		return false;
++	}
++
++	return true;
++}
++
++static void tcp_auth_update_current_key(struct tcp_auth_db_entry *entry,
++					struct tcp_auth_params *params,
++					u8 next_key_id)
++{
++	struct tcp_auth_master_key *next_key, *current_key;
++
++	current_key = rcu_dereference(entry->current_key);
++	if (current_key && current_key->id[TCP_AUTH_SEND] == next_key_id)
++		return;
++
++	next_key = tcp_auth_lookup_db_entry_key(entry, next_key_id,
++						TCP_AUTH_SEND);
++
++	if (next_key && next_key->flags & TCP_AUTH_FLAG_KEY_SEND) {
++		spin_lock_bh(&entry->update_lock);
++		rcu_assign_pointer(entry->current_key, next_key);
++		spin_unlock_bh(&entry->update_lock);
++	}
++}
++
++static void
++tcp_auth_req_update_current_key(const struct tcp_auth_db_entry *entry,
++				struct tcp_auth_req_params *params,
++				u8 next_key_id)
++{
++	struct tcp_auth_master_key *next_key;
++
++	if (READ_ONCE(params->current_key) == next_key_id)
++		return;
++
++	next_key = tcp_auth_lookup_db_entry_key(entry, next_key_id,
++						TCP_AUTH_SEND);
++
++	if (next_key && next_key->flags & TCP_AUTH_FLAG_KEY_SEND) {
++		spin_lock_bh(&params->update_lock);
++		params->current_key = next_key->id[TCP_AUTH_SEND];
++		spin_unlock_bh(&params->update_lock);
++	}
++}
++
++static bool
++do_tcp_auth_inbound_validate(struct sock *sk,
++			     struct request_sock *req,
++			     const struct sk_buff *skb,
++			     struct tcp_auth_params *params,
++			     const struct tcp_sock_auth_af_ops *ops)
++{
++	struct tcp_auth_db_entry *entry;
++	struct tcp_auth_master_key *master_key;
++	struct tcp_auth_req_params *req_params = NULL;
++	const struct tcphdr *th = tcp_hdr(skb);
++	struct tcp_auth_traffic_key tkey;
++	struct tcp_auth_sne *sne = NULL;
++	const struct tcp_auth_opt *ao;
++	bool syn;
++
++	tcp_auth_inbound_log_init(skb, ops);
++
++	if (unlikely(tcp_parse_auth_option(th, &ao)))
++		/* Malformed header */
++		return false;
++
++	if (likely(!ao))
++		return params ? false : true;
++
++	if (unlikely(!params))
++		return false;
++
++	if (unlikely(req)) {
++		req_params = rcu_dereference(tcp_rsk(req)->auth_params);
++		if (!req_params)
++			return false;
++	}
++
++	if (likely(params->collapsed))
++		entry = tcp_auth_get_collapsed_entry(params);
++	else
++		entry = ops->lookup_db_entry(sk, skb);
++
++	if (unlikely(!entry))
++		return false;
++
++	master_key = tcp_auth_lookup_db_entry_key(entry, ao->key_id,
++						  TCP_AUTH_RECV);
++	if (!master_key) {
++		tcp_auth_log_ratelimit(KERN_INFO, th->source, th->dest,
++				       "No key with receive ID %u - cannot authenticate received segment",
++				       ao->key_id);
++		return false;
++	}
++
++	/* Check our key is valid for authenticating received segments */
++	if (!(master_key->flags & TCP_AUTH_FLAG_KEY_RECV)) {
++		tcp_auth_log_ratelimit(KERN_INFO, th->source, th->dest,
++				       "Key with receive ID %u is not valid for authenticating received segments",
++				       master_key->id[TCP_AUTH_RECV]);
++
++		return false;
++	}
++
++	/* Verify option length is expected as per the algorithm */
++	if (ao->length != TCPOLEN_AUTH(master_key->alg)) {
++		tcp_auth_log_ratelimit(KERN_INFO, th->source, th->dest,
++				       "Option length incorrect for MAC algorithm %s (key %u)",
++				       master_key->alg->name,
++				       master_key->id[TCP_AUTH_RECV]);
++
++		return false;
++	}
++
++	syn = (th->syn && !th->ack);
++	if (sk->sk_state == TCP_LISTEN) {
++		if (req)
++			sne = &req_params->recv_sne;
++		else if (!syn)
++			return false;
++	} else {
++		sne = &params->recv_sne;
++	}
++
++	if (!tcp_auth_get_inbound_traffic_key(ops, req, params, skb,
++					      master_key, syn, &tkey))
++		return false;
++
++	if (!tcp_auth_hash_skb_and_compare(ops, skb, ao, sne, &tkey)) {
++		tcp_auth_master_put_traffic_key(&tkey);
++		return false;
++	}
++	tcp_auth_master_put_traffic_key(&tkey);
++
++	if (sk->sk_state == TCP_LISTEN) {
++		/* If this is a SYN then there is no request sock yet, so
++		 * nothing left to do.
++		 */
++		if (req)
++			tcp_auth_req_update_current_key(entry, req_params,
++							ao->recv_next_key_id);
++	} else {
++		tcp_auth_update_current_key(entry, params,
++					    ao->recv_next_key_id);
++	}
++
++	return true;
++}
++
++inline bool tcp_auth_inbound_validate(struct sock *sk,
++				      struct request_sock *req,
++				      const struct sk_buff *skb)
++{
++	struct tcp_sock *tp = tcp_sk(sk);
++	struct tcp_auth_params *params = rcu_dereference(tp->auth_params);
++
++	return do_tcp_auth_inbound_validate(sk, req, skb, params,
++					    &tp->af_specific->auth_ops);
++}
++
++inline bool tcp_auth_tw_inbound_validate(struct sock *sk,
++					 const struct sk_buff *skb)
++{
++	struct tcp_auth_params *params;
++
++	params = rcu_dereference(tcp_twsk(sk)->auth_params);
++	return do_tcp_auth_inbound_validate(sk, NULL, skb,
++					    params, tcp_twsk(sk)->auth_ops);
++}
++
++int tcp_auth_hash_hdr(const struct tcp_sock_auth_af_ops *ops,
++		      u8 *auth_mac, const struct tcp_auth_traffic_key *key,
++		      const struct sk_buff *skb, const struct tcphdr *th,
++		      __be32 sne)
++{
++	return do_tcp_auth_hash(ops, auth_mac, key, NULL, skb,
++				th, sne, th->doff << 2, false);
++}
++
++/* Fills the Authentication option pointed to by opt and calculates the
++ * MAC for the header. This is an AF agnostic function designed to be used
++ * for sending packets out of socket context. It assumes that there is a TCP
++ * header only, and no data.
++ */
++int tcp_auth_send_fill_opt(const struct sock *sk,
++			   const struct sk_buff *skb,
++			   struct tcp_auth_send_args *auth,
++			   struct tcphdr *out_th,
++			   struct tcp_auth_opt *opt)
++{
++	struct tcp_auth_traffic_key tkey;
++	const struct tcphdr *th = tcp_hdr(skb);
++	u8 curr_send_key = auth->current_key->id[TCP_AUTH_SEND];
++	__be32 sne;
++	int err;
++
++	tcp_auth_outbound_log_init(sk, auth->ops);
++
++	tcp_auth_lookup_traffic_key(auth->current_key,
++				    TCP_AUTH_TRAFFIC_KEY_SEND_OTHER,
++				    &tkey);
++	if (!tkey.key) {
++		err = auth->ops->get_send_traffic_key(auth->current_key, sk,
++						      th->dest, th->source,
++						      auth->snt_isn,
++						      auth->rcv_isn,
++						      &tkey);
++
++		if (unlikely(err)) {
++			tcp_auth_log_ratelimit(KERN_INFO, th->source, th->dest,
++					       "Failed to get traffic key %u to authenticate outgoing segment: %d",
++					       curr_send_key, err);
++			return err;
++		}
++	}
++
++	opt->kind = TCPOPT_AUTH;
++	opt->length = TCPOLEN_AUTH(auth->current_key->alg);
++	opt->key_id = curr_send_key;
++	opt->recv_next_key_id = auth->next_key->id[TCP_AUTH_RECV];
++
++	memset(opt->mac, 0, auth->current_key->alg->mac_length);
++
++	sne = tcp_auth_get_sne(auth->sne, th->seq);
++	err = tcp_auth_hash_hdr(auth->ops, (u8 *)&opt->mac, &tkey,
++				skb, out_th, sne);
++
++	tcp_auth_master_put_traffic_key(&tkey);
++
++	if (err)
++		tcp_auth_log_ratelimit(KERN_INFO, th->source, th->dest,
++				       "Failed to compute output MAC: %d", err);
++
++	return err;
++}
++
++int tcp_auth_debug_sockaddrs(const struct tcp_sock_auth_af_ops *ops,
++			     const struct sock *sk,
++			     const struct sk_buff *skb,
++			     __be16 sport, __be16 dport,
++			     struct __kernel_sockaddr_storage *src_sa_out,
++			     struct __kernel_sockaddr_storage *dst_sa_out)
++{
++	struct sockaddr_in *sin;
++	struct sockaddr_in6 *sin6;
++	const void *saddr, *daddr;
++
++	BUILD_BUG_ON(AF_INET == 0 || AF_INET6 == 0);
++	if (src_sa_out->ss_family && src_sa_out->ss_family)
++		return 0;
++
++	src_sa_out->ss_family = ops->addrs_for_auth_hash(sk, skb,
++							 &saddr, &daddr);
++	dst_sa_out->ss_family = src_sa_out->ss_family;
++
++	switch (src_sa_out->ss_family) {
++	case AF_INET:
++		sin = (struct sockaddr_in *)src_sa_out;
++		memcpy(&sin->sin_addr, saddr, sizeof(sin->sin_addr));
++		sin->sin_port = sport;
++		sin = (struct sockaddr_in *)dst_sa_out;
++		memcpy(&sin->sin_addr, daddr, sizeof(sin->sin_addr));
++		sin->sin_port = dport;
++		break;
++	case AF_INET6:
++		sin6 = (struct sockaddr_in6 *)src_sa_out;
++		memcpy(&sin6->sin6_addr, saddr, sizeof(sin6->sin6_addr));
++		sin6->sin6_port = sport;
++		sin6 = (struct sockaddr_in6 *)dst_sa_out;
++		memcpy(&sin6->sin6_addr, daddr, sizeof(sin6->sin6_addr));
++		sin6->sin6_port = dport;
++		break;
++	default:
++		return -1;
++	}
++
++	return 0;
++}
+--- a/net/ipv4/tcp_input.c
++++ b/net/ipv4/tcp_input.c
+@@ -3900,6 +3900,15 @@ void tcp_parse_options(const struct net
+ 							  opsize);
+ 				break;
+ 
++			case TCPOPT_AUTH:
++				/* Authentication has already been checked so
++				 * here we just copy the sender's preferred
++				 * receive key to be used later.
++				 */
++				opt_rx->auth_seen = 1;
++				opt_rx->next_auth_key = *++ptr;
++				break;
++
+ 			}
+ 			ptr += opsize-2;
+ 			length -= opsize;
+@@ -3988,6 +3997,67 @@ const u8 *tcp_parse_md5sig_option(const
+ EXPORT_SYMBOL(tcp_parse_md5sig_option);
+ #endif
+ 
++/* Parse RFC5925 Authentication Option from TCP header
++ * Returns < 0 if multiple AOs are seen, or if an AO is observed in
++ * conjunction with an MD5 signature, or if malformed options are observed.
++ */
++int tcp_parse_auth_option(const struct tcphdr *th,
++			  const struct tcp_auth_opt **opt)
++{
++	int length = (th->doff << 2) - sizeof(*th);
++	const u8 *ptr = (const u8 *)(th + 1);
++
++	*opt = NULL;
++
++	/* If not enough data remaining, we can short cut */
++	while (length >= TCPOLEN_AUTH_HDR) {
++		int opcode = *ptr++;
++		int opsize;
++		bool md5sig_seen = false;
++
++		switch (opcode) {
++		case TCPOPT_EOL:
++			return 0;
++		case TCPOPT_NOP:
++			length--;
++			continue;
++		default:
++			opsize = *ptr;
++			if (opsize < 2 || opsize > length)
++				return -1;
++			if (opcode == TCPOPT_MD5SIG) {
++				if (*opt)
++					return -1;
++				md5sig_seen = true;
++			} else if (opcode == TCPOPT_AUTH) {
++				/* The segment should be discarded if we
++				 * have already seen an authentication option
++				 * or we have seen an MD5 signature.
++				 * RFC5925 Section 2.2
++				 */
++				if (*opt || md5sig_seen)
++					return -1;
++
++				/* The segment is discarded if the indicated
++				 * length is less than 4. A segment length of
++				 * exactly 4 is essentially meaningless since it
++				 * implies there is no MAC. It is an explicitly
++				 * allowed value by the RFC however.
++				 * RFC5925 Section 2.2
++				 */
++				if (opsize < TCPOLEN_AUTH_HDR)
++					return -1;
++
++				*opt = (struct tcp_auth_opt *)(ptr - 1);
++			}
++		}
++		ptr += opsize - 1;
++		length -= opsize;
++	}
++	return 0;
++}
++EXPORT_SYMBOL(tcp_parse_auth_option);
++
+ /* Sorry, PAWS as specified is broken wrt. pure-ACKs -DaveM
+  *
+  * It is not fatal. If this ACK does _not_ change critical state (seqs, window)
+@@ -5784,6 +5854,7 @@ static int tcp_rcv_synsent_state_process
+ 	struct inet_connection_sock *icsk = inet_csk(sk);
+ 	struct tcp_sock *tp = tcp_sk(sk);
+ 	struct tcp_fastopen_cookie foc = { .len = -1 };
++	struct tcp_auth_params *auth_params;
+ 	int saved_clamp = tp->rx_opt.mss_clamp;
+ 	bool fastopen_fail;
+ 
+@@ -5842,6 +5913,13 @@ static int tcp_rcv_synsent_state_process
+ 		 *    state to ESTABLISHED..."
+ 		 */
+ 
++		/* Remote ISN is required for TCP-AO - cache it */
++		rcu_read_lock();
++		auth_params = rcu_dereference(tp->auth_params);
++		if (auth_params)
++			auth_params->rcv_isn = TCP_SKB_CB(skb)->seq;
++		rcu_read_unlock();
++
+ 		tcp_ecn_rcv_synack(tp, th);
+ 
+ 		tcp_init_wl(tp, TCP_SKB_CB(skb)->seq);
+@@ -6330,6 +6408,7 @@ static void tcp_openreq_init(struct requ
+ 	tcp_rsk(req)->rcv_nxt = TCP_SKB_CB(skb)->seq + 1;
+ 	tcp_rsk(req)->snt_synack = tcp_clock_us();
+ 	tcp_rsk(req)->last_oow_ack_time = 0;
++	tcp_rsk(req)->auth_params = NULL;
+ 	req->mss = rx_opt->mss_clamp;
+ 	req->ts_recent = rx_opt->saw_tstamp ? rx_opt->rcv_tsval : 0;
+ 	ireq->tstamp_ok = rx_opt->tstamp_ok;
+@@ -6417,6 +6496,42 @@ static void tcp_reqsk_record_syn(const s
+ 	}
+ }
+ 
++static int tcp_conn_request_auth_init(struct sock *sk,
++				      struct sk_buff *skb,
++				      struct request_sock *req,
++				      u8 next_key)
++{
++	struct tcp_auth_db_entry *entry;
++	struct tcp_auth_master_key *curr_key;
++	struct tcp_sock *tp = tcp_sk(sk);
++	struct tcp_request_sock *treq = tcp_rsk(req);
++
++	entry = tp->af_specific->auth_ops.lookup_db_entry(sk, skb);
++	if (!entry)
++		return -1;
++
++	curr_key = tcp_auth_lookup_db_entry_key(entry, next_key, TCP_AUTH_SEND);
++
++	if (!curr_key ||
++	    !(READ_ONCE(curr_key->flags) & TCP_AUTH_FLAG_KEY_SEND)) {
++		/* Key requested by sender is not (yet?) available/valid
++		 * for sending so attempt to fallback to the preferred send
++		 * key if available. It's then up to the sender whether they
++		 * complete the handshake, based upon whether they have
++		 * our preferred send key available.
++		 */
++		curr_key = rcu_dereference(entry->pref_send_key);
++		if (!curr_key)
++			return -1;
++	}
++
++	if (tcp_auth_alloc_req_params(req, GFP_ATOMIC))
++		return -1;
++
++	treq->auth_params->current_key = curr_key->id[TCP_AUTH_SEND];
++	return 0;
++}
++
+ int tcp_conn_request(struct request_sock_ops *rsk_ops,
+ 		     const struct tcp_request_sock_ops *af_ops,
+ 		     struct sock *sk, struct sk_buff *skb)
+@@ -6471,6 +6586,17 @@ int tcp_conn_request(struct request_sock
+ 	tcp_openreq_init(req, &tmp_opt, skb, sk);
+ 	inet_rsk(req)->no_srccheck = inet_sk(sk)->transparent;
+ 
++	/* Cache current master key ID on the req
++	 * We don't have an auth DB on the request socks to avoid needing
++	 * to propagate key changes made from userspace and reduce memory
++	 * overhead.
++	 */
++	if (unlikely(tmp_opt.auth_seen)) {
++		if (tcp_conn_request_auth_init(sk, skb, req,
++					       tmp_opt.next_auth_key))
++			goto drop_and_free;
++	}
++
+ 	/* Note: tcp_v6_init_req() might override ir_iif for link locals */
+ 	inet_rsk(req)->ir_iif = inet_request_bound_dev_if(sk, skb);
+ 
+--- a/net/ipv4/tcp_ipv4.c
++++ b/net/ipv4/tcp_ipv4.c
+@@ -435,6 +435,8 @@ void tcp_v4_err(struct sk_buff *icmp_skb
+ 	struct sock *sk;
+ 	struct sk_buff *skb;
+ 	struct request_sock *fastopen;
++	struct tcp_auth_params *auth_params;
++	bool conn_has_auth;
+ 	u32 seq, snd_una;
+ 	s32 remaining;
+ 	u32 delta_us;
+@@ -505,6 +507,36 @@ void tcp_v4_err(struct sk_buff *icmp_skb
+ 		if (code > NR_ICMP_UNREACH)
+ 			goto out;
+ 
++		if (code == ICMP_PROT_UNREACH ||
++		    code == ICMP_PORT_UNREACH ||
++		    code == ICMP_FRAG_NEEDED) {
++			switch (sk->sk_state) {
++			case TCP_ESTABLISHED:
++			case TCP_FIN_WAIT1:
++			case TCP_FIN_WAIT2:
++			case TCP_CLOSE_WAIT:
++			case TCP_CLOSING:
++			case TCP_LAST_ACK:
++			/* TCP_TIME_WAIT has already been handled */
++				rcu_read_lock();
++				auth_params = rcu_dereference(tp->auth_params);
++				conn_has_auth = (auth_params &&
++						 auth_params->collapsed);
++				rcu_read_unlock();
++
++				/* Ignore ICMPv4 Type 3 Codes 2-4 for
++				 * connections in a synchronized state which
++				 * match an MKT.
++				 *
++				 * RFC 5925 Section 7.8
++				 */
++				if (conn_has_auth)
++					goto out;
++			default:
++				break;
++			}
++		}
++
+ 		if (code == ICMP_FRAG_NEEDED) { /* PMTU discovery (RFC1191) */
+ 			/* We are not interested in TCP_LISTEN and open_requests
+ 			 * (SYN-ACKs send out by Linux are always <576bytes so
+@@ -647,14 +679,19 @@ EXPORT_SYMBOL(tcp_v4_send_check);
+  *	Exception: precedence violation. We do not implement it in any case.
+  */
+ 
+-static void tcp_v4_send_reset(const struct sock *sk, struct sk_buff *skb)
++void _do_tcp_v4_send_reset(const struct sock *sk,
++			   struct sk_buff *skb,
++			   struct tcp_auth_send_args *auth)
+ {
+ 	const struct tcphdr *th = tcp_hdr(skb);
+ 	struct {
+ 		struct tcphdr th;
++		union {
+ #ifdef CONFIG_TCP_MD5SIG
+-		__be32 opt[(TCPOLEN_MD5SIG_ALIGNED >> 2)];
++			__be32 opt[((TCPOLEN_MD5SIG_ALIGNED) >> 2)];
+ #endif
++			__be32 auth_opt[(TCPOLEN_AUTH_MAX >> 2)];
++		};
+ 	} rep;
+ 	struct ip_reply_arg arg;
+ #ifdef CONFIG_TCP_MD5SIG
+@@ -697,6 +734,18 @@ static void tcp_v4_send_reset(const stru
+ 	arg.iov[0].iov_len  = sizeof(rep.th);
+ 
+ 	net = sk ? sock_net(sk) : dev_net(skb_dst(skb)->dev);
++
++	if (unlikely(auth->current_key && auth->next_key)) {
++		struct tcp_auth_opt *opt = (struct tcp_auth_opt *)&rep.auth_opt;
++
++		rep.th.doff += (TCPOLEN_AUTH(auth->current_key->alg) / 4);
++		if (tcp_auth_send_fill_opt(sk, skb, auth, &rep.th, opt))
++			return;
++
++		arg.iov[0].iov_len += opt->length;
++		goto csum;
++	}
++
+ #ifdef CONFIG_TCP_MD5SIG
+ 	rcu_read_lock();
+ 	hash_location = tcp_parse_md5sig_option(th);
+@@ -746,6 +795,7 @@ static void tcp_v4_send_reset(const stru
+ 				     ip_hdr(skb)->daddr, &rep.th);
+ 	}
+ #endif
++csum:
+ 	arg.csum = csum_tcpudp_nofold(ip_hdr(skb)->daddr,
+ 				      ip_hdr(skb)->saddr, /* XXX */
+ 				      arg.iov[0].iov_len, IPPROTO_TCP, 0);
+@@ -788,11 +838,55 @@ out:
+ #endif
+ }
+ 
++void tcp_v4_send_reset(const struct sock *sk, struct sk_buff *skb)
++{
++	struct tcp_auth_send_args auth_args = {0};
++
++	/* We cannot do authentication if there is no socket */
++	if (!sk) {
++		_do_tcp_v4_send_reset(sk, skb, &auth_args);
++		return;
++	}
++
++	rcu_read_lock();
++
++	tcp_sk_get_auth_send_args(sk, &auth_args);
++	_do_tcp_v4_send_reset(sk, skb, &auth_args);
++
++	rcu_read_unlock();
++}
++
++void tcp_v4_timewait_reset(const struct sock *sk, struct sk_buff *skb)
++{
++	struct tcp_auth_send_args auth_args = {0};
++
++	rcu_read_lock();
++
++	tcp_timewait_get_auth_send_args(sk, &auth_args);
++	_do_tcp_v4_send_reset(sk, skb, &auth_args);
++
++	rcu_read_unlock();
++}
++
+ static void tcp_v4_reqsk_send_reset(const struct sock *sk,
+ 				    struct sk_buff *skb,
+ 				    struct request_sock *req)
+ {
+-	tcp_v4_send_reset(sk, skb);
++	struct tcp_auth_send_args auth_args = {0};
++
++	rcu_read_lock();
++
++	/* sk->sk_state == TCP_LISTEN -> for regular TCP_SYN_RECV
++	 * sk->sk_state == TCP_SYN_RECV -> for Fast Open.
++	 */
++	if (sk->sk_state == TCP_LISTEN)
++		tcp_reqsk_get_auth_send_args(sk, req, &auth_args);
++	else
++		tcp_sk_get_auth_send_args(sk, &auth_args);
++
++	_do_tcp_v4_send_reset(sk, skb, &auth_args);
++
++	rcu_read_unlock();
+ }
+ 
+ /* The code following below sending ACKs in SYN-RECV and TIME-WAIT states
+@@ -803,14 +897,18 @@ static void tcp_v4_send_ack(const struct
+ 			    struct sk_buff *skb, u32 seq, u32 ack,
+ 			    u32 win, u32 tsval, u32 tsecr, int oif,
+ 			    struct tcp_md5sig_key *key,
++			    struct tcp_auth_send_args *auth,
+ 			    int reply_flags, u8 tos)
+ {
+ 	const struct tcphdr *th = tcp_hdr(skb);
+ 	struct {
+ 		struct tcphdr th;
+-		__be32 opt[(TCPOLEN_TSTAMP_ALIGNED >> 2)
++		__be32 opt[(TCPOLEN_TSTAMP_ALIGNED >> 2) +
+ #ifdef CONFIG_TCP_MD5SIG
+-			   + (TCPOLEN_MD5SIG_ALIGNED >> 2)
++			   max((TCPOLEN_MD5SIG_ALIGNED >> 2),
++			       (TCPOLEN_AUTH_MAX >> 2))
++#else
++			   (TCPOLEN_AUTH_MAX >> 2)
+ #endif
+ 			];
+ 	} rep;
+@@ -841,8 +939,19 @@ static void tcp_v4_send_ack(const struct
+ 	rep.th.ack     = 1;
+ 	rep.th.window  = htons(win);
+ 
++	/* Generate Authentication option, this must be the last option */
++	if (unlikely(auth->current_key && auth->next_key)) {
++		struct tcp_auth_opt *opt;
++
++		rep.th.doff += (TCPOLEN_AUTH(auth->current_key->alg) / 4);
++		opt = (struct tcp_auth_opt *)&rep.opt[(tsecr) ? 3 : 0];
++		if (tcp_auth_send_fill_opt(sk, skb, auth, &rep.th, opt))
++			return;
++
++		arg.iov[0].iov_len += opt->length;
++	}
+ #ifdef CONFIG_TCP_MD5SIG
+-	if (key) {
++	else if (key) {
+ 		int offset = (tsecr) ? 3 : 0;
+ 
+ 		rep.opt[offset++] = htonl((TCPOPT_NOP << 24) |
+@@ -885,7 +994,11 @@ static void tcp_v4_timewait_ack(struct s
+ {
+ 	struct inet_timewait_sock *tw = inet_twsk(sk);
+ 	struct tcp_timewait_sock *tcptw = tcp_twsk(sk);
++	struct tcp_auth_send_args auth_args = {0};
+ 
++	rcu_read_lock();
++
++	tcp_timewait_get_auth_send_args(sk, &auth_args);
+ 	tcp_v4_send_ack(sk, skb,
+ 			tcptw->tw_snd_nxt, tcptw->tw_rcv_nxt,
+ 			tcptw->tw_rcv_wnd >> tw->tw_rcv_wscale,
+@@ -893,21 +1006,33 @@ static void tcp_v4_timewait_ack(struct s
+ 			tcptw->tw_ts_recent,
+ 			tw->tw_bound_dev_if,
+ 			tcp_twsk_md5_key(tcptw),
++			&auth_args,
+ 			tw->tw_transparent ? IP_REPLY_ARG_NOSRCCHECK : 0,
+ 			tw->tw_tos
+ 			);
+ 
++	rcu_read_unlock();
++
+ 	inet_twsk_put(tw);
+ }
+ 
+-static void tcp_v4_reqsk_send_ack(const struct sock *sk, struct sk_buff *skb,
++static void tcp_v4_reqsk_send_ack(const struct sock *sk,
++				  struct sk_buff *skb,
+ 				  struct request_sock *req)
+ {
++	struct tcp_auth_send_args auth_args = {0};
++	u32 seq;
++
+ 	/* sk->sk_state == TCP_LISTEN -> for regular TCP_SYN_RECV
+ 	 * sk->sk_state == TCP_SYN_RECV -> for Fast Open.
+ 	 */
+-	u32 seq = (sk->sk_state == TCP_LISTEN) ? tcp_rsk(req)->snt_isn + 1 :
+-					     tcp_sk(sk)->snd_nxt;
++	if (sk->sk_state == TCP_LISTEN) {
++		tcp_reqsk_get_auth_send_args(sk, req, &auth_args);
++		seq = tcp_rsk(req)->snt_isn + 1;
++	} else {
++		tcp_sk_get_auth_send_args(sk, &auth_args);
++		seq = tcp_sk(sk)->snd_nxt;
++	}
+ 
+ 	/* RFC 7323 2.3
+ 	 * The window field (SEG.WND) of every outgoing segment, with the
+@@ -922,6 +1047,7 @@ static void tcp_v4_reqsk_send_ack(const
+ 			0,
+ 			tcp_md5_do_lookup(sk, (union tcp_md5_addr *)&ip_hdr(skb)->saddr,
+ 					  AF_INET),
++			&auth_args,
+ 			inet_rsk(req)->no_srccheck ? IP_REPLY_ARG_NOSRCCHECK : 0,
+ 			ip_hdr(skb)->tos);
+ }
+@@ -967,7 +1093,13 @@ static int tcp_v4_send_synack(const stru
+  */
+ static void tcp_v4_reqsk_destructor(struct request_sock *req)
+ {
++	struct tcp_auth_req_params *auth_params;
++
+ 	kfree(rcu_dereference_protected(inet_rsk(req)->ireq_opt, 1));
++
++	auth_params = rcu_dereference_protected(tcp_rsk(req)->auth_params, 1);
++	if (auth_params)
++		kfree_rcu(auth_params, rcu);
+ }
+ 
+ #ifdef CONFIG_TCP_MD5SIG
+@@ -1279,6 +1411,46 @@ EXPORT_SYMBOL(tcp_v4_md5_hash_skb);
+ 
+ #endif
+ 
++int tcp_v4_auth_hash_headers(void *buf,
++			     __be32 sne,
++			     const void *saddr,
++			     const void *daddr,
++			     const struct tcphdr *th,
++			     int nbytes)
++{
++	__be32 *sne_buf = buf;
++	struct tcp4_pseudohdr *ph = (buf + sizeof(*sne_buf));
++
++	*sne_buf = sne;
++	ph->saddr = *((__be32 *)saddr);
++	ph->daddr = *((__be32 *)daddr);
++	ph->pad = 0;
++	ph->protocol = IPPROTO_TCP;
++	ph->len = cpu_to_be16(nbytes);
++
++	return sizeof(*sne_buf) + sizeof(*ph);
++}
++
++static int tcp_v4_parse_auth(struct sock *sk, char __user *optval, int optlen)
++{
++	struct tcp_auth tca;
++	struct sockaddr_in *sin = (struct sockaddr_in *)&tca.addr;
++
++	if (optlen < sizeof(tca))
++		return -EINVAL;
++
++	if (copy_from_user(&tca, optval, sizeof(tca)))
++		return -EFAULT;
++
++	/* Note: tca.key is still pointing to userspace memory */
++
++	if (sin->sin_family != AF_INET || tca.prefixlen > 32)
++		return -EINVAL;
++
++	return tcp_parse_auth(sk, &tca,
++			      (union tcp_md5_addr *)&sin->sin_addr, AF_INET);
++}
++
+ /* Called with rcu_read_lock() */
+ static bool tcp_v4_inbound_md5_hash(const struct sock *sk,
+ 				    const struct sk_buff *skb)
+@@ -1350,6 +1522,16 @@ static void tcp_v4_init_req(struct reque
+ 	RCU_INIT_POINTER(ireq->ireq_opt, tcp_v4_save_options(net, skb));
+ }
+ 
++struct tcp_auth_db_entry *
++tcp_v4_auth_lookup_db_entry_sk(const struct sock *sk,
++			       const struct sock *addr_sk)
++{
++	const union tcp_md5_addr *addr;
++
++	addr = (const union tcp_md5_addr *)&addr_sk->sk_daddr;
++	return tcp_auth_lookup_db(sk, addr, AF_INET);
++}
++
+ static struct dst_entry *tcp_v4_route_req(const struct sock *sk,
+ 					  struct flowi *fl,
+ 					  const struct request_sock *req)
+@@ -1398,7 +1580,6 @@ drop:
+ }
+ EXPORT_SYMBOL(tcp_v4_conn_request);
+ 
+-
+ /*
+  * The three way handshake has completed - we got a valid synack -
+  * now create the new socket.
+@@ -1751,6 +1932,11 @@ process:
+ 			reqsk_put(req);
+ 			goto csum_error;
+ 		}
++		if (unlikely(!tcp_auth_inbound_validate(sk, req, skb))) {
++			sk_drops_add(sk, skb);
++			reqsk_put(req);
++			goto discard_it;
++		}
+ 		if (unlikely(sk->sk_state != TCP_LISTEN)) {
+ 			inet_csk_reqsk_queue_drop_and_put(sk, req);
+ 			goto lookup;
+@@ -1800,6 +1986,9 @@ process:
+ 	if (!xfrm4_policy_check(sk, XFRM_POLICY_IN, skb))
+ 		goto discard_and_relse;
+ 
++	if (!tcp_auth_inbound_validate(sk, NULL, skb))
++		goto discard_and_relse;
++
+ 	if (tcp_v4_inbound_md5_hash(sk, skb))
+ 		goto discard_and_relse;
+ 
+@@ -1874,6 +2063,11 @@ do_time_wait:
+ 		inet_twsk_put(inet_twsk(sk));
+ 		goto csum_error;
+ 	}
++
++	if (unlikely(!tcp_auth_tw_inbound_validate(sk, skb))) {
++		inet_twsk_put(inet_twsk(sk));
++		goto discard_it;
++	}
+ 	switch (tcp_timewait_state_process(inet_twsk(sk), skb, th)) {
+ 	case TCP_TW_SYN: {
+ 		struct sock *sk2 = inet_lookup_listener(dev_net(skb->dev),
+@@ -1897,7 +2091,7 @@ do_time_wait:
+ 		tcp_v4_timewait_ack(sk, skb);
+ 		break;
+ 	case TCP_TW_RST:
+-		tcp_v4_send_reset(sk, skb);
++		tcp_v4_timewait_reset(sk, skb);
+ 		inet_twsk_deschedule_put(inet_twsk(sk));
+ 		goto discard_it;
+ 	case TCP_TW_SUCCESS:;
+@@ -1942,13 +2136,93 @@ const struct inet_connection_sock_af_ops
+ };
+ EXPORT_SYMBOL(ipv4_specific);
+ 
+-#ifdef CONFIG_TCP_MD5SIG
++int tcp_v4_auth_get_send_traffic_key(struct tcp_auth_master_key *master,
++				     const struct sock *sk,
++				     __be16 sport, __be16 dport,
++				     __be32 snd_isn, __be32 rcv_isn,
++				     struct tcp_auth_traffic_key *out)
++{
++	enum tcp_auth_traffic_key_type type;
++	struct tcp_v4_auth_kdf_context ctx = {
++		.sport = sport,
++		.dport = dport,
++		.sisn = snd_isn,
++		.disn = rcv_isn,
++	};
++
++	ctx.saddr = inet_sk(sk)->inet_rcv_saddr;
++	ctx.daddr = inet_sk(sk)->inet_daddr;
++	type = rcv_isn ? TCP_AUTH_TRAFFIC_KEY_SEND_OTHER :
++			 TCP_AUTH_TRAFFIC_KEY_SEND_SYN;
++
++	return tcp_auth_master_get_traffic_key(master, &ctx,
++					       sizeof(ctx), type, out);
++}
++
++int tcp_v4_auth_get_recv_traffic_key(struct tcp_auth_master_key *master,
++				     const struct sk_buff *skb,
++				     __be16 sport, __be16 dport,
++				     __be32 snd_isn, __be32 rcv_isn,
++				     struct tcp_auth_traffic_key *out)
++{
++	enum tcp_auth_traffic_key_type type;
++	struct tcp_v4_auth_kdf_context ctx = {
++		.sport = sport,
++		.dport = dport,
++		.sisn = snd_isn,
++		.disn = rcv_isn,
++	};
++
++	ctx.saddr = ip_hdr(skb)->saddr;
++	ctx.daddr = ip_hdr(skb)->daddr;
++	type = rcv_isn ? TCP_AUTH_TRAFFIC_KEY_RECV_OTHER :
++			 TCP_AUTH_TRAFFIC_KEY_RECV_SYN;
++
++	return tcp_auth_master_get_traffic_key(master, &ctx,
++					       sizeof(ctx), type, out);
++}
++
++struct tcp_auth_db_entry *tcp_v4_auth_lookup_db_entry(const struct sock *sk,
++						      const struct sk_buff *skb)
++{
++	const union tcp_md5_addr *addr;
++
++	addr = (union tcp_md5_addr *)&(ip_hdr(skb))->saddr;
++	return tcp_auth_lookup_db(sk, addr, AF_INET);
++}
++
++int tcp_v4_addrs_for_auth_hash(const struct sock *sk,
++			       const struct sk_buff *skb,
++			       const void **saddr, const void **daddr)
++{
++	if (sk) { /* valid for establish/request sockets */
++		*saddr = &sk->sk_rcv_saddr;
++		*daddr = &sk->sk_daddr;
++	} else {
++		const struct iphdr *iph = ip_hdr(skb);
++		*saddr = &iph->saddr;
++		*daddr = &iph->daddr;
++	}
++
++	return AF_INET;
++}
++
+ static const struct tcp_sock_af_ops tcp_sock_ipv4_specific = {
++#ifdef CONFIG_TCP_MD5SIG
+ 	.md5_lookup		= tcp_v4_md5_lookup,
+ 	.calc_md5_hash		= tcp_v4_md5_hash_skb,
+ 	.md5_parse		= tcp_v4_parse_md5_keys,
+-};
+ #endif
++	.auth_ops = {
++		.auth_parse		= tcp_v4_parse_auth,
++		.auth_hash_headers	= tcp_v4_auth_hash_headers,
++		.addrs_for_auth_hash	= tcp_v4_addrs_for_auth_hash,
++		.get_send_traffic_key	= tcp_v4_auth_get_send_traffic_key,
++		.get_recv_traffic_key	= tcp_v4_auth_get_recv_traffic_key,
++		.lookup_db_entry	= tcp_v4_auth_lookup_db_entry,
++		.lookup_db_entry_sk	= tcp_v4_auth_lookup_db_entry_sk,
++	},
++};
+ 
+ /* NOTE: A lot of things set to zero explicitly by call to
+  *       sk_alloc() so need not be done here.
+@@ -1961,9 +2235,7 @@ static int tcp_v4_init_sock(struct sock
+ 
+ 	icsk->icsk_af_ops = &ipv4_specific;
+ 
+-#ifdef CONFIG_TCP_MD5SIG
+ 	tcp_sk(sk)->af_specific = &tcp_sock_ipv4_specific;
+-#endif
+ 
+ 	return 0;
+ }
+@@ -1998,6 +2270,8 @@ void tcp_v4_destroy_sock(struct sock *sk
+ 	}
+ #endif
+ 
++	tcp_auth_destroy(sk);
++
+ 	/* Clean up a referenced TCP bind bucket. */
+ 	if (inet_csk(sk)->icsk_bind_hash)
+ 		inet_put_port(sk);
+--- a/net/ipv4/tcp_minisocks.c
++++ b/net/ipv4/tcp_minisocks.c
+@@ -246,6 +246,26 @@ kill:
+ }
+ EXPORT_SYMBOL(tcp_timewait_state_process);
+ 
++static inline int tcp_time_wait_auth_init(const struct sock *sk,
++					  struct tcp_timewait_sock *tcptw)
++{
++	const struct tcp_sock *tp = tcp_sk(sk);
++	struct tcp_auth_params *auth_params;
++
++	rcu_assign_pointer(tcptw->auth_params, NULL);
++
++	auth_params = rcu_dereference_protected(tp->auth_params,
++						lockdep_sock_is_held(sk));
++	if (auth_params) {
++		if (WARN_ON(!refcount_inc_not_zero(&auth_params->ref_count)))
++			return -1;
++
++		rcu_assign_pointer(tcptw->auth_params, auth_params);
++		tcptw->auth_ops = &tp->af_specific->auth_ops;
++	}
++	return 0;
++}
++
+ /*
+  * Move a socket to time-wait or dead fin-wait-2 state.
+  */
+@@ -304,6 +324,10 @@ void tcp_time_wait(struct sock *sk, int
+ 		} while (0);
+ #endif
+ 
++		/* Take ownership of authentication DB from the big socket */
++		if (tcp_time_wait_auth_init(sk, tcptw))
++			goto finish;
++
+ 		/* Get the TIME_WAIT timeout firing. */
+ 		if (timeo < rto)
+ 			timeo = rto;
+@@ -330,6 +354,7 @@ void tcp_time_wait(struct sock *sk, int
+ 		NET_INC_STATS(sock_net(sk), LINUX_MIB_TCPTIMEWAITOVERFLOW);
+ 	}
+ 
++finish:
+ 	tcp_update_metrics(sk);
+ 	tcp_done(sk);
+ }
+@@ -343,6 +368,8 @@ void tcp_twsk_destructor(struct sock *sk
+ 	if (twsk->tw_md5_key)
+ 		kfree_rcu(twsk->tw_md5_key, rcu);
+ #endif
++
++	tcp_auth_destroy(sk);
+ }
+ EXPORT_SYMBOL_GPL(tcp_twsk_destructor);
+ 
+@@ -454,6 +481,7 @@ struct sock *tcp_create_openreq_child(co
+ 	struct tcp_request_sock *treq = tcp_rsk(req);
+ 	struct inet_connection_sock *newicsk;
+ 	struct tcp_sock *oldtp, *newtp;
++	struct tcp_auth_master_key *old_current_key, *old_next_key;
+ 
+ 	if (!newsk)
+ 		return NULL;
+@@ -550,6 +578,11 @@ struct sock *tcp_create_openreq_child(co
+ 	if (newtp->af_specific->md5_lookup(sk, newsk))
+ 		newtp->tcp_header_len += TCPOLEN_MD5SIG_ALIGNED;
+ #endif
++	newtp->auth_params = NULL;
++	if (!tcp_auth_get_req_tx_master_keys(sk, req, &old_current_key,
++					     &old_next_key) && old_current_key)
++		newtp->tcp_header_len += TCPOLEN_AUTH(old_current_key->alg);
++
+ 	if (skb->len >= TCP_MSS_DEFAULT + newtp->tcp_header_len)
+ 		newicsk->icsk_ack.last_seg_size = skb->len - newtp->tcp_header_len;
+ 	newtp->rx_opt.mss_clamp = req->mss;
+--- a/net/ipv4/tcp_output.c
++++ b/net/ipv4/tcp_output.c
+@@ -415,6 +415,7 @@ static inline bool tcp_urg_mode(const st
+ #define OPTION_WSCALE		(1 << 3)
+ #define OPTION_FAST_OPEN_COOKIE	(1 << 8)
+ #define OPTION_SMC		(1 << 9)
++#define OPTION_AUTH		(1 << 10)
+ 
+ static void smc_options_write(__be32 *ptr, u16 *options)
+ {
+@@ -438,6 +439,9 @@ struct tcp_out_options {
+ 	u8 num_sack_blocks;	/* number of SACK blocks to include */
+ 	u8 hash_size;		/* bytes in hash_location */
+ 	__u8 *hash_location;	/* temporary pointer, overloaded */
++	u8 key_id;		/* RFC5925 auth current key ID */
++	u8 rnext_key_id;	/* RFC5925 auth desired next recv key ID */
++	u8 auth_len;		/* RFC5925 auth option length */
+ 	__u32 tsval, tsecr;	/* need to include OPTION_TS */
+ 	struct tcp_fastopen_cookie *fastopen_cookie;	/* Fast open cookie */
+ };
+@@ -468,6 +472,14 @@ static void tcp_options_write(__be32 *pt
+ 		ptr += 4;
+ 	}
+ 
++	if (unlikely(OPTION_AUTH & options)) {
++		*ptr++ = htonl((TCPOPT_AUTH << 24) | (opts->auth_len << 16) |
++			       (opts->key_id << 8) | opts->rnext_key_id);
++		/* overload cookie hash location */
++		opts->hash_location = (__u8 *)ptr;
++		ptr += ((opts->auth_len - TCPOLEN_AUTH_HDR) / 4);
++	}
++
+ 	if (unlikely(opts->mss)) {
+ 		*ptr++ = htonl((TCPOPT_MSS << 24) |
+ 			       (TCPOLEN_MSS << 16) |
+@@ -585,12 +597,26 @@ static void smc_set_option_cond(const st
+ #endif
+ }
+ 
++static inline u8
++tcp_auth_fill_out_options(const struct tcp_auth_master_key *current_key,
++			  const struct tcp_auth_master_key *next_key,
++			  struct tcp_out_options *opts)
++{
++	opts->options |= OPTION_AUTH;
++	opts->key_id = current_key->id[TCP_AUTH_SEND];
++	opts->rnext_key_id = next_key->id[TCP_AUTH_RECV];
++	opts->auth_len = TCPOLEN_AUTH(current_key->alg);
++	return opts->auth_len;
++}
++
+ /* Compute TCP options for SYN packets. This is not the final
+  * network wire format yet.
+  */
+ static unsigned int tcp_syn_options(struct sock *sk, struct sk_buff *skb,
+ 				struct tcp_out_options *opts,
+-				struct tcp_md5sig_key **md5)
++				struct tcp_md5sig_key **md5,
++				const struct tcp_auth_master_key *current_key,
++				const struct tcp_auth_master_key *next_key)
+ {
+ 	struct tcp_sock *tp = tcp_sk(sk);
+ 	unsigned int remaining = MAX_TCP_OPTION_SPACE;
+@@ -607,6 +633,10 @@ static unsigned int tcp_syn_options(stru
+ 	}
+ #endif
+ 
++	if (unlikely(current_key && next_key))
++		remaining -= tcp_auth_fill_out_options(current_key,
++						       next_key, opts);
++
+ 	/* We always get an MSS option.  The option bytes which will be seen in
+ 	 * normal data packets should timestamps be used, must be in the MSS
+ 	 * advertised.  But we subtract them from tp->mss_cache so that
+@@ -657,12 +687,15 @@ static unsigned int tcp_syn_options(stru
+ }
+ 
+ /* Set up TCP options for SYN-ACKs. */
+-static unsigned int tcp_synack_options(const struct sock *sk,
+-				       struct request_sock *req,
+-				       unsigned int mss, struct sk_buff *skb,
+-				       struct tcp_out_options *opts,
+-				       const struct tcp_md5sig_key *md5,
+-				       struct tcp_fastopen_cookie *foc)
++static unsigned int
++tcp_synack_options(const struct sock *sk,
++		   struct request_sock *req,
++		   unsigned int mss, struct sk_buff *skb,
++		   struct tcp_out_options *opts,
++		   const struct tcp_md5sig_key *md5,
++		   struct tcp_fastopen_cookie *foc,
++		   const struct tcp_auth_master_key *current_key,
++		   const struct tcp_auth_master_key *next_key)
+ {
+ 	struct inet_request_sock *ireq = inet_rsk(req);
+ 	unsigned int remaining = MAX_TCP_OPTION_SPACE;
+@@ -681,6 +714,10 @@ static unsigned int tcp_synack_options(c
+ 	}
+ #endif
+ 
++	if (unlikely(current_key && next_key))
++		remaining -= tcp_auth_fill_out_options(current_key,
++						       next_key, opts);
++
+ 	/* We always send an MSS option. */
+ 	opts->mss = mss;
+ 	remaining -= TCPOLEN_MSS_ALIGNED;
+@@ -722,9 +759,12 @@ static unsigned int tcp_synack_options(c
+ /* Compute TCP options for ESTABLISHED sockets. This is not the
+  * final wire format yet.
+  */
+-static unsigned int tcp_established_options(struct sock *sk, struct sk_buff *skb,
+-					struct tcp_out_options *opts,
+-					struct tcp_md5sig_key **md5)
++static unsigned int
++tcp_established_options(struct sock *sk, struct sk_buff *skb,
++			struct tcp_out_options *opts,
++			struct tcp_md5sig_key **md5,
++			const struct tcp_auth_master_key *current_key,
++			const struct tcp_auth_master_key *next_key)
+ {
+ 	struct tcp_sock *tp = tcp_sk(sk);
+ 	unsigned int size = 0;
+@@ -743,6 +783,9 @@ static unsigned int tcp_established_opti
+ 	}
+ #endif
+ 
++	if (unlikely(current_key && next_key))
++		size += tcp_auth_fill_out_options(current_key, next_key, opts);
++
+ 	if (likely(tp->rx_opt.tstamp_ok)) {
+ 		opts->options |= OPTION_TS;
+ 		opts->tsval = skb ? tcp_skb_timestamp(skb) + tp->tsoffset : 0;
+@@ -1024,12 +1067,27 @@ static int __tcp_transmit_skb(struct soc
+ 	unsigned int tcp_options_size, tcp_header_size;
+ 	struct sk_buff *oskb = NULL;
+ 	struct tcp_md5sig_key *md5;
++	struct tcp_auth_params *params;
++	struct tcp_auth_master_key *current_key = NULL, *next_key = NULL;
+ 	struct tcphdr *th;
+ 	int err;
+ 
+ 	BUG_ON(!skb || !tcp_skb_pcount(skb));
+ 	tp = tcp_sk(sk);
+ 
++	rcu_read_lock();
++
++	params = rcu_dereference(tp->auth_params);
++	if (unlikely(params && params->collapsed)) {
++		err = tcp_auth_get_collapsed_tx_master_keys(params,
++							    &current_key,
++							    &next_key);
++		if (err) {
++			rcu_read_unlock();
++			return err;
++		}
++	}
++
+ 	if (clone_it) {
+ 		TCP_SKB_CB(skb)->tx.in_flight = TCP_SKB_CB(skb)->end_seq
+ 			- tp->snd_una;
+@@ -1042,8 +1100,10 @@ static int __tcp_transmit_skb(struct soc
+ 				skb = skb_clone(oskb, gfp_mask);
+ 		} tcp_skb_tsorted_restore(oskb);
+ 
+-		if (unlikely(!skb))
++		if (unlikely(!skb)) {
++			rcu_read_unlock();
+ 			return -ENOBUFS;
++		}
+ 	}
+ 	skb->skb_mstamp = tp->tcp_mstamp;
+ 
+@@ -1052,10 +1112,12 @@ static int __tcp_transmit_skb(struct soc
+ 	memset(&opts, 0, sizeof(opts));
+ 
+ 	if (unlikely(tcb->tcp_flags & TCPHDR_SYN))
+-		tcp_options_size = tcp_syn_options(sk, skb, &opts, &md5);
++		tcp_options_size = tcp_syn_options(sk, skb, &opts, &md5,
++						   current_key, next_key);
+ 	else
+ 		tcp_options_size = tcp_established_options(sk, skb, &opts,
+-							   &md5);
++							   &md5, current_key,
++							   next_key);
+ 	tcp_header_size = tcp_options_size + sizeof(struct tcphdr);
+ 
+ 	/* if no packet is in qdisc/device queue, then allow XPS to select
+@@ -1128,6 +1190,58 @@ static int __tcp_transmit_skb(struct soc
+ 	}
+ #endif
+ 
++	if (unlikely(opts.options & OPTION_AUTH)) {
++		struct tcp_auth_traffic_key tkey;
++		enum tcp_auth_traffic_key_type type;
++		__be32 disn, sne;
++		const struct tcp_sock_af_ops *ops = tp->af_specific;
++		u8 curr_send_key = current_key->id[TCP_AUTH_SEND];
++
++		tcp_auth_outbound_log_init(sk, &ops->auth_ops);
++
++		if (unlikely(tcb->tcp_flags & TCPHDR_SYN)) {
++			disn = 0;
++			type = TCP_AUTH_TRAFFIC_KEY_SEND_SYN;
++		} else {
++			disn = htonl(params->rcv_isn);
++			type = TCP_AUTH_TRAFFIC_KEY_SEND_OTHER;
++		}
++
++		tcp_auth_lookup_traffic_key(current_key, type, &tkey);
++		if (unlikely(!tkey.key)) {
++			__be32 sisn = htonl(params->snt_isn);
++
++			err = ops->auth_ops.get_send_traffic_key(current_key,
++								 sk, th->source,
++								 th->dest, sisn,
++								 disn, &tkey);
++			if (unlikely(err)) {
++				tcp_auth_log_ratelimit(KERN_INFO,
++						       th->source, th->dest,
++						       "Failed to get traffic key %u to authenticate outgoing segment: %d",
++							curr_send_key, err);
++				rcu_read_unlock();
++				return err;
++			}
++		}
++
++		sne = tcp_auth_get_sne(&params->send_sne, th->seq);
++		err = tcp_auth_hash_skb(&tp->af_specific->auth_ops,
++					opts.hash_location, &tkey,
++					sk, skb, sne);
++		tcp_auth_master_put_traffic_key(&tkey);
++
++		if (unlikely(err)) {
++			tcp_auth_log_ratelimit(KERN_INFO, th->source, th->dest,
++					       "Failed to compute output MAC: %d",
++					       err);
++			rcu_read_unlock();
++			return err;
++		}
++	}
++
++	rcu_read_unlock();
++
+ 	icsk->icsk_af_ops->send_check(sk, skb);
+ 
+ 	if (likely(tcb->tcp_flags & TCPHDR_ACK))
+@@ -1579,6 +1693,16 @@ unsigned int tcp_current_mss(struct sock
+ 	unsigned int header_len;
+ 	struct tcp_out_options opts;
+ 	struct tcp_md5sig_key *md5;
++	struct tcp_auth_params *params;
++	struct tcp_auth_master_key *current_key = NULL, *next_key = NULL;
++
++	rcu_read_lock();
++
++	params = rcu_dereference(tp->auth_params);
++	if (unlikely(params && params->collapsed))
++		tcp_auth_get_collapsed_tx_master_keys(params,
++						      &current_key,
++						      &next_key);
+ 
+ 	mss_now = tp->mss_cache;
+ 
+@@ -1588,8 +1712,12 @@ unsigned int tcp_current_mss(struct sock
+ 			mss_now = tcp_sync_mss(sk, mtu);
+ 	}
+ 
+-	header_len = tcp_established_options(sk, NULL, &opts, &md5) +
++	header_len = tcp_established_options(sk, NULL, &opts, &md5,
++					     current_key, next_key) +
+ 		     sizeof(struct tcphdr);
++
++	rcu_read_unlock();
++
+ 	/* The mss_cache is sized based on tp->tcp_header_len, which assumes
+ 	 * some common options. If this is an odd packet (because we have SACK
+ 	 * blocks etc) then our calculated header_len will be different, and
+@@ -3205,13 +3333,18 @@ struct sk_buff *tcp_make_synack(const st
+ 	struct sk_buff *skb;
+ 	int tcp_header_size;
+ 	struct tcphdr *th;
++	struct tcp_auth_master_key *current_key = NULL, *next_key = NULL;
+ 	int mss;
+ 
++	rcu_read_lock();
++
++	if (tcp_auth_get_req_tx_master_keys(sk, req, &current_key, &next_key))
++		goto fail;
++
+ 	skb = alloc_skb(MAX_TCP_HEADER, GFP_ATOMIC);
+-	if (unlikely(!skb)) {
+-		dst_release(dst);
+-		return NULL;
+-	}
++	if (unlikely(!skb))
++		goto fail;
++
+ 	/* Reserve space for headers. */
+ 	skb_reserve(skb, MAX_TCP_HEADER);
+ 
+@@ -3245,12 +3378,12 @@ struct sk_buff *tcp_make_synack(const st
+ 		skb->skb_mstamp = tcp_clock_us();
+ 
+ #ifdef CONFIG_TCP_MD5SIG
+-	rcu_read_lock();
+ 	md5 = tcp_rsk(req)->af_specific->req_md5_lookup(sk, req_to_sk(req));
+ #endif
+ 	skb_set_hash(skb, tcp_rsk(req)->txhash, PKT_HASH_TYPE_L4);
+-	tcp_header_size = tcp_synack_options(sk, req, mss, skb, &opts, md5,
+-					     foc) + sizeof(*th);
++	tcp_header_size = tcp_synack_options(sk, req, mss, skb,
++					     &opts, md5, foc, current_key,
++					     next_key) + sizeof(*th);
+ 
+ 	skb_push(skb, tcp_header_size);
+ 	skb_reset_transport_header(skb);
+@@ -3279,12 +3412,60 @@ struct sk_buff *tcp_make_synack(const st
+ 	if (md5)
+ 		tcp_rsk(req)->af_specific->calc_md5_hash(opts.hash_location,
+ 					       md5, req_to_sk(req), skb);
+-	rcu_read_unlock();
+ #endif
+ 
++	if (unlikely(opts.options & OPTION_AUTH)) {
++		struct tcp_auth_req_params *req_params;
++		struct tcp_auth_traffic_key tkey;
++		const struct tcp_sock_af_ops *ops = tp->af_specific;
++		__be32 disn, sne;
++		int ret;
++
++		tcp_auth_outbound_log_init(req_to_sk(req), &ops->auth_ops);
++
++		req_params = rcu_dereference(tcp_rsk(req)->auth_params);
++		if (unlikely(!req_params))
++			goto fail;
++
++		disn = htonl(tcp_rsk(req)->rcv_isn);
++		ret = ops->auth_ops.get_send_traffic_key(current_key,
++							 req_to_sk(req),
++							 th->source, th->dest,
++							 th->seq, disn,
++							 &tkey);
++
++		if (unlikely(!tkey.key || ret)) {
++			tcp_auth_log_ratelimit(KERN_INFO, th->source, th->dest,
++					       "Failed to get traffic key %u to authenticate outgoing SYN/ACK: %d",
++					       current_key->id[TCP_AUTH_SEND],
++					       ret);
++			goto fail;
++		}
++
++		sne = tcp_auth_get_sne(&req_params->send_sne, th->seq);
++		ret = tcp_auth_hash_skb(&tp->af_specific->auth_ops,
++					opts.hash_location, &tkey,
++					req_to_sk(req), skb, sne);
++		tcp_auth_master_put_traffic_key(&tkey);
++
++		if (unlikely(ret)) {
++			tcp_auth_log_ratelimit(KERN_INFO, th->source, th->dest,
++					       "Failed to compute output SYN/ACK MAC: %d",
++					       ret);
++			goto fail;
++		}
++	}
++
++	rcu_read_unlock();
++
+ 	/* Do not fool tcpdump (if any), clean our debris */
+ 	skb->tstamp = 0;
+ 	return skb;
++
++fail:
++	rcu_read_unlock();
++	dst_release(dst);
++	return NULL;
+ }
+ EXPORT_SYMBOL(tcp_make_synack);
+ 
+@@ -3312,6 +3493,8 @@ static void tcp_connect_init(struct sock
+ {
+ 	const struct dst_entry *dst = __sk_dst_get(sk);
+ 	struct tcp_sock *tp = tcp_sk(sk);
++	struct tcp_auth_params *auth_params;
++	struct tcp_auth_db_entry *auth_entry;
+ 	__u8 rcv_wscale;
+ 	u32 rcv_wnd;
+ 
+@@ -3327,6 +3510,14 @@ static void tcp_connect_init(struct sock
+ 		tp->tcp_header_len += TCPOLEN_MD5SIG_ALIGNED;
+ #endif
+ 
++	rcu_read_lock();
++	auth_params = rcu_dereference(tp->auth_params);
++	if (auth_params && auth_params->collapsed) {
++		auth_entry = tcp_auth_get_collapsed_entry(auth_params);
++		tp->tcp_header_len += TCPOLEN_AUTH(auth_entry->alg);
++	}
++	rcu_read_unlock();
++
+ 	/* If user gave his TCP_MAXSEG, record it to clamp */
+ 	if (tp->rx_opt.user_mss)
+ 		tp->rx_opt.mss_clamp = tp->rx_opt.user_mss;
+@@ -3490,11 +3681,55 @@ done:
+ 	return err;
+ }
+ 
++static int tcp_auth_connect_collapse(struct sock *sk,
++				     struct tcp_auth_params *params)
++{
++	struct tcp_auth_master_key *pref_send_key;
++	struct tcp_auth_db_entry *entry;
++	int err;
++	struct tcp_sock *tp = tcp_sk(sk);
++	const struct tcp_sock_af_ops *af_ops = tp->af_specific;
++
++	tcp_auth_outbound_log_init(sk, &af_ops->auth_ops);
++
++	entry = af_ops->auth_ops.lookup_db_entry_sk(sk, sk);
++	if (!entry) {
++		tcp_auth_log_ratelimit(KERN_INFO,
++				       inet_sk(sk)->inet_sport,
++				       inet_sk(sk)->inet_dport,
++				       "No valid auth database entry found for connect");
++		return -ENOENT;
++	}
++
++	err = tcp_auth_collapse(sk, sk, entry);
++	if (err) {
++		tcp_auth_log_ratelimit(KERN_INFO,
++				       inet_sk(sk)->inet_sport,
++				       inet_sk(sk)->inet_dport,
++				       "Failed to collapse auth database: %d",
++				       err);
++		return err;
++	}
++
++	entry = tcp_auth_get_collapsed_entry(params);
++	pref_send_key = rcu_dereference_protected(entry->pref_send_key,
++						  lockdep_sock_is_held(sk));
++
++	params->snt_isn = tp->write_seq;
++
++	spin_lock_bh(&entry->update_lock);
++	rcu_assign_pointer(entry->current_key, pref_send_key);
++	spin_unlock_bh(&entry->update_lock);
++
++	return 0;
++}
++
+ /* Build a SYN and send it off. */
+ int tcp_connect(struct sock *sk)
+ {
+ 	struct tcp_sock *tp = tcp_sk(sk);
+ 	struct sk_buff *buff;
++	struct tcp_auth_params *auth_params;
+ 	int err;
+ 
+ 	tcp_call_bpf(sk, BPF_SOCK_OPS_TCP_CONNECT_CB, 0, NULL);
+@@ -3502,6 +3737,14 @@ int tcp_connect(struct sock *sk)
+ 	if (inet_csk(sk)->icsk_af_ops->rebuild_header(sk))
+ 		return -EHOSTUNREACH; /* Routing failure or similar. */
+ 
++	auth_params = rcu_dereference_protected(tp->auth_params,
++						lockdep_sock_is_held(sk));
++	if (auth_params) {
++		err = tcp_auth_connect_collapse(sk, auth_params);
++		if (err)
++			return err;
++	}
++
+ 	tcp_connect_init(sk);
+ 
+ 	if (unlikely(tp->repair)) {
+--- a/net/ipv6/tcp_ipv6.c
++++ b/net/ipv6/tcp_ipv6.c
+@@ -234,9 +234,7 @@ static int tcp_v6_connect(struct sock *s
+ 
+ 		icsk->icsk_af_ops = &ipv6_mapped;
+ 		sk->sk_backlog_rcv = tcp_v4_do_rcv;
+-#ifdef CONFIG_TCP_MD5SIG
+ 		tp->af_specific = &tcp_sock_ipv6_mapped_specific;
+-#endif
+ 
+ 		err = tcp_v4_connect(sk, (struct sockaddr *)&sin, sizeof(sin));
+ 
+@@ -244,9 +242,7 @@ static int tcp_v6_connect(struct sock *s
+ 			icsk->icsk_ext_hdr_len = exthdrlen;
+ 			icsk->icsk_af_ops = &ipv6_specific;
+ 			sk->sk_backlog_rcv = tcp_v6_do_rcv;
+-#ifdef CONFIG_TCP_MD5SIG
+ 			tp->af_specific = &tcp_sock_ipv6_specific;
+-#endif
+ 			goto failure;
+ 		}
+ 		np->saddr = sk->sk_v6_rcv_saddr;
+@@ -363,6 +359,8 @@ static void tcp_v6_err(struct sk_buff *s
+ 	struct tcp_sock *tp;
+ 	__u32 seq, snd_una;
+ 	struct sock *sk;
++	struct tcp_auth_params *auth_params;
++	bool conn_has_auth;
+ 	bool fatal;
+ 	int err;
+ 
+@@ -408,6 +406,32 @@ static void tcp_v6_err(struct sk_buff *s
+ 		goto out;
+ 	}
+ 
++	if (type == ICMPV6_DEST_UNREACH &&
++	    (code == ICMPV6_ADM_PROHIBITED || code == ICMPV6_PORT_UNREACH)) {
++		switch (sk->sk_state) {
++		case TCP_ESTABLISHED:
++		case TCP_FIN_WAIT1:
++		case TCP_FIN_WAIT2:
++		case TCP_CLOSE_WAIT:
++		case TCP_CLOSING:
++		case TCP_LAST_ACK:
++			rcu_read_lock();
++			auth_params = rcu_dereference(tp->auth_params);
++			conn_has_auth = (auth_params && auth_params->collapsed);
++			rcu_read_unlock();
++
++			/* Ignore ICMPv6 Type 1 Codes 1 & 4 for connections in a
++			 * synchronized state which match an MKT.
++			 *
++			 * RFC 5925 Section 7.8
++			 */
++			if (conn_has_auth)
++				goto out;
++		default:
++			break;
++		}
++	}
++
+ 	np = inet6_sk(sk);
+ 
+ 	if (type == NDISC_REDIRECT) {
+@@ -519,6 +543,9 @@ static void tcp_v6_reqsk_destructor(stru
+ {
+ 	kfree(inet_rsk(req)->ipv6_opt);
+ 	kfree_skb(inet_rsk(req)->pktopts);
++
++	if (tcp_rsk(req)->auth_params)
++		kfree_rcu(tcp_rsk(req)->auth_params, rcu);
+ }
+ 
+ #ifdef CONFIG_TCP_MD5SIG
+@@ -733,6 +760,138 @@ static bool tcp_v6_inbound_md5_hash(cons
+ 	return false;
+ }
+ 
++static int tcp_v6_parse_auth(struct sock *sk, char __user *optval, int optlen)
++{
++	struct tcp_auth tca;
++	struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&tca.addr;
++	union tcp_md5_addr *addr;
++	int family;
++
++	if (optlen < sizeof(tca))
++		return -EINVAL;
++
++	if (copy_from_user(&tca, optval, sizeof(tca)))
++		return -EFAULT;
++
++	/* Note: tca.key is still pointing to userspace memory */
++
++	if (sin6->sin6_family != AF_INET6)
++		return -EINVAL;
++
++	family = ipv6_addr_v4mapped(&sin6->sin6_addr) ? AF_INET : AF_INET6;
++
++	if (family == AF_INET) {
++		if (tca.prefixlen > 32)
++			return -EINVAL;
++		addr = (union tcp_md5_addr *)&sin6->sin6_addr.s6_addr32[3];
++	} else {
++		if (tca.prefixlen > 128)
++			return -EINVAL;
++		addr = (union tcp_md5_addr *)&sin6->sin6_addr;
++	}
++
++	return tcp_parse_auth(sk, &tca, addr, family);
++}
++
++static int tcp_v6_auth_hash_headers(void *buf,
++				    __be32 sne,
++				    const void *saddr,
++				    const void *daddr,
++				    const struct tcphdr *th,
++				    int nbytes)
++{
++	__be32 *sne_buf = buf;
++	struct tcp6_pseudohdr *ph = (buf + sizeof(*sne_buf));
++
++	*sne_buf = sne;
++	memcpy(&ph->saddr, saddr, sizeof(ph->saddr));
++	memcpy(&ph->daddr, daddr, sizeof(ph->daddr));
++	ph->len = cpu_to_be32(nbytes);
++	ph->protocol = cpu_to_be32(IPPROTO_TCP);
++
++	return sizeof(*sne_buf) + sizeof(*ph);
++}
++
++static int tcp_v6_addrs_for_auth_hash(const struct sock *sk,
++				      const struct sk_buff *skb,
++				      const void **saddr, const void **daddr)
++{
++	if (sk) { /* valid for establish/request sockets */
++		*saddr = &sk->sk_v6_rcv_saddr;
++		*daddr = &sk->sk_v6_daddr;
++	} else {
++		*saddr = &ipv6_hdr(skb)->saddr;
++		*daddr = &ipv6_hdr(skb)->daddr;
++	}
++
++	return AF_INET6;
++}
++
++static int tcp_v6_auth_get_send_traffic_key(struct tcp_auth_master_key *master,
++					    const struct sock *sk,
++					    __be16 sport, __be16 dport,
++					    __be32 snd_isn, __be32 rcv_isn,
++					    struct tcp_auth_traffic_key *out)
++{
++	enum tcp_auth_traffic_key_type type;
++	struct tcp_v6_auth_kdf_context ctx = {
++		.sport = sport,
++		.dport = dport,
++		.sisn = snd_isn,
++		.disn = rcv_isn,
++	};
++
++	memcpy(&ctx.saddr, &sk->sk_v6_rcv_saddr, sizeof(ctx.saddr));
++	memcpy(&ctx.daddr, &sk->sk_v6_daddr, sizeof(ctx.daddr));
++	type = rcv_isn ? TCP_AUTH_TRAFFIC_KEY_SEND_OTHER :
++			 TCP_AUTH_TRAFFIC_KEY_SEND_SYN;
++
++	return tcp_auth_master_get_traffic_key(master, &ctx,
++					       sizeof(ctx), type, out);
++}
++
++static int tcp_v6_auth_get_recv_traffic_key(struct tcp_auth_master_key *master,
++					    const struct sk_buff *skb,
++					    __be16 sport, __be16 dport,
++					    __be32 snd_isn, __be32 rcv_isn,
++					    struct tcp_auth_traffic_key *out)
++{
++	enum tcp_auth_traffic_key_type type;
++	struct tcp_v6_auth_kdf_context ctx = {
++		.sport = sport,
++		.dport = dport,
++		.sisn = snd_isn,
++		.disn = rcv_isn,
++	};
++
++	memcpy(&ctx.saddr, &ipv6_hdr(skb)->saddr, sizeof(ctx.saddr));
++	memcpy(&ctx.daddr, &ipv6_hdr(skb)->daddr, sizeof(ctx.daddr));
++	type = rcv_isn ? TCP_AUTH_TRAFFIC_KEY_RECV_OTHER :
++			 TCP_AUTH_TRAFFIC_KEY_RECV_SYN;
++
++	return tcp_auth_master_get_traffic_key(master, &ctx,
++					       sizeof(ctx), type, out);
++}
++
++static struct tcp_auth_db_entry *
++tcp_v6_auth_lookup_db_entry(const struct sock *sk, const struct sk_buff *skb)
++{
++	const union tcp_md5_addr *addr;
++
++	addr = (union tcp_md5_addr *)&(ipv6_hdr(skb))->saddr;
++	return tcp_auth_lookup_db(sk, addr, AF_INET6);
++}
++
++static struct tcp_auth_db_entry *
++tcp_v6_auth_lookup_db_entry_sk(const struct sock *sk,
++			       const struct sock *addr_sk)
++{
++	const union tcp_md5_addr *addr;
++
++	addr = (union tcp_md5_addr *)&addr_sk->sk_v6_daddr;
++	return tcp_auth_lookup_db(sk, addr, AF_INET6);
++}
++
+ static void tcp_v6_init_req(struct request_sock *req,
+ 			    const struct sock *sk_listener,
+ 			    struct sk_buff *skb)
+@@ -796,7 +955,8 @@ static const struct tcp_request_sock_ops
+ static void tcp_v6_send_response(const struct sock *sk, struct sk_buff *skb, u32 seq,
+ 				 u32 ack, u32 win, u32 tsval, u32 tsecr,
+ 				 int oif, struct tcp_md5sig_key *key, int rst,
+-				 u8 tclass, __be32 label)
++				 u8 tclass, __be32 label,
++				 struct tcp_auth_send_args *auth)
+ {
+ 	const struct tcphdr *th = tcp_hdr(skb);
+ 	struct tcphdr *t1;
+@@ -811,8 +971,11 @@ static void tcp_v6_send_response(const s
+ 
+ 	if (tsecr)
+ 		tot_len += TCPOLEN_TSTAMP_ALIGNED;
++
++	if (auth->current_key && auth->next_key)
++		tot_len += TCPOLEN_AUTH(auth->current_key->alg);
+ #ifdef CONFIG_TCP_MD5SIG
+-	if (key)
++	else if (key)
+ 		tot_len += TCPOLEN_MD5SIG_ALIGNED;
+ #endif
+ 
+@@ -846,8 +1009,15 @@ static void tcp_v6_send_response(const s
+ 		*topt++ = htonl(tsecr);
+ 	}
+ 
++	if (auth->current_key && auth->next_key) {
++		if (tcp_auth_send_fill_opt(sk, skb, auth, t1,
++					   (struct tcp_auth_opt *)topt)) {
++			kfree_skb(skb);
++			return;
++		}
++	}
+ #ifdef CONFIG_TCP_MD5SIG
+-	if (key) {
++	else if (key) {
+ 		*topt++ = htonl((TCPOPT_NOP << 24) | (TCPOPT_NOP << 16) |
+ 				(TCPOPT_MD5SIG << 8) | TCPOLEN_MD5SIG);
+ 		tcp_v6_md5_hash_hdr((__u8 *)topt, key,
+@@ -902,7 +1072,9 @@ static void tcp_v6_send_response(const s
+ 	kfree_skb(buff);
+ }
+ 
+-static void tcp_v6_send_reset(const struct sock *sk, struct sk_buff *skb)
++static void _do_tcp_v6_send_reset(const struct sock *sk,
++				  struct sk_buff *skb,
++				  struct tcp_auth_send_args *auth)
+ {
+ 	const struct tcphdr *th = tcp_hdr(skb);
+ 	u32 seq = 0, ack_seq = 0;
+@@ -970,7 +1142,8 @@ static void tcp_v6_send_reset(const stru
+ 			trace_tcp_send_reset(sk, skb);
+ 	}
+ 
+-	tcp_v6_send_response(sk, skb, seq, ack_seq, 0, 0, 0, oif, key, 1, 0, 0);
++	tcp_v6_send_response(sk, skb, seq, ack_seq, 0, 0, 0,
++			     oif, key, 1, 0, 0, auth);
+ 
+ #ifdef CONFIG_TCP_MD5SIG
+ out:
+@@ -978,55 +1151,117 @@ out:
+ #endif
+ }
+ 
++void tcp_v6_send_reset(const struct sock *sk, struct sk_buff *skb)
++{
++	struct tcp_auth_send_args auth_args = {0};
++
++	/* We cannot do authentication if there is no socket */
++	if (!sk) {
++		_do_tcp_v6_send_reset(sk, skb, &auth_args);
++		return;
++	}
++
++	rcu_read_lock();
++
++	tcp_sk_get_auth_send_args(sk, &auth_args);
++	_do_tcp_v6_send_reset(sk, skb, &auth_args);
++
++	rcu_read_unlock();
++}
++
++void tcp_v6_timewait_reset(const struct sock *sk, struct sk_buff *skb)
++{
++	struct tcp_auth_send_args auth_args = {0};
++
++	rcu_read_lock();
++
++	tcp_timewait_get_auth_send_args(sk, &auth_args);
++	_do_tcp_v6_send_reset(sk, skb, &auth_args);
++
++	rcu_read_unlock();
++}
++
+ static void tcp_v6_reqsk_send_reset(const struct sock *sk,
+ 				    struct sk_buff *skb,
+ 				    struct request_sock *req)
+ {
+-	tcp_v6_send_reset(sk, skb);
++	struct tcp_auth_send_args auth_args = {0};
++
++	rcu_read_lock();
++
++	/* sk->sk_state == TCP_LISTEN -> for regular TCP_SYN_RECV
++	 * sk->sk_state == TCP_SYN_RECV -> for Fast Open.
++	 */
++	if (sk->sk_state == TCP_LISTEN)
++		tcp_reqsk_get_auth_send_args(sk, req, &auth_args);
++	else
++		tcp_sk_get_auth_send_args(sk, &auth_args);
++
++	_do_tcp_v6_send_reset(sk, skb, &auth_args);
++
++	rcu_read_unlock();
+ }
+ 
+ static void tcp_v6_send_ack(const struct sock *sk, struct sk_buff *skb, u32 seq,
+ 			    u32 ack, u32 win, u32 tsval, u32 tsecr, int oif,
+ 			    struct tcp_md5sig_key *key, u8 tclass,
+-			    __be32 label)
++			    __be32 label, struct tcp_auth_send_args *auth)
+ {
+ 	tcp_v6_send_response(sk, skb, seq, ack, win, tsval, tsecr, oif, key, 0,
+-			     tclass, label);
++			     tclass, label, auth);
+ }
+ 
+ static void tcp_v6_timewait_ack(struct sock *sk, struct sk_buff *skb)
+ {
+ 	struct inet_timewait_sock *tw = inet_twsk(sk);
+ 	struct tcp_timewait_sock *tcptw = tcp_twsk(sk);
++	struct tcp_auth_send_args auth_args = {0};
+ 
++	rcu_read_lock();
++
++	tcp_timewait_get_auth_send_args(sk, &auth_args);
+ 	tcp_v6_send_ack(sk, skb, tcptw->tw_snd_nxt, tcptw->tw_rcv_nxt,
+ 			tcptw->tw_rcv_wnd >> tw->tw_rcv_wscale,
+ 			tcp_time_stamp_raw() + tcptw->tw_ts_offset,
+-			tcptw->tw_ts_recent, tw->tw_bound_dev_if, tcp_twsk_md5_key(tcptw),
+-			tw->tw_tclass, cpu_to_be32(tw->tw_flowlabel));
++			tcptw->tw_ts_recent, tw->tw_bound_dev_if,
++			tcp_twsk_md5_key(tcptw), tw->tw_tclass,
++			cpu_to_be32(tw->tw_flowlabel), &auth_args);
++
++	rcu_read_unlock();
+ 
+ 	inet_twsk_put(tw);
+ }
+ 
+-static void tcp_v6_reqsk_send_ack(const struct sock *sk, struct sk_buff *skb,
++static void tcp_v6_reqsk_send_ack(const struct sock *sk,
++				  struct sk_buff *skb,
+ 				  struct request_sock *req)
+ {
++	struct tcp_auth_send_args auth_args = {0};
++	u32 seq;
++
+ 	/* sk->sk_state == TCP_LISTEN -> for regular TCP_SYN_RECV
+ 	 * sk->sk_state == TCP_SYN_RECV -> for Fast Open.
+ 	 */
++	if (sk->sk_state == TCP_LISTEN) {
++		tcp_reqsk_get_auth_send_args(sk, req, &auth_args);
++		seq = tcp_rsk(req)->snt_isn + 1;
++	} else {
++		tcp_sk_get_auth_send_args(sk, &auth_args);
++		seq = tcp_sk(sk)->snd_nxt;
++	}
++
+ 	/* RFC 7323 2.3
+ 	 * The window field (SEG.WND) of every outgoing segment, with the
+ 	 * exception of <SYN> segments, MUST be right-shifted by
+ 	 * Rcv.Wind.Shift bits:
+ 	 */
+-	tcp_v6_send_ack(sk, skb, (sk->sk_state == TCP_LISTEN) ?
+-			tcp_rsk(req)->snt_isn + 1 : tcp_sk(sk)->snd_nxt,
++	tcp_v6_send_ack(sk, skb, seq,
+ 			tcp_rsk(req)->rcv_nxt,
+ 			req->rsk_rcv_wnd >> inet_rsk(req)->rcv_wscale,
+ 			tcp_time_stamp_raw() + tcp_rsk(req)->ts_off,
+ 			req->ts_recent, sk->sk_bound_dev_if,
+ 			tcp_v6_md5_do_lookup(sk, &ipv6_hdr(skb)->saddr),
+-			0, 0);
++			0, 0, &auth_args);
+ }
+ 
+ 
+@@ -1110,9 +1345,7 @@ static struct sock *tcp_v6_syn_recv_sock
+ 
+ 		inet_csk(newsk)->icsk_af_ops = &ipv6_mapped;
+ 		newsk->sk_backlog_rcv = tcp_v4_do_rcv;
+-#ifdef CONFIG_TCP_MD5SIG
+ 		newtp->af_specific = &tcp_sock_ipv6_mapped_specific;
+-#endif
+ 
+ 		newnp->ipv6_mc_list = NULL;
+ 		newnp->ipv6_ac_list = NULL;
+@@ -1495,6 +1728,11 @@ process:
+ 			reqsk_put(req);
+ 			goto csum_error;
+ 		}
++		if (!tcp_auth_inbound_validate(sk, req, skb)) {
++			sk_drops_add(sk, skb);
++			reqsk_put(req);
++			goto discard_it;
++		}
+ 		if (unlikely(sk->sk_state != TCP_LISTEN)) {
+ 			inet_csk_reqsk_queue_drop_and_put(sk, req);
+ 			goto lookup;
+@@ -1541,6 +1779,9 @@ process:
+ 	if (!xfrm6_policy_check(sk, XFRM_POLICY_IN, skb))
+ 		goto discard_and_relse;
+ 
++	if (!tcp_auth_inbound_validate(sk, NULL, skb))
++		goto discard_and_relse;
++
+ 	if (tcp_v6_inbound_md5_hash(sk, skb))
+ 		goto discard_and_relse;
+ 
+@@ -1612,6 +1853,11 @@ do_time_wait:
+ 		goto csum_error;
+ 	}
+ 
++	if (!tcp_auth_tw_inbound_validate(sk, skb)) {
++		inet_twsk_put(inet_twsk(sk));
++		goto discard_it;
++	}
++
+ 	switch (tcp_timewait_state_process(inet_twsk(sk), skb, th)) {
+ 	case TCP_TW_SYN:
+ 	{
+@@ -1639,7 +1885,7 @@ do_time_wait:
+ 		tcp_v6_timewait_ack(sk, skb);
+ 		break;
+ 	case TCP_TW_RST:
+-		tcp_v6_send_reset(sk, skb);
++		tcp_v6_timewait_reset(sk, skb);
+ 		inet_twsk_deschedule_put(inet_twsk(sk));
+ 		goto discard_it;
+ 	case TCP_TW_SUCCESS:
+@@ -1712,13 +1958,22 @@ static const struct inet_connection_sock
+ 	.mtu_reduced	   = tcp_v6_mtu_reduced,
+ };
+ 
+-#ifdef CONFIG_TCP_MD5SIG
+ static const struct tcp_sock_af_ops tcp_sock_ipv6_specific = {
++#ifdef CONFIG_TCP_MD5SIG
+ 	.md5_lookup	=	tcp_v6_md5_lookup,
+ 	.calc_md5_hash	=	tcp_v6_md5_hash_skb,
+ 	.md5_parse	=	tcp_v6_parse_md5_keys,
+-};
+ #endif
++	.auth_ops = {
++		.auth_parse		= tcp_v6_parse_auth,
++		.addrs_for_auth_hash	= tcp_v6_addrs_for_auth_hash,
++		.auth_hash_headers	= tcp_v6_auth_hash_headers,
++		.get_send_traffic_key	= tcp_v6_auth_get_send_traffic_key,
++		.get_recv_traffic_key	= tcp_v6_auth_get_recv_traffic_key,
++		.lookup_db_entry	= tcp_v6_auth_lookup_db_entry,
++		.lookup_db_entry_sk	= tcp_v6_auth_lookup_db_entry_sk,
++	},
++};
+ 
+ /*
+  *	TCP over IPv4 via INET6 API
+@@ -1742,13 +1997,22 @@ static const struct inet_connection_sock
+ 	.mtu_reduced	   = tcp_v4_mtu_reduced,
+ };
+ 
+-#ifdef CONFIG_TCP_MD5SIG
+ static const struct tcp_sock_af_ops tcp_sock_ipv6_mapped_specific = {
++#ifdef CONFIG_TCP_MD5SIG
+ 	.md5_lookup	=	tcp_v4_md5_lookup,
+ 	.calc_md5_hash	=	tcp_v4_md5_hash_skb,
+ 	.md5_parse	=	tcp_v6_parse_md5_keys,
+-};
+ #endif
++	.auth_ops = {
++		.auth_parse		= tcp_v6_parse_auth,
++		.addrs_for_auth_hash	= tcp_v4_addrs_for_auth_hash,
++		.auth_hash_headers	= tcp_v4_auth_hash_headers,
++		.get_send_traffic_key	= tcp_v4_auth_get_send_traffic_key,
++		.get_recv_traffic_key	= tcp_v4_auth_get_recv_traffic_key,
++		.lookup_db_entry	= tcp_v4_auth_lookup_db_entry,
++		.lookup_db_entry_sk	= tcp_v4_auth_lookup_db_entry_sk,
++	},
++};
+ 
+ /* NOTE: A lot of things set to zero explicitly by call to
+  *       sk_alloc() so need not be done here.
+@@ -1761,9 +2025,7 @@ static int tcp_v6_init_sock(struct sock
+ 
+ 	icsk->icsk_af_ops = &ipv6_specific;
+ 
+-#ifdef CONFIG_TCP_MD5SIG
+ 	tcp_sk(sk)->af_specific = &tcp_sock_ipv6_specific;
+-#endif
+ 
+ 	return 0;
+ }

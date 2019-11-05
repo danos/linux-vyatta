@@ -1,0 +1,106 @@
+From 463ec94042f5c34d4c7336ccaa126edc11fad4a0 Mon Sep 17 00:00:00 2001
+From: Mike Manning <mmanning@vyatta.att-mail.com>
+Date: Thu, 11 Apr 2019 10:36:28 +0100
+Subject: [PATCH net-next v2 5/5] bridge: update vlan dev link state for bridge
+ netdev changes
+
+If vlan bridge binding is enabled, then the link state of a vlan device
+that is an upper device of the bridge tracks the state of bridge ports
+that are members of that vlan. But this can only be done when the link
+state of the bridge is up. If it is down, then the link state of the
+vlan devices must also be down. This is to maintain existing behavior
+for when STP is enabled and there are no live ports, in which case the
+link state for the bridge and any vlan devices is down.
+
+Signed-off-by: Mike Manning <mmanning@vyatta.att-mail.com>
+---
+ net/bridge/br_vlan.c |   50 +++++++++++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 47 insertions(+), 3 deletions(-)
+
+--- a/net/bridge/br_vlan.c
++++ b/net/bridge/br_vlan.c
+@@ -1282,6 +1282,11 @@ static void br_vlan_set_vlan_dev_state(c
+ 	struct net_bridge_port *p;
+ 	bool has_carrier = false;
+ 
++	if (!netif_carrier_ok(br->dev)) {
++		netif_carrier_off(vlan_dev);
++		return;
++	}
++
+ 	list_for_each_entry(p, &br->port_list, list) {
+ 		vg = nbp_vlan_group(p);
+ 		if (br_vlan_find(vg, vid) && br_vlan_is_dev_up(p->dev)) {
+@@ -1306,10 +1311,12 @@ static void br_vlan_set_all_vlan_dev_sta
+ 		vlan_dev = br_vlan_get_upper_bind_vlan_dev(p->br->dev,
+ 							   vlan->vid);
+ 		if (vlan_dev) {
+-			if (br_vlan_is_dev_up(p->dev))
+-				netif_carrier_on(vlan_dev);
+-			else
++			if (br_vlan_is_dev_up(p->dev)) {
++				if (netif_carrier_ok(p->br->dev))
++					netif_carrier_on(vlan_dev);
++			} else {
+ 				br_vlan_set_vlan_dev_state(p->br, vlan_dev);
++			}
+ 		}
+ 	}
+ }
+@@ -1331,6 +1338,34 @@ static void br_vlan_upper_change(struct
+ 	}
+ }
+ 
++struct br_vlan_link_state_walk_data {
++	struct net_bridge *br;
++};
++
++static int br_vlan_link_state_change_fn(struct net_device *vlan_dev,
++					void *data_in)
++{
++	struct br_vlan_link_state_walk_data *data = data_in;
++
++	if (br_vlan_is_bind_vlan_dev(vlan_dev))
++		br_vlan_set_vlan_dev_state(data->br, vlan_dev);
++
++	return 0;
++}
++
++static void br_vlan_link_state_change(struct net_device *dev,
++				      struct net_bridge *br)
++{
++	struct br_vlan_link_state_walk_data data = {
++		.br = br
++	};
++
++	rcu_read_lock();
++	netdev_walk_all_upper_dev_rcu(dev, br_vlan_link_state_change_fn,
++				      &data);
++	rcu_read_unlock();
++}
++
+ /* Must be protected by RTNL. */
+ static void nbp_vlan_set_vlan_dev_state(struct net_bridge_port *p, u16 vid)
+ {
+@@ -1349,12 +1384,21 @@ void br_vlan_bridge_event(struct net_dev
+ 			  void *ptr)
+ {
+ 	struct netdev_notifier_changeupper_info *info;
++	struct net_bridge *br;
+ 
+ 	switch (event) {
+ 	case NETDEV_CHANGEUPPER:
+ 		info = ptr;
+ 		br_vlan_upper_change(dev, info->upper_dev, info->linking);
+ 		break;
++
++	case NETDEV_CHANGE:
++	case NETDEV_UP:
++		br = netdev_priv(dev);
++		if (!br->vlan_bridge_binding)
++			return;
++		br_vlan_link_state_change(dev, br);
++		break;
+ 	}
+ }
+ 

@@ -1,0 +1,32 @@
+MPLS: update pmtu when mpls drops a too big packet
+Disposition: Upstream
+
+When a local tcp connection is established over an MPLS encapsulated route,
+it does not allow for the MPLS encapsulation when working out the MSS.
+It also does not allow for routing via the loopback device ("lo")
+which has a much larger MTU than the underlying physical device.
+If it sends a large packet which exceeds the output MTU and gets dropped,
+there is no feedback to reduce the MSS and the tcp connection hangs.
+
+Call update_pmtu so that subsequent packets are the correct size.
+
+Signed-off-by: George Wilkie <gwilkie@vyatta.att-mail.com
+---
+ net/mpls/mpls_iptunnel.c |    5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+--- a/net/mpls/mpls_iptunnel.c
++++ b/net/mpls/mpls_iptunnel.c
+@@ -159,8 +159,11 @@ static int mpls_xmit(struct sk_buff *skb
+ 
+ 	/* Verify the destination can hold the packet */
+ 	mtu = mpls_dev_mtu(out_dev);
+-	if (mpls_pkt_too_big(skb, mtu - new_header_size))
++	if (mpls_pkt_too_big(skb, mtu - new_header_size)) {
++		skb->dev = dst->dev;
++		dst->ops->update_pmtu(dst, NULL, skb, mtu - new_header_size);
+ 		goto drop;
++	}
+ 
+ 	hh_len = LL_RESERVED_SPACE(out_dev);
+ 	if (!out_dev->header_ops)

@@ -1,0 +1,62 @@
+From 147c48431df4b657b8e64e0c7d086277c8c0f7ca Mon Sep 17 00:00:00 2001
+From: Mike Manning <mmanning@vyatta.att-mail.com>
+Date: Sun, 30 Sep 2018 15:24:44 +0100
+Subject: [PATCH net-next v5 6/9] vrf: mark skb for multicast or link-local as
+ enslaved to VRF
+
+The skb for packets that are multicast or to a link-local address are
+not marked as being enslaved to a VRF, if they are received on a socket
+bound to the VRF. This is needed for ND and it is preferable for the
+kernel not to have to deal with the additional use-cases if ll or mcast
+packets are handled as enslaved. However, this does not allow service
+instances listening on unbound and bound to VRF sockets to distinguish
+the VRF used, if packets are sent as multicast or to a link-local
+address. The fix is for the VRF driver to also mark these skb as being
+enslaved to the VRF.
+
+Signed-off-by: Mike Manning <mmanning@vyatta.att-mail.com>
+---
+ drivers/net/vrf.c | 19 +++++++++----------
+ 1 file changed, 9 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/net/vrf.c b/drivers/net/vrf.c
+index 69b7227c637e..21ad4b1d7f03 100644
+--- a/drivers/net/vrf.c
++++ b/drivers/net/vrf.c
+@@ -981,24 +981,23 @@ static struct sk_buff *vrf_ip6_rcv(struct net_device *vrf_dev,
+ 				   struct sk_buff *skb)
+ {
+ 	int orig_iif = skb->skb_iif;
+-	bool need_strict;
++	bool need_strict = rt6_need_strict(&ipv6_hdr(skb)->daddr);
++	bool is_ndisc = ipv6_ndisc_frame(skb);
+ 
+-	/* loopback traffic; do not push through packet taps again.
+-	 * Reset pkt_type for upper layers to process skb
++	/* loopback, multicast & non-ND link-local traffic; do not push through
++	 * packet taps again. Reset pkt_type for upper layers to process skb
+ 	 */
+-	if (skb->pkt_type == PACKET_LOOPBACK) {
++	if (skb->pkt_type == PACKET_LOOPBACK || (need_strict && !is_ndisc)) {
+ 		skb->dev = vrf_dev;
+ 		skb->skb_iif = vrf_dev->ifindex;
+ 		IP6CB(skb)->flags |= IP6SKB_L3SLAVE;
+-		skb->pkt_type = PACKET_HOST;
++		if (skb->pkt_type == PACKET_LOOPBACK)
++			skb->pkt_type = PACKET_HOST;
+ 		goto out;
+ 	}
+ 
+-	/* if packet is NDISC or addressed to multicast or link-local
+-	 * then keep the ingress interface
+-	 */
+-	need_strict = rt6_need_strict(&ipv6_hdr(skb)->daddr);
+-	if (!ipv6_ndisc_frame(skb) && !need_strict) {
++	/* if packet is NDISC then keep the ingress interface */
++	if (!is_ndisc) {
+ 		vrf_rx_stats(vrf_dev, skb->len);
+ 		skb->dev = vrf_dev;
+ 		skb->skb_iif = vrf_dev->ifindex;
+-- 
+2.11.0
+

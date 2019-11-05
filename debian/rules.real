@@ -93,6 +93,7 @@ binary-indep: \
 binary-arch-flavour: \
 	$(call if_package, $(IMAGE_PACKAGE_NAME),        install-image_$(ARCH)_$(FEATURESET)_$(FLAVOUR)) \
 	$(call if_package, linux-image-$(ABINAME)$(LOCALVERSION)-dbg, install-image-dbg_$(ARCH)_$(FEATURESET)_$(FLAVOUR)) \
+	$(call if_package, bvnos-linux-libc-dev-$(FEATURESET), install-bvnos-dev_$(ARCH)_$(FEATURESET)_$(FLAVOUR)) \
 	$(call if_package, linux-headers-$(ABINAME)$(LOCALVERSION), install-headers_$(ARCH)_$(FEATURESET)_$(FLAVOUR))
 
 binary-indep-featureset: \
@@ -364,6 +365,10 @@ install-headers_$(ARCH)_$(FEATURESET)_$(FLAVOUR): $(STAMPS_DIR)/build_$(ARCH)_$(
 
 	+$(MAKE_SELF) install-base
 
+ifeq ($(DO_HEADERS_META),True)
+	+$(MAKE_SELF) install-base DH_OPTIONS='-plinux-headers-$(ARCH)'
+endif
+
 install-libc-dev_$(ARCH): PACKAGE_NAME = linux-libc-dev
 install-libc-dev_$(ARCH): DH_OPTIONS = -p$(PACKAGE_NAME)
 install-libc-dev_$(ARCH): DIR = $(BUILD_DIR)/build-libc-dev
@@ -447,7 +452,11 @@ endif
 	  install-image_$(ARCH)_$(FEATURESET)_$(FLAVOUR)_bug \
 	  PACKAGE_DIR='$(PACKAGE_DIR)' PACKAGE_NAME='$(PACKAGE_NAME)' REAL_VERSION='$(REAL_VERSION)'
 	dh_strip --no-automatic-dbgsym -Xvmlinux
-	+$(MAKE_SELF) install-base
+	+$(MAKE_SELF) install-base GENCONTROL_ARGS='-Vkernel:Recommends='"$$( \
+		if grep -q '^CONFIG_SMP=y' $(DIR)/.config; then \
+			printf irqbalance,; \
+		fi)"
+	echo "{\"linux-image-$(REAL_VERSION)\": { \"files\": [ {\"sig_type\": \"efi\", \"file\": \"boot/vmlinuz-$(REAL_VERSION)\"} ] }}" > debian/files.json
 
 install-image_$(ARCH)_$(FEATURESET)_$(FLAVOUR)_dt: DT_INSTALL_DIR = $(PACKAGE_DIR)/usr/lib/linux-image-$(REAL_VERSION)
 install-image_$(ARCH)_$(FEATURESET)_$(FLAVOUR)_dt:
@@ -862,6 +871,73 @@ install-bootwrapper: build-bootwrapper
 	dh_gencontrol
 	dh_md5sums
 	dh_builddeb
+
+# To displace a UAPI header append it to the BVNOS_UAPI_H list to ship it
+# for all architectures, or to an arch-specifc target's BVNOS_UAPI_ARCH_H to
+# ship it ONLY for that specific architecture's package.
+# Example for a generic header to ship for all architectures:
+# install-bvnos-dev_$(ARCH)_$(FEATURESET)_$(FLAVOUR): BVNOS_UAPI_H = include/uapi/asm-generic/socket.h
+# Example for an arch-specific header to ship for all architectures:
+# install-bvnos-dev_$(ARCH)_$(FEATURESET)_$(FLAVOUR): BVNOS_UAPI_H = arch/$(HEADERS_ARCH)/include/uapi/asm/unistd.h
+# Example for an arch-specific header to ship only for armel:
+# install-bvnos-dev_armel_$(FEATURESET)_$(FLAVOUR): BVNOS_UAPI_ARCH_H = arch/arm/include/uapi/asm/ioctls.h
+install-bvnos-dev_$(ARCH)_$(FEATURESET)_$(FLAVOUR): PACKAGE = bvnos-linux-libc-dev$(LOCALVERSION_HEADERS)
+install-bvnos-dev_$(ARCH)_$(FEATURESET)_$(FLAVOUR): DH_OPTIONS = -p$(PACKAGE)
+install-bvnos-dev_$(ARCH)_$(FEATURESET)_$(FLAVOUR): pbase := /usr/include
+install-bvnos-dev_$(ARCH)_$(FEATURESET)_$(FLAVOUR): pfull := $(CURDIR)/debian/$(PACKAGE)$(pbase)
+install-bvnos-dev_$(ARCH)_$(FEATURESET)_$(FLAVOUR): BVNOS_UAPI_H = \
+		include/uapi/asm-generic/socket.h \
+		include/uapi/linux/rtg_domains.h \
+		include/uapi/linux/xfrm.h \
+		include/uapi/linux/rtnetlink.h \
+		include/uapi/linux/if_ether.h \
+		include/uapi/linux/netconf.h \
+		include/uapi/linux/netfilter/xt_BYPASS.h \
+		include/uapi/linux/netfilter/xt_NSH.h \
+		include/uapi/linux/if_link.h \
+		include/uapi/linux/if_tun.h \
+		include/uapi/linux/mpls.h \
+		include/uapi/linux/mpls_iptunnel.h \
+		include/uapi/linux/lwtunnel.h \
+		include/uapi/linux/tcp.h
+install-bvnos-dev_$(ARCH)_$(FEATURESET)_$(FLAVOUR): scripts/unifdef
+install-bvnos-dev_$(ARCH)_$(FEATURESET)_$(FLAVOUR):
+	dh_testdir
+	dh_testroot
+	dh_prep
+	mkdir -p $(pfull)
+# get the dest file by stripping the path until uapi/: $${header##*uapi\/}
+# get the dest directory by stripping the file name out of the path: $${dest_file%/*.h}
+# build a list of files to use in dh_configpackage, has to be single bash line
+	for header in $(BVNOS_UAPI_H) $(BVNOS_UAPI_ARCH_H); do \
+		if [ ! -f $(BUILD_DIR)/source_$(FEATURESET)/$$header ]; then \
+			continue; \
+		fi; \
+		scripts/headers_install.sh $(pfull) $(CURDIR) $(BUILD_DIR)/source_$(FEATURESET)/$$header; \
+		dest_file=$${header##*uapi\/}; \
+		mkdir -p $(pfull)/$${dest_file%/*.h}; \
+		mv $(pfull)/$$(basename $$header) $(pfull)/$$dest_file.bvnos; \
+		displaced=$$displaced" --displace /usr/include/"$$dest_file; \
+	done; \
+	dh_configpackage $${displaced//\/asm\//\/$(DEB_HOST_MULTIARCH)\/asm\/}
+# arch-specifc headers will be in asm/
+	if [ -d $(pfull)/asm ]; then \
+		mkdir -p $(pfull)/$(DEB_HOST_MULTIARCH); \
+		mv $(pfull)/asm $(pfull)/$(DEB_HOST_MULTIARCH)/; \
+	fi
+	+$(MAKE_SELF) install-base DH_OPTIONS='$(DH_OPTIONS)'
+
+install-bvnos-dev_$(ARCH)_$(FEATURESET)_$(FLAVOUR): HEADERS_ARCH = $(ARCH)
+install-bvnos-dev_amd64_$(FEATURESET)_$(FLAVOUR) \
+install-bvnos-dev_i386_$(FEATURESET)_$(FLAVOUR): BVNOS_UAPI_ARCH_H =
+install-bvnos-dev_armel_$(FEATURESET)_$(FLAVOUR): BVNOS_UAPI_ARCH_H =
+install-bvnos-dev_armhf_$(FEATURESET)_$(FLAVOUR): BVNOS_UAPI_ARCH_H =
+install-bvnos-dev_arm64_$(FEATURESET)_$(FLAVOUR): BVNOS_UAPI_ARCH_H =
+install-bvnos-dev_amd64_$(FEATURESET)_$(FLAVOUR) \
+install-bvnos-dev_i386_$(FEATURESET)_$(FLAVOUR): HEADERS_ARCH = x86
+install-bvnos-dev_armel_$(FEATURESET)_$(FLAVOUR) \
+install-bvnos-dev_armhf_$(FEATURESET)_$(FLAVOUR): HEADERS_ARCH = arm
+install-bvnos-dev_arm64_$(FEATURESET)_$(FLAVOUR): HEADERS_ARCH = arm64
 
 .PHONY: binary-% build-% install-% setup-% source-%
 

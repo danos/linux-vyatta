@@ -1,0 +1,41 @@
+net: allow traceroute with a specified interface in a vrf
+
+Traceroute executed in a vrf succeeds if no device is given or if the
+vrf is given as the device, but fails if the interface is given as the
+device. This is for default UDP probes, it succeeds for TCP SYN or ICMP
+ECHO probes. As the skb bound dev is the interface and the sk dev is
+the vrf, sk lookup fails for ICMP_DEST_UNREACH and ICMP_TIME_EXCEEDED
+messages. The solution is for the secondary dev to be passed so that
+the interface is available for the device match to succeed, in the same
+way as is already done for non-error cases.
+
+Signed-off-by: Mike Manning <mmanning@vyatta.att-mail.com>
+---
+ net/ipv4/udp.c |    4 ++--
+ net/ipv6/udp.c |    2 +-
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+--- a/net/ipv4/udp.c
++++ b/net/ipv4/udp.c
+@@ -613,8 +613,8 @@ void __udp4_lib_err(struct sk_buff *skb,
+ 	struct net *net = dev_net(skb->dev);
+ 
+ 	sk = __udp4_lib_lookup(net, iph->daddr, uh->dest,
+-			       iph->saddr, uh->source, skb->dev->ifindex, 0,
+-			       udptable, NULL);
++			       iph->saddr, uh->source, skb->dev->ifindex,
++			       inet_sdif(skb), udptable, NULL);
+ 	if (!sk) {
+ 		__ICMP_INC_STATS(net, ICMP_MIB_INERRORS);
+ 		return;	/* No socket for error */
+--- a/net/ipv6/udp.c
++++ b/net/ipv6/udp.c
+@@ -482,7 +482,7 @@ void __udp6_lib_err(struct sk_buff *skb,
+ 	struct net *net = dev_net(skb->dev);
+ 
+ 	sk = __udp6_lib_lookup(net, daddr, uh->dest, saddr, uh->source,
+-			       inet6_iif(skb), 0, udptable, NULL);
++			       inet6_iif(skb), inet6_sdif(skb), udptable, NULL);
+ 	if (!sk) {
+ 		__ICMP6_INC_STATS(net, __in6_dev_get(skb->dev),
+ 				  ICMP6_MIB_INERRORS);

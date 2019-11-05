@@ -1,0 +1,182 @@
+ipv6: add vrf table handling code for ipv6 mcast
+    
+The code to obtain the correct table for the incoming interface was
+missing for IPv6. This has been added along with the table creation
+notification to fib rules for the RTNL_FAMILY_IP6MR address family.
+
+Signed-off-by: Patrick Ruddy <pruddy@vyatta.att-mail.com>
+--- a/net/ipv6/ip6mr.c
++++ b/net/ipv6/ip6mr.c
+@@ -84,7 +84,8 @@ static struct mr_table *ip6mr_new_table(
+ static void ip6mr_free_table(struct mr_table *mrt);
+ 
+ static void ip6_mr_forward(struct net *net, struct mr_table *mrt,
+-			   struct sk_buff *skb, struct mfc6_cache *cache);
++			   struct net_device *dev, struct sk_buff *skb,
++			   struct mfc6_cache *cache);
+ static int ip6mr_cache_report(struct mr_table *mrt, struct sk_buff *pkt,
+ 			      mifi_t mifi, int assert);
+ static void mr6_netlink_event(struct mr_table *mrt, struct mfc6_cache *mfc,
+@@ -137,6 +138,9 @@ static int ip6mr_fib_lookup(struct net *
+ 		.flags = FIB_LOOKUP_NOREF,
+ 	};
+ 
++	/* update flow if oif or iif point to device enslaved to l3mdev */
++	l3mdev_update_flow(net, flowi6_to_flowi(flp6));
++
+ 	err = fib_rules_lookup(net->ipv6.mr6_rules_ops,
+ 			       flowi6_to_flowi(flp6), 0, &arg);
+ 	if (err < 0)
+@@ -163,7 +167,9 @@ static int ip6mr_rule_action(struct fib_
+ 		return -EINVAL;
+ 	}
+ 
+-	mrt = ip6mr_get_table(rule->fr_net, rule->table);
++	arg->table = fib_rule_get_table(rule, arg);
++
++	mrt = ip6mr_get_table(rule->fr_net, arg->table);
+ 	if (!mrt)
+ 		return -EAGAIN;
+ 	res->mrt = mrt;
+@@ -1033,7 +1039,7 @@ static void ip6mr_cache_resolve(struct n
+ 			}
+ 			rtnl_unicast(skb, net, NETLINK_CB(skb).portid);
+ 		} else
+-			ip6_mr_forward(net, mrt, skb, c);
++			ip6_mr_forward(net, mrt, skb->dev, skb, c);
+ 	}
+ }
+ 
+@@ -1139,7 +1145,7 @@ static int ip6mr_cache_report(struct mr_
+ 
+ /* Queue a packet for resolution. It gets locked cache entry! */
+ static int ip6mr_cache_unresolved(struct mr_table *mrt, mifi_t mifi,
+-				  struct sk_buff *skb)
++				  struct sk_buff *skb, struct net_device *dev)
+ {
+ 	struct mfc6_cache *c;
+ 	bool found = false;
+@@ -1199,6 +1205,10 @@ static int ip6mr_cache_unresolved(struct
+ 		kfree_skb(skb);
+ 		err = -ENOBUFS;
+ 	} else {
++		if (dev) {
++			skb->dev = dev;
++			skb->skb_iif = dev->ifindex;
++		}
+ 		skb_queue_tail(&c->_c.mfc_un.unres.unresolved, skb);
+ 		err = 0;
+ 	}
+@@ -2058,11 +2068,12 @@ static int ip6mr_find_vif(struct mr_tabl
+ }
+ 
+ static void ip6_mr_forward(struct net *net, struct mr_table *mrt,
+-			   struct sk_buff *skb, struct mfc6_cache *c)
++			   struct net_device *dev, struct sk_buff *skb,
++			   struct mfc6_cache *c)
+ {
+ 	int psend = -1;
+ 	int vif, ct;
+-	int true_vifi = ip6mr_find_vif(mrt, skb->dev);
++	int true_vifi = ip6mr_find_vif(mrt, dev);
+ 
+ 	vif = c->_c.mfc_parent;
+ 	c->_c.mfc_un.res.pkt++;
+@@ -2088,7 +2099,7 @@ static void ip6_mr_forward(struct net *n
+ 	/*
+ 	 * Wrong interface: drop packet and (maybe) send PIM assert.
+ 	 */
+-	if (mrt->vif_table[vif].dev != skb->dev) {
++	if (mrt->vif_table[vif].dev != dev) {
+ 		c->_c.mfc_un.res.wrong_if++;
+ 
+ 		if (true_vifi >= 0 && mrt->mroute_do_assert &&
+@@ -2161,6 +2172,7 @@ dont_forward:
+ 
+ int ip6_mr_input(struct sk_buff *skb)
+ {
++	struct rtable *rt = skb_rtable(skb);
+ 	struct mfc6_cache *cache;
+ 	struct net *net = dev_net(skb->dev);
+ 	struct mr_table *mrt;
+@@ -2169,6 +2181,19 @@ int ip6_mr_input(struct sk_buff *skb)
+ 		.flowi6_mark	= skb->mark,
+ 	};
+ 	int err;
++	struct net_device *dev;
++
++	/* skb->dev passed in is the master dev for vrfs.
++	 * Get the proper interface that does have a vif associated with it.
++	 */
++	dev = skb->dev;
++	if (netif_is_l3_master(skb->dev)) {
++		dev = dev_get_by_index_rcu(net, IPCB(skb)->iif);
++		if (!dev) {
++			kfree_skb(skb);
++			return -ENODEV;
++		}
++	}
+ 
+ 	err = ip6mr_fib_lookup(net, &fl6, &mrt);
+ 	if (err < 0) {
+@@ -2180,7 +2205,7 @@ int ip6_mr_input(struct sk_buff *skb)
+ 	cache = ip6mr_cache_find(mrt,
+ 				 &ipv6_hdr(skb)->saddr, &ipv6_hdr(skb)->daddr);
+ 	if (!cache) {
+-		int vif = ip6mr_find_vif(mrt, skb->dev);
++		int vif = ip6mr_find_vif(mrt, dev);
+ 
+ 		if (vif >= 0)
+ 			cache = ip6mr_cache_find_any(mrt,
+@@ -2194,9 +2219,9 @@ int ip6_mr_input(struct sk_buff *skb)
+ 	if (!cache) {
+ 		int vif;
+ 
+-		vif = ip6mr_find_vif(mrt, skb->dev);
++		vif = ip6mr_find_vif(mrt, dev);
+ 		if (vif >= 0) {
+-			int err = ip6mr_cache_unresolved(mrt, vif, skb);
++			int err = ip6mr_cache_unresolved(mrt, vif, skb, dev);
+ 			read_unlock(&mrt_lock);
+ 
+ 			return err;
+@@ -2206,7 +2231,7 @@ int ip6_mr_input(struct sk_buff *skb)
+ 		return -ENODEV;
+ 	}
+ 
+-	ip6_mr_forward(net, mrt, skb, cache);
++	ip6_mr_forward(net, mrt, dev, skb, cache);
+ 
+ 	read_unlock(&mrt_lock);
+ 
+@@ -2272,7 +2297,7 @@ int ip6mr_get_route(struct net *net, str
+ 		iph->saddr = rt->rt6i_src.addr;
+ 		iph->daddr = rt->rt6i_dst.addr;
+ 
+-		err = ip6mr_cache_unresolved(mrt, vif, skb2);
++		err = ip6mr_cache_unresolved(mrt, vif, skb2, dev);
+ 		read_unlock(&mrt_lock);
+ 
+ 		return err;
+--- a/drivers/net/vrf.c
++++ b/drivers/net/vrf.c
+@@ -1227,8 +1227,19 @@ static int vrf_add_fib_rules(const struc
+ 		goto ipmr_err;
+ #endif
+ 
++#if IS_ENABLED(CONFIG_IPV6_MROUTE_MULTIPLE_TABLES)
++	err = vrf_fib_rule(dev, RTNL_FAMILY_IP6MR, true);
++	if (err < 0)
++		goto ip6mr_err;
++#endif
++
+ 	return 0;
+ 
++#if IS_ENABLED(CONFIG_IPV6_MROUTE_MULTIPLE_TABLES)
++ip6mr_err:
++	vrf_fib_rule(dev, RTNL_FAMILY_IPMR,  false);
++#endif
++
+ #if IS_ENABLED(CONFIG_IP_MROUTE_MULTIPLE_TABLES)
+ ipmr_err:
+ 	vrf_fib_rule(dev, AF_INET6,  false);

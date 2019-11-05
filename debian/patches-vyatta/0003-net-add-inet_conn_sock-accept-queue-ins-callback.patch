@@ -1,0 +1,72 @@
+From 4a2bff0740fc04335e02ecb9bb93539876049cc9 Mon Sep 17 00:00:00 2001
+From: Duncan Eastoe <deastoe@vyatta.att-mail.com>
+Date: Tue, 27 Aug 2019 13:40:01 +0100
+Subject: [PATCH 3/6] net: add inet_conn_sock accept queue ins callback
+
+Adds the accept_queue_cb callback to inet_connection_sock. If defined
+the function will be called immediately before a socket is placed in
+the accept() backlog queue.
+
+This provides the ability to copy parameters from the listening
+and/or request sockets onto the new child socket before it gets
+delivered to userspace.
+
+If the defined callback function returns non-zero the child socket
+is released instead of being added to the queue.
+
+Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
+---
+ include/net/inet_connection_sock.h |  3 +++
+ net/ipv4/inet_connection_sock.c    | 22 ++++++++++++++--------
+ 2 files changed, 17 insertions(+), 8 deletions(-)
+
+diff --git a/include/net/inet_connection_sock.h b/include/net/inet_connection_sock.h
+index 371b3b45fd5c..16973993d09c 100644
+--- a/include/net/inet_connection_sock.h
++++ b/include/net/inet_connection_sock.h
+@@ -103,6 +103,9 @@ struct inet_connection_sock {
+ 	const struct tcp_ulp_ops  *icsk_ulp_ops;
+ 	void			  *icsk_ulp_data;
+ 	void (*icsk_clean_acked)(struct sock *sk, u32 acked_seq);
++	int (*accept_queue_cb)(struct sock *sk,
++			       struct request_sock *req,
++			       struct sock *child);
+ 	struct hlist_node         icsk_listen_portaddr_node;
+ 	unsigned int		  (*icsk_sync_mss)(struct sock *sk, u32 pmtu);
+ 	__u8			  icsk_ca_state:6,
+diff --git a/net/ipv4/inet_connection_sock.c b/net/ipv4/inet_connection_sock.c
+index 5c63449130d9..e1fe5694fb99 100644
+--- a/net/ipv4/inet_connection_sock.c
++++ b/net/ipv4/inet_connection_sock.c
+@@ -941,14 +941,20 @@ struct sock *inet_csk_reqsk_queue_add(struct sock *sk,
+ 		inet_child_forget(sk, req, child);
+ 		child = NULL;
+ 	} else {
+-		req->sk = child;
+-		req->dl_next = NULL;
+-		if (queue->rskq_accept_head == NULL)
+-			queue->rskq_accept_head = req;
+-		else
+-			queue->rskq_accept_tail->dl_next = req;
+-		queue->rskq_accept_tail = req;
+-		sk_acceptq_added(sk);
++		if (unlikely(inet_csk(sk)->accept_queue_cb &&
++			     inet_csk(sk)->accept_queue_cb(sk, req, child))) {
++			inet_child_forget(sk, req, child);
++			child = NULL;
++		} else {
++			req->sk = child;
++			req->dl_next = NULL;
++			if (!queue->rskq_accept_head)
++				queue->rskq_accept_head = req;
++			else
++				queue->rskq_accept_tail->dl_next = req;
++			queue->rskq_accept_tail = req;
++			sk_acceptq_added(sk);
++		}
+ 	}
+ 	spin_unlock(&queue->rskq_lock);
+ 	return child;
+-- 
+2.20.1
+

@@ -1,0 +1,141 @@
+---
+ drivers/net/tun.c           |   43 +++++++++++++++++++++++++++++++++++++++----
+ include/uapi/linux/if_tun.h |   17 +++++++++++++++++
+ 2 files changed, 56 insertions(+), 4 deletions(-)
+
+--- a/drivers/net/tun.c
++++ b/drivers/net/tun.c
+@@ -128,7 +128,7 @@ do {								\
+ #define TUN_VNET_BE     0x40000000
+ 
+ #define TUN_FEATURES (IFF_NO_PI | IFF_ONE_QUEUE | IFF_VNET_HDR | \
+-		      IFF_MULTI_QUEUE | IFF_NAPI | IFF_NAPI_FRAGS)
++		      IFF_MULTI_QUEUE | IFF_NAPI | IFF_NAPI_FRAGS | IFF_META_HDR)
+ 
+ #define GOODCOPY_LEN 128
+ 
+@@ -1743,6 +1743,8 @@ static ssize_t tun_get_user(struct tun_s
+ 	bool zerocopy = false;
+ 	int err;
+ 	u32 rxhash = 0;
++	struct tun_meta meta = { .flags = 0 };
++	struct net_device *dev = tun->dev;
+ 	int skb_xdp = 1;
+ 	bool frags = tun_napi_frags_enabled(tfile);
+ 
+@@ -1777,6 +1779,15 @@ static ssize_t tun_get_user(struct tun_s
+ 		iov_iter_advance(from, vnet_hdr_sz - sizeof(gso));
+ 	}
+ 
++	if (tun->flags & IFF_META_HDR) {
++		len -= sizeof(meta);
++		if (len > total_len)
++			return -EINVAL;
++
++		if (copy_from_iter(&meta, sizeof(meta), from) != sizeof(meta))
++			return -EFAULT;
++	}
++
+ 	if ((tun->flags & TUN_TYPE_MASK) == IFF_TAP) {
+ 		align += NET_IP_ALIGN;
+ 		if (unlikely(len < ETH_HLEN ||
+@@ -1872,6 +1883,14 @@ static ssize_t tun_get_user(struct tun_s
+ 		return -EINVAL;
+ 	}
+ 
++	if (meta.flags & TUN_META_FLAG_IIF) {
++		dev = __dev_get_by_index(&init_net, meta.iif);
++		if (dev)
++			skb->dev = dev;
++		else
++			dev = tun->dev;
++	}
++
+ 	switch (tun->flags & TUN_TYPE_MASK) {
+ 	case IFF_TUN:
+ 		if (tun->flags & IFF_NO_PI) {
+@@ -1892,13 +1911,12 @@ static ssize_t tun_get_user(struct tun_s
+ 		}
+ 
+ 		if (pi.proto == htons(ETH_P_TEB)) {
+-			skb->protocol = eth_type_trans(skb, tun->dev);
++			skb->protocol = eth_type_trans(skb, dev);
+ 		} else {
+ 			skb_reset_mac_header(skb);
+ 			skb->protocol = pi.proto;
++			skb->dev = dev;
+ 		}
+-
+-		skb->dev = tun->dev;
+ 		break;
+ 	case IFF_TAP:
+ 		if (!frags)
+@@ -1916,6 +1934,9 @@ static ssize_t tun_get_user(struct tun_s
+ 		uarg->callback(uarg, false);
+ 	}
+ 
++	if (meta.flags & TUN_META_FLAG_MARK)
++		skb->mark = meta.mark;
++
+ 	skb_reset_network_header(skb);
+ 	skb_probe_transport_header(skb, 0);
+ 
+@@ -2108,6 +2129,20 @@ static ssize_t tun_put_user(struct tun_s
+ 		iov_iter_advance(iter, vnet_hdr_sz - sizeof(gso));
+ 	}
+ 
++	if (tun->flags & IFF_META_HDR) {
++		struct tun_meta meta = { 0 };
++
++		meta.flags = TUN_META_FLAG_IIF;
++		meta.iif = skb->skb_iif;
++
++		meta.flags |= TUN_META_FLAG_MARK;
++		meta.mark = skb->mark;
++
++		if (copy_to_iter(&meta, sizeof(meta), iter) != sizeof(meta))
++			return -EFAULT;
++		total += sizeof(meta);
++	}
++
+ 	if (vlan_hlen) {
+ 		int ret;
+ 		struct veth veth;
+--- a/include/uapi/linux/if_tun.h
++++ b/include/uapi/linux/if_tun.h
+@@ -28,6 +28,9 @@
+ #define TUN_TAP_DEV	IFF_TAP
+ #define TUN_TYPE_MASK   0x000f
+ 
++/* Vyatta extension */
++#define TUN_META_HDR	IFF_META_HDR
++
+ /* Ioctl defines */
+ #define TUNSETNOCSUM  _IOW('T', 200, int) 
+ #define TUNSETDEBUG   _IOW('T', 201, int) 
+@@ -67,6 +70,7 @@
+ #define IFF_TAP		0x0002
+ #define IFF_NAPI	0x0010
+ #define IFF_NAPI_FRAGS	0x0020
++#define IFF_META_HDR	0x0080	/* Vyatta */
+ #define IFF_NO_PI	0x1000
+ /* This flag has no real effect */
+ #define IFF_ONE_QUEUE	0x2000
+@@ -111,4 +115,17 @@ struct tun_filter {
+ 	__u8   addr[0][ETH_ALEN];
+ };
+ 
++/* Prepended to the packet when the flag TUN_META is set
++ * This stuff is to transport meta data across the tap intf.
++ * the specific mark that should be applied to the packet.
++ * the iif and proto
++ */
++#define TUN_META_FLAG_MARK  (1 << 0)
++#define TUN_META_FLAG_IIF   (1 << 1)
++struct tun_meta {
++	__u16	flags;
++	__u32	mark;
++	__u32	iif;
++} __attribute__((__packed__));
++
+ #endif /* _UAPI__IF_TUN_H */

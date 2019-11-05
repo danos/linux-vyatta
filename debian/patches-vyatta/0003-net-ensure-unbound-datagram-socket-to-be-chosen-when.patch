@@ -1,0 +1,175 @@
+From 6d0303bf8b3c1c3e87369b93d645f0607085a321 Mon Sep 17 00:00:00 2001
+From: Mike Manning <mmanning@vyatta.att-mail.com>
+Date: Sun, 30 Sep 2018 15:24:40 +0100
+Subject: [PATCH net-next v5 3/9] net: ensure unbound datagram socket to be
+ chosen when not in a VRF
+
+Ensure an unbound datagram skt is chosen when not in a VRF. The check
+for a device match in compute_score() for UDP must be performed when
+there is no device match. For this, a failure is returned when there is
+no device match. This ensures that bound sockets are never selected,
+even if there is no unbound socket.
+
+Allow IPv6 packets to be sent over a datagram skt bound to a VRF. These
+packets are currently blocked, as flowi6_oif was set to that of the
+master vrf device, and the ipi6_ifindex is that of the slave device.
+Allow these packets to be sent by checking the device with ipi6_ifindex
+has the same L3 scope as that of the bound device of the skt, which is
+the master vrf device. Note that this check always succeeds if the skt
+is unbound.
+
+Even though the right datagram skt is now selected by compute_score(),
+a different skt is being returned that is bound to the wrong vrf. The
+difference between these and stream sockets is the handling of the skt
+option for SO_REUSEPORT. While the handling when adding a skt for reuse
+correctly checks that the bound device of the skt is a match, the skts
+in the hashslot are already incorrect. So for the same hash, a skt for
+the wrong vrf may be selected for the required port. The root cause is
+that the skt is immediately placed into a slot when it is created,
+but when the skt is then bound using SO_BINDTODEVICE, it remains in the
+same slot. The solution is to move the skt to the correct slot by
+forcing a rehash.
+
+Signed-off-by: Mike Manning <mmanning@vyatta.att-mail.com>
+---
+ include/net/udp.h   | 11 +++++++++++
+ net/core/sock.c     |  2 ++
+ net/ipv4/udp.c      | 15 ++++++---------
+ net/ipv6/datagram.c | 10 +++++++---
+ net/ipv6/udp.c      | 14 +++++---------
+ 5 files changed, 31 insertions(+), 21 deletions(-)
+
+diff --git a/include/net/udp.h b/include/net/udp.h
+index 9e82cb391dea..a496e441645e 100644
+--- a/include/net/udp.h
++++ b/include/net/udp.h
+@@ -252,6 +252,17 @@ static inline int udp_rqueue_get(struct sock *sk)
+ 	return sk_rmem_alloc_get(sk) - READ_ONCE(udp_sk(sk)->forward_deficit);
+ }
+ 
++static inline bool udp_sk_bound_dev_eq(struct net *net, int bound_dev_if,
++				       int dif, int sdif)
++{
++#if IS_ENABLED(CONFIG_NET_L3_MASTER_DEV)
++	return inet_bound_dev_eq(!!net->ipv4.sysctl_udp_l3mdev_accept,
++				 bound_dev_if, dif, sdif);
++#else
++	return inet_bound_dev_eq(true, bound_dev_if, dif, sdif);
++#endif
++}
++
+ /* net/ipv4/udp.c */
+ void udp_destruct_sock(struct sock *sk);
+ void skb_consume_udp(struct sock *sk, struct sk_buff *skb, int len);
+diff --git a/net/core/sock.c b/net/core/sock.c
+index 7e8796a6a089..2fff1796dcba 100644
+--- a/net/core/sock.c
++++ b/net/core/sock.c
+@@ -567,6 +567,8 @@ static int sock_setbindtodevice(struct sock *sk, char __user *optval,
+ 
+ 	lock_sock(sk);
+ 	sk->sk_bound_dev_if = index;
++	if (sk->sk_prot->rehash)
++		sk->sk_prot->rehash(sk);
+ 	sk_dst_reset(sk);
+ 	release_sock(sk);
+ 
+diff --git a/net/ipv4/udp.c b/net/ipv4/udp.c
+index 07d6fb80f433..2c01d52a8dd9 100644
+--- a/net/ipv4/udp.c
++++ b/net/ipv4/udp.c
+@@ -371,6 +371,7 @@ static int compute_score(struct sock *sk, struct net *net,
+ {
+ 	int score;
+ 	struct inet_sock *inet;
++	bool dev_match;
+ 
+ 	if (!net_eq(sock_net(sk), net) ||
+ 	    udp_sk(sk)->udp_port_hash != hnum ||
+@@ -398,15 +399,11 @@ static int compute_score(struct sock *sk, struct net *net,
+ 		score += 4;
+ 	}
+ 
+-	if (sk->sk_bound_dev_if || exact_dif) {
+-		bool dev_match = (sk->sk_bound_dev_if == dif ||
+-				  sk->sk_bound_dev_if == sdif);
+-
+-		if (!dev_match)
+-			return -1;
+-		if (sk->sk_bound_dev_if)
+-			score += 4;
+-	}
++	dev_match = udp_sk_bound_dev_eq(net, sk->sk_bound_dev_if,
++					dif, sdif);
++	if (!dev_match)
++		return -1;
++	score += 4;
+ 
+ 	if (sk->sk_incoming_cpu == raw_smp_processor_id())
+ 		score++;
+diff --git a/net/ipv6/datagram.c b/net/ipv6/datagram.c
+index 1ede7a16a0be..bde08aa549f3 100644
+--- a/net/ipv6/datagram.c
++++ b/net/ipv6/datagram.c
+@@ -772,6 +772,7 @@ int ip6_datagram_send_ctl(struct net *net, struct sock *sk,
+ 		case IPV6_2292PKTINFO:
+ 		    {
+ 			struct net_device *dev = NULL;
++			int src_idx;
+ 
+ 			if (cmsg->cmsg_len < CMSG_LEN(sizeof(struct in6_pktinfo))) {
+ 				err = -EINVAL;
+@@ -779,12 +780,15 @@ int ip6_datagram_send_ctl(struct net *net, struct sock *sk,
+ 			}
+ 
+ 			src_info = (struct in6_pktinfo *)CMSG_DATA(cmsg);
++			src_idx = src_info->ipi6_ifindex;
+ 
+-			if (src_info->ipi6_ifindex) {
++			if (src_idx) {
+ 				if (fl6->flowi6_oif &&
+-				    src_info->ipi6_ifindex != fl6->flowi6_oif)
++				    src_idx != fl6->flowi6_oif &&
++				    (sk->sk_bound_dev_if != fl6->flowi6_oif ||
++				     !sk_dev_equal_l3scope(sk, src_idx)))
+ 					return -EINVAL;
+-				fl6->flowi6_oif = src_info->ipi6_ifindex;
++				fl6->flowi6_oif = src_idx;
+ 			}
+ 
+ 			addr_type = __ipv6_addr_type(&src_info->ipi6_addr);
+diff --git a/net/ipv6/udp.c b/net/ipv6/udp.c
+index 5dc6949ed956..895fa77bde90 100644
+--- a/net/ipv6/udp.c
++++ b/net/ipv6/udp.c
+@@ -117,6 +117,7 @@ static int compute_score(struct sock *sk, struct net *net,
+ {
+ 	int score;
+ 	struct inet_sock *inet;
++	bool dev_match;
+ 
+ 	if (!net_eq(sock_net(sk), net) ||
+ 	    udp_sk(sk)->udp_port_hash != hnum ||
+@@ -144,15 +145,10 @@ static int compute_score(struct sock *sk, struct net *net,
+ 		score++;
+ 	}
+ 
+-	if (sk->sk_bound_dev_if || exact_dif) {
+-		bool dev_match = (sk->sk_bound_dev_if == dif ||
+-				  sk->sk_bound_dev_if == sdif);
+-
+-		if (!dev_match)
+-			return -1;
+-		if (sk->sk_bound_dev_if)
+-			score++;
+-	}
++	dev_match = udp_sk_bound_dev_eq(net, sk->sk_bound_dev_if, dif, sdif);
++	if (!dev_match)
++		return -1;
++	score++;
+ 
+ 	if (sk->sk_incoming_cpu == raw_smp_processor_id())
+ 		score++;
+-- 
+2.11.0
+

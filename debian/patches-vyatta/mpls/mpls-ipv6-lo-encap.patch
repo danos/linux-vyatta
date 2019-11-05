@@ -1,0 +1,59 @@
+MPLS: Install ipv6 routes with lwtunnel encap via loopback
+into the main table rather than the local table, making
+the route reachable. This is necessary to allow ipv6 mpls
+encap over loopback using a local label for PIC in the
+dataplane.
+
+Signed-off-by: Dewi Morgan <morgand@vyatta.att-mail.com>
+
+---
+ include/net/lwtunnel.h   |    9 +++++++++
+ net/ipv6/route.c         |    1 +
+ net/mpls/mpls_iptunnel.c |    1 +
+ 3 files changed, 11 insertions(+)
+
+--- a/include/net/lwtunnel.h
++++ b/include/net/lwtunnel.h
+@@ -17,6 +17,7 @@ struct fib_result;
+ #define LWTUNNEL_STATE_OUTPUT_REDIRECT	BIT(0)
+ #define LWTUNNEL_STATE_INPUT_REDIRECT	BIT(1)
+ #define LWTUNNEL_STATE_XMIT_REDIRECT	BIT(2)
++#define LWTUNNEL_STATE_OUTPUT_LOOPBACK	BIT(3)
+ 
+ enum {
+ 	LWTUNNEL_XMIT_DONE,
+@@ -109,6 +110,14 @@ static inline unsigned int lwtunnel_head
+ 	return 0;
+ }
+ 
++static inline bool lwtunnel_output_loopback(struct lwtunnel_state *lwtstate)
++{
++	if (lwtstate && (lwtstate->flags & LWTUNNEL_STATE_OUTPUT_LOOPBACK))
++		return true;
++
++	return false;
++}
++
+ int lwtunnel_encap_add_ops(const struct lwtunnel_encap_ops *op,
+ 			   unsigned int num);
+ int lwtunnel_encap_del_ops(const struct lwtunnel_encap_ops *op,
+--- a/net/ipv6/route.c
++++ b/net/ipv6/route.c
+@@ -3078,6 +3078,7 @@ static struct fib6_info *ip6_route_info_
+ 	 */
+ 	if ((cfg->fc_flags & RTF_REJECT) ||
+ 	    (dev && (dev->flags & IFF_LOOPBACK) &&
++	     !lwtunnel_output_loopback(rt->fib6_nh.nh_lwtstate) &&
+ 	     !(addr_type & IPV6_ADDR_LOOPBACK) &&
+ 	     !(cfg->fc_flags & RTF_LOCAL))) {
+ 		/* hold loopback dev/idev if we haven't done so. */
+--- a/net/mpls/mpls_iptunnel.c
++++ b/net/mpls/mpls_iptunnel.c
+@@ -326,6 +326,7 @@ static int mpls_build_state(struct nlatt
+ 
+ 	newts->type = LWTUNNEL_ENCAP_MPLS;
+ 	newts->flags |= LWTUNNEL_STATE_XMIT_REDIRECT;
++	newts->flags |= LWTUNNEL_STATE_OUTPUT_LOOPBACK;
+ 	newts->headroom = mpls_encap_size(tun_encap_info);
+ 
+ 	*ts = newts;

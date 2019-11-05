@@ -1,0 +1,129 @@
+From 86dc99470924b4ba6e82af44c563a82dab2ddf8b Mon Sep 17 00:00:00 2001
+From: Duncan Eastoe <deastoe@vyatta.att-mail.com>
+Date: Tue, 27 Aug 2019 13:40:02 +0100
+Subject: [PATCH 5/6] net: additional TCP-AO send debug logging
+
+The rate limited logs print the first byte of the traffic key used
+to authenticate transmitted segments. This is useful data to have
+when debugging MAC mismatch failures, since the send traffic key
+should match the receive traffic key on the remote end.
+
+They are disabled by default and can be enabled by the new
+tcp_auth_debug sysctl.
+
+Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
+---
+ include/net/netns/ipv4.h   |  1 +
+ include/net/tcp.h          |  2 ++
+ net/ipv4/sysctl_net_ipv4.c |  7 +++++++
+ net/ipv4/tcp_auth.c        |  5 +++++
+ net/ipv4/tcp_ipv4.c        |  2 ++
+ net/ipv4/tcp_output.c      | 13 +++++++++++++
+ 6 files changed, 30 insertions(+)
+
+diff --git a/include/net/netns/ipv4.h b/include/net/netns/ipv4.h
+index acb7d068dec9..4b69b0566622 100644
+--- a/include/net/netns/ipv4.h
++++ b/include/net/netns/ipv4.h
+@@ -177,6 +177,7 @@ struct netns_ipv4 {
+ 	unsigned int sysctl_tcp_fastopen_blackhole_timeout;
+ 	atomic_t tfo_active_disable_times;
+ 	unsigned long tfo_active_disable_stamp;
++	int sysctl_tcp_auth_debug;
+ 
+ 	int sysctl_udp_wmem_min;
+ 	int sysctl_udp_rmem_min;
+diff --git a/include/net/tcp.h b/include/net/tcp.h
+index 48c886421da3..025a63ddc56a 100644
+--- a/include/net/tcp.h
++++ b/include/net/tcp.h
+@@ -1692,6 +1692,8 @@ int tcp_auth_debug_sockaddrs(const struct tcp_sock_auth_af_ops *ops,
+ #define tcp_auth_inbound_log_init(s, o) \
+ 	struct tcp_auth_debug_ctx __auth_debug_ctx = { .skb = (s), .ops = (o) }
+ 
++#define tcp_auth_debug_is_on(s) (sock_net(s)->ipv4.sysctl_tcp_auth_debug)
++
+ int tcp_parse_auth_option(const struct tcphdr *th,
+ 			  const struct tcp_auth_opt **opt);
+ 
+diff --git a/net/ipv4/sysctl_net_ipv4.c b/net/ipv4/sysctl_net_ipv4.c
+index 5fd1f5233393..105350d977b8 100644
+--- a/net/ipv4/sysctl_net_ipv4.c
++++ b/net/ipv4/sysctl_net_ipv4.c
+@@ -1233,6 +1233,13 @@ static struct ctl_table ipv4_net_table[] = {
+ 		.extra1		= &zero,
+ 		.extra2		= &comp_sack_nr_max,
+ 	},
++	{
++		.procname	= "tcp_auth_debug",
++		.data		= &init_net.ipv4.sysctl_tcp_auth_debug,
++		.maxlen		= sizeof(int),
++		.mode		= 0644,
++		.proc_handler	= proc_dointvec
++	},
+ 	{
+ 		.procname	= "udp_rmem_min",
+ 		.data		= &init_net.ipv4.sysctl_udp_rmem_min,
+diff --git a/net/ipv4/tcp_auth.c b/net/ipv4/tcp_auth.c
+index bf8f44a0a602..88b50fb0f40b 100644
+--- a/net/ipv4/tcp_auth.c
++++ b/net/ipv4/tcp_auth.c
+@@ -1581,6 +1581,11 @@ int tcp_auth_send_fill_opt(const struct sock *sk,
+ 		}
+ 	}
+ 
++	tcp_auth_log_ratelimit_cond(KERN_DEBUG, tcp_auth_debug_is_on(sk),
++				    th->dest, th->source,
++				    "Computing output MAC using key with send ID %u (0x%02X...)",
++				    curr_send_key, tkey.key[0]);
++
+ 	opt->kind = TCPOPT_AUTH;
+ 	opt->length = TCPOLEN_AUTH(auth->current_key->alg);
+ 	opt->key_id = curr_send_key;
+diff --git a/net/ipv4/tcp_ipv4.c b/net/ipv4/tcp_ipv4.c
+index 68c51de049b3..98b5fb565488 100644
+--- a/net/ipv4/tcp_ipv4.c
++++ b/net/ipv4/tcp_ipv4.c
+@@ -2875,6 +2875,8 @@ static int __net_init tcp_sk_init(struct net *net)
+ 	net->ipv4.sysctl_tcp_fastopen_blackhole_timeout = 60 * 60;
+ 	atomic_set(&net->ipv4.tfo_active_disable_times, 0);
+ 
++	net->ipv4.sysctl_tcp_auth_debug = 0;
++
+ 	/* Reno is always built in */
+ 	if (!net_eq(net, &init_net) &&
+ 	    try_module_get(init_net.ipv4.tcp_congestion_control->owner))
+diff --git a/net/ipv4/tcp_output.c b/net/ipv4/tcp_output.c
+index 0de91a6a17cc..ba7daba9efd3 100644
+--- a/net/ipv4/tcp_output.c
++++ b/net/ipv4/tcp_output.c
+@@ -1225,6 +1225,12 @@ static int __tcp_transmit_skb(struct sock *sk, struct sk_buff *skb,
+ 			}
+ 		}
+ 
++		tcp_auth_log_ratelimit_cond(KERN_DEBUG,
++					    tcp_auth_debug_is_on(sk),
++					    th->source, th->dest,
++					    "Computing output MAC using key with send ID %u (0x%02X...)",
++					    curr_send_key, tkey.key[0]);
++
+ 		sne = tcp_auth_get_sne(&params->send_sne, th->seq);
+ 		err = tcp_auth_hash_skb(&tp->af_specific->auth_ops,
+ 					opts.hash_location, &tkey,
+@@ -3432,6 +3438,13 @@ struct sk_buff *tcp_make_synack(const struct sock *sk, struct dst_entry *dst,
+ 			goto fail;
+ 		}
+ 
++		tcp_auth_log_ratelimit_cond(KERN_DEBUG,
++					    tcp_auth_debug_is_on(sk),
++					    th->source, th->dest,
++					    "Computing output SYN/ACK MAC using key with send ID %u (0x%02X...)",
++					    current_key->id[TCP_AUTH_SEND],
++					    tkey.key[0]);
++
+ 		sne = tcp_auth_get_sne(&req_params->send_sne, th->seq);
+ 		ret = tcp_auth_hash_skb(&tp->af_specific->auth_ops,
+ 					opts.hash_location, &tkey,
+-- 
+2.20.1
+

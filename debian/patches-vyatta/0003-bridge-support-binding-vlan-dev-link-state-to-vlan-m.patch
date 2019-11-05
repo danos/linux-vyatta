@@ -1,0 +1,255 @@
+From 374a537d6a144d5379877581bc26cc2f703b5cae Mon Sep 17 00:00:00 2001
+From: Mike Manning <mmanning@vyatta.att-mail.com>
+Date: Fri, 29 Mar 2019 10:47:22 +0000
+Subject: [PATCH net-next v2 3/5] bridge: support binding vlan dev link state
+ to vlan member bridge ports
+
+In the case of vlan filtering on bridges, the bridge may also have the
+corresponding vlan devices as upper devices. A vlan bridge binding mode
+is added to allow the link state of the vlan device to track only the
+state of the subset of bridge ports that are also members of the vlan,
+rather than that of all bridge ports. This mode is set with a vlan flag
+rather than a bridge sysfs so that the 8021q module is aware that it
+should not set the link state for the vlan device.
+
+If bridge vlan is configured, the bridge device event handling results
+in the link state for an upper device being set, if it is a vlan device
+with the vlan bridge binding mode enabled. This also sets a
+vlan_bridge_binding flag so that subsequent UP/DOWN/CHANGE events for
+the ports in that bridge result in a link state update of the vlan
+device if required.
+
+The link state of the vlan device is up if there is at least one bridge
+port that is a vlan member that is admin & oper up, otherwise its oper
+state is IF_OPER_LOWERLAYERDOWN.
+
+Signed-off-by: Mike Manning <mmanning@vyatta.att-mail.com>
+---
+ net/bridge/br.c         |   14 +++-
+ net/bridge/br_private.h |   14 ++++
+ net/bridge/br_vlan.c    |  150 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 174 insertions(+), 4 deletions(-)
+
+--- a/net/bridge/br.c
++++ b/net/bridge/br.c
+@@ -38,10 +38,13 @@ static int br_device_event(struct notifi
+ 	bool changed_addr;
+ 	int err;
+ 
+-	/* register of bridge completed, add sysfs entries */
+-	if ((dev->priv_flags & IFF_EBRIDGE) && event == NETDEV_REGISTER) {
+-		br_sysfs_addbr(dev);
+-		return NOTIFY_DONE;
++	if (dev->priv_flags & IFF_EBRIDGE) {
++		if (event == NETDEV_REGISTER) {
++			/* register of bridge completed, add sysfs entries */
++			br_sysfs_addbr(dev);
++			return NOTIFY_DONE;
++		}
++		br_vlan_bridge_event(dev, event, ptr);
+ 	}
+ 
+ 	/* not a port of a bridge */
+@@ -113,6 +116,9 @@ static int br_device_event(struct notifi
+ 		break;
+ 	}
+ 
++	if (event != NETDEV_UNREGISTER)
++		br_vlan_port_event(p, event);
++
+ 	/* Events that may cause spanning tree to refresh */
+ 	if (!notified && (event == NETDEV_CHANGEADDR || event == NETDEV_UP ||
+ 			  event == NETDEV_CHANGE || event == NETDEV_DOWN))
+--- a/net/bridge/br_private.h
++++ b/net/bridge/br_private.h
+@@ -321,6 +321,7 @@ struct net_bridge {
+ 	u8				vlan_stats_enabled;
+ 	__be16				vlan_proto;
+ 	u16				default_pvid;
++	u8				vlan_bridge_binding;
+ 	struct net_bridge_vlan_group	__rcu *vlgrp;
+ #endif
+ 
+@@ -861,6 +862,9 @@ int nbp_vlan_init(struct net_bridge_port
+ int nbp_get_num_vlan_infos(struct net_bridge_port *p, u32 filter_mask);
+ void br_vlan_get_stats(const struct net_bridge_vlan *v,
+ 		       struct br_vlan_stats *stats);
++void br_vlan_port_event(struct net_bridge_port *p, unsigned long event);
++void br_vlan_bridge_event(struct net_device *dev, unsigned long event,
++			  void *ptr);
+ 
+ static inline struct net_bridge_vlan_group *br_vlan_group(
+ 					const struct net_bridge *br)
+@@ -1043,6 +1047,16 @@ static inline void br_vlan_get_stats(con
+ 				     struct br_vlan_stats *stats)
+ {
+ }
++
++static inline void br_vlan_port_event(struct net_bridge_port *p,
++				      unsigned long event)
++{
++}
++
++static inline void br_vlan_bridge_event(struct net_device *dev,
++					unsigned long event, void *ptr)
++{
++}
+ #endif
+ 
+ struct nf_br_ops {
+--- a/net/bridge/br_vlan.c
++++ b/net/bridge/br_vlan.c
+@@ -1203,3 +1203,153 @@ int br_vlan_get_info(const struct net_de
+ 	return 0;
+ }
+ EXPORT_SYMBOL_GPL(br_vlan_get_info);
++
++static int br_vlan_is_bind_vlan_dev(const struct net_device *dev)
++{
++	return is_vlan_dev(dev) &&
++		!!(vlan_dev_priv(dev)->flags & VLAN_FLAG_BRIDGE_BINDING);
++}
++
++static int br_vlan_is_bind_vlan_dev_fn(struct net_device *dev,
++				       __always_unused void *data)
++{
++	return br_vlan_is_bind_vlan_dev(dev);
++}
++
++static int br_vlan_has_upper_bind_vlan_dev(struct net_device *dev)
++{
++	int found;
++
++	rcu_read_lock();
++	found = netdev_walk_all_upper_dev_rcu(dev, br_vlan_is_bind_vlan_dev_fn,
++					      NULL);
++	rcu_read_unlock();
++
++	return found;
++}
++
++struct br_vlan_bind_walk_data {
++	u16 vid;
++	struct net_device *result;
++};
++
++static int br_vlan_match_bind_vlan_dev_fn(struct net_device *dev,
++					  void *data_in)
++{
++	struct br_vlan_bind_walk_data *data = data_in;
++	int found = 0;
++
++	if (br_vlan_is_bind_vlan_dev(dev) &&
++	    vlan_dev_priv(dev)->vlan_id == data->vid) {
++		data->result = dev;
++		found = 1;
++	}
++
++	return found;
++}
++
++static struct net_device *
++br_vlan_get_upper_bind_vlan_dev(struct net_device *dev, u16 vid)
++{
++	struct br_vlan_bind_walk_data data = {
++		.vid = vid,
++	};
++
++	rcu_read_lock();
++	netdev_walk_all_upper_dev_rcu(dev, br_vlan_match_bind_vlan_dev_fn,
++				      &data);
++	rcu_read_unlock();
++
++	return data.result;
++}
++
++static bool br_vlan_is_dev_up(const struct net_device *dev)
++{
++	return  !!(dev->flags & IFF_UP) && netif_oper_up(dev);
++}
++
++static void br_vlan_set_vlan_dev_state(const struct net_bridge *br,
++				       struct net_device *vlan_dev)
++{
++	u16 vid = vlan_dev_priv(vlan_dev)->vlan_id;
++	struct net_bridge_vlan_group *vg;
++	struct net_bridge_port *p;
++	bool has_carrier = false;
++
++	list_for_each_entry(p, &br->port_list, list) {
++		vg = nbp_vlan_group(p);
++		if (br_vlan_find(vg, vid) && br_vlan_is_dev_up(p->dev)) {
++			has_carrier = true;
++			break;
++		}
++	}
++
++	if (has_carrier)
++		netif_carrier_on(vlan_dev);
++	else
++		netif_carrier_off(vlan_dev);
++}
++
++static void br_vlan_set_all_vlan_dev_state(struct net_bridge_port *p)
++{
++	struct net_bridge_vlan_group *vg = nbp_vlan_group(p);
++	struct net_bridge_vlan *vlan;
++	struct net_device *vlan_dev;
++
++	list_for_each_entry(vlan, &vg->vlan_list, vlist) {
++		vlan_dev = br_vlan_get_upper_bind_vlan_dev(p->br->dev,
++							   vlan->vid);
++		if (vlan_dev) {
++			if (br_vlan_is_dev_up(p->dev))
++				netif_carrier_on(vlan_dev);
++			else
++				br_vlan_set_vlan_dev_state(p->br, vlan_dev);
++		}
++	}
++}
++
++static void br_vlan_upper_change(struct net_device *dev,
++				 struct net_device *upper_dev,
++				 bool linking)
++{
++	struct net_bridge *br = netdev_priv(dev);
++
++	if (!br_vlan_is_bind_vlan_dev(upper_dev))
++		return;
++
++	if (linking) {
++		br_vlan_set_vlan_dev_state(br, upper_dev);
++		br->vlan_bridge_binding = 1;
++	} else {
++		br->vlan_bridge_binding = br_vlan_has_upper_bind_vlan_dev(dev);
++	}
++}
++
++/* Must be protected by RTNL. */
++void br_vlan_bridge_event(struct net_device *dev, unsigned long event,
++			  void *ptr)
++{
++	struct netdev_notifier_changeupper_info *info;
++
++	switch (event) {
++	case NETDEV_CHANGEUPPER:
++		info = ptr;
++		br_vlan_upper_change(dev, info->upper_dev, info->linking);
++		break;
++	}
++}
++
++/* Must be protected by RTNL. */
++void br_vlan_port_event(struct net_bridge_port *p, unsigned long event)
++{
++	if (!p->br->vlan_bridge_binding)
++		return;
++
++	switch (event) {
++	case NETDEV_CHANGE:
++	case NETDEV_DOWN:
++	case NETDEV_UP:
++		br_vlan_set_all_vlan_dev_state(p);
++		break;
++	}
++}

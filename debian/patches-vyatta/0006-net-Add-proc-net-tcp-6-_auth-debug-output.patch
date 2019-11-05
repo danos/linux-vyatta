@@ -1,0 +1,314 @@
+From b905a265cbcde2458812f6442c351d6ba8203a0d Mon Sep 17 00:00:00 2001
+From: Duncan Eastoe <deastoe@vyatta.att-mail.com>
+Date: Tue, 27 Aug 2019 13:40:02 +0100
+Subject: [PATCH 6/6] net: Add /proc/net/tcp(6)_auth debug output
+
+Adds the /proc/net/tcp_auth and /proc/net/tcp6_auth virtual files
+which contain valuable information for debugging TCP Authentication
+operations.
+
+Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
+---
+ include/net/tcp.h   |   2 +
+ net/ipv4/tcp_auth.c | 199 ++++++++++++++++++++++++++++++++++++++++++++
+ net/ipv4/tcp_ipv4.c |  19 +++++
+ net/ipv6/tcp_ipv6.c |  19 +++++
+ 4 files changed, 239 insertions(+)
+
+diff --git a/include/net/tcp.h b/include/net/tcp.h
+index 025a63ddc56a..54f2d178e009 100644
+--- a/include/net/tcp.h
++++ b/include/net/tcp.h
+@@ -1804,6 +1804,8 @@ int tcp_auth_send_fill_opt(const struct sock *sk,
+ 			   struct tcphdr *out_th,
+ 			   struct tcp_auth_opt *opt);
+ 
++int tcp_auth_seq_show(struct seq_file *f, void *v, int family);
++
+ /* RFC2385 MD5 Signature Option */
+ #define tcp_md5_addr	 tcp_auth_addr
+ #define tcp_md5sum_block tcp_pseudohdr
+diff --git a/net/ipv4/tcp_auth.c b/net/ipv4/tcp_auth.c
+index e71245f768b7..27041e4aca51 100644
+--- a/net/ipv4/tcp_auth.c
++++ b/net/ipv4/tcp_auth.c
+@@ -1648,3 +1648,202 @@ int tcp_auth_debug_sockaddrs(const struct tcp_sock_auth_af_ops *ops,
+ 
+ 	return 0;
+ }
++
++static void tcp_auth_seq_show_sne(const struct tcp_auth_sne *sne,
++				  enum tcp_auth_direction dir,
++				  __be32 isn,
++				  struct seq_file *f)
++{
++	switch (dir) {
++	case TCP_AUTH_SEND:
++		seq_puts(f, "\n      send_isn   prev_send_seq send_sne   send_sne_flag");
++		break;
++	case TCP_AUTH_RECV:
++		seq_puts(f, "\n      recv_isn   prev_recv_seq recv_sne   recv_sne_flag");
++		break;
++	default:
++		return;
++	}
++
++	seq_printf(f, "\n      %-10u %-13u %-10u %sset",
++		   isn, ntohl(sne->prev_seq), sne->sne,
++		   (!sne->flag) ? "un" : "");
++}
++
++static int tcp_auth_seq_show_req_sock(const struct request_sock *req,
++				      struct seq_file *f, int i)
++{
++	const struct inet_request_sock *ireq = inet_rsk(req);
++	const struct tcp_auth_req_params *params;
++
++	rcu_read_lock();
++
++	params = rcu_dereference(tcp_rsk(req)->auth_params);
++	if (!params) {
++		rcu_read_unlock();
++		return -1;
++	}
++
++	if (req_to_sk((struct request_sock *)req)->sk_family == AF_INET) {
++		seq_printf(f, "%4d: %-15pI4 %-5u %-15pI4 %-5u",
++			   i,
++			   &ireq->ir_loc_addr,
++			   ireq->ir_num,
++			   &ireq->ir_rmt_addr,
++			   ntohs(ireq->ir_rmt_port));
++	} else {
++		seq_printf(f, "%4d: %-39pI6c %-5u %-39pI6c %-5u",
++			   i,
++			   &ireq->ir_v6_loc_addr,
++			   ireq->ir_num,
++			   &ireq->ir_v6_rmt_addr,
++			   ntohs(ireq->ir_rmt_port));
++	}
++
++	tcp_auth_seq_show_sne(&params->send_sne, TCP_AUTH_SEND,
++			      tcp_rsk(req)->snt_isn, f);
++	tcp_auth_seq_show_sne(&params->recv_sne, TCP_AUTH_RECV,
++			      tcp_rsk(req)->rcv_isn, f);
++
++	seq_puts(f, "\n      curr_key\n");
++	seq_printf(f, "      %d\n", params->current_key);
++
++	rcu_read_unlock();
++	return 0;
++}
++
++static void tcp_auth_seq_show_key(const struct tcp_auth_master_key *key,
++				  struct seq_file *f)
++{
++	const u8 **tkeys = (const u8 **)&key->traffic_key;
++
++	seq_printf(f, "\n          %-7u %-7u 0x%02X   %-6u 0x%-3u 0x%-5u 0x%-7u %s%s%s%s",
++		   key->id[TCP_AUTH_SEND], key->id[TCP_AUTH_RECV],
++		   key->key[0], key->keylen, key->flags,
++		   key->options, key->internal_flags,
++		   rcu_access_pointer(tkeys[TCP_AUTH_TRAFFIC_KEY_SEND_SYN]) ?
++			"SS " : "",
++		   rcu_access_pointer(tkeys[TCP_AUTH_TRAFFIC_KEY_SEND_OTHER]) ?
++			"SO " : "",
++		   rcu_access_pointer(tkeys[TCP_AUTH_TRAFFIC_KEY_RECV_SYN]) ?
++			"RS " : "",
++		   rcu_access_pointer(tkeys[TCP_AUTH_TRAFFIC_KEY_RECV_OTHER]) ?
++			"RO" : "");
++}
++
++static void tcp_auth_seq_show_entry(const struct tcp_auth_db_entry *entry,
++				    struct seq_file *f)
++{
++	struct tcp_auth_master_key *pref_send, *pref_recv, *curr, *key;
++
++	pref_send = rcu_dereference(entry->pref_send_key);
++	pref_recv = rcu_dereference(entry->pref_recv_key);
++	curr = rcu_dereference(entry->current_key);
++
++	seq_printf(f, " %-4u %-6u %-3u %-9d %-9d %-8d\n",
++		   entry->prefixlen, entry->family, entry->alg->id,
++		   pref_send ? pref_send->id[TCP_AUTH_SEND] : -1,
++		   pref_recv ? pref_recv->id[TCP_AUTH_RECV] : -1,
++		   curr ? curr->id[TCP_AUTH_SEND] : -1);
++
++	seq_puts(f, "          send_id recv_id key[0] keylen flags options int_flags cached_traffic_keys");
++
++	hlist_for_each_entry_rcu(key, &entry->keys_head, node)
++		tcp_auth_seq_show_key(key, f);
++}
++
++static int tcp_auth_seq_show_sock(const struct sock *sk,
++				  struct seq_file *f, int i)
++{
++	const struct inet_sock *inet = inet_sk(sk);
++	const struct tcp_auth_params *params;
++	const struct tcp_auth_db_entry *entry;
++	__u16 sport;
++
++	rcu_read_lock();
++
++	if (sk_fullsock(sk)) {
++		params = rcu_dereference(tcp_sk(sk)->auth_params);
++		sport = ntohs(inet_sk(sk)->inet_sport);
++	} else if (sk->sk_state == TCP_TIME_WAIT) {
++		params = rcu_dereference(tcp_twsk(sk)->auth_params);
++		sport = ntohs(inet_twsk(sk)->tw_sport);
++	} else {
++		rcu_read_unlock();
++		return -1;
++	}
++
++	if (!params) {
++		rcu_read_unlock();
++		return -1;
++	}
++
++	if (sk->sk_family == AF_INET) {
++		seq_printf(f, "%4d: %-15pI4 %-5u %-15pI4 %-5u\n",
++			   i,
++			   &inet->inet_rcv_saddr,
++			   sport,
++			   &inet->inet_daddr,
++			   ntohs(sk->sk_dport));
++	} else {
++		seq_printf(f, "%4d: %-39pI6c %-5u %-39pI6c %-5u\n",
++			   i,
++			   &sk->sk_v6_rcv_saddr,
++			   sport,
++			   &sk->sk_v6_daddr,
++			   ntohs(sk->sk_dport));
++	}
++
++	seq_printf(f, "      collapsed: %c",
++		   params->collapsed ? 'Y' : 'N');
++
++	/* SNEs are maintained on the respective request_sock,
++	 * not the listening socket.
++	 */
++	if (sk->sk_state != TCP_LISTEN) {
++		tcp_auth_seq_show_sne(&params->send_sne, TCP_AUTH_SEND,
++				      params->snt_isn, f);
++		tcp_auth_seq_show_sne(&params->recv_sne, TCP_AUTH_RECV,
++				      params->rcv_isn, f);
++	}
++
++	hlist_for_each_entry_rcu(entry, &params->head, node) {
++		if (sk->sk_family == AF_INET) {
++			seq_puts(f, "\n        address         plen family alg pref_send pref_recv curr_key\n");
++			seq_printf(f, "        %-15pI4", &entry->addr);
++		} else {
++			seq_puts(f, "\n        address                                 plen family alg pref_send pref_recv curr_key\n");
++			seq_printf(f, "        %-39pI6c", &entry->addr);
++		}
++		tcp_auth_seq_show_entry(entry, f);
++	}
++	seq_puts(f, "\n");
++
++	rcu_read_unlock();
++	return 0;
++}
++
++int tcp_auth_seq_show(struct seq_file *f, void *v, int family)
++{
++	struct tcp_iter_state *st;
++	struct sock *sk = v;
++	int ret = 0;
++
++	if (v == SEQ_START_TOKEN) {
++		if (family == AF_INET)
++			seq_puts(f, "  sl  local_address   port  rem_address     port");
++		else
++			seq_puts(f, "  sl  local_address                           port  rem_address                             port");
++		goto out;
++	}
++	st = f->private;
++
++	if (sk->sk_state == TCP_NEW_SYN_RECV)
++		ret = tcp_auth_seq_show_req_sock(v, f, st->num);
++	else
++		ret = tcp_auth_seq_show_sock(v, f, st->num);
++out:
++	if (ret >= 0)
++		seq_puts(f, "\n");
++	return 0;
++}
+diff --git a/net/ipv4/tcp_ipv4.c b/net/ipv4/tcp_ipv4.c
+index a1a11110fbfe..31236dcd92ef 100644
+--- a/net/ipv4/tcp_ipv4.c
++++ b/net/ipv4/tcp_ipv4.c
+@@ -2686,6 +2686,18 @@ static const struct seq_operations tcp4_seq_ops = {
+ 	.stop		= tcp_seq_stop,
+ };
+ 
++static int tcp_v4_auth_seq_show(struct seq_file *f, void *v)
++{
++	return tcp_auth_seq_show(f, v, AF_INET);
++}
++
++static const struct seq_operations tcp4_auth_seq_ops = {
++	.show		= tcp_v4_auth_seq_show,
++	.start		= tcp_seq_start,
++	.next		= tcp_seq_next,
++	.stop		= tcp_seq_stop,
++};
++
+ static struct tcp_seq_afinfo tcp4_seq_afinfo = {
+ 	.family		= AF_INET,
+ };
+@@ -2695,6 +2707,13 @@ static int __net_init tcp4_proc_init_net(struct net *net)
+ 	if (!proc_create_net_data("tcp", 0444, net->proc_net, &tcp4_seq_ops,
+ 			sizeof(struct tcp_iter_state), &tcp4_seq_afinfo))
+ 		return -ENOMEM;
++
++	if (!proc_create_net_data("tcp_auth", 0444, net->proc_net,
++				  &tcp4_auth_seq_ops,
++				  sizeof(struct tcp_iter_state),
++				  &tcp4_seq_afinfo))
++		return -ENOMEM;
++
+ 	return 0;
+ }
+ 
+diff --git a/net/ipv6/tcp_ipv6.c b/net/ipv6/tcp_ipv6.c
+index 3dc818e53da3..2063b0cfcce1 100644
+--- a/net/ipv6/tcp_ipv6.c
++++ b/net/ipv6/tcp_ipv6.c
+@@ -2199,6 +2199,18 @@ static const struct seq_operations tcp6_seq_ops = {
+ 	.stop		= tcp_seq_stop,
+ };
+ 
++static int tcp_v6_auth_seq_show(struct seq_file *f, void *v)
++{
++	return tcp_auth_seq_show(f, v, AF_INET6);
++}
++
++static const struct seq_operations tcp6_auth_seq_ops = {
++	.show		= tcp_v6_auth_seq_show,
++	.start		= tcp_seq_start,
++	.next		= tcp_seq_next,
++	.stop		= tcp_seq_stop,
++};
++
+ static struct tcp_seq_afinfo tcp6_seq_afinfo = {
+ 	.family		= AF_INET6,
+ };
+@@ -2208,6 +2220,13 @@ int __net_init tcp6_proc_init(struct net *net)
+ 	if (!proc_create_net_data("tcp6", 0444, net->proc_net, &tcp6_seq_ops,
+ 			sizeof(struct tcp_iter_state), &tcp6_seq_afinfo))
+ 		return -ENOMEM;
++
++	if (!proc_create_net_data("tcp6_auth", 0444, net->proc_net,
++				  &tcp6_auth_seq_ops,
++				  sizeof(struct tcp_iter_state),
++				  &tcp6_seq_afinfo))
++		return -ENOMEM;
++
+ 	return 0;
+ }
+ 
+-- 
+2.20.1
+

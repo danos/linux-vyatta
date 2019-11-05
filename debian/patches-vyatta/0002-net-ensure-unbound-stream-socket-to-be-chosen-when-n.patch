@@ -1,0 +1,134 @@
+From dc242a2d4465a539ed7128f12d66b9240d7a0851 Mon Sep 17 00:00:00 2001
+From: Mike Manning <mmanning@vyatta.att-mail.com>
+Date: Sun, 30 Sep 2018 15:24:39 +0100
+Subject: [PATCH net-next v5 2/9] net: ensure unbound stream socket to be
+ chosen when not in a VRF
+
+The commit a04a480d4392 ("net: Require exact match for TCP socket
+lookups if dif is l3mdev") only ensures that the correct socket is
+selected for packets in a VRF. However, there is no guarantee that
+the unbound socket will be selected for packets when not in a VRF.
+By checking for a device match in compute_score() also for the case
+when there is no bound device and attaching a score to this, the
+unbound socket is selected. And if a failure is returned when there
+is no device match, this ensures that bound sockets are never selected,
+even if there is no unbound socket.
+
+Signed-off-by: Mike Manning <mmanning@vyatta.att-mail.com>
+---
+ include/net/inet_hashtables.h | 11 +++++++++++
+ include/net/inet_sock.h       |  8 ++++++++
+ net/ipv4/inet_hashtables.c    | 14 ++++++--------
+ net/ipv6/inet6_hashtables.c   | 14 ++++++--------
+ 4 files changed, 31 insertions(+), 16 deletions(-)
+
+diff --git a/include/net/inet_hashtables.h b/include/net/inet_hashtables.h
+index 4ae060b4bac2..0ce460e93dc4 100644
+--- a/include/net/inet_hashtables.h
++++ b/include/net/inet_hashtables.h
+@@ -189,6 +189,17 @@ static inline void inet_ehash_locks_free(struct inet_hashinfo *hashinfo)
+ 	hashinfo->ehash_locks = NULL;
+ }
+ 
++static inline bool inet_sk_bound_dev_eq(struct net *net, int bound_dev_if,
++					int dif, int sdif)
++{
++#if IS_ENABLED(CONFIG_NET_L3_MASTER_DEV)
++	return inet_bound_dev_eq(!!net->ipv4.sysctl_tcp_l3mdev_accept,
++				 bound_dev_if, dif, sdif);
++#else
++	return inet_bound_dev_eq(true, bound_dev_if, dif, sdif);
++#endif
++}
++
+ struct inet_bind_bucket *
+ inet_bind_bucket_create(struct kmem_cache *cachep, struct net *net,
+ 			struct inet_bind_hashbucket *head,
+diff --git a/include/net/inet_sock.h b/include/net/inet_sock.h
+index ed3f723af00b..e8eef85006aa 100644
+--- a/include/net/inet_sock.h
++++ b/include/net/inet_sock.h
+@@ -143,6 +143,14 @@ static inline int inet_sk_bound_l3mdev(const struct sock *sk)
+ 	return 0;
+ }
+ 
++static inline bool inet_bound_dev_eq(bool l3mdev_accept, int bound_dev_if,
++				     int dif, int sdif)
++{
++	if (!bound_dev_if)
++		return !sdif || l3mdev_accept;
++	return bound_dev_if == dif || bound_dev_if == sdif;
++}
++
+ struct inet_cork {
+ 	unsigned int		flags;
+ 	__be32			addr;
+diff --git a/net/ipv4/inet_hashtables.c b/net/ipv4/inet_hashtables.c
+index 260531dc6458..2ec684057ebd 100644
+--- a/net/ipv4/inet_hashtables.c
++++ b/net/ipv4/inet_hashtables.c
+@@ -235,6 +235,7 @@ static inline int compute_score(struct sock *sk, struct net *net,
+ {
+ 	int score = -1;
+ 	struct inet_sock *inet = inet_sk(sk);
++	bool dev_match;
+ 
+ 	if (net_eq(sock_net(sk), net) && inet->inet_num == hnum &&
+ 			!ipv6_only_sock(sk)) {
+@@ -245,15 +246,12 @@ static inline int compute_score(struct sock *sk, struct net *net,
+ 				return -1;
+ 			score += 4;
+ 		}
+-		if (sk->sk_bound_dev_if || exact_dif) {
+-			bool dev_match = (sk->sk_bound_dev_if == dif ||
+-					  sk->sk_bound_dev_if == sdif);
++		dev_match = inet_sk_bound_dev_eq(net, sk->sk_bound_dev_if,
++						 dif, sdif);
++		if (!dev_match)
++			return -1;
++		score += 4;
+ 
+-			if (!dev_match)
+-				return -1;
+-			if (sk->sk_bound_dev_if)
+-				score += 4;
+-		}
+ 		if (sk->sk_incoming_cpu == raw_smp_processor_id())
+ 			score++;
+ 	}
+diff --git a/net/ipv6/inet6_hashtables.c b/net/ipv6/inet6_hashtables.c
+index 3d7c7460a0c5..5eeeba7181a1 100644
+--- a/net/ipv6/inet6_hashtables.c
++++ b/net/ipv6/inet6_hashtables.c
+@@ -99,6 +99,7 @@ static inline int compute_score(struct sock *sk, struct net *net,
+ 				const int dif, const int sdif, bool exact_dif)
+ {
+ 	int score = -1;
++	bool dev_match;
+ 
+ 	if (net_eq(sock_net(sk), net) && inet_sk(sk)->inet_num == hnum &&
+ 	    sk->sk_family == PF_INET6) {
+@@ -109,15 +110,12 @@ static inline int compute_score(struct sock *sk, struct net *net,
+ 				return -1;
+ 			score++;
+ 		}
+-		if (sk->sk_bound_dev_if || exact_dif) {
+-			bool dev_match = (sk->sk_bound_dev_if == dif ||
+-					  sk->sk_bound_dev_if == sdif);
++		dev_match = inet_sk_bound_dev_eq(net, sk->sk_bound_dev_if,
++						 dif, sdif);
++		if (!dev_match)
++			return -1;
++		score++;
+ 
+-			if (!dev_match)
+-				return -1;
+-			if (sk->sk_bound_dev_if)
+-				score++;
+-		}
+ 		if (sk->sk_incoming_cpu == raw_smp_processor_id())
+ 			score++;
+ 	}
+-- 
+2.11.0
+

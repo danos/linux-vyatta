@@ -1,0 +1,40 @@
+From 309ce92dbce19385498852f9254b8a75963ec345 Mon Sep 17 00:00:00 2001
+From: Mike Manning <mmanning@vyatta.att-mail.com>
+Date: Sun, 30 Sep 2018 15:24:45 +0100
+Subject: [PATCH net-next v5 7/9] ipv6: allow ping to link-local address in VRF
+
+If link-local packets are marked as enslaved to a VRF, then to allow
+ping to the link-local from a vrf, the error handling for IPV6_PKTINFO
+needs to be relaxed to also allow the pkt ipi6_ifindex to be that of a
+slave device to the vrf.
+
+Note that the real device also needs to be retrieved in icmp6_iif()
+to set the ipv6 flow oif to this for icmp echo reply handling. The
+recent commit 24b711edfc34 ("net/ipv6: Fix linklocal to global address
+with VRF") takes care of this, so the sdif does not need checking here.
+
+This fix makes ping to link-local consistent with that to global
+addresses, in that this can now be done from within the same VRF that
+the address is in.
+
+Signed-off-by: Mike Manning <mmanning@vyatta.att-mail.com>
+---
+ net/ipv6/ipv6_sockglue.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/net/ipv6/ipv6_sockglue.c b/net/ipv6/ipv6_sockglue.c
+index 381ce38940ae..973e215c3114 100644
+--- a/net/ipv6/ipv6_sockglue.c
++++ b/net/ipv6/ipv6_sockglue.c
+@@ -486,7 +486,7 @@ static int do_ipv6_setsockopt(struct sock *sk, int level, int optname,
+ 				retv = -EFAULT;
+ 				break;
+ 		}
+-		if (sk->sk_bound_dev_if && pkt.ipi6_ifindex != sk->sk_bound_dev_if)
++		if (!sk_dev_equal_l3scope(sk, pkt.ipi6_ifindex))
+ 			goto e_inval;
+ 
+ 		np->sticky_pktinfo.ipi6_ifindex = pkt.ipi6_ifindex;
+-- 
+2.11.0
+

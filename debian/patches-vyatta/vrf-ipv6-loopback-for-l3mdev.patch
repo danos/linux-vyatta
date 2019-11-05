@@ -1,0 +1,50 @@
+ipv6: Allow the l3mdev to be a loopback
+
+There is no way currently for an IPv6 client connect using a loopback
+address in a VRF, whereas for IPv4 the loopback address can be added:
+
+    $ sudo ip addr add dev vrfred 127.0.0.1/8
+    $ sudo ip -6 addr add ::1/128 dev vrfred
+    RTNETLINK answers: Cannot assign requested address
+
+So allow ::1 to be configured on an L3 master device. In order for
+this to be usable ip_route_output_flags needs to not consider ::1 to
+be a link scope address (since oif == l3mdev and so it would be
+dropped), and ipv6_rcv needs to consider the l3mdev to be a loopback
+device so that it doesn't drop the packets.
+
+Signed-off-by: Robert Shearman <rshearma@vyatta.att-mail.com>
+--- a/net/ipv6/addrconf.c
++++ b/net/ipv6/addrconf.c
+@@ -998,6 +998,7 @@ ipv6_add_addr(struct inet6_dev *idev, st
+ 	    (addr_type & IPV6_ADDR_MULTICAST &&
+ 	     !(cfg->ifa_flags & IFA_F_MCAUTOJOIN)) ||
+ 	    (!(idev->dev->flags & IFF_LOOPBACK) &&
++	     !netif_is_l3_master(idev->dev) &&
+ 	     addr_type & IPV6_ADDR_LOOPBACK))
+ 		return ERR_PTR(-EADDRNOTAVAIL);
+ 
+--- a/net/ipv6/route.c
++++ b/net/ipv6/route.c
+@@ -2134,7 +2134,8 @@ struct dst_entry *ip6_route_output_flags
+ {
+ 	bool any_src;
+ 
+-	if (rt6_need_strict(&fl6->daddr)) {
++	if (ipv6_addr_type(&fl6->daddr) &
++	    (IPV6_ADDR_MULTICAST | IPV6_ADDR_LINKLOCAL)) {
+ 		struct dst_entry *dst;
+ 
+ 		dst = l3mdev_link_scope_lookup(net, fl6);
+--- a/net/ipv6/ip6_input.c
++++ b/net/ipv6/ip6_input.c
+@@ -178,7 +178,8 @@ static struct sk_buff *ip6_rcv_core(stru
+ 	 */
+ 	if ((ipv6_addr_loopback(&hdr->saddr) ||
+ 	     ipv6_addr_loopback(&hdr->daddr)) &&
+-	     !(dev->flags & IFF_LOOPBACK))
++	    !(dev->flags & IFF_LOOPBACK) &&
++	    !netif_is_l3_master(dev))
+ 		goto err;
+ 
+ 	/* RFC4291 Errata ID: 3480

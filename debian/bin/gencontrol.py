@@ -14,6 +14,7 @@ from debian_linux.debian import PackageDescription, PackageRelation, \
 from debian_linux.gencontrol import Gencontrol as Base, merge_packages, \
     iter_featuresets
 from debian_linux.utils import Templates, read_control
+from debian_linux.kconfig import *
 
 locale.setlocale(locale.LC_CTYPE, "C.UTF-8")
 
@@ -55,6 +56,8 @@ class Gencontrol(Base):
             'tools-unversioned': config.SchemaItemBoolean(),
             'tools-versioned': config.SchemaItemBoolean(),
             'source': config.SchemaItemBoolean(),
+            'headers-meta': config.SchemaItemBoolean(),
+            'bvnos-dev': config.SchemaItemBoolean(),
         }
     }
 
@@ -318,6 +321,21 @@ class Gencontrol(Base):
         vars['localversion_headers'] = vars['localversion']
         makeflags['LOCALVERSION_HEADERS'] = vars['localversion_headers']
 
+    def do_featureset_packages(self, packages, makefile, arch, featureset, vars, makeflags, extra):
+        if self.config.merge('packages', arch, featureset).get('headers-meta', False):
+            makeflags['DO_HEADERS_META'] = True
+            meta = self.process_packages(self.templates["control.headers.meta"], vars)
+            merge_packages(packages, meta, arch)
+        else:
+            makeflags['DO_HEADERS_META'] = False
+
+        if self.config.merge('packages', arch, featureset).get('bvnos-dev', False):
+            makeflags['DO_BVNOS_DEV'] = True
+            bvnos_dev = self.process_packages(self.templates["control.bvnos-dev"], vars)
+            merge_packages(packages, bvnos_dev, arch)
+        else:
+            makeflags['DO_BVNOS_DEV'] = False
+
     flavour_makeflags_base = (
         ('compiler', 'COMPILER', False),
         ('compiler-filename', 'COMPILER', True),
@@ -464,6 +482,14 @@ class Gencontrol(Base):
         assert len(image) == 1
 
         vars.setdefault('desc', None)
+
+        if os.path.isfile("debian/config/%s/%s/config" % (arch, featureset)):
+            fset_config = KconfigFile()
+            fset_config.read(open("debian/config/%s/%s/config" % (arch, featureset)))
+            if 'NET_ROUTING_DOMAINS' in fset_config and fset_config['NET_ROUTING_DOMAINS'].value:
+                image_fields['Provides'].append("linux-image-rtdmn")
+            if 'NET_VRF' in fset_config and fset_config['NET_VRF'].value:
+                image_fields['Provides'].append("linux-image-vrf")
 
         image_main = self.process_real_image(image[0], image_fields, vars)
         packages_own.append(image_main)

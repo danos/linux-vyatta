@@ -1,0 +1,112 @@
+---
+ include/linux/if_vlan.h  |    7 ++++++-
+ net/8021q/vlan.h         |   12 ++++++++++++
+ net/8021q/vlan_core.c    |    9 ++++++---
+ net/8021q/vlan_netlink.c |    3 +++
+ net/core/dev.c           |    8 +++++++-
+ 5 files changed, 34 insertions(+), 5 deletions(-)
+
+--- a/include/linux/if_vlan.h
++++ b/include/linux/if_vlan.h
+@@ -307,6 +307,9 @@ static inline bool eth_type_vlan(__be16
+ 	switch (ethertype) {
+ 	case htons(ETH_P_8021Q):
+ 	case htons(ETH_P_8021AD):
++	case htons(ETH_P_QINQ1):
++	case htons(ETH_P_QINQ2):
++	case htons(ETH_P_QINQ3):
+ 		return true;
+ 	default:
+ 		return false;
+@@ -318,7 +321,9 @@ static inline bool vlan_hw_offload_capab
+ {
+ 	if (proto == htons(ETH_P_8021Q) && features & NETIF_F_HW_VLAN_CTAG_TX)
+ 		return true;
+-	if (proto == htons(ETH_P_8021AD) && features & NETIF_F_HW_VLAN_STAG_TX)
++	if ((proto == htons(ETH_P_8021AD) || proto == htons(ETH_P_QINQ1)
++	     || proto == htons(ETH_P_QINQ2) || proto == htons(ETH_P_QINQ3)) &&
++	    features & NETIF_F_HW_VLAN_STAG_TX)
+ 		return true;
+ 	return false;
+ }
+--- a/net/8021q/vlan.h
++++ b/net/8021q/vlan.h
+@@ -16,6 +16,9 @@
+ enum vlan_protos {
+ 	VLAN_PROTO_8021Q	= 0,
+ 	VLAN_PROTO_8021AD,
++	VLAN_PROTO_QINQ1,
++	VLAN_PROTO_QINQ2,
++	VLAN_PROTO_QINQ3,
+ 	VLAN_PROTO_NUM,
+ };
+ 
+@@ -38,11 +41,20 @@ struct vlan_info {
+ 
+ static inline unsigned int vlan_proto_idx(__be16 proto)
+ {
++	/* 1AD and QINQ1/2/3 are applied to outer vlan
++	 * and do not coexist.
++	 */
+ 	switch (proto) {
+ 	case htons(ETH_P_8021Q):
+ 		return VLAN_PROTO_8021Q;
+ 	case htons(ETH_P_8021AD):
+ 		return VLAN_PROTO_8021AD;
++	case htons(ETH_P_QINQ1):
++		return VLAN_PROTO_QINQ1;
++	case htons(ETH_P_QINQ2):
++		return VLAN_PROTO_QINQ2;
++	case htons(ETH_P_QINQ3):
++		return VLAN_PROTO_QINQ3;
+ 	default:
+ 		BUG();
+ 		return 0;
+--- a/net/8021q/vlan_core.c
++++ b/net/8021q/vlan_core.c
+@@ -170,7 +170,8 @@ static bool vlan_hw_filter_capable(const
+ 	if (proto == htons(ETH_P_8021Q) &&
+ 	    dev->features & NETIF_F_HW_VLAN_CTAG_FILTER)
+ 		return true;
+-	if (proto == htons(ETH_P_8021AD) &&
++	if ((proto == htons(ETH_P_8021AD) || proto == htons(ETH_P_QINQ1) ||
++	     proto == htons(ETH_P_QINQ2) || proto == htons(ETH_P_QINQ3)) &&
+ 	    dev->features & NETIF_F_HW_VLAN_STAG_FILTER)
+ 		return true;
+ 	return false;
+--- a/net/8021q/vlan_netlink.c
++++ b/net/8021q/vlan_netlink.c
+@@ -71,6 +71,9 @@ static int vlan_validate(struct nlattr *
+ 		switch (nla_get_be16(data[IFLA_VLAN_PROTOCOL])) {
+ 		case htons(ETH_P_8021Q):
+ 		case htons(ETH_P_8021AD):
++		case htons(ETH_P_QINQ1):
++		case htons(ETH_P_QINQ2):
++		case htons(ETH_P_QINQ3):
+ 			break;
+ 		default:
+ 			NL_SET_ERR_MSG_MOD(extack, "Invalid VLAN protocol");
+--- a/net/core/dev.c
++++ b/net/core/dev.c
+@@ -4467,6 +4467,9 @@ static bool skb_pfmemalloc_protocol(stru
+ 	case htons(ETH_P_IPV6):
+ 	case htons(ETH_P_8021Q):
+ 	case htons(ETH_P_8021AD):
++	case htons(ETH_P_QINQ1):
++	case htons(ETH_P_QINQ2):
++	case htons(ETH_P_QINQ3):
+ 		return true;
+ 	default:
+ 		return false;
+@@ -4522,7 +4525,10 @@ another_round:
+ 	__this_cpu_inc(softnet_data.processed);
+ 
+ 	if (skb->protocol == cpu_to_be16(ETH_P_8021Q) ||
+-	    skb->protocol == cpu_to_be16(ETH_P_8021AD)) {
++	    skb->protocol == cpu_to_be16(ETH_P_8021AD) ||
++	    skb->protocol == cpu_to_be16(ETH_P_QINQ1) ||
++	    skb->protocol == cpu_to_be16(ETH_P_QINQ2) ||
++	    skb->protocol == cpu_to_be16(ETH_P_QINQ3)) {
+ 		skb = skb_vlan_untag(skb);
+ 		if (unlikely(!skb))
+ 			goto out;

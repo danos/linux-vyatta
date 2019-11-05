@@ -1,0 +1,268 @@
+---
+ include/linux/netdevice.h |    2 +
+ net/8021q/vlan.c          |   80 ++++++++++++++++++++++++++++++++++++++++++----
+ net/8021q/vlan.h          |    2 +
+ net/8021q/vlan_netlink.c  |   79 +++++++++++++++++++++++++++++++++++++++------
+ net/core/rtnetlink.c      |    5 ++
+ 5 files changed, 151 insertions(+), 17 deletions(-)
+
+--- a/include/linux/netdevice.h
++++ b/include/linux/netdevice.h
+@@ -2452,6 +2452,8 @@ enum netdev_cmd {
+ 	NETDEV_CVLAN_FILTER_DROP_INFO,
+ 	NETDEV_SVLAN_FILTER_PUSH_INFO,
+ 	NETDEV_SVLAN_FILTER_DROP_INFO,
++	NETDEV_CHANGEVLAN,
++	NETDEV_CHANGELINK,
+ };
+ const char *netdev_cmd_to_name(enum netdev_cmd cmd);
+ 
+--- a/net/8021q/vlan.c
++++ b/net/8021q/vlan.c
+@@ -83,7 +83,7 @@ static void vlan_stacked_transfer_operst
+ 		netif_stacked_transfer_operstate(rootdev, dev);
+ }
+ 
+-void unregister_vlan_dev(struct net_device *dev, struct list_head *head)
++void vlan_dev_remove_vlan(struct net_device *dev, struct list_head *head)
+ {
+ 	struct vlan_dev_priv *vlan = vlan_dev_priv(dev);
+ 	struct net_device *real_dev = vlan->real_dev;
+@@ -108,11 +108,6 @@ void unregister_vlan_dev(struct net_devi
+ 	vlan_group_set_device(grp, vlan->vlan_proto, vlan_id, NULL);
+ 
+ 	netdev_upper_dev_unlink(real_dev, dev);
+-	/* Because unregister_netdevice_queue() makes sure at least one rcu
+-	 * grace period is respected before device freeing,
+-	 * we dont need to call synchronize_net() here.
+-	 */
+-	unregister_netdevice_queue(dev, head);
+ 
+ 	if (grp->nr_vlan_devs == 0) {
+ 		vlan_mvrp_uninit_applicant(real_dev);
+@@ -125,6 +120,17 @@ void unregister_vlan_dev(struct net_devi
+ 	dev_put(real_dev);
+ }
+ 
++void unregister_vlan_dev(struct net_device *dev, struct list_head *head)
++{
++	vlan_dev_remove_vlan(dev, head);
++
++	/* Because unregister_netdevice_queue() makes sure at least one rcu
++	 * grace period is respected before device freeing,
++	 * we dont need to call synchronize_net() here.
++	 */
++	unregister_netdevice_queue(dev, head);
++}
++
+ int vlan_check_real_dev(struct net_device *real_dev,
+ 			__be16 protocol, u16 vlan_id,
+ 			struct netlink_ext_ack *extack)
+@@ -145,6 +151,68 @@ int vlan_check_real_dev(struct net_devic
+ 	return 0;
+ }
+ 
++int change_vlan_dev(struct net_device *dev, struct netlink_ext_ack *extack)
++{
++	struct vlan_dev_priv *vlan = vlan_dev_priv(dev);
++	struct net_device *real_dev = vlan->real_dev;
++	u16 vlan_id = vlan->vlan_id;
++	struct vlan_info *vlan_info;
++	struct vlan_group *grp;
++	int err;
++
++	err = vlan_vid_add(real_dev, vlan->vlan_proto, vlan_id);
++	if (err)
++		return err;
++
++	vlan_info = rtnl_dereference(real_dev->vlan_info);
++	/* vlan_info should be there now. vlan_vid_add took care of it */
++	BUG_ON(!vlan_info);
++
++	grp = &vlan_info->grp;
++	if (grp->nr_vlan_devs == 0) {
++		err = vlan_gvrp_init_applicant(real_dev);
++		if (err < 0)
++			goto out_vid_del;
++		err = vlan_mvrp_init_applicant(real_dev);
++		if (err < 0)
++			goto out_uninit_gvrp;
++	}
++
++	err = vlan_group_prealloc_vid(grp, vlan->vlan_proto, vlan_id);
++	if (err < 0)
++		goto out_uninit_mvrp;
++
++	vlan->nest_level = dev_get_nest_level(real_dev) + 1;
++
++	err = netdev_upper_dev_link(real_dev, dev, extack);
++	if (err)
++		goto out_uninit_mvrp;
++
++	/* Account for reference in struct vlan_dev_priv */
++	dev_hold(real_dev);
++
++	vlan_stacked_transfer_operstate(real_dev, dev, vlan);
++	linkwatch_fire_event(dev); /* _MUST_ call rfc2863_policy() */
++
++	/* So, got the sucker initialized, now lets place
++	 * it into our local structure.
++	 */
++	vlan_group_set_device(grp, vlan->vlan_proto, vlan_id, dev);
++	grp->nr_vlan_devs++;
++
++	return 0;
++
++out_uninit_mvrp:
++	if (grp->nr_vlan_devs == 0)
++		vlan_mvrp_uninit_applicant(real_dev);
++out_uninit_gvrp:
++	if (grp->nr_vlan_devs == 0)
++		vlan_gvrp_uninit_applicant(real_dev);
++out_vid_del:
++	vlan_vid_del(real_dev, vlan->vlan_proto, vlan_id);
++	return err;
++}
++
+ int register_vlan_dev(struct net_device *dev, struct netlink_ext_ack *extack)
+ {
+ 	struct vlan_dev_priv *vlan = vlan_dev_priv(dev);
+--- a/net/8021q/vlan.h
++++ b/net/8021q/vlan.h
+@@ -113,6 +113,8 @@ int vlan_check_real_dev(struct net_devic
+ 			struct netlink_ext_ack *extack);
+ void vlan_setup(struct net_device *dev);
+ int register_vlan_dev(struct net_device *dev, struct netlink_ext_ack *extack);
++int change_vlan_dev(struct net_device *dev, struct netlink_ext_ack *extack);
++void vlan_dev_remove_vlan(struct net_device *dev, struct list_head *head);
+ void unregister_vlan_dev(struct net_device *dev, struct list_head *head);
+ bool vlan_dev_inherit_address(struct net_device *dev,
+ 			      struct net_device *real_dev);
+--- a/net/8021q/vlan_netlink.c
++++ b/net/8021q/vlan_netlink.c
+@@ -58,8 +58,13 @@ static int vlan_validate(struct nlattr *
+ 	}
+ 
+ 	if (!data) {
+-		NL_SET_ERR_MSG_MOD(extack, "VLAN properties not specified");
+-		return -EINVAL;
++		if (tb[IFLA_LINK])
++			return 0;
++		else {
++			NL_SET_ERR_MSG_MOD(extack,
++					   "VLAN properties not specified");
++			return -EINVAL;
++		}
+ 	}
+ 
+ 	if (data[IFLA_VLAN_PROTOCOL]) {
+@@ -108,22 +113,79 @@ static int vlan_changelink(struct net_de
+ 			   struct nlattr *data[],
+ 			   struct netlink_ext_ack *extack)
+ {
++	struct vlan_dev_priv *vlan = vlan_dev_priv(dev);
+ 	struct ifla_vlan_flags *flags;
+ 	struct ifla_vlan_qos_mapping *m;
+ 	struct nlattr *attr;
+-	int rem;
++	__be16 proto;
++	int err, rem, linkcmd = 0;
++	u16 id;
+ 
+-	if (data[IFLA_VLAN_FLAGS]) {
++	if (!vlan)
++		return 0;
++
++	if (data && data[IFLA_VLAN_PROTOCOL])
++		proto = nla_get_be16(data[IFLA_VLAN_PROTOCOL]);
++	else
++		proto = htons(ETH_P_8021Q);
++
++	if (data && data[IFLA_VLAN_ID])
++		id = nla_get_u16(data[IFLA_VLAN_ID]);
++	else
++		id = vlan->vlan_id;
++
++	if (tb[IFLA_LINK]) {
++		struct net_device *dev_newreal;
++		int ifindex;
++
++		ifindex = nla_get_u32(tb[IFLA_LINK]);
++
++		if (vlan->real_dev && (ifindex != vlan->real_dev->ifindex)) {
++			dev_newreal = __dev_get_by_index(dev_net(dev), ifindex);
++			if (dev_newreal) {
++				err = vlan_check_real_dev(dev_newreal,
++							  proto, id, extack);
++				if (err < 0)
++					return err;
++
++				vlan_dev_remove_vlan(dev, NULL);
++				vlan->real_dev = dev_newreal;
++				change_vlan_dev(dev, extack);
++				err = call_netdevice_notifiers(
++					       NETDEV_CHANGELINK, dev);
++				notifier_to_errno(err);
++			}
++			linkcmd = 1;
++		}
++	}
++
++	if (vlan->vlan_id != id || vlan->vlan_proto != proto) {
++		vlan_dev_remove_vlan(dev, NULL);
++		err = vlan_check_real_dev(vlan->real_dev, proto, id, extack);
++		if (err < 0)
++			return err;
++		vlan->vlan_id = id;
++		vlan->vlan_proto = proto;
++		change_vlan_dev(dev, extack);
++		err = call_netdevice_notifiers(NETDEV_CHANGEVLAN, dev);
++		notifier_to_errno(err);
++	} else if (!linkcmd) {
++		err = vlan_check_real_dev(vlan->real_dev, proto, id, extack);
++		if (err < 0)
++			return err;
++	}
++
++	if (data && data[IFLA_VLAN_FLAGS]) {
+ 		flags = nla_data(data[IFLA_VLAN_FLAGS]);
+ 		vlan_dev_change_flags(dev, flags->flags, flags->mask);
+ 	}
+-	if (data[IFLA_VLAN_INGRESS_QOS]) {
++	if (data && data[IFLA_VLAN_INGRESS_QOS]) {
+ 		nla_for_each_nested(attr, data[IFLA_VLAN_INGRESS_QOS], rem) {
+ 			m = nla_data(attr);
+ 			vlan_dev_set_ingress_priority(dev, m->to, m->from);
+ 		}
+ 	}
+-	if (data[IFLA_VLAN_EGRESS_QOS]) {
++	if (data && data[IFLA_VLAN_EGRESS_QOS]) {
+ 		nla_for_each_nested(attr, data[IFLA_VLAN_EGRESS_QOS], rem) {
+ 			m = nla_data(attr);
+ 			vlan_dev_set_egress_priority(dev, m->from, m->to);
+@@ -169,11 +231,6 @@ static int vlan_newlink(struct net *src_
+ 	dev->priv_flags |= (real_dev->priv_flags & IFF_XMIT_DST_RELEASE);
+ 	vlan->flags	 = VLAN_FLAG_REORDER_HDR;
+ 
+-	err = vlan_check_real_dev(real_dev, vlan->vlan_proto, vlan->vlan_id,
+-				  extack);
+-	if (err < 0)
+-		return err;
+-
+ 	max_mtu = netif_reduces_vlan_mtu(real_dev) ? real_dev->mtu - VLAN_HLEN :
+ 						     real_dev->mtu;
+ 	if (!tb[IFLA_MTU])
+--- a/net/core/rtnetlink.c
++++ b/net/core/rtnetlink.c
+@@ -3044,6 +3044,11 @@ replay:
+ 				if (err < 0)
+ 					return err;
+ 				status |= DO_SETLINK_NOTIFY;
++			} else if (tb[IFLA_LINK] && ops) {
++				err = ops->changelink(dev, tb, data, extack);
++				if (err < 0)
++					return err;
++				status |= DO_SETLINK_NOTIFY;
+ 			}
+ 
+ 			if (linkinfo[IFLA_INFO_SLAVE_DATA]) {

@@ -1,0 +1,124 @@
+tun: add Vyatta extensions
+
+Extensions to allow masqurade of ethtool info and device statistics.
+
+Signed-off-by: Stephen Hemminger <stephen@networkplumber.org>
+
+---
+ drivers/net/tun.c              |   78 ++++++++++++++++++++++++++++++++++-------
+ include/uapi/linux/if_tunnel.h |    8 ++++
+ 2 files changed, 73 insertions(+), 13 deletions(-)
+
+--- a/drivers/net/tun.c
++++ b/drivers/net/tun.c
+@@ -61,6 +61,7 @@
+ #include <linux/if_arp.h>
+ #include <linux/if_ether.h>
+ #include <linux/if_tun.h>
++#include <linux/if_tunnel.h>
+ #include <linux/if_vlan.h>
+ #include <linux/crc32.h>
+ #include <linux/nsproxy.h>
+@@ -248,6 +249,10 @@ struct tun_struct {
+ 	struct tun_prog __rcu *steering_prog;
+ 	struct tun_prog __rcu *filter_prog;
+ 	struct ethtool_link_ksettings link_ksettings;
++
++	/* Vyatta extensions for remote statistics and speed */
++	char		hw_driver[32];
++	char		hw_bus[ETHTOOL_BUSINFO_LEN];
+ };
+ 
+ struct veth {
+@@ -1155,6 +1160,34 @@ static netdev_features_t tun_net_fix_fea
+ 	return (features & tun->set_features) | (features & ~TUN_USER_FEATURES);
+ }
+ 
++static int
++tun_net_set_info(struct net_device *dev, const void __user *data)
++{
++	struct tun_struct *tun = netdev_priv(dev);
++	struct tunnel_lower info;
++
++	if (!capable(CAP_NET_ADMIN))
++		return -EPERM;
++
++	if (copy_from_user(&info, data, sizeof(info)))
++		return -EFAULT;
++
++	strlcpy(tun->hw_driver, info.driver, sizeof(tun->hw_driver));
++	strlcpy(tun->hw_bus, info.bus, sizeof(tun->hw_bus));
++	return 0;
++}
++
++static int
++tun_net_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
++{
++	switch (cmd) {
++	case SIOCTUNNELINFO:
++		return tun_net_set_info(dev, ifr->ifr_ifru.ifru_data);
++	default:
++		return -EOPNOTSUPP;
++	}
++}
++
+ static void tun_set_headroom(struct net_device *dev, int new_hr)
+ {
+ 	struct tun_struct *tun = netdev_priv(dev);
+@@ -1323,6 +1356,7 @@ static const struct net_device_ops tap_n
+ 	.ndo_start_xmit		= tun_net_xmit,
+ 	.ndo_fix_features	= tun_net_fix_features,
+ 	.ndo_set_rx_mode	= tun_net_mclist,
++	.ndo_do_ioctl		= tun_net_ioctl,
+ 	.ndo_set_mac_address	= eth_mac_addr,
+ 	.ndo_validate_addr	= eth_validate_addr,
+ 	.ndo_select_queue	= tun_select_queue,
+@@ -2615,6 +2649,11 @@ static int tun_set_iff(struct net *net,
+ 
+ 		spin_lock_init(&tun->lock);
+ 
++		strlcpy(tun->hw_driver, DRV_NAME, sizeof(tun->hw_driver));
++		strlcpy(tun->hw_bus,
++			(ifr->ifr_flags & IFF_TUN) ? "tun" : "tap",
++			sizeof(tun->hw_bus));
++
+ 		err = security_tun_dev_alloc_security(&tun->security);
+ 		if (err < 0)
+ 			goto err_free_stat;
+@@ -3319,17 +3358,9 @@ static void tun_get_drvinfo(struct net_d
+ {
+ 	struct tun_struct *tun = netdev_priv(dev);
+ 
+-	strlcpy(info->driver, DRV_NAME, sizeof(info->driver));
++	strlcpy(info->driver, tun->hw_driver, sizeof(info->driver));
+ 	strlcpy(info->version, DRV_VERSION, sizeof(info->version));
+-
+-	switch (tun->flags & TUN_TYPE_MASK) {
+-	case IFF_TUN:
+-		strlcpy(info->bus_info, "tun", sizeof(info->bus_info));
+-		break;
+-	case IFF_TAP:
+-		strlcpy(info->bus_info, "tap", sizeof(info->bus_info));
+-		break;
+-	}
++	strlcpy(info->bus_info, tun->hw_bus, sizeof(info->bus_info));
+ }
+ 
+ static u32 tun_get_msglevel(struct net_device *dev)
+--- a/include/uapi/linux/if_tunnel.h
++++ b/include/uapi/linux/if_tunnel.h
+@@ -22,6 +22,14 @@
+ #define SIOCDEL6RD      (SIOCDEVPRIVATE + 10)
+ #define SIOCCHG6RD      (SIOCDEVPRIVATE + 11)
+ 
++/* Vyatta extension for setting tunnel info from application */
++#define SIOCTUNNELINFO	(SIOCDEVPRIVATE + 15)
++
++struct tunnel_lower {
++	char driver[32];
++	char bus[32];
++};
++
+ #define GRE_CSUM	__cpu_to_be16(0x8000)
+ #define GRE_ROUTING	__cpu_to_be16(0x4000)
+ #define GRE_KEY		__cpu_to_be16(0x2000)

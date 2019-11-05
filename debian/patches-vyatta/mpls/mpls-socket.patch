@@ -1,0 +1,598 @@
+MPLS: socket support for OAM applications
+
+Allow application to send and receive raw MPLS packets.
+Targeted at OAM applications.
+
+Socket option to allow reception of TTL expiry packets.
+Packet is passed to application rather than dropped.
+Application can attach a BPF filter to match on specific packets of
+interest.
+Socket option to allow input interface to be passed up with received
+packets.
+
+When sending, outgoing interface and next hop can be provided in control
+info.
+Default is to send via loopback device and switch on top label.
+Top label can be provided in packet data or separately in a socket address.
+
+Disposition: Internal (until gets sent upstream)
+Signed-off-by: George Wilkie <gwilkie@vyatta.att-mail.com
+---
+ include/linux/socket.h    |    1 
+ include/uapi/linux/mpls.h |   20 +
+ net/mpls/af_mpls.c        |  466 +++++++++++++++++++++++++++++++++++++++++++++-
+ 3 files changed, 480 insertions(+), 7 deletions(-)
+
+--- a/net/mpls/af_mpls.c
++++ b/net/mpls/af_mpls.c
+@@ -35,6 +35,20 @@
+ 
+ #define MPLS_NEIGH_TABLE_UNSPEC (NEIGH_LINK_TABLE + 1)
+ 
++/* MPLS socket info */
++#define mpls_sk(sk) ((struct mpls_sock *)(sk))
++
++struct mpls_sock {
++	/* struct sock has to be the first member of mpls_sock */
++	struct sock	sk;
++	__u8		ttl_expiry:1;
++	__u8		input_if:1;
++};
++
++/* List of all MPLS sockets */
++HLIST_HEAD(mpls_sock_list);
++DEFINE_SPINLOCK(mpls_sock_list_lock);
++
+ static int zero = 0;
+ static int one = 1;
+ static int label_limit = (1 << 20) - 1;
+@@ -330,6 +344,50 @@ static bool mpls_egress(struct net *net,
+ 	return success;
+ }
+ 
++static bool mpls_ttl_expiry(struct sk_buff *skb, struct net_device *dev)
++{
++	struct sock *sk;
++	struct sock *last = NULL;
++	struct net *net = dev_net(skb->dev);
++	bool rcvd = false;
++
++	rcu_read_lock();
++	sk_for_each_rcu(sk, &mpls_sock_list) {
++		struct mpls_sock *ms = mpls_sk(sk);
++
++		/* If socket is bound to an interface, only report
++		 * the packet if it came from that interface.
++		 */
++		if (ms->ttl_expiry &&
++		    (!sk->sk_bound_dev_if ||
++		     sk->sk_bound_dev_if == dev->ifindex) &&
++		    net_eq(sock_net(sk), net)) {
++			if (last) {
++				struct sk_buff *cl = skb_clone(skb, GFP_ATOMIC);
++
++				if (cl) {
++					if (sock_queue_rcv_skb(sk, cl) == 0)
++						rcvd = true;
++					else
++						kfree_skb(cl);
++				}
++			}
++			last = sk;
++		}
++	}
++
++	if (last) {
++		if (sock_queue_rcv_skb(last, skb) == 0)
++			rcvd = true;
++		else if (rcvd)
++			/* Clone was received, free original */
++			kfree_skb(skb);
++	}
++
++	rcu_read_unlock();
++	return rcvd;
++}
++
+ static int mpls_forward(struct sk_buff *skb, struct net_device *dev,
+ 			struct packet_type *pt, struct net_device *orig_dev)
+ {
+@@ -373,6 +431,17 @@ static int mpls_forward(struct sk_buff *
+ 	hdr = mpls_hdr(skb);
+ 	dec = mpls_entry_decode(hdr);
+ 
++	skb_orphan(skb);
++
++	/* Verify ttl is valid */
++	if (dec.ttl <= 1) {
++		/* Give it to anyone listening for ttl expiry packets */
++		if (mpls_ttl_expiry(skb, orig_dev))
++			return NET_RX_SUCCESS;
++		goto err;
++	}
++	dec.ttl -= 1;
++
+ 	rt = mpls_route_input_rcu(net, dec.label);
+ 	if (!rt) {
+ 		MPLS_INC_STATS(mdev, rx_noroute);
+@@ -387,18 +456,11 @@ static int mpls_forward(struct sk_buff *
+ 	skb_pull(skb, sizeof(*hdr));
+ 	skb_reset_network_header(skb);
+ 
+-	skb_orphan(skb);
+-
+ 	if (skb_warn_if_lro(skb))
+ 		goto err;
+ 
+ 	skb_forward_csum(skb);
+ 
+-	/* Verify ttl is valid */
+-	if (dec.ttl <= 1)
+-		goto err;
+-	dec.ttl -= 1;
+-
+ 	/* Find the output device */
+ 	out_dev = rcu_dereference(nh->nh_dev);
+ 	if (!mpls_output_possible(out_dev))
+@@ -471,6 +533,380 @@ static struct packet_type mpls_packet_ty
+ 	.func = mpls_forward,
+ };
+ 
++static int mpls_sock_insert(struct sock *sk)
++{
++	spin_lock(&mpls_sock_list_lock);
++	sk_add_node_rcu(sk, &mpls_sock_list);
++	spin_unlock(&mpls_sock_list_lock);
++
++	return 0;
++}
++
++static void mpls_sock_remove(struct sock *sk)
++{
++	spin_lock(&mpls_sock_list_lock);
++	sk_del_node_init_rcu(sk);
++	spin_unlock(&mpls_sock_list_lock);
++}
++
++static int mpls_sock_release(struct socket *sock)
++{
++	struct sock *sk = sock->sk;
++
++	if (sk) {
++		sock->sk = NULL;
++		sk_common_release(sk);
++	}
++	return 0;
++}
++
++static int mpls_setsockopt(struct socket *sock, int level, int optname,
++			   char __user *optval, unsigned int optlen)
++{
++	struct sock *sk = sock->sk;
++	struct mpls_sock *ms = mpls_sk(sk);
++	unsigned int val = 0;
++	int err = 0;
++
++	if (level != SOL_MPLS)
++		return -ENOPROTOOPT;
++
++	if (optlen != sizeof(val))
++		return -EINVAL;
++
++	if (get_user(val, (unsigned int __user *)optval))
++		return -EFAULT;
++
++	lock_sock(sk);
++	switch (optname) {
++	case MPLS_TTL_EXPIRY:
++		ms->ttl_expiry = val ? 1 : 0;
++		break;
++	case MPLS_INPUTIF:
++		ms->input_if = val ? 1 : 0;
++		break;
++	default:
++		err = -ENOPROTOOPT;
++		break;
++	}
++	release_sock(sk);
++	return err;
++}
++
++static int mpls_getsockopt(struct socket *sock, int level, int optname,
++			   char __user *optval, int __user *optlen)
++{
++	struct sock *sk = sock->sk;
++	struct mpls_sock *ms = mpls_sk(sk);
++	unsigned int val;
++	int len;
++
++	if (level != SOL_MPLS)
++		return -ENOPROTOOPT;
++
++	if (get_user(len, optlen))
++		return -EFAULT;
++
++	len = min_t(unsigned int, len, sizeof(int));
++	if (len < 1)
++		return -EINVAL;
++
++	lock_sock(sk);
++	switch (optname) {
++	case MPLS_TTL_EXPIRY:
++		val = ms->ttl_expiry ? 1 : 0;
++		break;
++	case MPLS_INPUTIF:
++		val = ms->input_if ? 1 : 0;
++		break;
++	default:
++		release_sock(sk);
++		return -ENOPROTOOPT;
++	}
++	release_sock(sk);
++
++	if (put_user(len, optlen))
++		return -EFAULT;
++	if (copy_to_user(optval, &val, len))
++		return -EFAULT;
++	return 0;
++}
++
++static int mpls_send_ctl(struct net *net, struct sock *sk, struct msghdr *msg,
++			 struct net_device **dev, u8 *table, const void **addr)
++{
++	struct cmsghdr *cmsg;
++	struct mpls_nhinfo *nhi;
++	int alen;
++	int err = 0;
++
++	for_each_cmsghdr(cmsg, msg) {
++		if (!CMSG_OK(msg, cmsg)) {
++			err = -EINVAL;
++			goto exit_f;
++		}
++
++		if (cmsg->cmsg_level != SOL_MPLS)
++			continue;
++
++		switch (cmsg->cmsg_type) {
++		case MPLS_NEXTHOP:
++			if (cmsg->cmsg_len < CMSG_LEN(sizeof(*nhi))) {
++				err = -EINVAL;
++				goto exit_f;
++			}
++
++			nhi = (struct mpls_nhinfo *)CMSG_DATA(cmsg);
++			if (nhi->mpls_family == AF_INET) {
++				alen = sizeof(struct in_addr);
++				*table = NEIGH_ARP_TABLE;
++			} else if (nhi->mpls_family == AF_INET6) {
++				alen = sizeof(struct in6_addr);
++				*table = NEIGH_ND_TABLE;
++			} else {
++				err = -EINVAL;
++				goto exit_f;
++			}
++
++			if (cmsg->cmsg_len < CMSG_LEN(sizeof(*nhi) + alen)) {
++				err = -EINVAL;
++				goto exit_f;
++			}
++
++			*dev = dev_get_by_index(net, nhi->mpls_ifindex);
++			if (!(*dev)) {
++				err = -EINVAL;
++				goto exit_f;
++			}
++
++			*addr = nhi->mpls_addr;
++			break;
++
++		default:
++			net_dbg_ratelimited("invalid mpls cmsg type: %d\n",
++					    cmsg->cmsg_type);
++			err = -EINVAL;
++			goto exit_f;
++		}
++	}
++
++exit_f:
++	return err;
++}
++
++static int mpls_sendmsg(struct socket *sock, struct msghdr *msg, size_t len)
++{
++	struct sock *sk = sock->sk;
++	struct net *net = sock_net(sk);
++	DECLARE_SOCKADDR(struct sockaddr_mpls *, addr, msg->msg_name);
++	int flags = msg->msg_flags;
++	int noblock = flags & MSG_DONTWAIT;
++	struct sk_buff *skb;
++	struct mpls_shim_hdr *hdr;
++	struct net_device *out_dev;
++	unsigned int hh_len;
++	unsigned int h_len;
++	unsigned int mtu;
++	const void *via;
++	u8 via_table;
++	int err;
++
++	/* Next hop can be provided in control message */
++	out_dev = NULL;
++	if (msg->msg_controllen) {
++		err = mpls_send_ctl(net, sk, msg, &out_dev, &via_table, &via);
++		if (err)
++			goto out;
++	}
++
++	/* Send via loopback device if no next hop supplied */
++	if (!out_dev) {
++		out_dev = net->loopback_dev;
++		dev_hold(out_dev);
++		via = out_dev->dev_addr;
++		via_table = NEIGH_LINK_TABLE;
++	}
++
++	/* Top label can be provided in socket address */
++	if (addr) {
++		err = -EINVAL;
++		if (msg->msg_namelen < sizeof(*addr))
++			goto out_dev;
++		if (addr->smpls_family != AF_MPLS)
++			goto out_dev;
++		hdr = (struct mpls_shim_hdr *)&addr->smpls_label;
++		h_len = sizeof(*hdr);
++	} else {
++		hdr = NULL;
++		h_len = 0;
++	}
++
++	/* Allocate a buffer and copy in the user data */
++	hh_len = LL_RESERVED_SPACE(out_dev);
++	if (!out_dev->header_ops)
++		hh_len = 0;
++	skb = sock_alloc_send_skb(sk, h_len + hh_len + len, noblock, &err);
++	if (!skb)
++		goto out_dev;
++
++	skb_reserve(skb, h_len + hh_len);
++	err = memcpy_from_msg(skb_put(skb, len), msg, len);
++	if (err)
++		goto out_skb;
++	skb_reset_network_header(skb);
++
++	/* Verify device can transmit the packet */
++	err = -ENETDOWN;
++	if (!mpls_output_possible(out_dev))
++		goto out_skb;
++
++	mtu = mpls_dev_mtu(out_dev);
++	err = -E2BIG;
++	if (mpls_pkt_too_big(skb, mtu - h_len))
++		goto out_skb;
++
++	skb->dev = out_dev;
++	skb->protocol = htons(ETH_P_MPLS_UC);
++
++	if (h_len) {
++		skb_push(skb, h_len);
++		skb_reset_network_header(skb);
++		memcpy(mpls_hdr(skb), hdr, h_len);
++	}
++
++	mpls_stats_inc_outucastpkts(out_dev, skb);
++
++	err = neigh_xmit(via_table, out_dev, via, skb);
++	if (err) {
++		net_dbg_ratelimited("%s: packet transmission failed: %d\n",
++				    __func__, err);
++		goto out_skb;
++	}
++
++	dev_put(out_dev);
++	return len;
++
++out_skb:
++	kfree_skb(skb);
++out_dev:
++	dev_put(out_dev);
++out:
++	return err;
++}
++
++static int mpls_recvmsg(struct socket *sock, struct msghdr *msg, size_t len,
++			int flags)
++{
++	struct sock *sk = sock->sk;
++	struct mpls_sock *ms = mpls_sk(sk);
++	struct sk_buff *skb;
++	int copied = 0;
++	int err = -EOPNOTSUPP;
++
++	if (flags & MSG_OOB)
++		goto out;
++
++	skb = skb_recv_datagram(sk, flags, flags & MSG_DONTWAIT, &err);
++	if (!skb)
++		goto out;
++
++	copied = skb->len;
++	if (copied > len) {
++		copied = len;
++		msg->msg_flags |= MSG_TRUNC;
++	}
++
++	err = skb_copy_datagram_msg(skb, 0, msg, copied);
++	if (err)
++		goto out_free;
++
++	sock_recv_ts_and_drops(msg, sk, skb);
++
++	if (msg->msg_name) {
++		DECLARE_SOCKADDR(struct sockaddr_mpls *, sm, msg->msg_name);
++
++		memset(sm, 0, sizeof(*sm));
++		sm->smpls_family = AF_MPLS;
++		sm->smpls_label.entry = mpls_hdr(skb)->label_stack_entry;
++		msg->msg_namelen = sizeof(*sm);
++	}
++
++	if (ms->input_if) {
++		put_cmsg(msg, SOL_MPLS, MPLS_INPUTIF, sizeof(skb->skb_iif),
++			 &skb->skb_iif);
++	}
++
++out_free:
++	skb_free_datagram(sk, skb);
++out:
++	if (err)
++		return err;
++	return copied;
++}
++
++static struct proto mpls_proto = {
++	.name		= "MPLS",
++	.owner		= THIS_MODULE,
++	.obj_size	= sizeof(struct mpls_sock),
++	.hash		= mpls_sock_insert,
++	.unhash		= mpls_sock_remove,
++};
++
++static const struct proto_ops mpls_proto_ops = {
++	.family =	AF_MPLS,
++	.owner =	THIS_MODULE,
++	.release =	mpls_sock_release,
++	.bind =		sock_no_bind,
++	.connect =	sock_no_connect,
++	.socketpair =	sock_no_socketpair,
++	.accept =	sock_no_accept,
++	.getname =	sock_no_getname,
++	.poll =		datagram_poll,
++	.ioctl =	sock_no_ioctl,
++	.listen =	sock_no_listen,
++	.shutdown =	sock_no_shutdown,
++	.setsockopt =	mpls_setsockopt,
++	.getsockopt =	mpls_getsockopt,
++	.sendmsg =	mpls_sendmsg,
++	.recvmsg =	mpls_recvmsg,
++	.mmap =		sock_no_mmap,
++	.sendpage =	sock_no_sendpage,
++};
++
++static void mpls_sock_destruct(struct sock *sk)
++{
++	skb_queue_purge(&sk->sk_receive_queue);
++}
++
++static int mpls_sock_create(struct net *net, struct socket *sock, int protocol,
++			    int kern)
++{
++	struct sock *sk;
++
++	if (sock->type != SOCK_RAW)
++		return -ESOCKTNOSUPPORT;
++	sk = sk_alloc(net, PF_MPLS, GFP_KERNEL, &mpls_proto, 0);
++	if (!sk)
++		return -ENOMEM;
++
++	sock->ops = &mpls_proto_ops;
++	sock_init_data(sock, sk);
++
++	sk->sk_family   = AF_MPLS;
++	sk->sk_protocol = protocol;
++	sk->sk_destruct = mpls_sock_destruct;
++
++	sk->sk_prot->hash(sk);
++
++	return 0;
++}
++
++static const struct net_proto_family mpls_family_ops = {
++	.family	= PF_MPLS,
++	.create	= mpls_sock_create,
++	.owner	= THIS_MODULE,
++};
++
+ static const struct nla_policy rtm_mpls_policy[RTA_MAX+1] = {
+ 	[RTA_DST]		= { .type = NLA_U32 },
+ 	[RTA_OIF]		= { .type = NLA_U32 },
+@@ -2606,6 +3042,14 @@ static int __init mpls_init(void)
+ 	if (err)
+ 		goto out_unregister_pernet;
+ 
++	err = proto_register(&mpls_proto, 0);
++	if (err)
++		goto out_unregister_notifier;
++
++	err = sock_register(&mpls_family_ops);
++	if (err)
++		goto out_unregister_proto;
++
+ 	dev_add_pack(&mpls_packet_type);
+ 
+ 	rtnl_af_register(&mpls_af_ops);
+@@ -2624,6 +3068,12 @@ static int __init mpls_init(void)
+ out:
+ 	return err;
+ 
++out_unregister_proto:
++	proto_unregister(&mpls_proto);
++
++out_unregister_notifier:
++	unregister_netdevice_notifier(&mpls_dev_notifier);
++
+ out_unregister_pernet:
+ 	unregister_pernet_subsys(&mpls_net_ops);
+ 	goto out;
+@@ -2638,6 +3088,8 @@ static void __exit mpls_exit(void)
+ 	unregister_netdevice_notifier(&mpls_dev_notifier);
+ 	unregister_pernet_subsys(&mpls_net_ops);
+ 	ipgre_tunnel_encap_del_mpls_ops();
++	sock_unregister(PF_MPLS);
++	proto_unregister(&mpls_proto);
+ }
+ module_exit(mpls_exit);
+ 
+--- a/include/uapi/linux/mpls.h
++++ b/include/uapi/linux/mpls.h
+@@ -4,6 +4,7 @@
+ 
+ #include <linux/types.h>
+ #include <asm/byteorder.h>
++#include <linux/socket.h>
+ 
+ /* Reference: RFC 5462, RFC 3032
+  *
+@@ -104,4 +105,23 @@ enum rtmpls_payload_nh_flags {
+ 
+ #define RTMPNF_ALL (RTMPNF_BOS_ONLY)
+ 
++struct sockaddr_mpls {
++	__kernel_sa_family_t	smpls_family;
++	unsigned short		smpls_pad;
++	struct mpls_label	smpls_label;
++	unsigned char		smpls_zero[8];
++};
++
++/* Socket options */
++#define MPLS_INPUTIF	1
++#define MPLS_TTL_EXPIRY	2
++#define MPLS_NEXTHOP	3
++
++struct mpls_nhinfo {
++	int		mpls_ifindex;
++	unsigned short	mpls_family;
++	unsigned short	mpls_pad;
++	unsigned char	mpls_addr[0];
++};
++
+ #endif /* _UAPI_MPLS_H */
+--- a/include/linux/socket.h
++++ b/include/linux/socket.h
+@@ -309,6 +309,7 @@ struct ucred {
+ #define SOL_ICMPV6	58
+ #define SOL_SCTP	132
+ #define SOL_UDPLITE	136     /* UDP-Lite (RFC 3828) */
++#define SOL_MPLS	137
+ #define SOL_RAW		255
+ #define SOL_IPX		256
+ #define SOL_AX25	257

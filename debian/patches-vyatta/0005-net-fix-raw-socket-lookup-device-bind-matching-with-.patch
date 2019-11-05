@@ -1,0 +1,93 @@
+From 16f4a40ccc2149a321083a1ff727fdc6f451b20a Mon Sep 17 00:00:00 2001
+From: Duncan Eastoe <deastoe@vyatta.att-mail.com>
+Date: Sun, 30 Sep 2018 15:24:42 +0100
+Subject: [PATCH net-next v5 5/9] net: fix raw socket lookup device bind
+ matching with VRFs
+
+When there exist a pair of raw sockets one unbound and one bound
+to a VRF but equal in all other respects, when a packet is received
+in the VRF context, __raw_v4_lookup() matches on both sockets.
+
+This results in the packet being delivered over both sockets,
+instead of only the raw socket bound to the VRF. The bound device
+checks in __raw_v4_lookup() are replaced with a call to
+raw_sk_bound_dev_eq() which correctly handles whether the packet
+should be delivered over the unbound socket in such cases.
+
+In __raw_v6_lookup() the match on the device binding of the socket is
+similarly updated to use raw_sk_bound_dev_eq() which matches the
+handling in __raw_v4_lookup().
+
+Importantly raw_sk_bound_dev_eq() takes the raw_l3mdev_accept sysctl
+into account.
+
+Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
+Signed-off-by: Mike Manning <mmanning@vyatta.att-mail.com>
+---
+ include/net/raw.h | 13 ++++++++++++-
+ net/ipv4/raw.c    |  3 +--
+ net/ipv6/raw.c    |  5 ++---
+ 3 files changed, 15 insertions(+), 6 deletions(-)
+
+diff --git a/include/net/raw.h b/include/net/raw.h
+index 20ebf0b3dfa8..821ff4887f77 100644
+--- a/include/net/raw.h
++++ b/include/net/raw.h
+@@ -17,7 +17,7 @@
+ #ifndef _RAW_H
+ #define _RAW_H
+ 
+-
++#include <net/inet_sock.h>
+ #include <net/protocol.h>
+ #include <linux/icmp.h>
+ 
+@@ -75,4 +75,15 @@ static inline struct raw_sock *raw_sk(const struct sock *sk)
+ 	return (struct raw_sock *)sk;
+ }
+ 
++static inline bool raw_sk_bound_dev_eq(struct net *net, int bound_dev_if,
++				       int dif, int sdif)
++{
++#if IS_ENABLED(CONFIG_NET_L3_MASTER_DEV)
++	return inet_bound_dev_eq(!!net->ipv4.sysctl_raw_l3mdev_accept,
++				 bound_dev_if, dif, sdif);
++#else
++	return inet_bound_dev_eq(true, bound_dev_if, dif, sdif);
++#endif
++}
++
+ #endif	/* _RAW_H */
+diff --git a/net/ipv4/raw.c b/net/ipv4/raw.c
+index 1ebd29abe79c..fb1f02015a15 100644
+--- a/net/ipv4/raw.c
++++ b/net/ipv4/raw.c
+@@ -131,8 +131,7 @@ struct sock *__raw_v4_lookup(struct net *net, struct sock *sk,
+ 		if (net_eq(sock_net(sk), net) && inet->inet_num == num	&&
+ 		    !(inet->inet_daddr && inet->inet_daddr != raddr) 	&&
+ 		    !(inet->inet_rcv_saddr && inet->inet_rcv_saddr != laddr) &&
+-		    !(sk->sk_bound_dev_if && sk->sk_bound_dev_if != dif &&
+-		      sk->sk_bound_dev_if != sdif))
++		    raw_sk_bound_dev_eq(net, sk->sk_bound_dev_if, dif, sdif))
+ 			goto found; /* gotcha */
+ 	}
+ 	sk = NULL;
+diff --git a/net/ipv6/raw.c b/net/ipv6/raw.c
+index 5e0efd3954e9..aed7eb5c2123 100644
+--- a/net/ipv6/raw.c
++++ b/net/ipv6/raw.c
+@@ -86,9 +86,8 @@ struct sock *__raw_v6_lookup(struct net *net, struct sock *sk,
+ 			    !ipv6_addr_equal(&sk->sk_v6_daddr, rmt_addr))
+ 				continue;
+ 
+-			if (sk->sk_bound_dev_if &&
+-			    sk->sk_bound_dev_if != dif &&
+-			    sk->sk_bound_dev_if != sdif)
++			if (!raw_sk_bound_dev_eq(net, sk->sk_bound_dev_if,
++						 dif, sdif))
+ 				continue;
+ 
+ 			if (!ipv6_addr_any(&sk->sk_v6_rcv_saddr)) {
+-- 
+2.11.0
+

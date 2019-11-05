@@ -1,0 +1,158 @@
+mcast: build pim reg interface to master
+
+The per-vrf register tunnel should be bound to the vrf master
+interface for consistency and identification of the vrf relationshsip
+in interface netlink messages.
+
+Signed-off-by: Patrick Ruddy <pruddy@vyatta.att-mail.com>
+--- linux-vyatta.orig/net/ipv4/ipmr.c
++++ linux-vyatta/net/ipv4/ipmr.c
+@@ -68,6 +68,7 @@
+ #include <linux/netconf.h>
+ #include <net/nexthop.h>
+ #include <net/switchdev.h>
++#include <linux/rtnetlink.h>
+ 
+ #include <linux/nospec.h>
+ 
+@@ -567,10 +568,12 @@ static void reg_vif_setup(struct net_dev
+ 	dev->features		|= NETIF_F_NETNS_LOCAL;
+ }
+ 
+-static struct net_device *ipmr_reg_vif(struct net *net, struct mr_table *mrt)
++static struct net_device *ipmr_reg_vif(struct net *net, struct mr_table *mrt,
++				       int master)
+ {
+ 	struct net_device *dev;
+ 	char name[IFNAMSIZ];
++	int err;
+ 
+ 	if (mrt->id == RT_TABLE_DEFAULT)
+ 		sprintf(name, "pimreg");
+@@ -594,6 +597,11 @@ static struct net_device *ipmr_reg_vif(s
+ 	if (dev_open(dev))
+ 		goto failure;
+ 
++	if (master) {
++		err = do_set_master(dev, master, NULL);
++		if (err != 0)
++			goto failure;
++	}
+ 	dev_hold(dev);
+ 
+ 	return dev;
+@@ -835,7 +843,7 @@ static void ipmr_update_thresholds(struc
+ }
+ 
+ static int vif_add(struct net *net, struct mr_table *mrt,
+-		   struct vifctl *vifc, int mrtsock)
++		   struct vifctl *vifc, int mrtsock, int master)
+ {
+ 	int vifi = vifc->vifc_vifi;
+ 	struct switchdev_attr attr = {
+@@ -859,7 +867,7 @@ static int vif_add(struct net *net, stru
+ 		 */
+ 		if (mrt->mroute_reg_vif_num >= 0)
+ 			return -EADDRINUSE;
+-		dev = ipmr_reg_vif(net, mrt);
++		dev = ipmr_reg_vif(net, mrt, master);
+ 		if (!dev)
+ 			return -ENOBUFS;
+ 		err = dev_set_allmulti(dev, 1);
+@@ -1451,7 +1459,8 @@ int ip_mroute_setsockopt(struct sock *sk
+ 		}
+ 		if (optname == MRT_ADD_VIF) {
+ 			ret = vif_add(net, mrt, &vif,
+-				      sk == rtnl_dereference(mrt->mroute_sk));
++				      sk == rtnl_dereference(mrt->mroute_sk),
++				      sk->sk_bound_dev_if);
+ 		} else {
+ 			ret = vif_delete(mrt, vif.vifc_vifi, 0, NULL);
+ 		}
+--- linux-vyatta.orig/include/linux/rtnetlink.h
++++ linux-vyatta/include/linux/rtnetlink.h
+@@ -26,6 +26,8 @@ struct sk_buff *rtmsg_ifinfo_build_skb(i
+ 				       int new_ifindex);
+ void rtmsg_ifinfo_send(struct sk_buff *skb, struct net_device *dev,
+ 		       gfp_t flags);
++int do_set_master(struct net_device *dev, int ifindex,
++		  struct netlink_ext_ack *extack);
+ 
+ 
+ /* RTNL is used as a global lock for all changes to network configuration  */
+--- linux-vyatta.orig/net/core/rtnetlink.c
++++ linux-vyatta/net/core/rtnetlink.c
+@@ -2289,7 +2289,7 @@ static int do_setvfinfo(struct net_devic
+ 	return err;
+ }
+ 
+-static int do_set_master(struct net_device *dev, int ifindex,
++int do_set_master(struct net_device *dev, int ifindex,
+ 			 struct netlink_ext_ack *extack)
+ {
+ 	struct net_device *upper_dev = netdev_master_upper_dev_get(dev);
+--- linux-vyatta.orig/net/ipv6/ip6mr.c
++++ linux-vyatta/net/ipv6/ip6mr.c
+@@ -52,6 +52,7 @@
+ #include <net/ip6_checksum.h>
+ #include <linux/netconf.h>
+ #include <net/ip_tunnels.h>
++#include <linux/rtnetlink.h>
+ 
+ #include <linux/nospec.h>
+ 
+@@ -641,10 +642,12 @@ static void reg_vif_setup(struct net_dev
+ 	dev->features		|= NETIF_F_NETNS_LOCAL;
+ }
+ 
+-static struct net_device *ip6mr_reg_vif(struct net *net, struct mr_table *mrt)
++static struct net_device *ip6mr_reg_vif(struct net *net, struct mr_table *mrt,
++					int master)
+ {
+ 	struct net_device *dev;
+ 	char name[IFNAMSIZ];
++	int err;
+ 
+ 	if (mrt->id == RT6_TABLE_DFLT)
+ 		sprintf(name, "pim6reg");
+@@ -665,6 +668,12 @@ static struct net_device *ip6mr_reg_vif(
+ 	if (dev_open(dev))
+ 		goto failure;
+ 
++	if (master) {
++		err = do_set_master(dev, master, NULL);
++		if (err != 0)
++			goto failure;
++	}
++
+ 	dev_hold(dev);
+ 	return dev;
+ 
+@@ -859,7 +868,7 @@ static void ip6mr_update_thresholds(stru
+ }
+ 
+ static int mif6_add(struct net *net, struct mr_table *mrt,
+-		    struct mif6ctl *vifc, int mrtsock)
++		    struct mif6ctl *vifc, int mrtsock, int master)
+ {
+ 	int vifi = vifc->mif6c_mifi;
+ 	struct vif_device *v = &mrt->vif_table[vifi];
+@@ -880,7 +889,7 @@ static int mif6_add(struct net *net, str
+ 		 */
+ 		if (mrt->mroute_reg_vif_num >= 0)
+ 			return -EADDRINUSE;
+-		dev = ip6mr_reg_vif(net, mrt);
++		dev = ip6mr_reg_vif(net, mrt, master);
+ 		if (!dev)
+ 			return -ENOBUFS;
+ 		err = dev_set_allmulti(dev, 1);
+@@ -1662,7 +1671,8 @@ int ip6_mroute_setsockopt(struct sock *s
+ 			return -ENFILE;
+ 		rtnl_lock();
+ 		ret = mif6_add(net, mrt, &vif,
+-			       sk == rtnl_dereference(mrt->mroute_sk));
++			       sk == rtnl_dereference(mrt->mroute_sk),
++			       sk->sk_bound_dev_if);
+ 		rtnl_unlock();
+ 		return ret;
+ 

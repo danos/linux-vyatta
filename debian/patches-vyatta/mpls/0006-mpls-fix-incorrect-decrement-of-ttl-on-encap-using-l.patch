@@ -1,0 +1,302 @@
+From 92a55609931376b26432d92a1e6f8441e13e005e Mon Sep 17 00:00:00 2001
+From: Robert Shearman <rshearma@vyatta.att-mail.com>
+Date: Fri, 4 Dec 2015 16:25:23 +0000
+Subject: [PATCH 6/6] mpls: fix incorrect decrement of ttl on encap using
+ loopback device
+Disposition: Upstream
+
+The use of a loopback device as the output interface for an IPv4/IPv6
+route using encap is useful as it allows inserting a level of
+indirection between potentially large numbers of routes and their
+output device and via address. However, the one problem with doing
+this is that it results in the TTL being incorrectly decremented in
+the MPLS forwarding after the packet comes off the loopback device.
+
+The problem could be solved by a check in mpls_forward on the input
+interface being a loopback, but this risks packets looping infinitely
+in the system if routes that caused a loop were added, instead of the
+packet being eventually dropped. Therefore, instead in mpls_output if
+the output interface is a loopback perform the route lookup of the
+top-most label and add any labels from the mpls nexthop, before adding
+the labels from the encap, excluding the top-most one.
+
+Signed-off-by: Robert Shearman <rshearma@vyatta.att-mail.com>
+---
+ net/mpls/af_mpls.c       |   25 ----------
+ net/mpls/internal.h      |   23 +++++++++
+ net/mpls/mpls_iptunnel.c |  114 +++++++++++++++++++++++++++++++++++++++--------
+ 3 files changed, 122 insertions(+), 40 deletions(-)
+
+--- a/net/mpls/af_mpls.c
++++ b/net/mpls/af_mpls.c
+@@ -43,7 +43,7 @@ static void rtmsg_lfib(int event, u32 la
+ 		       struct nlmsghdr *nlh, struct net *net, u32 portid,
+ 		       unsigned int nlm_flags);
+ 
+-static struct mpls_route *mpls_route_input_rcu(struct net *net, unsigned index)
++struct mpls_route *mpls_route_input_rcu(struct net *net, unsigned index)
+ {
+ 	struct mpls_route *rt = NULL;
+ 
+@@ -54,6 +54,7 @@ static struct mpls_route *mpls_route_inp
+ 	}
+ 	return rt;
+ }
++EXPORT_SYMBOL_GPL(mpls_route_input_rcu);
+ 
+ bool mpls_output_possible(const struct net_device *dev)
+ {
+@@ -61,23 +62,6 @@ bool mpls_output_possible(const struct n
+ }
+ EXPORT_SYMBOL_GPL(mpls_output_possible);
+ 
+-static u8 *__mpls_nh_via(struct mpls_route *rt, struct mpls_nh *nh)
+-{
+-	return (u8 *)nh + rt->rt_via_offset;
+-}
+-
+-static const u8 *mpls_nh_via(const struct mpls_route *rt,
+-			     const struct mpls_nh *nh)
+-{
+-	return __mpls_nh_via((struct mpls_route *)rt, (struct mpls_nh *)nh);
+-}
+-
+-static unsigned int mpls_nh_header_size(const struct mpls_nh *nh)
+-{
+-	/* The size of the layer 2.5 labels to be added for this route */
+-	return nh->nh_labels * sizeof(struct mpls_shim_hdr);
+-}
+-
+ unsigned int mpls_dev_mtu(const struct net_device *dev)
+ {
+ 	/* The amount of data the layer 2 frame can hold */
+@@ -189,11 +173,6 @@ static u32 mpls_multipath_hash(struct mp
+ 	return hash;
+ }
+ 
+-static struct mpls_nh *mpls_get_nexthop(struct mpls_route *rt, u8 index)
+-{
+-	return (struct mpls_nh *)((u8 *)rt->rt_nh + index * rt->rt_nh_size);
+-}
+-
+ /* number of alive nexthops (rt->rt_nhn_alive) and the flags for
+  * a next hop (nh->nh_flags) are modified by netdev event handlers.
+  * Since those fields can change at any moment, use READ_ONCE to
+--- a/net/mpls/internal.h
++++ b/net/mpls/internal.h
+@@ -200,6 +200,28 @@ static inline struct mpls_dev *mpls_dev_
+ 	return rcu_dereference_rtnl(dev->mpls_ptr);
+ }
+ 
++static u8 *__mpls_nh_via(struct mpls_route *rt, struct mpls_nh *nh)
++{
++	return (u8 *)nh + rt->rt_via_offset;
++}
++
++static const u8 *mpls_nh_via(const struct mpls_route *rt,
++			     const struct mpls_nh *nh)
++{
++	return __mpls_nh_via((struct mpls_route *)rt, (struct mpls_nh *)nh);
++}
++
++static unsigned int mpls_nh_header_size(const struct mpls_nh *nh)
++{
++	/* The size of the layer 2.5 labels to be added for this route */
++	return nh->nh_labels * sizeof(struct mpls_shim_hdr);
++}
++
++static struct mpls_nh *mpls_get_nexthop(struct mpls_route *rt, u8 index)
++{
++	return (struct mpls_nh *)((u8 *)rt->rt_nh + index * rt->rt_nh_size);
++}
++
+ int nla_put_labels(struct sk_buff *skb, int attrtype,  u8 labels,
+ 		   const u32 label[]);
+ int nla_get_labels(const struct nlattr *nla, u8 max_labels, u8 *labels,
+@@ -209,5 +231,6 @@ unsigned int mpls_dev_mtu(const struct n
+ bool mpls_pkt_too_big(const struct sk_buff *skb, unsigned int mtu);
+ void mpls_stats_inc_outucastpkts(struct net_device *dev,
+ 				 const struct sk_buff *skb);
++struct mpls_route *mpls_route_input_rcu(struct net *net, unsigned index);
+ 
+ #endif /* MPLS_INTERNAL_H */
+--- a/net/mpls/mpls_iptunnel.c
++++ b/net/mpls/mpls_iptunnel.c
+@@ -41,19 +41,20 @@ static unsigned int mpls_encap_size(stru
+ static int mpls_xmit(struct sk_buff *skb)
+ {
+ 	struct mpls_iptunnel_encap *tun_encap_info;
++	const struct mpls_nh *mpls_nh = NULL;
+ 	struct mpls_shim_hdr *hdr;
+ 	struct net_device *out_dev;
+ 	unsigned int hh_len;
+ 	unsigned int new_header_size;
+ 	unsigned int mtu;
+ 	struct dst_entry *dst = skb_dst(skb);
+-	struct rtable *rt = NULL;
+-	struct rt6_info *rt6 = NULL;
+ 	struct mpls_dev *out_mdev;
++	const void *via_addr;
+ 	struct net *net;
++	int via_table;
+ 	int err = 0;
+ 	bool bos;
+-	int i;
++	int i, j;
+ 	unsigned int ttl;
+ 
+ 	/* Find the output device */
+@@ -81,6 +82,8 @@ static int mpls_xmit(struct sk_buff *skb
+ 	 *    - enabled => use TTL value from IPv4/IPv6 header
+ 	 */
+ 	if (dst->ops->family == AF_INET) {
++		struct rtable *rt;
++
+ 		if (tun_encap_info->ttl_propagate == MPLS_TTL_PROP_DISABLED)
+ 			ttl = tun_encap_info->default_ttl;
+ 		else if (tun_encap_info->ttl_propagate == MPLS_TTL_PROP_DEFAULT &&
+@@ -89,7 +92,11 @@ static int mpls_xmit(struct sk_buff *skb
+ 		else
+ 			ttl = ip_hdr(skb)->ttl;
+ 		rt = (struct rtable *)dst;
++		via_addr = &rt->rt_gateway;
++		via_table = NEIGH_ARP_TABLE;
+ 	} else if (dst->ops->family == AF_INET6) {
++		struct rt6_info *rt6;
++
+ 		if (tun_encap_info->ttl_propagate == MPLS_TTL_PROP_DISABLED)
+ 			ttl = tun_encap_info->default_ttl;
+ 		else if (tun_encap_info->ttl_propagate == MPLS_TTL_PROP_DEFAULT &&
+@@ -98,12 +105,59 @@ static int mpls_xmit(struct sk_buff *skb
+ 		else
+ 			ttl = ipv6_hdr(skb)->hop_limit;
+ 		rt6 = (struct rt6_info *)dst;
++		via_addr = &rt6->rt6i_gateway;
++		via_table = NEIGH_ND_TABLE;
+ 	} else {
+ 		goto drop;
+ 	}
+ 
++	if (out_dev->flags & IFF_LOOPBACK && tun_encap_info->labels) {
++		struct mpls_route *rt;
++		unsigned int nh_index;
++		u32 hash = 0;
++
++		rt = mpls_route_input_rcu(net, tun_encap_info->label[0]);
++		if (!rt || !rt->rt_nhn) {
++			struct mpls_dev *mdev = mpls_dev_get(out_dev);
++			if (mdev)
++				MPLS_INC_STATS(mdev, rx_noroute);
++			goto free;
++		}
++
++		if (rt->rt_nhn > 1) {
++			if (via_table == NEIGH_ARP_TABLE) {
++				const struct iphdr *v4hdr = ip_hdr(skb);
++
++				hash = jhash_3words(ntohl(v4hdr->saddr),
++						    ntohl(v4hdr->daddr),
++						    v4hdr->protocol, hash);
++			} else {
++				const struct ipv6hdr *v6hdr = ipv6_hdr(skb);
++
++				hash = __ipv6_addr_jhash(&v6hdr->saddr, hash);
++				hash = __ipv6_addr_jhash(&v6hdr->daddr, hash);
++				hash = jhash_1word(v6hdr->nexthdr, hash);
++			}
++		}
++
++		nh_index = hash % rt->rt_nhn;
++		mpls_nh = mpls_get_nexthop(rt, nh_index);
++		new_header_size = mpls_encap_size(tun_encap_info);
++
++		/* Find the output device */
++		out_dev = rcu_dereference(mpls_nh->nh_dev);
++		if (!mpls_output_possible(out_dev))
++			goto drop;
++		new_header_size = mpls_encap_size(tun_encap_info) -
++			sizeof(struct mpls_shim_hdr) +
++			mpls_nh_header_size(mpls_nh);
++		via_addr = mpls_nh_via(rt, mpls_nh);
++		via_table = mpls_nh->nh_via_table;
++	} else {
++		new_header_size = mpls_encap_size(tun_encap_info);
++	}
++
+ 	/* Verify the destination can hold the packet */
+-	new_header_size = mpls_encap_size(tun_encap_info);
+ 	mtu = mpls_dev_mtu(out_dev);
+ 	if (mpls_pkt_too_big(skb, mtu - new_header_size))
+ 		goto drop;
+@@ -124,25 +178,50 @@ static int mpls_xmit(struct sk_buff *skb
+ 	skb_reset_network_header(skb);
+ 
+ 	skb->dev = out_dev;
+-	skb->protocol = htons(ETH_P_MPLS_UC);
+ 
+-	/* Push the new labels */
+ 	hdr = mpls_hdr(skb);
+-	bos = true;
+-	for (i = tun_encap_info->labels - 1; i >= 0; i--) {
+-		hdr[i] = mpls_entry_encode(tun_encap_info->label[i],
+-					   ttl, 0, bos);
+-		bos = false;
++
++	if (mpls_nh) {
++		/* Push the encap labels except for the top-of-stack one */
++		bos = true;
++		j = mpls_nh->nh_labels + tun_encap_info->labels - 2;
++		for (i = tun_encap_info->labels - 1; i >= 1; i--) {
++			hdr[j--] = mpls_entry_encode(tun_encap_info->label[i],
++						     ttl, 0, bos);
++			bos = false;
++		}
++
++		/* Push the nexthop labels */
++		for (i = mpls_nh->nh_labels - 1; i >= 0; i--) {
++			hdr[j--] = mpls_entry_encode(mpls_nh->nh_label[i],
++						     ttl, 0, bos);
++			bos = false;
++		}
++
++		/* If no labels were pushed, then the packet should go
++		 * out unlabeled according to the protocol it came in
++		 * here with
++		 */
++		if (mpls_nh->nh_labels || tun_encap_info->labels > 1)
++			skb->protocol = htons(ETH_P_MPLS_UC);
++		else if (dst->ops->family == AF_INET)
++			skb->protocol = htons(ETH_P_IP);
++		else
++			skb->protocol = htons(ETH_P_IPV6);
++	} else {
++		/* Push the encap labels */
++		bos = true;
++		for (i = tun_encap_info->labels - 1; i >= 0; i--) {
++			hdr[i] = mpls_entry_encode(tun_encap_info->label[i],
++						   ttl, 0, bos);
++			bos = false;
++		}
++		skb->protocol = htons(ETH_P_MPLS_UC);
+ 	}
+ 
+ 	mpls_stats_inc_outucastpkts(out_dev, skb);
+ 
+-	if (rt)
+-		err = neigh_xmit(NEIGH_ARP_TABLE, out_dev, &rt->rt_gateway,
+-				 skb);
+-	else if (rt6)
+-		err = neigh_xmit(NEIGH_ND_TABLE, out_dev, &rt6->rt6i_gateway,
+-				 skb);
++	err = neigh_xmit(via_table, out_dev, via_addr, skb);
+ 	if (err)
+ 		net_dbg_ratelimited("%s: packet transmission failed: %d\n",
+ 				    __func__, err);
+@@ -153,6 +232,7 @@ drop:
+ 	out_mdev = out_dev ? mpls_dev_get(out_dev) : NULL;
+ 	if (out_mdev)
+ 		MPLS_INC_STATS(out_mdev, tx_errors);
++free:
+ 	kfree_skb(skb);
+ 	return -EINVAL;
+ }

@@ -1,0 +1,207 @@
+From bc59e267dd6bedbcc39e0fbd61905090ee7bd828 Mon Sep 17 00:00:00 2001
+From: Mike Manning <mmanning@vyatta.att-mail.com>
+Date: Sun, 30 Sep 2018 15:24:41 +0100
+Subject: [PATCH net-next v5 4/9] net: provide a sysctl raw_l3mdev_accept for
+ raw socket lookup with VRFs
+
+Add a sysctl raw_l3mdev_accept to control raw socket lookup in a manner
+similar to use of tcp_l3mdev_accept for stream and of udp_l3mdev_accept
+for datagram sockets. Have this default to enabled for reasons of
+backwards compatibility. This is so as to specify the output device
+with cmsg and IP_PKTINFO, but using a socket not bound to the
+corresponding VRF. This allows e.g. older ping implementations to be
+run with specifying the device but without executing it in the VRF.
+If the option is disabled, packets received in a VRF context are only
+handled by a raw socket bound to the VRF, and correspondingly packets
+in the default VRF are only handled by a socket not bound to any VRF.
+
+Signed-off-by: Mike Manning <mmanning@vyatta.att-mail.com>
+---
+ Documentation/networking/ip-sysctl.txt | 12 ++++++++++++
+ Documentation/networking/vrf.txt       | 13 +++++++++++++
+ include/net/netns/ipv4.h               |  3 +++
+ include/net/raw.h                      |  1 +
+ net/ipv4/af_inet.c                     |  2 ++
+ net/ipv4/raw.c                         | 28 ++++++++++++++++++++++++++--
+ net/ipv4/sysctl_net_ipv4.c             | 11 +++++++++++
+ 7 files changed, 68 insertions(+), 2 deletions(-)
+
+diff --git a/Documentation/networking/ip-sysctl.txt b/Documentation/networking/ip-sysctl.txt
+index 163b5ff1073c..e0e72e2ff6b2 100644
+--- a/Documentation/networking/ip-sysctl.txt
++++ b/Documentation/networking/ip-sysctl.txt
+@@ -359,6 +359,7 @@ tcp_l3mdev_accept - BOOLEAN
+ 	derived from the listen socket to be bound to the L3 domain in
+ 	which the packets originated. Only valid when the kernel was
+ 	compiled with CONFIG_NET_L3_MASTER_DEV.
++        Default: 0 (disabled)
+ 
+ tcp_low_latency - BOOLEAN
+ 	This is a legacy option, it has no effect anymore.
+@@ -762,6 +763,7 @@ udp_l3mdev_accept - BOOLEAN
+ 	being received regardless of the L3 domain in which they
+ 	originated. Only valid when the kernel was compiled with
+ 	CONFIG_NET_L3_MASTER_DEV.
++        Default: 0 (disabled)
+ 
+ udp_mem - vector of 3 INTEGERs: min, pressure, max
+ 	Number of pages allowed for queueing by all UDP sockets.
+@@ -788,6 +790,16 @@ udp_wmem_min - INTEGER
+ 	total pages of UDP sockets exceed udp_mem pressure. The unit is byte.
+ 	Default: 4K
+ 
++RAW variables:
++
++raw_l3mdev_accept - BOOLEAN
++	Enabling this option allows a "global" bound socket to work
++	across L3 master domains (e.g., VRFs) with packets capable of
++	being received regardless of the L3 domain in which they
++	originated. Only valid when the kernel was compiled with
++	CONFIG_NET_L3_MASTER_DEV.
++	Default: 1 (enabled)
++
+ CIPSOv4 Variables:
+ 
+ cipso_cache_enable - BOOLEAN
+diff --git a/Documentation/networking/vrf.txt b/Documentation/networking/vrf.txt
+index d4b129402d57..a5f103b083a0 100644
+--- a/Documentation/networking/vrf.txt
++++ b/Documentation/networking/vrf.txt
+@@ -111,9 +111,22 @@ the same port if they bind to an l3mdev.
+ TCP & UDP services running in the default VRF context (ie., not bound
+ to any VRF device) can work across all VRF domains by enabling the
+ tcp_l3mdev_accept and udp_l3mdev_accept sysctl options:
++
+     sysctl -w net.ipv4.tcp_l3mdev_accept=1
+     sysctl -w net.ipv4.udp_l3mdev_accept=1
+ 
++These options are disabled by default so that a socket in a VRF is only
++selected for packets in that VRF. There is a similar option for RAW
++sockets, which is enabled by default for reasons of backwards compatibility.
++This is so as to specify the output device with cmsg and IP_PKTINFO, but
++using a socket not bound to the corresponding VRF. This allows e.g. older ping
++implementations to be run with specifying the device but without executing it
++in the VRF. This option can be disabled so that packets received in a VRF
++context are only handled by a raw socket bound to the VRF, and packets in the
++default VRF are only handled by a socket not bound to any VRF:
++
++    sysctl -w net.ipv4.raw_l3mdev_accept=0
++
+ netfilter rules on the VRF device can be used to limit access to services
+ running in the default VRF context as well.
+ 
+diff --git a/include/net/netns/ipv4.h b/include/net/netns/ipv4.h
+index e47503b4e4d1..104a6669e344 100644
+--- a/include/net/netns/ipv4.h
++++ b/include/net/netns/ipv4.h
+@@ -103,6 +103,9 @@ struct netns_ipv4 {
+ 	/* Shall we try to damage output packets if routing dev changes? */
+ 	int sysctl_ip_dynaddr;
+ 	int sysctl_ip_early_demux;
++#ifdef CONFIG_NET_L3_MASTER_DEV
++	int sysctl_raw_l3mdev_accept;
++#endif
+ 	int sysctl_tcp_early_demux;
+ 	int sysctl_udp_early_demux;
+ 
+diff --git a/include/net/raw.h b/include/net/raw.h
+index 9c9fa98a91a4..20ebf0b3dfa8 100644
+--- a/include/net/raw.h
++++ b/include/net/raw.h
+@@ -61,6 +61,7 @@ void raw_seq_stop(struct seq_file *seq, void *v);
+ 
+ int raw_hash_sk(struct sock *sk);
+ void raw_unhash_sk(struct sock *sk);
++void raw_init(void);
+ 
+ struct raw_sock {
+ 	/* inet_sock has to be the first member */
+diff --git a/net/ipv4/af_inet.c b/net/ipv4/af_inet.c
+index 1fbe2f815474..07749c5b0a50 100644
+--- a/net/ipv4/af_inet.c
++++ b/net/ipv4/af_inet.c
+@@ -1964,6 +1964,8 @@ static int __init inet_init(void)
+ 	/* Add UDP-Lite (RFC 3828) */
+ 	udplite4_register();
+ 
++	raw_init();
++
+ 	ping_init();
+ 
+ 	/*
+diff --git a/net/ipv4/raw.c b/net/ipv4/raw.c
+index 8ca3eb06ba04..1ebd29abe79c 100644
+--- a/net/ipv4/raw.c
++++ b/net/ipv4/raw.c
+@@ -805,7 +805,7 @@ static int raw_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
+ 	return copied;
+ }
+ 
+-static int raw_init(struct sock *sk)
++static int raw_sk_init(struct sock *sk)
+ {
+ 	struct raw_sock *rp = raw_sk(sk);
+ 
+@@ -970,7 +970,7 @@ struct proto raw_prot = {
+ 	.connect	   = ip4_datagram_connect,
+ 	.disconnect	   = __udp_disconnect,
+ 	.ioctl		   = raw_ioctl,
+-	.init		   = raw_init,
++	.init		   = raw_sk_init,
+ 	.setsockopt	   = raw_setsockopt,
+ 	.getsockopt	   = raw_getsockopt,
+ 	.sendmsg	   = raw_sendmsg,
+@@ -1133,4 +1133,28 @@ void __init raw_proc_exit(void)
+ {
+ 	unregister_pernet_subsys(&raw_net_ops);
+ }
++
++static void raw_sysctl_init_net(struct net *net)
++{
++#ifdef CONFIG_NET_L3_MASTER_DEV
++	net->ipv4.sysctl_raw_l3mdev_accept = 1;
++#endif
++}
++
++static int __net_init raw_sysctl_init(struct net *net)
++{
++	raw_sysctl_init_net(net);
++	return 0;
++}
++
++static struct pernet_operations __net_initdata raw_sysctl_ops = {
++	.init	= raw_sysctl_init,
++};
++
++void __init raw_init(void)
++{
++	raw_sysctl_init_net(&init_net);
++	if (register_pernet_subsys(&raw_sysctl_ops))
++		panic("RAW: failed to init sysctl parameters.\n");
++}
+ #endif /* CONFIG_PROC_FS */
+diff --git a/net/ipv4/sysctl_net_ipv4.c b/net/ipv4/sysctl_net_ipv4.c
+index 891ed2f91467..ba0fc4b18465 100644
+--- a/net/ipv4/sysctl_net_ipv4.c
++++ b/net/ipv4/sysctl_net_ipv4.c
+@@ -602,6 +602,17 @@ static struct ctl_table ipv4_net_table[] = {
+ 		.mode		= 0644,
+ 		.proc_handler	= ipv4_ping_group_range,
+ 	},
++#ifdef CONFIG_NET_L3_MASTER_DEV
++	{
++		.procname	= "raw_l3mdev_accept",
++		.data		= &init_net.ipv4.sysctl_raw_l3mdev_accept,
++		.maxlen		= sizeof(int),
++		.mode		= 0644,
++		.proc_handler	= proc_dointvec_minmax,
++		.extra1		= &zero,
++		.extra2		= &one,
++	},
++#endif
+ 	{
+ 		.procname	= "tcp_ecn",
+ 		.data		= &init_net.ipv4.sysctl_tcp_ecn,
+-- 
+2.11.0
+

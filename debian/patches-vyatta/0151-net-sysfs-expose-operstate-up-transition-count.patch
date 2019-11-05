@@ -1,0 +1,221 @@
+From: Nachiketa Prachanda <Nachi.Prachanda@att.com>
+Date: Wed Jan  7 22:27:34 PST 2015
+Subject: net-sysfs: expose operstate transition count
+
+monitor operstate transition up <-> (down|dormant etc) to help
+detect interface/link flapping issues.
+
+
+  added /sys/class/net/<if>/opstate_changes - number of
+  opstate transitons.
+  exposed via netlink IFLA_OPSTATE_CHANGES
+
+  added /sys/class/net/<if>/opstate_age time since last opstate
+  transition. 
+  exposed via netlink IFLA_OPSTATE_AGE
+ 
+Signed-off-by: Nachiketa Prachanda <Nachi.Prachanda@att.com>
+---
+ include/linux/netdevice.h    |   15 +++++++++++++++
+ include/uapi/linux/if_link.h |    2 ++
+ net/core/dev.c               |   17 +++++++++++++++++
+ net/core/link_watch.c        |    3 +++
+ net/core/net-sysfs.c         |   27 +++++++++++++++++++++++++++
+ net/core/rtnetlink.c         |   18 ++++++++++++++++++
+ 6 files changed, 82 insertions(+)
+
+--- a/include/linux/netdevice.h
++++ b/include/linux/netdevice.h
+@@ -1748,6 +1748,10 @@ struct net_device {
+ 	unsigned long		mem_start;
+ 	unsigned long		base_addr;
+ 	int			irq;
++	/* monitor user visible IFF_RUNNING on<->off transitions */
++	atomic_t		opstate_changes;
++	/* last time of opstate change */
++	ktime_t			opstate_last_change;
+ 
+ 	/*
+ 	 *	Some hardware also needs these fields (state,dev_list,
+@@ -3724,6 +3728,15 @@ static inline bool netif_oper_up(const s
+ }
+ 
+ /**
++ * rfc2863_oper_up - test if rfc2863 operstate is up
++ * @dev: network device
++ */
++static inline bool rfc2863_oper_up(const struct net_device *dev)
++{
++	return netif_running(dev) && netif_oper_up(dev);
++}
++
++/**
+  *	netif_device_present - is device available or removed
+  *	@dev: network device
+  *
+@@ -3738,6 +3751,8 @@ void netif_device_detach(struct net_devi
+ 
+ void netif_device_attach(struct net_device *dev);
+ 
++void dev_record_opstate_change(struct net_device *dev, bool oldstatus);
++
+ /*
+  * Network interface message level settings
+  */
+--- a/include/uapi/linux/if_link.h
++++ b/include/uapi/linux/if_link.h
+@@ -166,6 +166,8 @@ enum {
+ 	IFLA_NEW_IFINDEX,
+ 	IFLA_MIN_MTU,
+ 	IFLA_MAX_MTU,
++	IFLA_OPSTATE_CHANGES,
++	IFLA_OPSTATE_AGE,
+ 	__IFLA_MAX
+ };
+ 
+--- a/net/core/dev.c
++++ b/net/core/dev.c
+@@ -7429,6 +7429,23 @@ unsigned int dev_get_flags(const struct
+ }
+ EXPORT_SYMBOL(dev_get_flags);
+ 
++/**
++ * dev_record_opstate_change - update the operstate_ups counters.
++ * @dev: network device
++ * @oldstatus - old rfc2863 operational status.
++ */
++void dev_record_opstate_change(struct net_device *dev, bool oldstatus)
++{
++	bool status = rfc2863_oper_up(dev);
++
++	if (oldstatus == status)
++		return;
++
++	atomic_inc(&dev->opstate_changes);
++	dev->opstate_last_change = ktime_get_boottime();
++}
++EXPORT_SYMBOL(dev_record_opstate_change);
++
+ int __dev_change_flags(struct net_device *dev, unsigned int flags)
+ {
+ 	unsigned int old_flags = dev->flags;
+--- a/net/core/link_watch.c
++++ b/net/core/link_watch.c
+@@ -53,6 +53,7 @@ static unsigned char default_operstate(c
+ static void rfc2863_policy(struct net_device *dev)
+ {
+ 	unsigned char operstate = default_operstate(dev);
++	bool opstatus;
+ 
+ 	if (operstate == dev->operstate)
+ 		return;
+@@ -70,7 +71,9 @@ static void rfc2863_policy(struct net_de
+ 		break;
+ 	}
+ 
++	opstatus = rfc2863_oper_up(dev);
+ 	dev->operstate = operstate;
++	dev_record_opstate_change(dev, opstatus);
+ 
+ 	write_unlock_bh(&dev_base_lock);
+ }
+--- a/net/core/net-sysfs.c
++++ b/net/core/net-sysfs.c
+@@ -301,6 +301,31 @@ static ssize_t carrier_changes_show(stru
+ }
+ static DEVICE_ATTR_RO(carrier_changes);
+ 
++static ssize_t opstate_changes_show(struct device *dev,
++				    struct device_attribute *attr,
++				    char *buf)
++{
++	struct net_device *netdev = to_net_dev(dev);
++
++	return sprintf(buf, fmt_dec,
++		       atomic_read(&netdev->opstate_changes));
++}
++static DEVICE_ATTR_RO(opstate_changes);
++
++static ssize_t opstate_age_show(struct device *dev,
++				struct device_attribute *attr,
++				char *buf)
++{
++	struct net_device *netdev = to_net_dev(dev);
++	ktime_t kt = ktime_sub(ktime_get_boottime(),
++			       netdev->opstate_last_change);
++	u64 age = ktime_to_ms(kt);
++
++	return sprintf(buf, "%llu.%03llu\n",
++		       age / MSEC_PER_SEC, age % MSEC_PER_SEC);
++}
++static DEVICE_ATTR_RO(opstate_age);
++
+ static ssize_t carrier_up_count_show(struct device *dev,
+ 				     struct device_attribute *attr,
+ 				     char *buf)
+@@ -535,6 +560,8 @@ static struct attribute *net_class_attrs
+ 	&dev_attr_duplex.attr,
+ 	&dev_attr_dormant.attr,
+ 	&dev_attr_operstate.attr,
++	&dev_attr_opstate_changes.attr,
++	&dev_attr_opstate_age.attr,
+ 	&dev_attr_carrier_changes.attr,
+ 	&dev_attr_ifalias.attr,
+ 	&dev_attr_carrier.attr,
+--- a/net/core/rtnetlink.c
++++ b/net/core/rtnetlink.c
+@@ -837,8 +837,11 @@ static void set_operstate(struct net_dev
+ 	}
+ 
+ 	if (dev->operstate != operstate) {
++		bool opstatus = rfc2863_oper_up(dev);
++
+ 		write_lock_bh(&dev_base_lock);
+ 		dev->operstate = operstate;
++		dev_record_opstate_change(dev, opstatus);
+ 		write_unlock_bh(&dev_base_lock);
+ 		netdev_state_change(dev);
+ 	}
+@@ -1000,6 +1003,8 @@ static noinline size_t if_nlmsg_size(con
+ 	       + nla_total_size(1) /* IFLA_OPERSTATE */
+ 	       + nla_total_size(1) /* IFLA_LINKMODE */
+ 	       + nla_total_size(4) /* IFLA_CARRIER_CHANGES */
++	       + nla_total_size(4) /* IFLA_OPSTATE_CHANGES */
++	       + nla_total_size(4) /* IFLA_OPSTATE_AGE */
+ 	       + nla_total_size(4) /* IFLA_LINK_NETNSID */
+ 	       + nla_total_size(4) /* IFLA_GROUP */
+ 	       + nla_total_size(ext_filter_mask
+@@ -1575,6 +1580,14 @@ static int rtnl_fill_link_af(struct sk_b
+ 	return 0;
+ }
+ 
++static u32 get_opstate_age(struct net_device *dev)
++{
++	u64 age = ktime_to_ms(ktime_sub(ktime_get_boottime(),
++					dev->opstate_last_change));
++
++	return age / MSEC_PER_SEC;
++}
++
+ static int rtnl_fill_ifinfo(struct sk_buff *skb,
+ 			    struct net_device *dev, struct net *src_net,
+ 			    int type, u32 pid, u32 seq, u32 change,
+@@ -1626,6 +1639,9 @@ static int rtnl_fill_ifinfo(struct sk_bu
+ 	    nla_put_u32(skb, IFLA_CARRIER_CHANGES,
+ 			atomic_read(&dev->carrier_up_count) +
+ 			atomic_read(&dev->carrier_down_count)) ||
++	    nla_put_u32(skb, IFLA_OPSTATE_CHANGES,
++			atomic_read(&dev->opstate_changes)) ||
++	    nla_put_u32(skb, IFLA_OPSTATE_AGE, get_opstate_age(dev)) ||
+ 	    nla_put_u8(skb, IFLA_PROTO_DOWN, dev->proto_down) ||
+ 	    nla_put_u32(skb, IFLA_CARRIER_UP_COUNT,
+ 			atomic_read(&dev->carrier_up_count)) ||
+@@ -1731,6 +1747,8 @@ static const struct nla_policy ifla_poli
+ 	[IFLA_GSO_MAX_SIZE]	= { .type = NLA_U32 },
+ 	[IFLA_PHYS_PORT_ID]	= { .type = NLA_BINARY, .len = MAX_PHYS_ITEM_ID_LEN },
+ 	[IFLA_CARRIER_CHANGES]	= { .type = NLA_U32 },  /* ignored */
++	[IFLA_OPSTATE_CHANGES]	= { .type = NLA_U32 },  /* ignored */
++	[IFLA_OPSTATE_AGE]	= { .type = NLA_U32 },  /* ignored */
+ 	[IFLA_PHYS_SWITCH_ID]	= { .type = NLA_BINARY, .len = MAX_PHYS_ITEM_ID_LEN },
+ 	[IFLA_LINK_NETNSID]	= { .type = NLA_S32 },
+ 	[IFLA_PROTO_DOWN]	= { .type = NLA_U8 },
