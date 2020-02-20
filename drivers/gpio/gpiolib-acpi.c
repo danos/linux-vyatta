@@ -1314,18 +1314,6 @@ static const struct dmi_system_id gpiolib_acpi_quirks[] = {
 		},
 		.driver_data = (void *)QUIRK_NO_WAKEUP,
 	},
-	{
-		/*
-		 * The Terra Pad 1061 has a micro-USB-B id-pin handler, which
-		 * instead of controlling the actual micro-USB-B turns the 5V
-		 * boost for its USB-A connector off. The actual micro-USB-B
-		 * connector is wired for charging only.
-		 */
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "Wortmann_AG"),
-			DMI_MATCH(DMI_PRODUCT_NAME, "TERRA_PAD_1061"),
-		}
-	},
 	{} /* Terminating entry */
 };
 
