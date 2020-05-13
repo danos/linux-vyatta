@@ -1,0 +1,66 @@
+From 892c0f08ad48fe55f6952da6d206c3d6fba81d5a Mon Sep 17 00:00:00 2001
+From: Mike Manning <mmanning@vyatta.att-mail.com>
+Date: Fri, 29 Mar 2019 12:00:49 +0000
+Subject: [PATCH net-next v2 4/5] bridge: update vlan dev state when port added
+ to or deleted from vlan
+
+If vlan bridge binding is enabled, then the link state of a vlan device
+that is an upper device of the bridge should track the state of bridge
+ports that are members of that vlan. So if a bridge port becomes or
+stops being a member of a vlan, then update the link state of the
+vlan device if necessary.
+
+Signed-off-by: Mike Manning <mmanning@vyatta.att-mail.com>
+---
+ net/bridge/br_vlan.c |   19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+--- a/net/bridge/br_vlan.c
++++ b/net/bridge/br_vlan.c
+@@ -7,6 +7,8 @@
+ #include "br_private.h"
+ #include "br_private_tunnel.h"
+ 
++static void nbp_vlan_set_vlan_dev_state(struct net_bridge_port *p, u16 vid);
++
+ static inline int br_vlan_cmp(struct rhashtable_compare_arg *arg,
+ 			      const void *ptr)
+ {
+@@ -269,6 +271,9 @@ static int __vlan_add(struct net_bridge_
+ 
+ 	__vlan_add_list(v);
+ 	__vlan_add_flags(v, flags);
++
++	if (p)
++		nbp_vlan_set_vlan_dev_state(p, v->vid);
+ out:
+ 	return err;
+ 
+@@ -329,6 +334,7 @@ static int __vlan_del(struct net_bridge_
+ 		rhashtable_remove_fast(&vg->vlan_hash, &v->vnode,
+ 				       br_vlan_rht_params);
+ 		__vlan_del_list(v);
++		nbp_vlan_set_vlan_dev_state(p, v->vid);
+ 		kfree_rcu(v, rcu);
+ 	}
+ 
+@@ -1326,6 +1332,19 @@ static void br_vlan_upper_change(struct
+ }
+ 
+ /* Must be protected by RTNL. */
++static void nbp_vlan_set_vlan_dev_state(struct net_bridge_port *p, u16 vid)
++{
++	struct net_device *vlan_dev;
++
++	if (!p->br->vlan_bridge_binding)
++		return;
++
++	vlan_dev = br_vlan_get_upper_bind_vlan_dev(p->br->dev, vid);
++	if (vlan_dev)
++		br_vlan_set_vlan_dev_state(p->br, vlan_dev);
++}
++
++/* Must be protected by RTNL. */
+ void br_vlan_bridge_event(struct net_device *dev, unsigned long event,
+ 			  void *ptr)
+ {

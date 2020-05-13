@@ -1,0 +1,281 @@
+From 13ec1f0958f384a763fcfbf8814351578c3a2815 Mon Sep 17 00:00:00 2001
+From: Robert Shearman <rshearma@vyatta.att-mail.com>
+Date: Sun, 30 Sep 2018 15:24:38 +0100
+Subject: [PATCH net-next v5 1/9] net: allow binding socket in a VRF when
+ there's an unbound socket
+
+Change the inet socket lookup to avoid packets arriving on a device
+enslaved to an l3mdev from matching unbound sockets by removing the
+wildcard for non sk_bound_dev_if and instead relying on check against
+the secondary device index, which will be 0 when the input device is
+not enslaved to an l3mdev and so match against an unbound socket and
+not match when the input device is enslaved.
+
+Change the socket binding to take the l3mdev into account to allow an
+unbound socket to not conflict sockets bound to an l3mdev given the
+datapath isolation now guaranteed.
+
+Signed-off-by: Robert Shearman <rshearma@vyatta.att-mail.com>
+Signed-off-by: Mike Manning <mmanning@vyatta.att-mail.com>
+---
+ Documentation/networking/vrf.txt |  9 +++++----
+ include/net/inet6_hashtables.h   |  5 ++---
+ include/net/inet_hashtables.h    | 13 ++++++-------
+ include/net/inet_sock.h          | 13 +++++++++++++
+ net/ipv4/inet_connection_sock.c  | 13 ++++++++++---
+ net/ipv4/inet_hashtables.c       | 20 +++++++++++++++-----
+ 6 files changed, 51 insertions(+), 22 deletions(-)
+
+diff --git a/Documentation/networking/vrf.txt b/Documentation/networking/vrf.txt
+index 8ff7b4c8f91b..d4b129402d57 100644
+--- a/Documentation/networking/vrf.txt
++++ b/Documentation/networking/vrf.txt
+@@ -103,6 +103,11 @@ VRF device:
+ 
+ or to specify the output device using cmsg and IP_PKTINFO.
+ 
++By default the scope of the port bindings for unbound sockets is
++limited to the default VRF. That is, it will not be matched by packets
++arriving on interfaces enslaved to an l3mdev and processes may bind to
++the same port if they bind to an l3mdev.
++
+ TCP & UDP services running in the default VRF context (ie., not bound
+ to any VRF device) can work across all VRF domains by enabling the
+ tcp_l3mdev_accept and udp_l3mdev_accept sysctl options:
+@@ -112,10 +117,6 @@ tcp_l3mdev_accept and udp_l3mdev_accept sysctl options:
+ netfilter rules on the VRF device can be used to limit access to services
+ running in the default VRF context as well.
+ 
+-The default VRF does not have limited scope with respect to port bindings.
+-That is, if a process does a wildcard bind to a port in the default VRF it
+-owns the port across all VRF domains within the network namespace.
+-
+ ################################################################################
+ 
+ Using iproute2 for VRFs
+diff --git a/include/net/inet6_hashtables.h b/include/net/inet6_hashtables.h
+index 6e91e38a31da..9db98af46985 100644
+--- a/include/net/inet6_hashtables.h
++++ b/include/net/inet6_hashtables.h
+@@ -115,9 +115,8 @@ int inet6_hash(struct sock *sk);
+ 	 ((__sk)->sk_family == AF_INET6)			&&	\
+ 	 ipv6_addr_equal(&(__sk)->sk_v6_daddr, (__saddr))		&&	\
+ 	 ipv6_addr_equal(&(__sk)->sk_v6_rcv_saddr, (__daddr))	&&	\
+-	 (!(__sk)->sk_bound_dev_if	||				\
+-	   ((__sk)->sk_bound_dev_if == (__dif))	||			\
+-	   ((__sk)->sk_bound_dev_if == (__sdif)))		&&	\
++	 (((__sk)->sk_bound_dev_if == (__dif))	||			\
++	  ((__sk)->sk_bound_dev_if == (__sdif)))		&&	\
+ 	 net_eq(sock_net(__sk), (__net)))
+ 
+ #endif /* _INET6_HASHTABLES_H */
+diff --git a/include/net/inet_hashtables.h b/include/net/inet_hashtables.h
+index 9141e95529e7..4ae060b4bac2 100644
+--- a/include/net/inet_hashtables.h
++++ b/include/net/inet_hashtables.h
+@@ -79,6 +79,7 @@ struct inet_ehash_bucket {
+ 
+ struct inet_bind_bucket {
+ 	possible_net_t		ib_net;
++	int			l3mdev;
+ 	unsigned short		port;
+ 	signed char		fastreuse;
+ 	signed char		fastreuseport;
+@@ -191,7 +192,7 @@ static inline void inet_ehash_locks_free(struct inet_hashinfo *hashinfo)
+ struct inet_bind_bucket *
+ inet_bind_bucket_create(struct kmem_cache *cachep, struct net *net,
+ 			struct inet_bind_hashbucket *head,
+-			const unsigned short snum);
++			const unsigned short snum, int l3mdev);
+ void inet_bind_bucket_destroy(struct kmem_cache *cachep,
+ 			      struct inet_bind_bucket *tb);
+ 
+@@ -282,9 +283,8 @@ static inline struct sock *inet_lookup_listener(struct net *net,
+ #define INET_MATCH(__sk, __net, __cookie, __saddr, __daddr, __ports, __dif, __sdif) \
+ 	(((__sk)->sk_portpair == (__ports))			&&	\
+ 	 ((__sk)->sk_addrpair == (__cookie))			&&	\
+-	 (!(__sk)->sk_bound_dev_if	||				\
+-	   ((__sk)->sk_bound_dev_if == (__dif))			||	\
+-	   ((__sk)->sk_bound_dev_if == (__sdif)))		&&	\
++	 (((__sk)->sk_bound_dev_if == (__dif))			||	\
++	  ((__sk)->sk_bound_dev_if == (__sdif)))		&&	\
+ 	 net_eq(sock_net(__sk), (__net)))
+ #else /* 32-bit arch */
+ #define INET_ADDR_COOKIE(__name, __saddr, __daddr) \
+@@ -294,9 +294,8 @@ static inline struct sock *inet_lookup_listener(struct net *net,
+ 	(((__sk)->sk_portpair == (__ports))		&&		\
+ 	 ((__sk)->sk_daddr	== (__saddr))		&&		\
+ 	 ((__sk)->sk_rcv_saddr	== (__daddr))		&&		\
+-	 (!(__sk)->sk_bound_dev_if	||				\
+-	   ((__sk)->sk_bound_dev_if == (__dif))		||		\
+-	   ((__sk)->sk_bound_dev_if == (__sdif)))	&&		\
++	 (((__sk)->sk_bound_dev_if == (__dif))		||		\
++	  ((__sk)->sk_bound_dev_if == (__sdif)))	&&		\
+ 	 net_eq(sock_net(__sk), (__net)))
+ #endif /* 64-bit arch */
+ 
+diff --git a/include/net/inet_sock.h b/include/net/inet_sock.h
+index a80fd0ac4563..ed3f723af00b 100644
+--- a/include/net/inet_sock.h
++++ b/include/net/inet_sock.h
+@@ -130,6 +130,19 @@ static inline int inet_request_bound_dev_if(const struct sock *sk,
+ 	return sk->sk_bound_dev_if;
+ }
+ 
++static inline int inet_sk_bound_l3mdev(const struct sock *sk)
++{
++#ifdef CONFIG_NET_L3_MASTER_DEV
++	struct net *net = sock_net(sk);
++
++	if (!net->ipv4.sysctl_tcp_l3mdev_accept)
++		return l3mdev_master_ifindex_by_index(net,
++						      sk->sk_bound_dev_if);
++#endif
++
++	return 0;
++}
++
+ struct inet_cork {
+ 	unsigned int		flags;
+ 	__be32			addr;
+diff --git a/net/ipv4/inet_connection_sock.c b/net/ipv4/inet_connection_sock.c
+index 15e7f7915a21..5c63449130d9 100644
+--- a/net/ipv4/inet_connection_sock.c
++++ b/net/ipv4/inet_connection_sock.c
+@@ -183,7 +183,9 @@ inet_csk_find_open_port(struct sock *sk, struct inet_bind_bucket **tb_ret, int *
+ 	int i, low, high, attempt_half;
+ 	struct inet_bind_bucket *tb;
+ 	u32 remaining, offset;
++	int l3mdev;
+ 
++	l3mdev = inet_sk_bound_l3mdev(sk);
+ 	attempt_half = (sk->sk_reuse == SK_CAN_REUSE) ? 1 : 0;
+ other_half_scan:
+ 	inet_get_local_port_range(net, &low, &high);
+@@ -219,7 +221,8 @@ inet_csk_find_open_port(struct sock *sk, struct inet_bind_bucket **tb_ret, int *
+ 						  hinfo->bhash_size)];
+ 		spin_lock_bh(&head->lock);
+ 		inet_bind_bucket_for_each(tb, &head->chain)
+-			if (net_eq(ib_net(tb), net) && tb->port == port) {
++			if (net_eq(ib_net(tb), net) && tb->l3mdev == l3mdev &&
++			    tb->port == port) {
+ 				if (!inet_csk_bind_conflict(sk, tb, false, false))
+ 					goto success;
+ 				goto next_port;
+@@ -293,6 +296,9 @@ int inet_csk_get_port(struct sock *sk, unsigned short snum)
+ 	struct net *net = sock_net(sk);
+ 	struct inet_bind_bucket *tb = NULL;
+ 	kuid_t uid = sock_i_uid(sk);
++	int l3mdev;
++
++	l3mdev = inet_sk_bound_l3mdev(sk);
+ 
+ 	if (!port) {
+ 		head = inet_csk_find_open_port(sk, &tb, &port);
+@@ -306,11 +312,12 @@ int inet_csk_get_port(struct sock *sk, unsigned short snum)
+ 					  hinfo->bhash_size)];
+ 	spin_lock_bh(&head->lock);
+ 	inet_bind_bucket_for_each(tb, &head->chain)
+-		if (net_eq(ib_net(tb), net) && tb->port == port)
++		if (net_eq(ib_net(tb), net) && tb->l3mdev == l3mdev &&
++		    tb->port == port)
+ 			goto tb_found;
+ tb_not_found:
+ 	tb = inet_bind_bucket_create(hinfo->bind_bucket_cachep,
+-				     net, head, port);
++				     net, head, port, l3mdev);
+ 	if (!tb)
+ 		goto fail_unlock;
+ tb_found:
+diff --git a/net/ipv4/inet_hashtables.c b/net/ipv4/inet_hashtables.c
+index f5c9ef2586de..260531dc6458 100644
+--- a/net/ipv4/inet_hashtables.c
++++ b/net/ipv4/inet_hashtables.c
+@@ -65,12 +65,14 @@ static u32 sk_ehashfn(const struct sock *sk)
+ struct inet_bind_bucket *inet_bind_bucket_create(struct kmem_cache *cachep,
+ 						 struct net *net,
+ 						 struct inet_bind_hashbucket *head,
+-						 const unsigned short snum)
++						 const unsigned short snum,
++						 int l3mdev)
+ {
+ 	struct inet_bind_bucket *tb = kmem_cache_alloc(cachep, GFP_ATOMIC);
+ 
+ 	if (tb) {
+ 		write_pnet(&tb->ib_net, net);
++		tb->l3mdev    = l3mdev;
+ 		tb->port      = snum;
+ 		tb->fastreuse = 0;
+ 		tb->fastreuseport = 0;
+@@ -135,6 +137,7 @@ int __inet_inherit_port(const struct sock *sk, struct sock *child)
+ 			table->bhash_size);
+ 	struct inet_bind_hashbucket *head = &table->bhash[bhash];
+ 	struct inet_bind_bucket *tb;
++	int l3mdev;
+ 
+ 	spin_lock(&head->lock);
+ 	tb = inet_csk(sk)->icsk_bind_hash;
+@@ -143,6 +146,8 @@ int __inet_inherit_port(const struct sock *sk, struct sock *child)
+ 		return -ENOENT;
+ 	}
+ 	if (tb->port != port) {
++		l3mdev = inet_sk_bound_l3mdev(sk);
++
+ 		/* NOTE: using tproxy and redirecting skbs to a proxy
+ 		 * on a different listener port breaks the assumption
+ 		 * that the listener socket's icsk_bind_hash is the same
+@@ -150,12 +155,13 @@ int __inet_inherit_port(const struct sock *sk, struct sock *child)
+ 		 * create a new bind bucket for the child here. */
+ 		inet_bind_bucket_for_each(tb, &head->chain) {
+ 			if (net_eq(ib_net(tb), sock_net(sk)) &&
+-			    tb->port == port)
++			    tb->l3mdev == l3mdev && tb->port == port)
+ 				break;
+ 		}
+ 		if (!tb) {
+ 			tb = inet_bind_bucket_create(table->bind_bucket_cachep,
+-						     sock_net(sk), head, port);
++						     sock_net(sk), head, port,
++						     l3mdev);
+ 			if (!tb) {
+ 				spin_unlock(&head->lock);
+ 				return -ENOMEM;
+@@ -675,6 +681,7 @@ int __inet_hash_connect(struct inet_timewait_death_row *death_row,
+ 	u32 remaining, offset;
+ 	int ret, i, low, high;
+ 	static u32 hint;
++	int l3mdev;
+ 
+ 	if (port) {
+ 		head = &hinfo->bhash[inet_bhashfn(net, port,
+@@ -693,6 +700,8 @@ int __inet_hash_connect(struct inet_timewait_death_row *death_row,
+ 		return ret;
+ 	}
+ 
++	l3mdev = inet_sk_bound_l3mdev(sk);
++
+ 	inet_get_local_port_range(net, &low, &high);
+ 	high++; /* [32768, 60999] -> [32768, 61000[ */
+ 	remaining = high - low;
+@@ -719,7 +728,8 @@ int __inet_hash_connect(struct inet_timewait_death_row *death_row,
+ 		 * the established check is already unique enough.
+ 		 */
+ 		inet_bind_bucket_for_each(tb, &head->chain) {
+-			if (net_eq(ib_net(tb), net) && tb->port == port) {
++			if (net_eq(ib_net(tb), net) && tb->l3mdev == l3mdev &&
++			    tb->port == port) {
+ 				if (tb->fastreuse >= 0 ||
+ 				    tb->fastreuseport >= 0)
+ 					goto next_port;
+@@ -732,7 +742,7 @@ int __inet_hash_connect(struct inet_timewait_death_row *death_row,
+ 		}
+ 
+ 		tb = inet_bind_bucket_create(hinfo->bind_bucket_cachep,
+-					     net, head, port);
++					     net, head, port, l3mdev);
+ 		if (!tb) {
+ 			spin_unlock_bh(&head->lock);
+ 			return -ENOMEM;
+-- 
+2.11.0
+

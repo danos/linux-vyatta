@@ -1,0 +1,172 @@
+MPLS: source address selection
+
+For mpls using the local label over loopback, the
+source address selection chooses the first primary
+address on the first interface in the event that no
+ip address is configured on the loopback lo interface.
+
+Modify this behaviour by making a local label lookup
+to derive the mpls nexthop. The source address selection
+can then make use of the outgoing mpls interface.
+
+Signed-off-by: Dewi Morgan <morgand@vyatta.att-mail.com
+---
+ include/net/ip_fib.h     |    3 +++
+ include/net/lwtunnel.h   |   11 +++++++++++
+ net/core/lwtunnel.c      |   24 ++++++++++++++++++++++++
+ net/mpls/mpls_iptunnel.c |   37 +++++++++++++++++++++++++++++++++++++
+ 4 files changed, 75 insertions(+)
+
+--- a/net/mpls/mpls_iptunnel.c
++++ b/net/mpls/mpls_iptunnel.c
+@@ -13,6 +13,7 @@
+ #include <linux/types.h>
+ #include <linux/skbuff.h>
+ #include <linux/net.h>
++#include <linux/inetdevice.h>
+ #include <linux/module.h>
+ #include <linux/mpls.h>
+ #include <linux/vmalloc.h>
+@@ -38,6 +39,41 @@ static unsigned int mpls_encap_size(stru
+ 	return en->labels * sizeof(struct mpls_shim_hdr);
+ }
+ 
++static __be32 mpls_select_saddr(struct net *net, struct fib_result *res,
++				__be32 saddr)
++{
++	struct mpls_iptunnel_encap *tun_encap_info;
++	struct lwtunnel_state *lwtstate;
++	struct fib_info *fi = res->fi;
++	struct net_device *out_dev;
++	struct mpls_route *rt;
++	unsigned int nh_index;
++
++	out_dev = rcu_dereference(FIB_RES_NH(*res).nh_dev);
++	if (!(out_dev->flags & IFF_LOOPBACK))
++		return saddr;
++
++	lwtstate = FIB_RES_NH(*res).nh_lwtstate;
++	tun_encap_info = mpls_lwtunnel_encap(lwtstate);
++	if (!tun_encap_info->labels)
++		return saddr;
++
++	rt = mpls_route_input_rcu(net, tun_encap_info->label[0]);
++	if (!rt || !rt->rt_nhn)
++		return saddr;
++
++	for (nh_index = 0; nh_index < rt->rt_nhn; nh_index++) {
++		const struct mpls_nh *mpls_nh;
++
++		mpls_nh = mpls_get_nexthop(rt, nh_index);
++		out_dev = rcu_dereference(mpls_nh->nh_dev);
++		if (mpls_output_possible(out_dev))
++			return inet_select_addr(out_dev, 0, fi->fib_scope);
++	}
++
++	return saddr;
++}
++
+ static int mpls_xmit(struct sk_buff *skb)
+ {
+ 	struct mpls_iptunnel_encap *tun_encap_info;
+@@ -358,6 +394,7 @@ static int mpls_encap_cmp(struct lwtunne
+ 
+ static const struct lwtunnel_encap_ops mpls_iptun_ops = {
+ 	.build_state = mpls_build_state,
++	.select_saddr = mpls_select_saddr,
+ 	.xmit = mpls_xmit,
+ 	.fill_encap = mpls_fill_encap_info,
+ 	.get_encap_size = mpls_encap_nlsize,
+--- a/include/net/lwtunnel.h
++++ b/include/net/lwtunnel.h
+@@ -7,6 +7,8 @@
+ #include <linux/types.h>
+ #include <net/route.h>
+ 
++struct fib_result;
++
+ #define LWTUNNEL_HASH_BITS   7
+ #define LWTUNNEL_HASH_SIZE   (1 << LWTUNNEL_HASH_BITS)
+ 
+@@ -38,6 +40,8 @@ struct lwtunnel_encap_ops {
+ 			   struct lwtunnel_state **ts,
+ 			   struct netlink_ext_ack *extack);
+ 	void (*destroy_state)(struct lwtunnel_state *lws);
++	__be32 (*select_saddr)(struct net *net, struct fib_result *res,
++			       __be32 saddr);
+ 	int (*output)(struct net *net, struct sock *sk, struct sk_buff *skb);
+ 	int (*input)(struct sk_buff *skb);
+ 	int (*fill_encap)(struct sk_buff *skb,
+@@ -122,6 +126,7 @@ int lwtunnel_fill_encap(struct sk_buff *
+ int lwtunnel_get_encap_size(struct lwtunnel_state *lwtstate);
+ struct lwtunnel_state *lwtunnel_state_alloc(int hdr_len);
+ int lwtunnel_cmp_encap(struct lwtunnel_state *a, struct lwtunnel_state *b);
++__be32 lwtunnel_select_saddr(struct net *net, struct fib_result *res);
+ int lwtunnel_output(struct net *net, struct sock *sk, struct sk_buff *skb);
+ int lwtunnel_input(struct sk_buff *skb);
+ int lwtunnel_xmit(struct sk_buff *skb);
+@@ -222,6 +227,12 @@ static inline int lwtunnel_cmp_encap(str
+ 	return 0;
+ }
+ 
++static inline __be32 lwtunnel_select_saddr(struct net *net,
++					   struct fib_result *res)
++{
++	return FIB_RES_SADDR(net, *res);
++}
++
+ static inline int lwtunnel_output(struct net *net, struct sock *sk, struct sk_buff *skb)
+ {
+ 	return -EOPNOTSUPP;
+--- a/net/core/lwtunnel.c
++++ b/net/core/lwtunnel.c
+@@ -382,6 +382,30 @@ drop:
+ }
+ EXPORT_SYMBOL_GPL(lwtunnel_xmit);
+ 
++__be32 lwtunnel_select_saddr(struct net *net, struct fib_result *res)
++{
++	const struct lwtunnel_encap_ops *ops;
++	struct lwtunnel_state *lwtstate;
++	__be32 saddr = FIB_RES_SADDR(net, *res);
++
++	lwtstate = FIB_RES_NH(*res).nh_lwtstate;
++	if (!lwtstate)
++		return saddr;
++
++	if (lwtstate->type == LWTUNNEL_ENCAP_NONE ||
++	    lwtstate->type > LWTUNNEL_ENCAP_MAX)
++		return saddr;
++
++	rcu_read_lock();
++	ops = rcu_dereference(lwtun_encaps[lwtstate->type]);
++	if (likely(ops && ops->select_saddr))
++		saddr = ops->select_saddr(net, res, saddr);
++	rcu_read_unlock();
++
++	return saddr;
++}
++EXPORT_SYMBOL(lwtunnel_select_saddr);
++
+ int lwtunnel_input(struct sk_buff *skb)
+ {
+ 	struct dst_entry *dst = skb_dst(skb);
+--- a/include/net/ip_fib.h
++++ b/include/net/ip_fib.h
+@@ -17,6 +17,7 @@
+ #define _NET_IP_FIB_H
+ 
+ #include <net/flow.h>
++#include <net/lwtunnel.h>
+ #include <linux/seq_file.h>
+ #include <linux/rcupdate.h>
+ #include <net/fib_notifier.h>
+@@ -187,6 +188,8 @@ __be32 fib_info_update_nh_saddr(struct n
+ #define FIB_RES_OIF(res)		(FIB_RES_NH(res).nh_oif)
+ 
+ #define FIB_RES_PREFSRC(net, res)	((res).fi->fib_prefsrc ? : \
++					 FIB_RES_NH(res).nh_lwtstate ? \
++					 lwtunnel_select_saddr(net, &res) : \
+ 					 FIB_RES_SADDR(net, res))
+ 
+ struct fib_entry_notifier_info {

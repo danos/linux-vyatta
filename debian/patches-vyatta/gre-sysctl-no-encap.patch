@@ -1,0 +1,218 @@
+---
+ net/ipv4/ip_gre.c |  147 ++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 147 insertions(+)
+
+--- a/net/ipv4/ip_gre.c
++++ b/net/ipv4/ip_gre.c
+@@ -32,6 +32,8 @@
+ #include <linux/netfilter_ipv4.h>
+ #include <linux/etherdevice.h>
+ #include <linux/if_ether.h>
++#include <linux/if_tun.h>
++#include <linux/notifier.h>
+ 
+ #include <net/sock.h>
+ #include <net/ip.h>
+@@ -111,6 +113,15 @@ static bool log_ecn_error = true;
+ module_param(log_ecn_error, bool, 0644);
+ MODULE_PARM_DESC(log_ecn_error, "Log packets received with corrupted ECN");
+ 
++struct gre_devconf {
++	char o_ifname[IFNAMSIZ];
++	int  o_ifindex;
++};
++
++static struct gre_devconf gre_devconf __read_mostly = {
++	.o_ifindex = -1
++};
++
+ static struct rtnl_link_ops ipgre_link_ops __read_mostly;
+ static int ipgre_tunnel_init(struct net_device *dev);
+ static void erspan_build_header(struct sk_buff *skb,
+@@ -671,6 +682,40 @@ static int gre_fill_metadata_dst(struct
+ 	return 0;
+ }
+ 
++static bool gre_xmit_bypass(struct sk_buff *skb,
++			    struct net_device *dev,
++			    __be16 proto)
++{
++	if (gre_devconf.o_ifindex != -1) {
++		struct net_device *out_dev;
++
++		skb->dev = dev;
++		skb->skb_iif = dev->ifindex;
++		out_dev = __dev_get_by_index(&init_net, gre_devconf.o_ifindex);
++		skb->dev = out_dev;
++		if (!skb->dev) {
++			kfree_skb(skb);
++			dev->stats.tx_dropped++;
++			return true;
++		}
++		skb->protocol = proto;
++
++		/* Intercepting GRE so don't add the headers. */
++		if (dev->header_ops) {
++			struct ip_tunnel *tunnel = netdev_priv(dev);
++			const struct iphdr *out_hdr;
++
++			out_hdr = (const struct iphdr *)skb->data;
++			skb_pull(skb, tunnel->hlen + sizeof(struct iphdr));
++			skb_reset_mac_header(skb);
++			memcpy(&skb->mark, &out_hdr->daddr, sizeof(skb->mark));
++		}
++		dev_queue_xmit(skb);
++		return true;
++	}
++	return false;
++}
++
+ static netdev_tx_t ipgre_xmit(struct sk_buff *skb,
+ 			      struct net_device *dev)
+ {
+@@ -680,6 +725,9 @@ static netdev_tx_t ipgre_xmit(struct sk_
+ 	if (!pskb_inet_may_pull(skb))
+ 		goto free_skb;
+ 
++	if (gre_xmit_bypass(skb, dev, skb->protocol))
++		return NETDEV_TX_OK;
++
+ 	if (tunnel->collect_md) {
+ 		gre_fb_xmit(skb, dev, skb->protocol);
+ 		return NETDEV_TX_OK;
+@@ -705,6 +753,9 @@ static netdev_tx_t ipgre_xmit(struct sk_
+ 		tnl_params = &tunnel->parms.iph;
+ 	}
+ 
++	if (gre_xmit_bypass(skb, dev, htons(ETH_P_TEB)))
++		return NETDEV_TX_OK;
++
+ 	if (gre_handle_offloads(skb, !!(tunnel->parms.o_flags & TUNNEL_CSUM)))
+ 		goto free_skb;
+ 
+@@ -920,6 +971,15 @@ static int ipgre_header(struct sk_buff *
+ static int ipgre_header_parse(const struct sk_buff *skb, unsigned char *haddr)
+ {
+ 	const struct iphdr *iph = (const struct iphdr *) skb_mac_header(skb);
++
++	if (gre_devconf.o_ifindex != -1) {
++		/* Ip src addr is stored in the mark when the dataplane
++		 * has removed the ip/gre headers.
++		 */
++		memcpy(haddr, &skb->mark, 4);
++		return 4;
++	}
++
+ 	memcpy(haddr, &iph->saddr, 4);
+ 	return 4;
+ }
+@@ -1681,6 +1741,86 @@ static struct pernet_operations erspan_n
+ 	.size = sizeof(struct ip_tunnel_net),
+ };
+ 
++static int gre_sysctl_netdev_event(struct notifier_block *this,
++				   unsigned long event,
++				   void *ptr)
++{
++	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
++
++	switch (event) {
++	case NETDEV_REGISTER:
++		if (strcmp(dev->name, gre_devconf.o_ifname) == 0)
++			gre_devconf.o_ifindex = dev->ifindex;
++		break;
++	case NETDEV_UNREGISTER:
++		if (dev->ifindex == gre_devconf.o_ifindex)
++			gre_devconf.o_ifindex = -1;
++		break;
++	case NETDEV_CHANGENAME:
++		if (strcmp(dev->name, gre_devconf.o_ifname) == 0)
++			gre_devconf.o_ifindex = dev->ifindex;
++		else if (dev->ifindex == gre_devconf.o_ifindex)
++			gre_devconf.o_ifindex = -1;
++
++		break;
++	}
++
++	return NOTIFY_DONE;
++}
++
++int gre_sysctl_proc_dostring(struct ctl_table *table, int write,
++			     void __user *buffer, size_t *lenp, loff_t *ppos)
++{
++	int r;
++
++	r = proc_dostring(table, write, buffer, lenp, ppos);
++	if (write && r == 0) {
++		struct net_device *dev =
++			dev_get_by_name(current->nsproxy->net_ns,
++					gre_devconf.o_ifname);
++		if (dev) {
++			gre_devconf.o_ifindex = dev->ifindex;
++			dev_put(dev);
++		}
++	}
++	return r;
++}
++
++struct ctl_table gre_sysctl_table[] = {
++	{
++		.procname	= "gre_output_if",
++		.data		= &gre_devconf.o_ifname,
++		.maxlen		= IFNAMSIZ,
++		.mode		= 0644,
++		.proc_handler	= gre_sysctl_proc_dostring,
++	},
++	{
++		/* sentinel */
++	}
++};
++
++static struct notifier_block gre_sysctl_notifier = {
++	.notifier_call = gre_sysctl_netdev_event,
++};
++
++static struct ctl_table_header *hdr;
++
++static int gre_sysctl_register(void)
++{
++	register_netdevice_notifier(&gre_sysctl_notifier);
++
++	hdr = register_net_sysctl(&init_net, "net/ipv4/gre", gre_sysctl_table);
++	if (!hdr)
++		return -ENOMEM;
++	return 0;
++}
++
++static void gre_sysctl_unregister(void)
++{
++	unregister_netdevice_notifier(&gre_sysctl_notifier);
++	unregister_net_sysctl_table(hdr);
++}
++
+ static int __init ipgre_init(void)
+ {
+ 	int err;
+@@ -1717,8 +1857,14 @@ static int __init ipgre_init(void)
+ 	if (err < 0)
+ 		goto erspan_link_failed;
+ 
++	err = gre_sysctl_register();
++	if (err < 0)
++		goto sysctl_failed;
++
+ 	return 0;
+ 
++sysctl_failed:
++	rtnl_link_unregister(&erspan_link_ops);
+ erspan_link_failed:
+ 	rtnl_link_unregister(&ipgre_tap_ops);
+ tap_ops_failed:
+@@ -1736,6 +1882,7 @@ pnet_tap_failed:
+ 
+ static void __exit ipgre_fini(void)
+ {
++	gre_sysctl_unregister();
+ 	rtnl_link_unregister(&ipgre_tap_ops);
+ 	rtnl_link_unregister(&ipgre_link_ops);
+ 	rtnl_link_unregister(&erspan_link_ops);

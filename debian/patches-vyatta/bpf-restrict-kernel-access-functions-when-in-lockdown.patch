@@ -1,0 +1,35 @@
+bpf: Restrict bpf when kernel is in lockdown mode
+
+bpf_read() and bpf_read_str() could potentially be abused to (eg) allow
+private keys in kernel memory to be leaked. Disable them if the kernel
+has been locked down instead of restricting BPF completely. This is
+inline with the later version of the code in version 5.4
+---
+ kernel/trace/bpf_trace.c |    9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+--- a/kernel/trace/bpf_trace.c
++++ b/kernel/trace/bpf_trace.c
+@@ -100,6 +100,11 @@ BPF_CALL_3(bpf_probe_read, void *, dst,
+ {
+ 	int ret;
+ 
++	if (kernel_is_locked_down("BPF")) {
++		memset(dst, 0, size);
++		return -EPERM;
++	}
++
+ 	ret = probe_kernel_read(dst, unsafe_ptr, size);
+ 	if (unlikely(ret < 0))
+ 		memset(dst, 0, size);
+@@ -522,6 +527,10 @@ BPF_CALL_3(bpf_probe_read_str, void *, d
+ {
+ 	int ret;
+ 
++	if (kernel_is_locked_down("BPF")) {
++		memset(dst, 0, size);
++		return -EPERM;
++	}
+ 	/*
+ 	 * The strncpy_from_unsafe() call will likely not fill the entire
+ 	 * buffer, but that's okay in this circumstance as we're probing

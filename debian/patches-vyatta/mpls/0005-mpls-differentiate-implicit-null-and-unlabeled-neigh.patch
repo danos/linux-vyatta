@@ -1,0 +1,426 @@
+From 5ac3de9e19a0c6a82e9e78931abc8b076c81c7c0 Mon Sep 17 00:00:00 2001
+From: Robert Shearman <rshearma@vyatta.att-mail.com>
+Date: Mon, 13 Apr 2015 15:56:04 +0100
+Subject: [PATCH 5/6] mpls: differentiate implicit-null and unlabeled
+ neighbours
+
+The control plane can advertise labels for neighbours that don't have
+an outgoing label which means that in terms of RFC3031 the label is
+valid, but there won't be an NHFLE. RFC3031 s3.22 states in this
+situation that either the remaining labels should be popped (if the
+control plane can determine that it's safe to do so, which in light of
+MPLS-VPN, RFC4364, is never the case now) or that the packet should
+be discarded.
+
+Therefore, introduce a new route attribute, RTA_MPLS_PAYLOAD, that
+allows the control plane to restrict/specify what the LSP is used for.
+Two nested attributes are specified: RTMPA_TYPE to specify the type of
+traffic; and RTMPA_NH_FLAGS to allow the control plane to specify what
+the path/nexthop is used for, in particular that packets arriving on
+an LSP must be BOS only (otherwise, the packets are dropped.
+
+Signed-off-by: Robert Shearman <rshearma@vyatta.att-mail.com>
+---
+ include/uapi/linux/mpls.h      |   30 ++++++++
+ include/uapi/linux/rtnetlink.h |    1 
+ net/mpls/af_mpls.c             |  148 +++++++++++++++++++++++++++++++++++++----
+ net/mpls/internal.h            |    4 -
+ 4 files changed, 168 insertions(+), 15 deletions(-)
+
+--- a/include/uapi/linux/mpls.h
++++ b/include/uapi/linux/mpls.h
+@@ -74,4 +74,34 @@ struct mpls_link_stats {
+ 	__u64	rx_noroute;		/* no route for packet dest	*/
+ };
+ 
++/* MPLS tunnel attributes
++ * [RTA_MPLS_PAYLOAD] = {
++ *     [RTMPA_TYPE],
++ *     [RTMPA_NH_FLAGS]
++ * }
++ */
++enum rtmpls_payload_attr {
++	RTMPA_TYPE,
++	RTMPA_NH_FLAGS,
++};
++
++/* RTMPA_TYPE - u32 specifying type */
++enum rtmpls_payload_type {
++	RTMPT_IP		= 0x0000, /* IPv4 or IPv6 */
++	RTMPT_IPV4		= 0x0004,
++	RTMPT_IPV6		= 0x0006,
++
++	/* Other types not implemented:
++	 *  - Pseudo-wire with or without control word (RFC4385)
++	 *  - GAL (RFC5586)
++	 */
++};
++
++/* RTMPA_NH_FLAGS - u32 specifying zero or more flags */
++enum rtmpls_payload_nh_flags {
++	RTMPNF_BOS_ONLY	= 0x00000001,
++};
++
++#define RTMPNF_ALL (RTMPNF_BOS_ONLY)
++
+ #endif /* _UAPI_MPLS_H */
+--- a/include/uapi/linux/rtnetlink.h
++++ b/include/uapi/linux/rtnetlink.h
+@@ -335,6 +335,7 @@ enum rtattr_type_t {
+ 	RTA_IP_PROTO,
+ 	RTA_SPORT,
+ 	RTA_DPORT,
++	RTA_MPLS_PAYLOAD = (RTA_PAD + 9),
+ 	__RTA_MAX
+ };
+ 
+--- a/net/mpls/af_mpls.c
++++ b/net/mpls/af_mpls.c
+@@ -238,26 +238,39 @@ static struct mpls_nh *mpls_select_multi
+ 	int nh_index = 0;
+ 	int n = 0;
+ 	u8 alive;
++	bool bos;
+ 
+ 	/* No need to look further into packet if there's only
+ 	 * one path
+ 	 */
+-	if (rt->rt_nhn == 1)
++	if (rt->rt_nhn == 1) {
++		if (unlikely(rt->rt_nh[0].nh_bos_only &&
++			     !mpls_entry_decode(mpls_hdr(skb)).bos))
++			return NULL;
+ 		return rt->rt_nh;
++	}
+ 
+ 	alive = READ_ONCE(rt->rt_nhn_alive);
+ 	if (alive == 0)
+ 		return NULL;
+ 
++	bos = mpls_entry_decode(mpls_hdr(skb)).bos;
+ 	hash = mpls_multipath_hash(rt, skb);
+-	nh_index = hash % alive;
+-	if (alive == rt->rt_nhn)
++	if (bos)
++		nh_index = hash % alive;
++	else
++		nh_index = hash % rt->rt_non_bos_only_nhn;
++
++	if (alive == rt->rt_nhn && (bos || rt->rt_non_bos_only_nhn == alive))
+ 		goto out;
++
+ 	for_nexthops(rt) {
+ 		unsigned int nh_flags = READ_ONCE(nh->nh_flags);
+ 
+ 		if (nh_flags & (RTNH_F_DEAD | RTNH_F_LINKDOWN))
+ 			continue;
++		if (!bos && rt->rt_nh[nh_index].nh_bos_only)
++			continue;
+ 		if (n == nh_index)
+ 			return nh;
+ 		n++;
+@@ -270,7 +283,7 @@ out:
+ static bool mpls_egress(struct net *net, struct mpls_route *rt,
+ 			struct sk_buff *skb, struct mpls_entry_decoded dec)
+ {
+-	enum mpls_payload_type payload_type;
++	enum rtmpls_payload_type payload_type;
+ 	bool success = false;
+ 
+ 	/* The IPv4 code below accesses through the IPv4 header
+@@ -287,11 +300,11 @@ static bool mpls_egress(struct net *net,
+ 		return false;
+ 
+ 	payload_type = rt->rt_payload_type;
+-	if (payload_type == MPT_UNSPEC)
++	if (payload_type == RTMPT_IP)
+ 		payload_type = ip_hdr(skb)->version;
+ 
+ 	switch (payload_type) {
+-	case MPT_IPV4: {
++	case RTMPT_IPV4: {
+ 		struct iphdr *hdr4 = ip_hdr(skb);
+ 		u8 new_ttl;
+ 		skb->protocol = htons(ETH_P_IP);
+@@ -314,7 +327,7 @@ static bool mpls_egress(struct net *net,
+ 		success = true;
+ 		break;
+ 	}
+-	case MPT_IPV6: {
++	case RTMPT_IPV6: {
+ 		struct ipv6hdr *hdr6 = ipv6_hdr(skb);
+ 		skb->protocol = htons(ETH_P_IPV6);
+ 
+@@ -331,7 +344,7 @@ static bool mpls_egress(struct net *net,
+ 		success = true;
+ 		break;
+ 	}
+-	case MPT_UNSPEC:
++	case RTMPT_IP:
+ 		/* Should have decided which protocol it is by now */
+ 		break;
+ 	}
+@@ -484,6 +497,7 @@ static const struct nla_policy rtm_mpls_
+ 	[RTA_DST]		= { .type = NLA_U32 },
+ 	[RTA_OIF]		= { .type = NLA_U32 },
+ 	[RTA_TTL_PROPAGATE]	= { .type = NLA_U8 },
++	[RTA_MPLS_PAYLOAD]	= { .type = NLA_NESTED },
+ };
+ 
+ struct mpls_route_config {
+@@ -498,6 +512,7 @@ struct mpls_route_config {
+ 	u32			rc_output_label[MAX_NEW_LABELS];
+ 	u32			rc_nlflags;
+ 	enum mpls_payload_type	rc_payload_type;
++	u32			rc_mpnh_flags;
+ 	struct nl_info		rc_nlinfo;
+ 	struct rtnexthop	*rc_mp;
+ 	int			rc_mp_len;
+@@ -524,6 +539,7 @@ static struct mpls_route *mpls_rt_alloc(
+ 	rt->rt_nhn_alive = num_nh;
+ 	rt->rt_nh_size = nh_size;
+ 	rt->rt_via_offset = MPLS_NH_VIA_OFF(max_labels);
++	rt->rt_non_bos_only_nhn = num_nh;
+ 
+ 	return rt;
+ }
+@@ -783,12 +799,16 @@ static int mpls_nh_build_from_cfg(struct
+ 	memcpy(__mpls_nh_via(rt, nh), cfg->rc_via, cfg->rc_via_alen);
+ 	nh->nh_via_alen = cfg->rc_via_alen;
+ 
++	nh->nh_bos_only = (cfg->rc_mpnh_flags & RTMPNF_BOS_ONLY) ? 1 : 0;
++
+ 	err = mpls_nh_assign_dev(net, rt, nh, cfg->rc_ifindex);
+ 	if (err)
+ 		goto errout;
+ 
+ 	if (nh->nh_flags & (RTNH_F_DEAD | RTNH_F_LINKDOWN))
+ 		rt->rt_nhn_alive--;
++	if (nh->nh_bos_only)
++		rt->rt_non_bos_only_nhn--;
+ 
+ 	return 0;
+ 
+@@ -799,6 +819,7 @@ errout:
+ static int mpls_nh_build(struct net *net, struct mpls_route *rt,
+ 			 struct mpls_nh *nh, int oif, struct nlattr *via,
+ 			 struct nlattr *newdst, u8 max_labels,
++			 uint32_t mpls_nh_flags,
+ 			 struct netlink_ext_ack *extack)
+ {
+ 	int err = -ENOMEM;
+@@ -822,6 +843,8 @@ static int mpls_nh_build(struct net *net
+ 		nh->nh_via_table = MPLS_NEIGH_TABLE_UNSPEC;
+ 	}
+ 
++	nh->nh_bos_only = (mpls_nh_flags & RTMPNF_BOS_ONLY) ? 1 : 0;
++
+ 	err = mpls_nh_assign_dev(net, rt, nh, oif);
+ 	if (err)
+ 		goto errout;
+@@ -886,8 +909,9 @@ static int mpls_nh_build_multi(struct mp
+ 			       struct netlink_ext_ack *extack)
+ {
+ 	struct rtnexthop *rtnh = cfg->rc_mp;
+-	struct nlattr *nla_via, *nla_newdst;
++	struct nlattr *nla_via, *nla_newdst, *nla_mpl;
+ 	int remaining = cfg->rc_mp_len;
++	uint32_t mpls_nh_flags;
+ 	int err = 0;
+ 	u8 nhs = 0;
+ 
+@@ -896,6 +920,7 @@ static int mpls_nh_build_multi(struct mp
+ 
+ 		nla_via = NULL;
+ 		nla_newdst = NULL;
++		mpls_nh_flags = 0;
+ 
+ 		err = -EINVAL;
+ 		if (!rtnh_ok(rtnh, remaining))
+@@ -913,16 +938,33 @@ static int mpls_nh_build_multi(struct mp
+ 
+ 			nla_via = nla_find(attrs, attrlen, RTA_VIA);
+ 			nla_newdst = nla_find(attrs, attrlen, RTA_NEWDST);
++			nla_mpl = nla_find(attrs, attrlen, RTA_MPLS_PAYLOAD);
++			if (nla_mpl) {
++				void *mpls_attrs = nla_data(nla_mpl);
++				int mpls_attr_len = nla_len(nla_mpl);
++				struct nlattr *mpnh_nla;
++
++				mpnh_nla = nla_find(mpls_attrs, mpls_attr_len,
++						    RTMPA_NH_FLAGS);
++				if (mpnh_nla) {
++					mpls_nh_flags = nla_get_u32(mpnh_nla);
++
++					if (mpls_nh_flags & ~RTMPNF_ALL)
++						goto errout;
++				}
++			}
+ 		}
+ 
+ 		err = mpls_nh_build(cfg->rc_nlinfo.nl_net, rt, nh,
+ 				    rtnh->rtnh_ifindex, nla_via, nla_newdst,
+-				    max_labels, extack);
++				    max_labels, mpls_nh_flags, extack);
+ 		if (err)
+ 			goto errout;
+ 
+ 		if (nh->nh_flags & (RTNH_F_DEAD | RTNH_F_LINKDOWN))
+ 			rt->rt_nhn_alive--;
++		if (nh->nh_bos_only)
++			rt->rt_non_bos_only_nhn--;
+ 
+ 		rtnh = rtnh_next(rtnh, &remaining);
+ 		nhs++;
+@@ -1846,6 +1888,38 @@ static int rtm_to_route_config(struct sk
+ 				MPLS_TTL_PROP_DISABLED;
+ 			break;
+ 		}
++		case RTA_MPLS_PAYLOAD: {
++			void *mpls_attrs = nla_data(nla);
++			int mpls_attr_len = nla_len(nla);
++			struct nlattr *mpnh_nla;
++			struct nlattr *mpt_nla;
++
++			mpt_nla = nla_find(mpls_attrs, mpls_attr_len,
++					   RTMPA_TYPE);
++			if (mpt_nla) {
++				cfg->rc_payload_type = nla_get_u32(mpt_nla);
++
++				switch (cfg->rc_payload_type) {
++				case RTMPT_IP:
++				case RTMPT_IPV4:
++				case RTMPT_IPV6:
++					break;
++				default:
++					goto errout;
++				}
++			}
++
++			mpnh_nla = nla_find(mpls_attrs, mpls_attr_len,
++					    RTMPA_NH_FLAGS);
++			if (mpnh_nla) {
++				cfg->rc_mpnh_flags = nla_get_u32(mpnh_nla);
++
++				if (cfg->rc_mpnh_flags & ~RTMPNF_ALL)
++					goto errout;
++			}
++
++			break;
++		}
+ 		default:
+ 			NL_SET_ERR_MSG_ATTR(extack, nla, "Unknown attribute");
+ 			/* Unsupported attribute */
+@@ -1934,6 +2008,25 @@ static int mpls_dump_route(struct sk_buf
+ 			       ttl_propagate))
+ 			goto nla_put_failure;
+ 	}
++
++	if (rt->rt_payload_type ||
++	    (rt->rt_nhn == 1 && rt->rt_nh[0].nh_bos_only)) {
++		struct nlattr *mpls_payload = nla_nest_start(skb,
++							     RTA_MPLS_PAYLOAD);
++
++		if (!mpls_payload)
++			goto nla_put_failure;
++
++		if (rt->rt_payload_type && nla_put_u32(skb, RTMPA_TYPE,
++						       rt->rt_payload_type))
++			goto nla_put_failure;
++		if (rt->rt_nhn == 1 && rt->rt_nh[0].nh_bos_only &&
++		    nla_put_u32(skb, RTMPA_NH_FLAGS, RTMPNF_BOS_ONLY))
++			goto nla_put_failure;
++
++		nla_nest_end(skb, mpls_payload);
++	}
++
+ 	if (rt->rt_nhn == 1) {
+ 		const struct mpls_nh *nh = rt->rt_nh;
+ 
+@@ -1991,6 +2084,18 @@ static int mpls_dump_route(struct sk_buf
+ 					nh->nh_via_alen))
+ 				goto nla_put_failure;
+ 
++			if (nh->nh_bos_only) {
++				struct nlattr *mpls_payload = nla_nest_start(
++					skb, RTA_MPLS_PAYLOAD);
++
++				if (!mpls_payload)
++					goto nla_put_failure;
++				if (nla_put_u32(skb, RTMPA_NH_FLAGS,
++						RTMPNF_BOS_ONLY))
++					goto nla_put_failure;
++				nla_nest_end(skb, mpls_payload);
++			}
++
+ 			/* length of rtnetlink header + attributes */
+ 			rtnh->rtnh_len = nlmsg_get_pos(skb) - (void *)rtnh;
+ 		} endfor_nexthops(rt);
+@@ -2048,6 +2153,15 @@ static inline size_t lfib_nlmsg_size(str
+ 		NLMSG_ALIGN(sizeof(struct rtmsg))
+ 		+ nla_total_size(4)			/* RTA_DST */
+ 		+ nla_total_size(1);			/* RTA_TTL_PROPAGATE */
++	if (rt->rt_payload_type ||
++	    (rt->rt_nhn == 1 && rt->rt_nh[0].nh_bos_only)) {
++		size_t plsize = 0;
++		if (rt->rt_payload_type)
++			plsize += nla_total_size(4); /* RTMPA_TYPE */
++		if (rt->rt_nhn == 1 && rt->rt_nh[0].nh_bos_only)
++			plsize += nla_total_size(4); /* RTMPA_NH_FLAGS */
++		payload += nla_total_size(plsize); /* RTA_MPLS_PAYLOAD */
++	}
+ 
+ 	if (rt->rt_nhn == 1) {
+ 		struct mpls_nh *nh = rt->rt_nh;
+@@ -2071,6 +2185,13 @@ static inline size_t lfib_nlmsg_size(str
+ 				nhsize += nla_total_size(2 + nh->nh_via_alen);
+ 			if (nh->nh_labels)
+ 				nhsize += nla_total_size(nh->nh_labels * 4);
++			if (nh->nh_bos_only) {
++				/* RTMPA_NH_FLAGS */
++				size_t plsize = nla_total_size(4);
++
++				/* RTA_MPLS_PAYLOAD */
++				payload += nla_total_size(plsize);
++			}
+ 		} endfor_nexthops(rt);
+ 		/* nested attribute */
+ 		payload += nla_total_size(nhsize);
+@@ -2293,7 +2414,7 @@ static int resize_platform_label_table(s
+ 			goto nort0;
+ 		RCU_INIT_POINTER(rt0->rt_nh->nh_dev, lo);
+ 		rt0->rt_protocol = RTPROT_KERNEL;
+-		rt0->rt_payload_type = MPT_IPV4;
++		rt0->rt_payload_type = RTMPT_IPV4;
+ 		rt0->rt_ttl_propagate = MPLS_TTL_PROP_DEFAULT;
+ 		rt0->rt_nh->nh_via_table = NEIGH_LINK_TABLE;
+ 		rt0->rt_nh->nh_via_alen = lo->addr_len;
+@@ -2307,7 +2428,7 @@ static int resize_platform_label_table(s
+ 			goto nort2;
+ 		RCU_INIT_POINTER(rt2->rt_nh->nh_dev, lo);
+ 		rt2->rt_protocol = RTPROT_KERNEL;
+-		rt2->rt_payload_type = MPT_IPV6;
++		rt2->rt_payload_type = RTMPT_IPV6;
+ 		rt2->rt_ttl_propagate = MPLS_TTL_PROP_DEFAULT;
+ 		rt2->rt_nh->nh_via_table = NEIGH_LINK_TABLE;
+ 		rt2->rt_nh->nh_via_alen = lo->addr_len;
+--- a/net/mpls/internal.h
++++ b/net/mpls/internal.h
+@@ -96,7 +96,7 @@ struct mpls_nh { /* next hop label forwa
+ 	u8			nh_labels;
+ 	u8			nh_via_alen;
+ 	u8			nh_via_table;
+-	u8			nh_reserved1;
++	u8			nh_bos_only;
+ 
+ 	u32			nh_label[0];
+ };
+@@ -153,7 +153,7 @@ struct mpls_route { /* next hop label fo
+ 	u8			rt_nhn_alive;
+ 	u8			rt_nh_size;
+ 	u8			rt_via_offset;
+-	u8			rt_reserved1;
++	u8			rt_non_bos_only_nhn;
+ 	struct mpls_nh		rt_nh[0];
+ };
+ 

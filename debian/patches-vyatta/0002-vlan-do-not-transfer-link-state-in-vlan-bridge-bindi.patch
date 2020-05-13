@@ -1,0 +1,134 @@
+From 43ad5d799bf1c177206983efd509e79d97de71fe Mon Sep 17 00:00:00 2001
+From: Mike Manning <mmanning@vyatta.att-mail.com>
+Date: Fri, 29 Mar 2019 09:33:02 +0000
+Subject: [PATCH net-next v2 2/5] vlan: do not transfer link state in vlan
+ bridge binding mode
+
+In vlan bridge binding mode, the link state is no longer transferred
+from the lower device. Instead it is set by the bridge module according
+to the state of bridge ports that are members of the vlan.
+
+Signed-off-by: Mike Manning <mmanning@vyatta.att-mail.com>
+---
+ net/8021q/vlan.c     |   18 ++++++++++++++----
+ net/8021q/vlan_dev.c |   19 ++++++++++++-------
+ 2 files changed, 26 insertions(+), 11 deletions(-)
+
+--- a/net/8021q/vlan.c
++++ b/net/8021q/vlan.c
+@@ -75,6 +75,14 @@ static int vlan_group_prealloc_vid(struc
+ 	return 0;
+ }
+ 
++static void vlan_stacked_transfer_operstate(const struct net_device *rootdev,
++					    struct net_device *dev,
++					    struct vlan_dev_priv *vlan)
++{
++	if (!(vlan->flags & VLAN_FLAG_BRIDGE_BINDING))
++		netif_stacked_transfer_operstate(rootdev, dev);
++}
++
+ void unregister_vlan_dev(struct net_device *dev, struct list_head *head)
+ {
+ 	struct vlan_dev_priv *vlan = vlan_dev_priv(dev);
+@@ -180,7 +188,7 @@ int register_vlan_dev(struct net_device
+ 	/* Account for reference in struct vlan_dev_priv */
+ 	dev_hold(real_dev);
+ 
+-	netif_stacked_transfer_operstate(real_dev, dev);
++	vlan_stacked_transfer_operstate(real_dev, dev, vlan);
+ 	linkwatch_fire_event(dev); /* _MUST_ call rfc2863_policy() */
+ 
+ 	/* So, got the sucker initialized, now lets place
+@@ -397,7 +405,8 @@ static int vlan_device_event(struct noti
+ 	case NETDEV_CHANGE:
+ 		/* Propagate real device state to vlan devices */
+ 		vlan_group_for_each_dev(grp, i, vlandev)
+-			netif_stacked_transfer_operstate(dev, vlandev);
++			vlan_stacked_transfer_operstate(dev, vlandev,
++							vlan_dev_priv(vlandev));
+ 		break;
+ 
+ 	case NETDEV_CHANGEADDR:
+@@ -444,7 +453,8 @@ static int vlan_device_event(struct noti
+ 		dev_close_many(&close_list, false);
+ 
+ 		list_for_each_entry_safe(vlandev, tmp, &close_list, close_list) {
+-			netif_stacked_transfer_operstate(dev, vlandev);
++			vlan_stacked_transfer_operstate(dev, vlandev,
++							vlan_dev_priv(vlandev));
+ 			list_del_init(&vlandev->close_list);
+ 		}
+ 		list_del(&close_list);
+@@ -460,7 +470,7 @@ static int vlan_device_event(struct noti
+ 			vlan = vlan_dev_priv(vlandev);
+ 			if (!(vlan->flags & VLAN_FLAG_LOOSE_BINDING))
+ 				dev_change_flags(vlandev, flgs | IFF_UP);
+-			netif_stacked_transfer_operstate(dev, vlandev);
++			vlan_stacked_transfer_operstate(dev, vlandev, vlan);
+ 		}
+ 		break;
+ 
+--- a/net/8021q/vlan_dev.c
++++ b/net/8021q/vlan_dev.c
+@@ -298,7 +298,8 @@ static int vlan_dev_open(struct net_devi
+ 	if (vlan->flags & VLAN_FLAG_MVRP)
+ 		vlan_mvrp_request_join(dev);
+ 
+-	if (netif_carrier_ok(real_dev))
++	if (netif_carrier_ok(real_dev) &&
++	    !(vlan->flags & VLAN_FLAG_BRIDGE_BINDING))
+ 		netif_carrier_on(dev);
+ 	return 0;
+ 
+@@ -328,7 +329,8 @@ static int vlan_dev_stop(struct net_devi
+ 	if (!ether_addr_equal(dev->dev_addr, real_dev->dev_addr))
+ 		dev_uc_del(real_dev, dev->dev_addr);
+ 
+-	netif_carrier_off(dev);
++	if (!(vlan->flags & VLAN_FLAG_BRIDGE_BINDING))
++		netif_carrier_off(dev);
+ 	return 0;
+ }
+ 
+@@ -550,7 +552,8 @@ static const struct net_device_ops vlan_
+ 
+ static int vlan_dev_init(struct net_device *dev)
+ {
+-	struct net_device *real_dev = vlan_dev_priv(dev)->real_dev;
++	struct vlan_dev_priv *vlan = vlan_dev_priv(dev);
++	struct net_device *real_dev = vlan->real_dev;
+ 
+ 	netif_carrier_off(dev);
+ 
+@@ -561,6 +564,9 @@ static int vlan_dev_init(struct net_devi
+ 					  (1<<__LINK_STATE_DORMANT))) |
+ 		      (1<<__LINK_STATE_PRESENT);
+ 
++	if (vlan->flags & VLAN_FLAG_BRIDGE_BINDING)
++		dev->state |= (1 << __LINK_STATE_NOCARRIER);
++
+ 	dev->hw_features = NETIF_F_HW_CSUM | NETIF_F_SG |
+ 			   NETIF_F_FRAGLIST | NETIF_F_GSO_SOFTWARE |
+ 			   NETIF_F_HIGHDMA | NETIF_F_SCTP_CRC |
+@@ -589,8 +595,7 @@ static int vlan_dev_init(struct net_devi
+ #endif
+ 
+ 	dev->needed_headroom = real_dev->needed_headroom;
+-	if (vlan_hw_offload_capable(real_dev->features,
+-				    vlan_dev_priv(dev)->vlan_proto)) {
++	if (vlan_hw_offload_capable(real_dev->features, vlan->vlan_proto)) {
+ 		dev->header_ops      = &vlan_passthru_header_ops;
+ 		dev->hard_header_len = real_dev->hard_header_len;
+ 	} else {
+@@ -604,8 +609,8 @@ static int vlan_dev_init(struct net_devi
+ 
+ 	vlan_dev_set_lockdep_class(dev, vlan_dev_get_lock_subclass(dev));
+ 
+-	vlan_dev_priv(dev)->vlan_pcpu_stats = netdev_alloc_pcpu_stats(struct vlan_pcpu_stats);
+-	if (!vlan_dev_priv(dev)->vlan_pcpu_stats)
++	vlan->vlan_pcpu_stats = netdev_alloc_pcpu_stats(struct vlan_pcpu_stats);
++	if (!vlan->vlan_pcpu_stats)
+ 		return -ENOMEM;
+ 
+ 	return 0;

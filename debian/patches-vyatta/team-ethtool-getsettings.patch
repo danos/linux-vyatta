@@ -1,0 +1,49 @@
+---
+ drivers/net/team/team.c |   29 +++++++++++++++++++++++++++++
+ 1 file changed, 29 insertions(+)
+
+--- a/drivers/net/team/team.c
++++ b/drivers/net/team/team.c
+@@ -2008,6 +2008,34 @@ static int team_change_carrier(struct ne
+ 	return 0;
+ }
+ 
++static int team_ethtool_get_settings(struct net_device *dev,
++				     struct ethtool_cmd *ecmd)
++{
++	struct team *team = netdev_priv(dev);
++
++	struct team_port *port;
++	unsigned long speed = 0;
++
++	ecmd->duplex = DUPLEX_UNKNOWN;
++	ecmd->port = PORT_OTHER;
++
++	mutex_lock(&team->lock);
++	list_for_each_entry(port, &team->port_list, list) {
++		if (port->linkup && port->state.speed != SPEED_UNKNOWN &&
++		    team_port_enabled(port))
++			speed += port->state.speed;
++
++		if (ecmd->duplex == DUPLEX_UNKNOWN &&
++		    port->linkup && port->state.duplex != DUPLEX_UNKNOWN)
++			ecmd->duplex = port->state.duplex;
++	}
++
++	ethtool_cmd_speed_set(ecmd, speed);
++	mutex_unlock(&team->lock);
++
++	return 0;
++}
++
+ static const struct net_device_ops team_netdev_ops = {
+ 	.ndo_init		= team_init,
+ 	.ndo_uninit		= team_uninit,
+@@ -2048,6 +2076,7 @@ static void team_ethtool_get_drvinfo(str
+ static const struct ethtool_ops team_ethtool_ops = {
+ 	.get_drvinfo		= team_ethtool_get_drvinfo,
+ 	.get_link		= ethtool_op_get_link,
++	.get_settings		= team_ethtool_get_settings,
+ };
+ 
+ /***********************

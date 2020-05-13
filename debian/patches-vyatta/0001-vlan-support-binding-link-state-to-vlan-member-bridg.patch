@@ -1,0 +1,70 @@
+From dffc38ffccab0db60ac40899039999b617aba93f Mon Sep 17 00:00:00 2001
+From: Mike Manning <mmanning@vyatta.att-mail.com>
+Date: Fri, 29 Mar 2019 07:27:33 +0000
+Subject: [PATCH net-next v2 1/5] vlan: support binding link state to vlan
+ member bridge ports
+
+In the case of vlan filtering on bridges, the bridge may also have the
+corresponding vlan devices as upper devices. Currently the link state
+of vlan devices is transferred from the lower device. So this is up if
+the bridge is in admin up state and there is at least one bridge port
+that is up, regardless of the vlan that the port is a member of.
+
+The link state of the vlan device may need to track only the state of
+the subset of ports that are also members of the corresponding vlan,
+rather than that of all ports.
+
+Add a flag to specify a vlan bridge binding mode, by which the link
+state is no longer automatically transferred from the lower device,
+but is instead determined by the bridge ports that are members of the
+vlan.
+
+Signed-off-by: Mike Manning <mmanning@vyatta.att-mail.com>
+---
+ include/uapi/linux/if_vlan.h |    9 +++++----
+ net/8021q/vlan_dev.c         |    3 ++-
+ net/8021q/vlan_netlink.c     |    3 ++-
+ 3 files changed, 9 insertions(+), 6 deletions(-)
+
+--- a/include/uapi/linux/if_vlan.h
++++ b/include/uapi/linux/if_vlan.h
+@@ -32,10 +32,11 @@ enum vlan_ioctl_cmds {
+ };
+ 
+ enum vlan_flags {
+-	VLAN_FLAG_REORDER_HDR	= 0x1,
+-	VLAN_FLAG_GVRP		= 0x2,
+-	VLAN_FLAG_LOOSE_BINDING	= 0x4,
+-	VLAN_FLAG_MVRP		= 0x8,
++	VLAN_FLAG_REORDER_HDR		= 0x1,
++	VLAN_FLAG_GVRP			= 0x2,
++	VLAN_FLAG_LOOSE_BINDING		= 0x4,
++	VLAN_FLAG_MVRP			= 0x8,
++	VLAN_FLAG_BRIDGE_BINDING	= 0x10,
+ };
+ 
+ enum vlan_name_types {
+--- a/net/8021q/vlan_dev.c
++++ b/net/8021q/vlan_dev.c
+@@ -224,7 +224,8 @@ int vlan_dev_change_flags(const struct n
+ 	u32 old_flags = vlan->flags;
+ 
+ 	if (mask & ~(VLAN_FLAG_REORDER_HDR | VLAN_FLAG_GVRP |
+-		     VLAN_FLAG_LOOSE_BINDING | VLAN_FLAG_MVRP))
++		     VLAN_FLAG_LOOSE_BINDING | VLAN_FLAG_MVRP |
++		     VLAN_FLAG_BRIDGE_BINDING))
+ 		return -EINVAL;
+ 
+ 	vlan->flags = (old_flags & ~mask) | (flags & mask);
+--- a/net/8021q/vlan_netlink.c
++++ b/net/8021q/vlan_netlink.c
+@@ -84,7 +84,8 @@ static int vlan_validate(struct nlattr *
+ 		flags = nla_data(data[IFLA_VLAN_FLAGS]);
+ 		if ((flags->flags & flags->mask) &
+ 		    ~(VLAN_FLAG_REORDER_HDR | VLAN_FLAG_GVRP |
+-		      VLAN_FLAG_LOOSE_BINDING | VLAN_FLAG_MVRP)) {
++		      VLAN_FLAG_LOOSE_BINDING | VLAN_FLAG_MVRP |
++		      VLAN_FLAG_BRIDGE_BINDING)) {
+ 			NL_SET_ERR_MSG_MOD(extack, "Invalid VLAN flags");
+ 			return -EINVAL;
+ 		}

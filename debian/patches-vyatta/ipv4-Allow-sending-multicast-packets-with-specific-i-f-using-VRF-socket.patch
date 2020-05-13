@@ -1,0 +1,56 @@
+ipv4: Allow sending multicast packets on specific i/f using VRF socket
+
+It is useful to be able to use the same socket for listening in a
+specific VRF, as for sending multicast packets out of a specific
+interface. However, the bound device on the socket currently takes
+precedence and results in the packets not being sent.
+
+Relax the condition on overriding the output interface to use for
+sending packets out of UDP, raw and ping sockets to allow multicast
+packets to be sent using the specified multicast interface.
+
+Signed-off-by: Robert Shearman <rshearma@vyatta.att-mail.com>
+--- a/net/ipv4/datagram.c
++++ b/net/ipv4/datagram.c
+@@ -42,7 +42,7 @@ int __ip4_datagram_connect(struct sock *
+ 	oif = sk->sk_bound_dev_if;
+ 	saddr = inet->inet_saddr;
+ 	if (ipv4_is_multicast(usin->sin_addr.s_addr)) {
+-		if (!oif)
++		if (!oif || netif_index_is_l3_master(sock_net(sk), oif))
+ 			oif = inet->mc_index;
+ 		if (!saddr)
+ 			saddr = inet->mc_addr;
+--- a/net/ipv4/ping.c
++++ b/net/ipv4/ping.c
+@@ -787,7 +787,7 @@ static int ping_v4_sendmsg(struct sock *
+ 	}
+ 
+ 	if (ipv4_is_multicast(daddr)) {
+-		if (!ipc.oif)
++		if (!ipc.oif || netif_index_is_l3_master(sock_net(sk), ipc.oif))
+ 			ipc.oif = inet->mc_index;
+ 		if (!saddr)
+ 			saddr = inet->mc_addr;
+--- a/net/ipv4/raw.c
++++ b/net/ipv4/raw.c
+@@ -611,7 +611,7 @@ static int raw_sendmsg(struct sock *sk,
+ 		tos |= RTO_ONLINK;
+ 
+ 	if (ipv4_is_multicast(daddr)) {
+-		if (!ipc.oif)
++		if (!ipc.oif || netif_index_is_l3_master(sock_net(sk), ipc.oif))
+ 			ipc.oif = inet->mc_index;
+ 		if (!saddr)
+ 			saddr = inet->mc_addr;
+--- a/net/ipv4/udp.c
++++ b/net/ipv4/udp.c
+@@ -992,7 +992,7 @@ int udp_sendmsg(struct sock *sk, struct
+ 	}
+ 
+ 	if (ipv4_is_multicast(daddr)) {
+-		if (!ipc.oif)
++		if (!ipc.oif || netif_index_is_l3_master(sock_net(sk), ipc.oif))
+ 			ipc.oif = inet->mc_index;
+ 		if (!saddr)
+ 			saddr = inet->mc_addr;

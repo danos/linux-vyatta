@@ -1,0 +1,89 @@
+From a0097f441e5b3a67e7813ae49471c5fa4e5cdd7d Mon Sep 17 00:00:00 2001
+From: Mike Manning <mmanning@vyatta.att-mail.com>
+Date: Sun, 30 Sep 2018 15:24:46 +0100
+Subject: [PATCH net-next v5 8/9] ipv6: handling of multicast packets received
+ in VRF
+
+If the skb for multicast packets marked as enslaved to a VRF are
+received, then the secondary device index should be used to obtain
+the real device. And verify the multicast address against the
+enslaved rather than the l3mdev device.
+
+Signed-off-by: Dewi Morgan <morgand@vyatta.att-mail.com>
+Signed-off-by: Mike Manning <mmanning@vyatta.att-mail.com>
+---
+ net/ipv6/ip6_input.c | 35 ++++++++++++++++++++++++++++++++---
+ 1 file changed, 32 insertions(+), 3 deletions(-)
+
+diff --git a/net/ipv6/ip6_input.c b/net/ipv6/ip6_input.c
+index 96577e742afd..df58e1100226 100644
+--- a/net/ipv6/ip6_input.c
++++ b/net/ipv6/ip6_input.c
+@@ -359,6 +359,8 @@ static int ip6_input_finish(struct net *net, struct sock *sk, struct sk_buff *sk
+ 			}
+ 		} else if (ipprot->flags & INET6_PROTO_FINAL) {
+ 			const struct ipv6hdr *hdr;
++			int sdif = inet6_sdif(skb);
++			struct net_device *dev;
+ 
+ 			/* Only do this once for first final protocol */
+ 			have_final = true;
+@@ -371,9 +373,19 @@ static int ip6_input_finish(struct net *net, struct sock *sk, struct sk_buff *sk
+ 			skb_postpull_rcsum(skb, skb_network_header(skb),
+ 					   skb_network_header_len(skb));
+ 			hdr = ipv6_hdr(skb);
++
++			/* skb->dev passed may be master dev for vrfs. */
++			if (sdif) {
++				dev = dev_get_by_index_rcu(net, sdif);
++				if (!dev)
++					goto discard;
++			} else {
++				dev = skb->dev;
++			}
++
+ 			if (ipv6_addr_is_multicast(&hdr->daddr) &&
+-			    !ipv6_chk_mcast_addr(skb->dev, &hdr->daddr,
+-			    &hdr->saddr) &&
++			    !ipv6_chk_mcast_addr(dev, &hdr->daddr,
++						 &hdr->saddr) &&
+ 			    !ipv6_is_mld(skb, nexthdr, skb_network_header_len(skb)))
+ 				goto discard;
+ 		}
+@@ -432,15 +444,32 @@ EXPORT_SYMBOL_GPL(ip6_input);
+ 
+ int ip6_mc_input(struct sk_buff *skb)
+ {
++	int sdif = inet6_sdif(skb);
+ 	const struct ipv6hdr *hdr;
++	struct net_device *dev;
+ 	bool deliver;
+ 
+ 	__IP6_UPD_PO_STATS(dev_net(skb_dst(skb)->dev),
+ 			 __in6_dev_get_safely(skb->dev), IPSTATS_MIB_INMCAST,
+ 			 skb->len);
+ 
++	/* skb->dev passed may be master dev for vrfs. */
++	if (sdif) {
++		rcu_read_lock();
++		dev = dev_get_by_index_rcu(dev_net(skb->dev), sdif);
++		if (!dev) {
++			rcu_read_unlock();
++			kfree_skb(skb);
++			return -ENODEV;
++		}
++	} else {
++		dev = skb->dev;
++	}
++
+ 	hdr = ipv6_hdr(skb);
+-	deliver = ipv6_chk_mcast_addr(skb->dev, &hdr->daddr, NULL);
++	deliver = ipv6_chk_mcast_addr(dev, &hdr->daddr, NULL);
++	if (sdif)
++		rcu_read_unlock();
+ 
+ #ifdef CONFIG_IPV6_MROUTE
+ 	/*
+-- 
+2.11.0
+
