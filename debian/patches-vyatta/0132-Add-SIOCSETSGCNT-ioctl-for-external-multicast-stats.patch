@@ -8,15 +8,15 @@
 
 --- a/include/linux/mroute_base.h
 +++ b/include/linux/mroute_base.h
-@@ -7,6 +7,7 @@
- #include <net/net_namespace.h>
+@@ -8,6 +8,7 @@
  #include <net/sock.h>
  #include <net/fib_notifier.h>
+ #include <net/ip_fib.h>
 +#include <uapi/linux/rtnetlink.h>
  
  /**
   * struct vif_device - interface representor for multicast routing
-@@ -145,6 +146,7 @@ struct mr_mfc {
+@@ -146,6 +147,7 @@ struct mr_mfc {
  			unsigned long pkt;
  			unsigned long wrong_if;
  			unsigned long lastuse;
@@ -26,17 +26,17 @@
  		} res;
 --- a/include/uapi/linux/mroute.h
 +++ b/include/uapi/linux/mroute.h
-@@ -33,6 +33,7 @@
+@@ -34,6 +34,7 @@
  #define SIOCGETVIFCNT	SIOCPROTOPRIVATE	/* IP protocol privates */
  #define SIOCGETSGCNT	(SIOCPROTOPRIVATE+1)
  #define SIOCGETRPF	(SIOCPROTOPRIVATE+2)
 +#define SIOCSETSGCNT	(SIOCPROTOPRIVATE+3)
  
- #define MAXVIFS		32
- typedef unsigned long vifbitmap_t;	/* User mode code depends on this lot */
+ /* MRT_FLUSH optional flags */
+ #define MRT_FLUSH_MFC	1	/* Flush multicast entries */
 --- a/include/uapi/linux/mroute6.h
 +++ b/include/uapi/linux/mroute6.h
-@@ -35,7 +35,8 @@
+@@ -36,7 +36,8 @@
  
  #define SIOCGETMIFCNT_IN6	SIOCPROTOPRIVATE	/* IP protocol privates */
  #define SIOCGETSGCNT_IN6	(SIOCPROTOPRIVATE+1)
@@ -44,11 +44,11 @@
 +#define SIOCGETRPF		(SIOCPROTOPRIVATE+2)
 +#define SIOCSETSGCNT_IN6	(SIOCPROTOPRIVATE+3)
  
- #define MAXMIFS		32
- typedef unsigned long mifbitmap_t;	/* User mode code depends on this lot */
+ /* MRT6_FLUSH optional flags */
+ #define MRT6_FLUSH_MFC	1	/* Flush multicast entries */
 --- a/net/ipv4/ipmr.c
 +++ b/net/ipv4/ipmr.c
-@@ -1597,6 +1597,8 @@ int ip_mroute_getsockopt(struct sock *sk
+@@ -1618,6 +1618,8 @@ int ip_mroute_getsockopt(struct sock *sk
  /* The IP multicast ioctl support routines. */
  int ipmr_ioctl(struct sock *sk, int cmd, void __user *arg)
  {
@@ -57,7 +57,7 @@
  	struct sioc_sg_req sr;
  	struct sioc_vif_req vr;
  	struct vif_device *vif;
-@@ -1630,6 +1632,24 @@ int ipmr_ioctl(struct sock *sk, int cmd,
+@@ -1651,6 +1653,24 @@ int ipmr_ioctl(struct sock *sk, int cmd,
  		}
  		read_unlock(&mrt_lock);
  		return -EADDRNOTAVAIL;
@@ -82,7 +82,7 @@
  	case SIOCGETSGCNT:
  		if (copy_from_user(&sr, arg, sizeof(sr)))
  			return -EFAULT;
-@@ -1637,9 +1657,12 @@ int ipmr_ioctl(struct sock *sk, int cmd,
+@@ -1658,9 +1678,12 @@ int ipmr_ioctl(struct sock *sk, int cmd,
  		rcu_read_lock();
  		c = ipmr_cache_find(mrt, sr.src.s_addr, sr.grp.s_addr);
  		if (c) {
@@ -98,7 +98,7 @@
  			rcu_read_unlock();
  
  			if (copy_to_user(arg, &sr, sizeof(sr)))
-@@ -1672,6 +1695,9 @@ struct compat_sioc_vif_req {
+@@ -1693,6 +1716,9 @@ struct compat_sioc_vif_req {
  
  int ipmr_compat_ioctl(struct sock *sk, unsigned int cmd, void __user *arg)
  {
@@ -108,7 +108,7 @@
  	struct compat_sioc_sg_req sr;
  	struct compat_sioc_vif_req vr;
  	struct vif_device *vif;
-@@ -1705,6 +1731,25 @@ int ipmr_compat_ioctl(struct sock *sk, u
+@@ -1726,6 +1752,25 @@ int ipmr_compat_ioctl(struct sock *sk, u
  		}
  		read_unlock(&mrt_lock);
  		return -EADDRNOTAVAIL;
@@ -134,7 +134,7 @@
  	case SIOCGETSGCNT:
  		if (copy_from_user(&sr, arg, sizeof(sr)))
  			return -EFAULT;
-@@ -1712,9 +1757,12 @@ int ipmr_compat_ioctl(struct sock *sk, u
+@@ -1733,9 +1778,12 @@ int ipmr_compat_ioctl(struct sock *sk, u
  		rcu_read_lock();
  		c = ipmr_cache_find(mrt, sr.src.s_addr, sr.grp.s_addr);
  		if (c) {
@@ -152,7 +152,7 @@
  			if (copy_to_user(arg, &sr, sizeof(sr)))
 --- a/net/ipv6/ip6mr.c
 +++ b/net/ipv6/ip6mr.c
-@@ -1864,6 +1864,23 @@ int ip6mr_ioctl(struct sock *sk, int cmd
+@@ -1891,6 +1891,23 @@ int ip6mr_ioctl(struct sock *sk, int cmd
  		}
  		read_unlock(&mrt_lock);
  		return -EADDRNOTAVAIL;
@@ -176,7 +176,7 @@
  	case SIOCGETSGCNT_IN6:
  		if (copy_from_user(&sr, arg, sizeof(sr)))
  			return -EFAULT;
-@@ -1871,9 +1888,12 @@ int ip6mr_ioctl(struct sock *sk, int cmd
+@@ -1898,9 +1915,12 @@ int ip6mr_ioctl(struct sock *sk, int cmd
  		rcu_read_lock();
  		c = ip6mr_cache_find(mrt, &sr.src.sin6_addr, &sr.grp.sin6_addr);
  		if (c) {
@@ -192,7 +192,7 @@
  			rcu_read_unlock();
  
  			if (copy_to_user(arg, &sr, sizeof(sr)))
-@@ -1939,6 +1959,24 @@ int ip6mr_compat_ioctl(struct sock *sk,
+@@ -1966,6 +1986,24 @@ int ip6mr_compat_ioctl(struct sock *sk,
  		}
  		read_unlock(&mrt_lock);
  		return -EADDRNOTAVAIL;
@@ -217,7 +217,7 @@
  	case SIOCGETSGCNT_IN6:
  		if (copy_from_user(&sr, arg, sizeof(sr)))
  			return -EFAULT;
-@@ -1946,9 +1984,12 @@ int ip6mr_compat_ioctl(struct sock *sk,
+@@ -1973,9 +2011,12 @@ int ip6mr_compat_ioctl(struct sock *sk,
  		rcu_read_lock();
  		c = ip6mr_cache_find(mrt, &sr.src.sin6_addr, &sr.grp.sin6_addr);
  		if (c) {

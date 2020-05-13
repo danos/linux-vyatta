@@ -14,7 +14,7 @@ Signed-off-by: Dewi Morgan <morgand@vyatta.att-mail.com>
 
 --- a/include/net/lwtunnel.h
 +++ b/include/net/lwtunnel.h
-@@ -17,6 +17,7 @@ struct fib_result;
+@@ -15,6 +15,7 @@
  #define LWTUNNEL_STATE_OUTPUT_REDIRECT	BIT(0)
  #define LWTUNNEL_STATE_INPUT_REDIRECT	BIT(1)
  #define LWTUNNEL_STATE_XMIT_REDIRECT	BIT(2)
@@ -22,7 +22,7 @@ Signed-off-by: Dewi Morgan <morgand@vyatta.att-mail.com>
  
  enum {
  	LWTUNNEL_XMIT_DONE,
-@@ -109,6 +110,14 @@ static inline unsigned int lwtunnel_head
+@@ -107,6 +108,14 @@ static inline unsigned int lwtunnel_head
  	return 0;
  }
  
@@ -39,17 +39,42 @@ Signed-off-by: Dewi Morgan <morgand@vyatta.att-mail.com>
  int lwtunnel_encap_del_ops(const struct lwtunnel_encap_ops *op,
 --- a/net/ipv6/route.c
 +++ b/net/ipv6/route.c
-@@ -3078,6 +3078,7 @@ static struct fib6_info *ip6_route_info_
- 	 */
- 	if ((cfg->fc_flags & RTF_REJECT) ||
+@@ -3374,10 +3374,12 @@ out:
+ 	return err;
+ }
+ 
+-static bool fib6_is_reject(u32 flags, struct net_device *dev, int addr_type)
++static bool fib6_is_reject(u32 flags, struct net_device *dev,
++			   int addr_type, struct lwtunnel_state	*lwtstate)
+ {
+ 	if ((flags & RTF_REJECT) ||
  	    (dev && (dev->flags & IFF_LOOPBACK) &&
-+	     !lwtunnel_output_loopback(rt->fib6_nh.nh_lwtstate) &&
++	     !lwtunnel_output_loopback(lwtstate) &&
  	     !(addr_type & IPV6_ADDR_LOOPBACK) &&
- 	     !(cfg->fc_flags & RTF_LOCAL))) {
+ 	     !(flags & RTF_LOCAL)))
+ 		return true;
+@@ -3431,7 +3433,8 @@ int fib6_nh_init(struct net *net, struct
+ 	 * they would result in kernel looping; promote them to reject routes
+ 	 */
+ 	addr_type = ipv6_addr_type(&cfg->fc_dst);
+-	if (fib6_is_reject(cfg->fc_flags, dev, addr_type)) {
++	if (fib6_is_reject(cfg->fc_flags, dev,
++			   addr_type, fib6_nh->fib_nh_lws)) {
  		/* hold loopback dev/idev if we haven't done so. */
+ 		if (dev != net->loopback_dev) {
+ 			if (dev) {
+@@ -3678,7 +3681,7 @@ static struct fib6_info *ip6_route_info_
+ 		 */
+ 		addr_type = ipv6_addr_type(&cfg->fc_dst);
+ 		if (fib6_is_reject(cfg->fc_flags, rt->fib6_nh->fib_nh_dev,
+-				   addr_type))
++				   addr_type, rt->fib6_nh->fib_nh_lws))
+ 			rt->fib6_flags = RTF_REJECT | RTF_NONEXTHOP;
+ 	}
+ 
 --- a/net/mpls/mpls_iptunnel.c
 +++ b/net/mpls/mpls_iptunnel.c
-@@ -326,6 +326,7 @@ static int mpls_build_state(struct nlatt
+@@ -328,6 +328,7 @@ static int mpls_build_state(struct nlatt
  
  	newts->type = LWTUNNEL_ENCAP_MPLS;
  	newts->flags |= LWTUNNEL_STATE_XMIT_REDIRECT;

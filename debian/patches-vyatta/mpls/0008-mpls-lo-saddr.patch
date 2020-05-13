@@ -19,7 +19,7 @@ Signed-off-by: Dewi Morgan <morgand@vyatta.att-mail.com
 
 --- a/net/mpls/mpls_iptunnel.c
 +++ b/net/mpls/mpls_iptunnel.c
-@@ -13,6 +13,7 @@
+@@ -8,6 +8,7 @@
  #include <linux/types.h>
  #include <linux/skbuff.h>
  #include <linux/net.h>
@@ -27,7 +27,7 @@ Signed-off-by: Dewi Morgan <morgand@vyatta.att-mail.com
  #include <linux/module.h>
  #include <linux/mpls.h>
  #include <linux/vmalloc.h>
-@@ -38,6 +39,41 @@ static unsigned int mpls_encap_size(stru
+@@ -33,6 +34,41 @@ static unsigned int mpls_encap_size(stru
  	return en->labels * sizeof(struct mpls_shim_hdr);
  }
  
@@ -41,11 +41,11 @@ Signed-off-by: Dewi Morgan <morgand@vyatta.att-mail.com
 +	struct mpls_route *rt;
 +	unsigned int nh_index;
 +
-+	out_dev = rcu_dereference(FIB_RES_NH(*res).nh_dev);
++	out_dev = rcu_dereference(res->nhc->nhc_dev);
 +	if (!(out_dev->flags & IFF_LOOPBACK))
 +		return saddr;
 +
-+	lwtstate = FIB_RES_NH(*res).nh_lwtstate;
++	lwtstate = res->nhc->nhc_lwtstate;
 +	tun_encap_info = mpls_lwtunnel_encap(lwtstate);
 +	if (!tun_encap_info->labels)
 +		return saddr;
@@ -69,7 +69,7 @@ Signed-off-by: Dewi Morgan <morgand@vyatta.att-mail.com
  static int mpls_xmit(struct sk_buff *skb)
  {
  	struct mpls_iptunnel_encap *tun_encap_info;
-@@ -358,6 +394,7 @@ static int mpls_encap_cmp(struct lwtunne
+@@ -360,6 +396,7 @@ static int mpls_encap_cmp(struct lwtunne
  
  static const struct lwtunnel_encap_ops mpls_iptun_ops = {
  	.build_state = mpls_build_state,
@@ -79,16 +79,7 @@ Signed-off-by: Dewi Morgan <morgand@vyatta.att-mail.com
  	.get_encap_size = mpls_encap_nlsize,
 --- a/include/net/lwtunnel.h
 +++ b/include/net/lwtunnel.h
-@@ -7,6 +7,8 @@
- #include <linux/types.h>
- #include <net/route.h>
- 
-+struct fib_result;
-+
- #define LWTUNNEL_HASH_BITS   7
- #define LWTUNNEL_HASH_SIZE   (1 << LWTUNNEL_HASH_BITS)
- 
-@@ -38,6 +40,8 @@ struct lwtunnel_encap_ops {
+@@ -39,6 +39,8 @@ struct lwtunnel_encap_ops {
  			   struct lwtunnel_state **ts,
  			   struct netlink_ext_ack *extack);
  	void (*destroy_state)(struct lwtunnel_state *lws);
@@ -97,7 +88,7 @@ Signed-off-by: Dewi Morgan <morgand@vyatta.att-mail.com
  	int (*output)(struct net *net, struct sock *sk, struct sk_buff *skb);
  	int (*input)(struct sk_buff *skb);
  	int (*fill_encap)(struct sk_buff *skb,
-@@ -122,6 +126,7 @@ int lwtunnel_fill_encap(struct sk_buff *
+@@ -123,6 +125,7 @@ int lwtunnel_fill_encap(struct sk_buff *
  int lwtunnel_get_encap_size(struct lwtunnel_state *lwtstate);
  struct lwtunnel_state *lwtunnel_state_alloc(int hdr_len);
  int lwtunnel_cmp_encap(struct lwtunnel_state *a, struct lwtunnel_state *b);
@@ -105,14 +96,14 @@ Signed-off-by: Dewi Morgan <morgand@vyatta.att-mail.com
  int lwtunnel_output(struct net *net, struct sock *sk, struct sk_buff *skb);
  int lwtunnel_input(struct sk_buff *skb);
  int lwtunnel_xmit(struct sk_buff *skb);
-@@ -222,6 +227,12 @@ static inline int lwtunnel_cmp_encap(str
+@@ -241,6 +244,12 @@ static inline int lwtunnel_cmp_encap(str
  	return 0;
  }
  
 +static inline __be32 lwtunnel_select_saddr(struct net *net,
 +					   struct fib_result *res)
 +{
-+	return FIB_RES_SADDR(net, *res);
++	return fib_result_prefsrc(net, res);
 +}
 +
  static inline int lwtunnel_output(struct net *net, struct sock *sk, struct sk_buff *skb)
@@ -120,7 +111,7 @@ Signed-off-by: Dewi Morgan <morgand@vyatta.att-mail.com
  	return -EOPNOTSUPP;
 --- a/net/core/lwtunnel.c
 +++ b/net/core/lwtunnel.c
-@@ -382,6 +382,30 @@ drop:
+@@ -378,6 +378,30 @@ drop:
  }
  EXPORT_SYMBOL_GPL(lwtunnel_xmit);
  
@@ -128,9 +119,9 @@ Signed-off-by: Dewi Morgan <morgand@vyatta.att-mail.com
 +{
 +	const struct lwtunnel_encap_ops *ops;
 +	struct lwtunnel_state *lwtstate;
-+	__be32 saddr = FIB_RES_SADDR(net, *res);
++	__be32 saddr = fib_result_prefsrc(net, res);
 +
-+	lwtstate = FIB_RES_NH(*res).nh_lwtstate;
++	lwtstate = FIB_RES_NHC(*res)->nhc_lwtstate;
 +	if (!lwtstate)
 +		return saddr;
 +
@@ -151,22 +142,15 @@ Signed-off-by: Dewi Morgan <morgand@vyatta.att-mail.com
  int lwtunnel_input(struct sk_buff *skb)
  {
  	struct dst_entry *dst = skb_dst(skb);
---- a/include/net/ip_fib.h
-+++ b/include/net/ip_fib.h
-@@ -17,6 +17,7 @@
- #define _NET_IP_FIB_H
+--- a/net/ipv4/fib_semantics.c
++++ b/net/ipv4/fib_semantics.c
+@@ -1299,6 +1299,9 @@ __be32 fib_result_prefsrc(struct net *ne
+ 	if (res->fi->fib_prefsrc)
+ 		return res->fi->fib_prefsrc;
  
- #include <net/flow.h>
-+#include <net/lwtunnel.h>
- #include <linux/seq_file.h>
- #include <linux/rcupdate.h>
- #include <net/fib_notifier.h>
-@@ -187,6 +188,8 @@ __be32 fib_info_update_nh_saddr(struct n
- #define FIB_RES_OIF(res)		(FIB_RES_NH(res).nh_oif)
++	if (nhc->nhc_lwtstate)
++		return lwtunnel_select_saddr(net, res);
++
+ 	if (nhc->nhc_family == AF_INET) {
+ 		struct fib_nh *nh;
  
- #define FIB_RES_PREFSRC(net, res)	((res).fi->fib_prefsrc ? : \
-+					 FIB_RES_NH(res).nh_lwtstate ? \
-+					 lwtunnel_select_saddr(net, &res) : \
- 					 FIB_RES_SADDR(net, res))
- 
- struct fib_entry_notifier_info {
