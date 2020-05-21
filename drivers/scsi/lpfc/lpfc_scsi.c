@@ -671,8 +671,10 @@ lpfc_get_scsi_buf_s4(struct lpfc_hba *phba, struct lpfc_nodelist *ndlp,
 	lpfc_cmd->prot_data_type = 0;
 #endif
 	tmp = lpfc_get_cmd_rsp_buf_per_hdwq(phba, lpfc_cmd);
-	if (!tmp)
+	if (!tmp) {
+		lpfc_release_io_buf(phba, lpfc_cmd, lpfc_cmd->hdwq);
 		return NULL;
+	}
 
 	lpfc_cmd->fcp_cmnd = tmp->fcp_cmnd;
 	lpfc_cmd->fcp_rsp = tmp->fcp_rsp;
@@ -719,7 +721,7 @@ lpfc_get_scsi_buf_s4(struct lpfc_hba *phba, struct lpfc_nodelist *ndlp,
 	iocb->ulpLe = 1;
 	iocb->ulpClass = CLASS3;
 
-	if (lpfc_ndlp_check_qdepth(phba, ndlp)) {
+	if (lpfc_ndlp_check_qdepth(phba, ndlp) && lpfc_cmd) {
 		atomic_inc(&ndlp->cmd_pending);
 		lpfc_cmd->flags |= LPFC_SBUF_BUMP_QDEPTH;
 	}

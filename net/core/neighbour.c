@@ -1954,6 +1954,9 @@ static int neigh_add(struct sk_buff *skb, struct nlmsghdr *nlh,
 				   NEIGH_UPDATE_F_OVERRIDE_ISROUTER);
 	}
 
+	if (protocol)
+		neigh->protocol = protocol;
+
 	if (ndm->ndm_flags & NTF_EXT_LEARNED)
 		flags |= NEIGH_UPDATE_F_EXT_LEARNED;
 
@@ -1966,9 +1969,6 @@ static int neigh_add(struct sk_buff *skb, struct nlmsghdr *nlh,
 	} else
 		err = __neigh_update(neigh, lladdr, ndm->ndm_state, flags,
 				     NETLINK_CB(skb).portid, extack);
-
-	if (protocol)
-		neigh->protocol = protocol;
 
 	neigh_release(neigh);
 
@@ -2049,8 +2049,8 @@ static int neightbl_fill_info(struct sk_buff *skb, struct neigh_table *tbl,
 		goto nla_put_failure;
 	{
 		unsigned long now = jiffies;
-		unsigned int flush_delta = now - tbl->last_flush;
-		unsigned int rand_delta = now - tbl->last_rand;
+		long flush_delta = now - tbl->last_flush;
+		long rand_delta = now - tbl->last_rand;
 		struct neigh_hash_table *nht;
 		struct ndt_config ndc = {
 			.ndtc_key_len		= tbl->key_len,
