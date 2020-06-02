@@ -22,10 +22,10 @@ the labels from the encap, excluding the top-most one.
 
 Signed-off-by: Robert Shearman <rshearma@vyatta.att-mail.com>
 ---
- net/mpls/af_mpls.c       |   25 ----------
- net/mpls/internal.h      |   23 +++++++++
- net/mpls/mpls_iptunnel.c |  114 +++++++++++++++++++++++++++++++++++++++--------
- 3 files changed, 122 insertions(+), 40 deletions(-)
+ net/mpls/af_mpls.c       |   25 --------
+ net/mpls/internal.h      |   23 ++++++++
+ net/mpls/mpls_iptunnel.c |  132 +++++++++++++++++++++++++++++++++++++----------
+ 3 files changed, 131 insertions(+), 49 deletions(-)
 
 --- a/net/mpls/af_mpls.c
 +++ b/net/mpls/af_mpls.c
@@ -155,31 +155,35 @@ Signed-off-by: Robert Shearman <rshearma@vyatta.att-mail.com>
  		if (tun_encap_info->ttl_propagate == MPLS_TTL_PROP_DISABLED)
  			ttl = tun_encap_info->default_ttl;
  		else if (tun_encap_info->ttl_propagate == MPLS_TTL_PROP_DEFAULT &&
-@@ -84,7 +87,14 @@ static int mpls_xmit(struct sk_buff *skb
+@@ -84,7 +87,16 @@ static int mpls_xmit(struct sk_buff *skb
  		else
  			ttl = ip_hdr(skb)->ttl;
  		rt = (struct rtable *)dst;
-+		if (rt->rt_gw_family == AF_INET6)
++		if (rt->rt_gw_family == AF_INET6) {
 +			via_addr = &rt->rt_gw6;
-+		else
++			via_table = NEIGH_ND_TABLE;
++		} else {
 +			via_addr = &rt->rt_gw4;
-+		via_table = NEIGH_ARP_TABLE;
++			via_table = NEIGH_ARP_TABLE;
++		}
  	} else if (dst->ops->family == AF_INET6) {
 +		struct rt6_info *rt6;
 +
  		if (tun_encap_info->ttl_propagate == MPLS_TTL_PROP_DISABLED)
  			ttl = tun_encap_info->default_ttl;
  		else if (tun_encap_info->ttl_propagate == MPLS_TTL_PROP_DEFAULT &&
-@@ -93,12 +103,63 @@ static int mpls_xmit(struct sk_buff *skb
+@@ -93,12 +105,65 @@ static int mpls_xmit(struct sk_buff *skb
  		else
  			ttl = ipv6_hdr(skb)->hop_limit;
  		rt6 = (struct rt6_info *)dst;
 +		if (ipv6_addr_v4mapped(&rt6->rt6i_gateway)) {
 +			/* 6PE (RFC 4798) */
 +			via_addr = &rt6->rt6i_gateway.s6_addr32[3];
-+		} else
++			via_table = NEIGH_ARP_TABLE;
++		} else {
 +			via_addr = &rt6->rt6i_gateway;
-+		via_table = NEIGH_ND_TABLE;
++			via_table = NEIGH_ND_TABLE;
++		}
  	} else {
  		goto drop;
  	}
@@ -235,7 +239,7 @@ Signed-off-by: Robert Shearman <rshearma@vyatta.att-mail.com>
  	mtu = mpls_dev_mtu(out_dev);
  	if (mpls_pkt_too_big(skb, mtu - new_header_size))
  		goto drop;
-@@ -119,35 +180,49 @@ static int mpls_xmit(struct sk_buff *skb
+@@ -119,35 +184,49 @@ static int mpls_xmit(struct sk_buff *skb
  	skb_reset_network_header(skb);
  
  	skb->dev = out_dev;
@@ -303,11 +307,11 @@ Signed-off-by: Robert Shearman <rshearma@vyatta.att-mail.com>
 -			err = neigh_xmit(NEIGH_ND_TABLE, out_dev, &rt6->rt6i_gateway,
 -					 skb);
 -	}
-+	err = neigh_xmit(NEIGH_ND_TABLE, out_dev, via_addr, skb);
++	err = neigh_xmit(via_table, out_dev, via_addr, skb);
  	if (err)
  		net_dbg_ratelimited("%s: packet transmission failed: %d\n",
  				    __func__, err);
-@@ -158,6 +233,7 @@ drop:
+@@ -158,6 +237,7 @@ drop:
  	out_mdev = out_dev ? mpls_dev_get(out_dev) : NULL;
  	if (out_mdev)
  		MPLS_INC_STATS(out_mdev, tx_errors);
