@@ -2053,7 +2053,7 @@ int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int nonblock,
 
 		/* Well, if we have backlog, try to process it now yet. */
 
-		if (copied >= target && !sk->sk_backlog.tail)
+		if (copied >= target && !READ_ONCE(sk->sk_backlog.tail))
 			break;
 
 		if (copied) {
@@ -3527,22 +3527,14 @@ static int do_tcp_getsockopt(struct sock *sk, int level,
 		return 0;
 
 	case TCP_FASTOPEN_KEY: {
-		__u8 key[TCP_FASTOPEN_KEY_BUF_LENGTH];
-		struct tcp_fastopen_context *ctx;
-		unsigned int key_len = 0;
+		u64 key[TCP_FASTOPEN_KEY_BUF_LENGTH / sizeof(u64)];
+		unsigned int key_len;
 
 		if (get_user(len, optlen))
 			return -EFAULT;
 
-		rcu_read_lock();
-		ctx = rcu_dereference(icsk->icsk_accept_queue.fastopenq.ctx);
-		if (ctx) {
-			key_len = tcp_fastopen_context_len(ctx) *
-					TCP_FASTOPEN_KEY_LENGTH;
-			memcpy(&key[0], &ctx->key[0], key_len);
-		}
-		rcu_read_unlock();
-
+		key_len = tcp_fastopen_get_cipher(net, icsk, key) *
+				TCP_FASTOPEN_KEY_LENGTH;
 		len = min_t(unsigned int, len, key_len);
 		if (put_user(len, optlen))
 			return -EFAULT;
