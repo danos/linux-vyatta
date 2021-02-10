@@ -102,6 +102,7 @@ static u64 __read_mostly cr4_reserved_bits = CR4_RESERVED_BITS;
 
 static void update_cr8_intercept(struct kvm_vcpu *vcpu);
 static void process_nmi(struct kvm_vcpu *vcpu);
+static void process_smi(struct kvm_vcpu *vcpu);
 static void enter_smm(struct kvm_vcpu *vcpu);
 static void __kvm_set_rflags(struct kvm_vcpu *vcpu, unsigned long rflags);
 static void store_regs(struct kvm_vcpu *vcpu);
@@ -3771,6 +3772,10 @@ static void kvm_vcpu_ioctl_x86_get_vcpu_events(struct kvm_vcpu *vcpu,
 					       struct kvm_vcpu_events *events)
 {
 	process_nmi(vcpu);
+
+
+	if (kvm_check_request(KVM_REQ_SMI, vcpu))
+		process_smi(vcpu);
 
 	/*
 	 * The API doesn't provide the instruction length for software
@@ -10369,6 +10374,28 @@ bool kvm_arch_no_poll(struct kvm_vcpu *vcpu)
 }
 EXPORT_SYMBOL_GPL(kvm_arch_no_poll);
 
+u64 kvm_spec_ctrl_valid_bits(struct kvm_vcpu *vcpu)
+{
+	uint64_t bits = SPEC_CTRL_IBRS | SPEC_CTRL_STIBP | SPEC_CTRL_SSBD;
+
+	/* The STIBP bit doesn't fault even if it's not advertised */
+	if (!guest_cpuid_has(vcpu, X86_FEATURE_SPEC_CTRL) &&
+	    !guest_cpuid_has(vcpu, X86_FEATURE_AMD_IBRS))
+		bits &= ~(SPEC_CTRL_IBRS | SPEC_CTRL_STIBP);
+	if (!boot_cpu_has(X86_FEATURE_SPEC_CTRL) &&
+	    !boot_cpu_has(X86_FEATURE_AMD_IBRS))
+		bits &= ~(SPEC_CTRL_IBRS | SPEC_CTRL_STIBP);
+
+	if (!guest_cpuid_has(vcpu, X86_FEATURE_SPEC_CTRL_SSBD) &&
+	    !guest_cpuid_has(vcpu, X86_FEATURE_AMD_SSBD))
+		bits &= ~SPEC_CTRL_SSBD;
+	if (!boot_cpu_has(X86_FEATURE_SPEC_CTRL_SSBD) &&
+	    !boot_cpu_has(X86_FEATURE_AMD_SSBD))
+		bits &= ~SPEC_CTRL_SSBD;
+
+	return bits;
+}
+EXPORT_SYMBOL_GPL(kvm_spec_ctrl_valid_bits);
 
 EXPORT_TRACEPOINT_SYMBOL_GPL(kvm_exit);
 EXPORT_TRACEPOINT_SYMBOL_GPL(kvm_fast_mmio);
