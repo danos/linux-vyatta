@@ -1,0 +1,383 @@
+commit b17244cebb24b30b886d46938cc5f798f7337574
+Author: Subash Abhinov Kasiviswanathan <subashab@codeaurora.org>
+Date:   Wed Nov 25 11:27:22 2020 -0700
+
+    netfilter: x_tables: Switch synchronization to RCU
+    
+    [ Upstream commit cc00bcaa589914096edef7fb87ca5cee4a166b5c ]
+    
+    When running concurrent iptables rules replacement with data, the per CPU
+    sequence count is checked after the assignment of the new information.
+    The sequence count is used to synchronize with the packet path without the
+    use of any explicit locking. If there are any packets in the packet path using
+    the table information, the sequence count is incremented to an odd value and
+    is incremented to an even after the packet process completion.
+    
+    The new table value assignment is followed by a write memory barrier so every
+    CPU should see the latest value. If the packet path has started with the old
+    table information, the sequence counter will be odd and the iptables
+    replacement will wait till the sequence count is even prior to freeing the
+    old table info.
+    
+    However, this assumes that the new table information assignment and the memory
+    barrier is actually executed prior to the counter check in the replacement
+    thread. If CPU decides to execute the assignment later as there is no user of
+    the table information prior to the sequence check, the packet path in another
+    CPU may use the old table information. The replacement thread would then free
+    the table information under it leading to a use after free in the packet
+    processing context-
+    
+    Unable to handle kernel NULL pointer dereference at virtual
+    address 000000000000008e
+    pc : ip6t_do_table+0x5d0/0x89c
+    lr : ip6t_do_table+0x5b8/0x89c
+    ip6t_do_table+0x5d0/0x89c
+    ip6table_filter_hook+0x24/0x30
+    nf_hook_slow+0x84/0x120
+    ip6_input+0x74/0xe0
+    ip6_rcv_finish+0x7c/0x128
+    ipv6_rcv+0xac/0xe4
+    __netif_receive_skb+0x84/0x17c
+    process_backlog+0x15c/0x1b8
+    napi_poll+0x88/0x284
+    net_rx_action+0xbc/0x23c
+    __do_softirq+0x20c/0x48c
+    
+    This could be fixed by forcing instruction order after the new table
+    information assignment or by switching to RCU for the synchronization.
+    
+    Fixes: 80055dab5de0 ("netfilter: x_tables: make xt_replace_table wait until old rules are not used anymore")
+    Reported-by: Sean Tranchetti <stranche@codeaurora.org>
+    Reported-by: kernel test robot <lkp@intel.com>
+    Suggested-by: Florian Westphal <fw@strlen.de>
+    Signed-off-by: Subash Abhinov Kasiviswanathan <subashab@codeaurora.org>
+    Signed-off-by: Pablo Neira Ayuso <pablo@netfilter.org>
+    Signed-off-by: Sasha Levin <sashal@kernel.org>
+
+diff --git b/include/linux/netfilter/x_tables.h a/include/linux/netfilter/x_tables.h
+index f5c21b7d2974..1b261c51b3a3 100644
+--- b/include/linux/netfilter/x_tables.h
++++ a/include/linux/netfilter/x_tables.h
+@@ -227,7 +227,7 @@ struct xt_table {
+ 	unsigned int valid_hooks;
+ 
+ 	/* Man behind the curtain... */
+-	struct xt_table_info __rcu *private;
++	struct xt_table_info *private;
+ 
+ 	/* Set this to THIS_MODULE if you are a module, otherwise NULL */
+ 	struct module *me;
+@@ -448,9 +448,6 @@ xt_get_per_cpu_counter(struct xt_counters *cnt, unsigned int cpu)
+ 
+ struct nf_hook_ops *xt_hook_ops_alloc(const struct xt_table *, nf_hookfn *);
+ 
+-struct xt_table_info
+-*xt_table_get_private_protected(const struct xt_table *table);
+-
+ #ifdef CONFIG_COMPAT
+ #include <net/compat.h>
+ 
+diff --git b/net/ipv4/netfilter/arp_tables.c a/net/ipv4/netfilter/arp_tables.c
+index 8a6a4384e791..f1f78a742b36 100644
+--- b/net/ipv4/netfilter/arp_tables.c
++++ a/net/ipv4/netfilter/arp_tables.c
+@@ -203,7 +203,7 @@ unsigned int arpt_do_table(struct sk_buff *skb,
+ 
+ 	local_bh_disable();
+ 	addend = xt_write_recseq_begin();
+-	private = rcu_access_pointer(table->private);
++	private = READ_ONCE(table->private); /* Address dependency. */
+ 	cpu     = smp_processor_id();
+ 	table_base = private->entries;
+ 	jumpstack  = (struct arpt_entry **)private->jumpstack[cpu];
+@@ -649,7 +649,7 @@ static struct xt_counters *alloc_counters(const struct xt_table *table)
+ {
+ 	unsigned int countersize;
+ 	struct xt_counters *counters;
+-	const struct xt_table_info *private = xt_table_get_private_protected(table);
++	const struct xt_table_info *private = table->private;
+ 
+ 	/* We need atomic snapshot of counters: rest doesn't change
+ 	 * (other than comefrom, which userspace doesn't care
+@@ -673,7 +673,7 @@ static int copy_entries_to_user(unsigned int total_size,
+ 	unsigned int off, num;
+ 	const struct arpt_entry *e;
+ 	struct xt_counters *counters;
+-	struct xt_table_info *private = xt_table_get_private_protected(table);
++	struct xt_table_info *private = table->private;
+ 	int ret = 0;
+ 	void *loc_cpu_entry;
+ 
+@@ -808,7 +808,7 @@ static int get_info(struct net *net, void __user *user,
+ 	t = xt_request_find_table_lock(net, NFPROTO_ARP, name);
+ 	if (!IS_ERR(t)) {
+ 		struct arpt_getinfo info;
+-		const struct xt_table_info *private = xt_table_get_private_protected(t);
++		const struct xt_table_info *private = t->private;
+ #ifdef CONFIG_COMPAT
+ 		struct xt_table_info tmp;
+ 
+@@ -861,7 +861,7 @@ static int get_entries(struct net *net, struct arpt_get_entries __user *uptr,
+ 
+ 	t = xt_find_table_lock(net, NFPROTO_ARP, get.name);
+ 	if (!IS_ERR(t)) {
+-		const struct xt_table_info *private = xt_table_get_private_protected(t);
++		const struct xt_table_info *private = t->private;
+ 
+ 		if (get.size == private->size)
+ 			ret = copy_entries_to_user(private->size,
+@@ -1020,7 +1020,7 @@ static int do_add_counters(struct net *net, const void __user *user,
+ 	}
+ 
+ 	local_bh_disable();
+-	private = xt_table_get_private_protected(t);
++	private = t->private;
+ 	if (private->number != tmp.num_counters) {
+ 		ret = -EINVAL;
+ 		goto unlock_up_free;
+@@ -1357,7 +1357,7 @@ static int compat_copy_entries_to_user(unsigned int total_size,
+ 				       void __user *userptr)
+ {
+ 	struct xt_counters *counters;
+-	const struct xt_table_info *private = xt_table_get_private_protected(table);
++	const struct xt_table_info *private = table->private;
+ 	void __user *pos;
+ 	unsigned int size;
+ 	int ret = 0;
+diff --git b/net/ipv4/netfilter/ip_tables.c a/net/ipv4/netfilter/ip_tables.c
+index 485276999544..10b91ebdf213 100644
+--- b/net/ipv4/netfilter/ip_tables.c
++++ a/net/ipv4/netfilter/ip_tables.c
+@@ -258,7 +258,7 @@ ipt_do_table(struct sk_buff *skb,
+ 	WARN_ON(!(table->valid_hooks & (1 << hook)));
+ 	local_bh_disable();
+ 	addend = xt_write_recseq_begin();
+-	private = rcu_access_pointer(table->private);
++	private = READ_ONCE(table->private); /* Address dependency. */
+ 	cpu        = smp_processor_id();
+ 	table_base = private->entries;
+ 	jumpstack  = (struct ipt_entry **)private->jumpstack[cpu];
+@@ -791,7 +791,7 @@ static struct xt_counters *alloc_counters(const struct xt_table *table)
+ {
+ 	unsigned int countersize;
+ 	struct xt_counters *counters;
+-	const struct xt_table_info *private = xt_table_get_private_protected(table);
++	const struct xt_table_info *private = table->private;
+ 
+ 	/* We need atomic snapshot of counters: rest doesn't change
+ 	   (other than comefrom, which userspace doesn't care
+@@ -815,7 +815,7 @@ copy_entries_to_user(unsigned int total_size,
+ 	unsigned int off, num;
+ 	const struct ipt_entry *e;
+ 	struct xt_counters *counters;
+-	const struct xt_table_info *private = xt_table_get_private_protected(table);
++	const struct xt_table_info *private = table->private;
+ 	int ret = 0;
+ 	const void *loc_cpu_entry;
+ 
+@@ -965,7 +965,7 @@ static int get_info(struct net *net, void __user *user,
+ 	t = xt_request_find_table_lock(net, AF_INET, name);
+ 	if (!IS_ERR(t)) {
+ 		struct ipt_getinfo info;
+-		const struct xt_table_info *private = xt_table_get_private_protected(t);
++		const struct xt_table_info *private = t->private;
+ #ifdef CONFIG_COMPAT
+ 		struct xt_table_info tmp;
+ 
+@@ -1019,7 +1019,7 @@ get_entries(struct net *net, struct ipt_get_entries __user *uptr,
+ 
+ 	t = xt_find_table_lock(net, AF_INET, get.name);
+ 	if (!IS_ERR(t)) {
+-		const struct xt_table_info *private = xt_table_get_private_protected(t);
++		const struct xt_table_info *private = t->private;
+ 		if (get.size == private->size)
+ 			ret = copy_entries_to_user(private->size,
+ 						   t, uptr->entrytable);
+@@ -1175,7 +1175,7 @@ do_add_counters(struct net *net, const void __user *user,
+ 	}
+ 
+ 	local_bh_disable();
+-	private = xt_table_get_private_protected(t);
++	private = t->private;
+ 	if (private->number != tmp.num_counters) {
+ 		ret = -EINVAL;
+ 		goto unlock_up_free;
+@@ -1570,7 +1570,7 @@ compat_copy_entries_to_user(unsigned int total_size, struct xt_table *table,
+ 			    void __user *userptr)
+ {
+ 	struct xt_counters *counters;
+-	const struct xt_table_info *private = xt_table_get_private_protected(table);
++	const struct xt_table_info *private = table->private;
+ 	void __user *pos;
+ 	unsigned int size;
+ 	int ret = 0;
+diff --git b/net/ipv6/netfilter/ip6_tables.c a/net/ipv6/netfilter/ip6_tables.c
+index 12735ee7713a..c973ace208c5 100644
+--- b/net/ipv6/netfilter/ip6_tables.c
++++ a/net/ipv6/netfilter/ip6_tables.c
+@@ -280,7 +280,7 @@ ip6t_do_table(struct sk_buff *skb,
+ 
+ 	local_bh_disable();
+ 	addend = xt_write_recseq_begin();
+-	private = rcu_access_pointer(table->private);
++	private = READ_ONCE(table->private); /* Address dependency. */
+ 	cpu        = smp_processor_id();
+ 	table_base = private->entries;
+ 	jumpstack  = (struct ip6t_entry **)private->jumpstack[cpu];
+@@ -807,7 +807,7 @@ static struct xt_counters *alloc_counters(const struct xt_table *table)
+ {
+ 	unsigned int countersize;
+ 	struct xt_counters *counters;
+-	const struct xt_table_info *private = xt_table_get_private_protected(table);
++	const struct xt_table_info *private = table->private;
+ 
+ 	/* We need atomic snapshot of counters: rest doesn't change
+ 	   (other than comefrom, which userspace doesn't care
+@@ -831,7 +831,7 @@ copy_entries_to_user(unsigned int total_size,
+ 	unsigned int off, num;
+ 	const struct ip6t_entry *e;
+ 	struct xt_counters *counters;
+-	const struct xt_table_info *private = xt_table_get_private_protected(table);
++	const struct xt_table_info *private = table->private;
+ 	int ret = 0;
+ 	const void *loc_cpu_entry;
+ 
+@@ -981,7 +981,7 @@ static int get_info(struct net *net, void __user *user,
+ 	t = xt_request_find_table_lock(net, AF_INET6, name);
+ 	if (!IS_ERR(t)) {
+ 		struct ip6t_getinfo info;
+-		const struct xt_table_info *private = xt_table_get_private_protected(t);
++		const struct xt_table_info *private = t->private;
+ #ifdef CONFIG_COMPAT
+ 		struct xt_table_info tmp;
+ 
+@@ -1036,7 +1036,7 @@ get_entries(struct net *net, struct ip6t_get_entries __user *uptr,
+ 
+ 	t = xt_find_table_lock(net, AF_INET6, get.name);
+ 	if (!IS_ERR(t)) {
+-		struct xt_table_info *private = xt_table_get_private_protected(t);
++		struct xt_table_info *private = t->private;
+ 		if (get.size == private->size)
+ 			ret = copy_entries_to_user(private->size,
+ 						   t, uptr->entrytable);
+@@ -1191,7 +1191,7 @@ do_add_counters(struct net *net, const void __user *user, unsigned int len,
+ 	}
+ 
+ 	local_bh_disable();
+-	private = xt_table_get_private_protected(t);
++	private = t->private;
+ 	if (private->number != tmp.num_counters) {
+ 		ret = -EINVAL;
+ 		goto unlock_up_free;
+@@ -1579,7 +1579,7 @@ compat_copy_entries_to_user(unsigned int total_size, struct xt_table *table,
+ 			    void __user *userptr)
+ {
+ 	struct xt_counters *counters;
+-	const struct xt_table_info *private = xt_table_get_private_protected(table);
++	const struct xt_table_info *private = table->private;
+ 	void __user *pos;
+ 	unsigned int size;
+ 	int ret = 0;
+diff --git b/net/netfilter/x_tables.c a/net/netfilter/x_tables.c
+index d1ef2d793073..44f971f31992 100644
+--- b/net/netfilter/x_tables.c
++++ a/net/netfilter/x_tables.c
+@@ -1349,14 +1349,6 @@ struct xt_counters *xt_counters_alloc(unsigned int counters)
+ }
+ EXPORT_SYMBOL(xt_counters_alloc);
+ 
+-struct xt_table_info
+-*xt_table_get_private_protected(const struct xt_table *table)
+-{
+-	return rcu_dereference_protected(table->private,
+-					 mutex_is_locked(&xt[table->af].mutex));
+-}
+-EXPORT_SYMBOL(xt_table_get_private_protected);
+-
+ struct xt_table_info *
+ xt_replace_table(struct xt_table *table,
+ 	      unsigned int num_counters,
+@@ -1364,6 +1356,7 @@ xt_replace_table(struct xt_table *table,
+ 	      int *error)
+ {
+ 	struct xt_table_info *private;
++	unsigned int cpu;
+ 	int ret;
+ 
+ 	ret = xt_jumpstack_alloc(newinfo);
+@@ -1373,20 +1366,47 @@ xt_replace_table(struct xt_table *table,
+ 	}
+ 
+ 	/* Do the substitution. */
+-	private = xt_table_get_private_protected(table);
++	local_bh_disable();
++	private = table->private;
+ 
+ 	/* Check inside lock: is the old number correct? */
+ 	if (num_counters != private->number) {
+ 		pr_debug("num_counters != table->private->number (%u/%u)\n",
+ 			 num_counters, private->number);
++		local_bh_enable();
+ 		*error = -EAGAIN;
+ 		return NULL;
+ 	}
+ 
+ 	newinfo->initial_entries = private->initial_entries;
++	/*
++	 * Ensure contents of newinfo are visible before assigning to
++	 * private.
++	 */
++	smp_wmb();
++	table->private = newinfo;
++
++	/* make sure all cpus see new ->private value */
++	smp_wmb();
+ 
+-	rcu_assign_pointer(table->private, newinfo);
+-	synchronize_rcu();
++	/*
++	 * Even though table entries have now been swapped, other CPU's
++	 * may still be using the old entries...
++	 */
++	local_bh_enable();
++
++	/* ... so wait for even xt_recseq on all cpus */
++	for_each_possible_cpu(cpu) {
++		seqcount_t *s = &per_cpu(xt_recseq, cpu);
++		u32 seq = raw_read_seqcount(s);
++
++		if (seq & 1) {
++			do {
++				cond_resched();
++				cpu_relax();
++			} while (seq == raw_read_seqcount(s));
++		}
++	}
+ 
+ #ifdef CONFIG_AUDIT
+ 	if (audit_enabled) {
+@@ -1427,12 +1447,12 @@ struct xt_table *xt_register_table(struct net *net,
+ 	}
+ 
+ 	/* Simplifies replace_table code. */
+-	rcu_assign_pointer(table->private, bootstrap);
++	table->private = bootstrap;
+ 
+ 	if (!xt_replace_table(table, 0, newinfo, &ret))
+ 		goto unlock;
+ 
+-	private = xt_table_get_private_protected(table);
++	private = table->private;
+ 	pr_debug("table->private->number = %u\n", private->number);
+ 
+ 	/* save number of initial entries */
+@@ -1455,8 +1475,7 @@ void *xt_unregister_table(struct xt_table *table)
+ 	struct xt_table_info *private;
+ 
+ 	mutex_lock(&xt[table->af].mutex);
+-	private = xt_table_get_private_protected(table);
+-	RCU_INIT_POINTER(table->private, NULL);
++	private = table->private;
+ 	list_del(&table->list);
+ 	mutex_unlock(&xt[table->af].mutex);
+ 	kfree(table);
