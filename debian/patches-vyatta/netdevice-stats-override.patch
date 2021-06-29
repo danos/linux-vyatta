@@ -1,0 +1,133 @@
+net: allow overriding network statisitics
+
+Allow a privledged process to override the network device statistics.
+This is second generation of this patch. The first was specific to TUN
+device, but need same solution for other nested device types
+as well.
+
+This patch is unlikely to be accepted upstream because there is no
+need for it unless doing offload.
+
+Signed-off-by: Stephen Hemminger <stephen@networkplumber.org>
+
+
+---
+ include/linux/netdevice.h    |    1 +
+ include/uapi/linux/sockios.h |    4 ++++
+ net/core/dev.c               |   13 +++++++++++++
+ net/core/dev_ioctl.c         |   31 +++++++++++++++++++++++++++++++
+ 4 files changed, 49 insertions(+)
+
+--- a/include/linux/netdevice.h
++++ b/include/linux/netdevice.h
+@@ -1716,6 +1716,7 @@ struct net_device {
+ 	int			ifindex;
+ 	int			group;
+ 
++	struct rtnl_link_stats64 *fake_stats;
+ 	struct net_device_stats	stats;
+ 
+ 	atomic_long_t		rx_dropped;
+--- a/include/uapi/linux/sockios.h
++++ b/include/uapi/linux/sockios.h
+@@ -132,6 +132,10 @@
+ #define SIOCSHWTSTAMP	0x89b0		/* set and get config		*/
+ #define SIOCGHWTSTAMP	0x89b1		/* get config			*/
+ 
++
++/* Vyatta specific ioctl calls */
++#define SIOCSIFSTATS	0x89D0		/* set interface statistics */
++
+ /* Device private ioctl calls */
+ 
+ /*
+--- a/net/core/dev.c
++++ b/net/core/dev.c
+@@ -8231,6 +8231,17 @@ struct rtnl_link_stats64 *dev_get_stats(
+ 					struct rtnl_link_stats64 *storage)
+ {
+ 	const struct net_device_ops *ops = dev->netdev_ops;
++	struct rtnl_link_stats64 *stats;
++
++	/* Allow statistics to be impostered */
++	rcu_read_lock();
++	stats = rcu_dereference(dev->fake_stats);
++	if (stats) {
++		*storage = *stats;
++		rcu_read_unlock();
++		goto out;
++	}
++	rcu_read_unlock();
+ 
+ 	if (ops->ndo_get_stats64) {
+ 		memset(storage, 0, sizeof(*storage));
+@@ -8243,6 +8254,7 @@ struct rtnl_link_stats64 *dev_get_stats(
+ 	storage->rx_dropped += (unsigned long)atomic_long_read(&dev->rx_dropped);
+ 	storage->tx_dropped += (unsigned long)atomic_long_read(&dev->tx_dropped);
+ 	storage->rx_nohandler += (unsigned long)atomic_long_read(&dev->rx_nohandler);
++out:
+ 	return storage;
+ }
+ EXPORT_SYMBOL(dev_get_stats);
+@@ -8415,6 +8427,7 @@ void free_netdev(struct net_device *dev)
+ 	netif_free_tx_queues(dev);
+ 	netif_free_rx_queues(dev);
+ 
++	kfree(dev->fake_stats);
+ 	kfree(rcu_dereference_protected(dev->ingress_queue, 1));
+ 
+ 	/* Flush device addresses */
+--- a/net/core/dev_ioctl.c
++++ b/net/core/dev_ioctl.c
+@@ -218,6 +218,33 @@ static int net_hwtstamp_validate(struct
+ 	return 0;
+ }
+ 
++/* Vyatta extension to allow an ioctl to override interface statistics */
++static int dev_stat_override(struct net_device *dev, void *data)
++{
++	struct link_stats_rcu {
++		struct rtnl_link_stats64 link;
++		struct rcu_head rcu;
++	} *stats;
++	struct rtnl_link_stats64 *old;
++
++	stats = kmalloc(sizeof(*stats), GFP_USER);
++	if (!stats)
++		return -ENOMEM;
++
++	if (copy_from_user(&stats->link, data,
++			   sizeof(struct rtnl_link_stats64))) {
++		kfree(stats);
++		return -EFAULT;
++	}
++
++	old = xchg(&dev->fake_stats, &stats->link);
++	if (old)
++		kfree_rcu(container_of(old, struct link_stats_rcu, link),
++			  rcu);
++
++	return 0;
++}
++
+ /*
+  *	Perform the SIOCxIFxxx calls, inside rtnl_lock()
+  */
+@@ -302,6 +329,9 @@ static int dev_ifsioc(struct net *net, s
+ 		ifr->ifr_newname[IFNAMSIZ-1] = '\0';
+ 		return dev_change_name(dev, ifr->ifr_newname);
+ 
++	case SIOCSIFSTATS:
++		return dev_stat_override(dev, ifr->ifr_data);
++
+ 	case SIOCSHWTSTAMP:
+ 		err = net_hwtstamp_validate(ifr);
+ 		if (err)
+@@ -518,6 +548,7 @@ int dev_ioctl(struct net *net, unsigned
+ 	default:
+ 		if (cmd == SIOCWANDEV ||
+ 		    cmd == SIOCGHWTSTAMP ||
++		    cmd == SIOCSIFSTATS ||
+ 		    (cmd >= SIOCDEVPRIVATE &&
+ 		     cmd <= SIOCDEVPRIVATE + 15)) {
+ 			dev_load(net, ifr->ifr_name);

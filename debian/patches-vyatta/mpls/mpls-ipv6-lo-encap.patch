@@ -1,0 +1,50 @@
+MPLS: Install ipv6 routes with lwtunnel encap via loopback
+into the main table rather than the local table, making
+the route reachable. This is necessary to allow ipv6 mpls
+encap over loopback using a local label for PIC in the
+dataplane.
+
+Signed-off-by: Dewi Morgan <dewi.morgan@intl.att.com>
+
+---
+ net/ipv6/route.c |   12 +++++++-----
+ 1 file changed, 7 insertions(+), 5 deletions(-)
+
+--- a/net/ipv6/route.c
++++ b/net/ipv6/route.c
+@@ -3404,12 +3404,14 @@ out:
+ 	return err;
+ }
+ 
+-static bool fib6_is_reject(u32 flags, struct net_device *dev, int addr_type)
++static bool fib6_is_reject(struct fib6_config *cfg,
++			   struct net_device *dev, int addr_type)
+ {
+-	if ((flags & RTF_REJECT) ||
++	if ((cfg->fc_flags & RTF_REJECT) ||
+ 	    (dev && (dev->flags & IFF_LOOPBACK) &&
++	     !(cfg->fc_encap && (cfg->fc_encap_type == LWTUNNEL_ENCAP_MPLS)) &&
+ 	     !(addr_type & IPV6_ADDR_LOOPBACK) &&
+-	     !(flags & (RTF_ANYCAST | RTF_LOCAL))))
++	     !(cfg->fc_flags & (RTF_ANYCAST | RTF_LOCAL))))
+ 		return true;
+ 
+ 	return false;
+@@ -3461,7 +3463,7 @@ int fib6_nh_init(struct net *net, struct
+ 	 * they would result in kernel looping; promote them to reject routes
+ 	 */
+ 	addr_type = ipv6_addr_type(&cfg->fc_dst);
+-	if (fib6_is_reject(cfg->fc_flags, dev, addr_type)) {
++	if (fib6_is_reject(cfg, dev, addr_type)) {
+ 		/* hold loopback dev/idev if we haven't done so. */
+ 		if (dev != net->loopback_dev) {
+ 			if (dev) {
+@@ -3707,7 +3709,7 @@ static struct fib6_info *ip6_route_info_
+ 		 * result in kernel looping; promote them to reject routes
+ 		 */
+ 		addr_type = ipv6_addr_type(&cfg->fc_dst);
+-		if (fib6_is_reject(cfg->fc_flags, rt->fib6_nh->fib_nh_dev,
++		if (fib6_is_reject(cfg, rt->fib6_nh->fib_nh_dev,
+ 				   addr_type))
+ 			rt->fib6_flags = RTF_REJECT | RTF_NONEXTHOP;
+ 	}

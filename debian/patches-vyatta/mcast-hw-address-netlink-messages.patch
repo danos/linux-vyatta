@@ -1,0 +1,109 @@
+Netlink messages for multicast HW addr programming
+    
+Add RTM_NEWADDR and RTM_DELADDR netlink messages to indicate
+interest in specific multicast hardware addresses. These messages
+are sent when addressed are added or deleted from the appropriate
+interface driver.
+
+Signed-off-by: Patrick Ruddy <pruddy@vyatta.att-mail.com>
+---
+ net/core/dev_addr_lists.c |   65 ++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 63 insertions(+), 2 deletions(-)
+
+--- a/net/core/dev_addr_lists.c
++++ b/net/core/dev_addr_lists.c
+@@ -12,6 +12,7 @@
+  */
+ 
+ #include <linux/netdevice.h>
++#include <net/netlink.h>
+ #include <linux/rtnetlink.h>
+ #include <linux/export.h>
+ #include <linux/list.h>
+@@ -661,6 +662,62 @@ out:
+ }
+ EXPORT_SYMBOL(dev_mc_add_excl);
+ 
++static int fill_addr(struct sk_buff *skb, struct net_device *dev,
++		     const unsigned char *addr, int type)
++{
++	struct nlmsghdr *nlh;
++	struct ifaddrmsg *ifm;
++
++	nlh = nlmsg_put(skb, 0, 0, type, sizeof(*ifm), 0);
++	if (nlh == NULL)
++		return -EMSGSIZE;
++
++	ifm = nlmsg_data(nlh);
++	ifm->ifa_family = AF_UNSPEC;
++	ifm->ifa_prefixlen = 0;
++	ifm->ifa_flags = IFA_F_PERMANENT;
++	ifm->ifa_scope = RT_SCOPE_LINK;
++	ifm->ifa_index = dev->ifindex;
++	if (nla_put(skb, IFA_ADDRESS, dev->addr_len, addr))
++		goto nla_put_failure;
++	nlmsg_end(skb, nlh);
++	return 0;
++
++nla_put_failure:
++	nlmsg_cancel(skb, nlh);
++	return -EMSGSIZE;
++}
++
++static inline size_t addr_nlmsg_size(void)
++{
++	return NLMSG_ALIGN(sizeof(struct ifaddrmsg))
++		+ nla_total_size(MAX_ADDR_LEN);
++}
++
++static void mc_addr_notify(struct net_device *dev, const unsigned char * addr,
++			   int type)
++{
++	struct net *net = dev_net(dev);
++	struct sk_buff *skb;
++	int err = -ENOBUFS;
++
++	skb = nlmsg_new(addr_nlmsg_size(), GFP_ATOMIC);
++	if (skb == NULL)
++		goto errout;
++
++	err = fill_addr(skb, dev, addr, type);
++	if (err < 0) {
++		WARN_ON(err == -EMSGSIZE);
++		kfree_skb(skb);
++		goto errout;
++	}
++	rtnl_notify(skb, net, 0, RTNLGRP_LINK, NULL, GFP_ATOMIC);
++	return;
++errout:
++ 	if (err < 0)
++		rtnl_set_sk_err(net, RTNLGRP_LINK, err);
++}
++
+ static int __dev_mc_add(struct net_device *dev, const unsigned char *addr,
+ 			bool global)
+ {
+@@ -669,8 +726,10 @@ static int __dev_mc_add(struct net_devic
+ 	netif_addr_lock_bh(dev);
+ 	err = __hw_addr_add_ex(&dev->mc, addr, dev->addr_len,
+ 			       NETDEV_HW_ADDR_T_MULTICAST, global, false, 0);
+-	if (!err)
++	if (!err) {
+ 		__dev_set_rx_mode(dev);
++		mc_addr_notify(dev, addr, RTM_NEWADDR);
++	}
+ 	netif_addr_unlock_bh(dev);
+ 	return err;
+ }
+@@ -709,8 +768,10 @@ static int __dev_mc_del(struct net_devic
+ 	netif_addr_lock_bh(dev);
+ 	err = __hw_addr_del_ex(&dev->mc, addr, dev->addr_len,
+ 			       NETDEV_HW_ADDR_T_MULTICAST, global, false);
+-	if (!err)
++	if (!err) {
+ 		__dev_set_rx_mode(dev);
++		mc_addr_notify(dev, addr, RTM_DELADDR);
++	}
+ 	netif_addr_unlock_bh(dev);
+ 	return err;
+ }
