@@ -1,9 +1,7 @@
 PROGS = \
 	bin2c \
-	conmakehash \
 	extract-cert \
 	kallsyms \
-	pnmtologo \
 	recordmcount \
 	sign-file \
 	unifdef
