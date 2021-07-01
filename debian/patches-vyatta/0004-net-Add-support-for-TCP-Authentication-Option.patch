@@ -165,7 +165,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
 +triggered by setting the TCP_AUTH_MASTER_FLAG_CACHE_TKEYS flag.
 --- a/include/linux/tcp.h
 +++ b/include/linux/tcp.h
-@@ -95,6 +95,8 @@ struct tcp_options_received {
+@@ -97,6 +97,8 @@ struct tcp_options_received {
  	u8	num_sacks;	/* Number of SACK blocks		*/
  	u16	user_mss;	/* mss requested by user in ioctl	*/
  	u16	mss_clamp;	/* Maximal mss, negotiated at connection setup */
@@ -174,7 +174,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  };
  
  static inline void tcp_clear_options(struct tcp_options_received *rx_opt)
-@@ -104,6 +106,7 @@ static inline void tcp_clear_options(str
+@@ -106,6 +108,7 @@ static inline void tcp_clear_options(str
  #if IS_ENABLED(CONFIG_SMC)
  	rx_opt->smc_ok = 0;
  #endif
@@ -182,25 +182,24 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  }
  
  /* This is the max number of SACKS that we'll generate and process. It's safe
-@@ -128,6 +131,8 @@ struct tcp_request_sock {
- 						  * FastOpen it's the seq#
+@@ -135,6 +138,7 @@ struct tcp_request_sock {
  						  * after data-in-SYN.
  						  */
-+
+ 	u8				syn_tos;
 +	struct tcp_auth_req_params	__rcu *auth_params;
  };
  
  static inline struct tcp_request_sock *tcp_rsk(const struct request_sock *req)
-@@ -382,6 +387,8 @@ struct tcp_sock {
- 			   * while socket was owned by user.
- 			   */
+@@ -397,6 +401,8 @@ struct tcp_sock {
+ 	bool	syn_smc;	/* SYN includes SMC */
+ #endif
  
 +	struct tcp_auth_params	__rcu *auth_params;
 +
  #ifdef CONFIG_TCP_MD5SIG
  /* TCP AF-Specific parts; only used by MD5 Signature support so far */
  	const struct tcp_sock_af_ops	*af_specific;
-@@ -424,6 +431,8 @@ static inline struct tcp_sock *tcp_sk(co
+@@ -439,6 +445,8 @@ static inline struct tcp_sock *tcp_sk(co
  	return (struct tcp_sock *)sk;
  }
  
@@ -209,7 +208,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  struct tcp_timewait_sock {
  	struct inet_timewait_sock tw_sk;
  #define tw_rcv_nxt tw_sk.__tw_common.skc_tw_rcv_nxt
-@@ -440,6 +449,8 @@ struct tcp_timewait_sock {
+@@ -455,6 +463,8 @@ struct tcp_timewait_sock {
  #ifdef CONFIG_TCP_MD5SIG
  	struct tcp_md5sig_key	  *tw_md5_key;
  #endif
@@ -220,15 +219,15 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  static inline struct tcp_timewait_sock *tcp_twsk(const struct sock *sk)
 --- a/include/net/tcp.h
 +++ b/include/net/tcp.h
-@@ -182,6 +182,7 @@ void tcp_time_wait(struct sock *sk, int
+@@ -184,6 +184,7 @@ void tcp_time_wait(struct sock *sk, int
  #define TCPOPT_SACK             5       /* SACK Block */
  #define TCPOPT_TIMESTAMP	8	/* Better RTT estimations/PAWS */
  #define TCPOPT_MD5SIG		19	/* MD5 Signature (RFC2385) */
 +#define TCPOPT_AUTH		29	/* Authentication Option (RFC5925) */
+ #define TCPOPT_MPTCP		30	/* Multipath TCP (RFC6824) */
  #define TCPOPT_FASTOPEN		34	/* Fast open (RFC7413) */
  #define TCPOPT_EXP		254	/* Experimental */
- /* Magic number to be after the option value for sharing TCP
-@@ -214,6 +215,17 @@ void tcp_time_wait(struct sock *sk, int
+@@ -217,6 +218,17 @@ void tcp_time_wait(struct sock *sk, int
  #define TCPOLEN_MSS_ALIGNED		4
  #define TCPOLEN_EXP_SMC_BASE_ALIGNED	8
  
@@ -246,7 +245,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  /* Flags in tp->nonagle */
  #define TCP_NAGLE_OFF		1	/* Nagle's algo is disabled */
  #define TCP_NAGLE_CORK		2	/* Socket is corked	    */
-@@ -1527,31 +1539,107 @@ static inline void tcp_clear_all_retrans
+@@ -1548,32 +1560,107 @@ static inline void tcp_clear_all_retrans
  	tp->retransmit_skb_hint = NULL;
  }
  
@@ -272,8 +271,9 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
 -	struct hlist_node	node;
 -	u8			keylen;
 -	u8			family; /* AF_INET or AF_INET6 */
--	union tcp_md5_addr	addr;
 -	u8			prefixlen;
+-	union tcp_md5_addr	addr;
+-	int			l3index; /* set if key added with L3 scope */
 -	u8			key[TCP_MD5SIG_MAXKEYLEN];
 -	struct rcu_head		rcu;
 +struct tcp_auth_traffic_key {
@@ -367,7 +367,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  struct tcp4_pseudohdr {
  	__be32		saddr;
  	__be32		daddr;
-@@ -1567,13 +1655,227 @@ struct tcp6_pseudohdr {
+@@ -1589,13 +1676,228 @@ struct tcp6_pseudohdr {
  	__be32		protocol;	/* including padding */
  };
  
@@ -581,8 +581,9 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
 +	struct hlist_node	node;
 +	u8			keylen;
 +	u8			family; /* AF_INET or AF_INET6 */
-+	union tcp_md5_addr	addr;
 +	u8			prefixlen;
++	union tcp_md5_addr	addr;
++	int			l3index; /* set if key added with L3 scope */
 +	u8			key[TCP_MD5SIG_MAXKEYLEN];
 +	struct rcu_head		rcu;
 +};
@@ -596,14 +597,14 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  /* - pool: digest algorithm, hash description and scratch buffer */
  struct tcp_md5sig_pool {
  	struct ahash_request	*md5_req;
-@@ -1957,6 +2259,41 @@ int tcp_conn_request(struct request_sock
+@@ -1994,6 +2296,41 @@ int tcp_conn_request(struct request_sock
  		     const struct tcp_request_sock_ops *af_ops,
  		     struct sock *sk, struct sk_buff *skb);
  
 +struct tcp_sock_auth_af_ops {
 +	int		(*auth_parse)(struct sock *sk,
-+					char __user *optval,
-+					int optlen);
++				      sockptr_t optval,
++				      int optlen);
 +
 +	int (*addrs_for_auth_hash)(const struct sock *sk,
 +				   const struct sk_buff *skb,
@@ -638,8 +639,8 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  /* TCP af-specific functions */
  struct tcp_sock_af_ops {
  #ifdef CONFIG_TCP_MD5SIG
-@@ -1971,6 +2308,8 @@ struct tcp_sock_af_ops {
- 				     char __user *optval,
+@@ -2008,6 +2345,8 @@ struct tcp_sock_af_ops {
+ 				     sockptr_t optval,
  				     int optlen);
  #endif
 +
@@ -647,7 +648,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  };
  
  struct tcp_request_sock_ops {
-@@ -2018,6 +2357,69 @@ static inline __u32 cookie_init_sequence
+@@ -2061,6 +2400,69 @@ static inline __u32 cookie_init_sequence
  }
  #endif
  
@@ -727,7 +728,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  
  #define TCP_REPAIR_ON		1
  #define TCP_REPAIR_OFF		0
-@@ -329,6 +330,40 @@ struct tcp_diag_md5sig {
+@@ -341,6 +342,40 @@ struct tcp_diag_md5sig {
  	__u8	tcpm_key[TCP_MD5SIG_MAXKEYLEN];
  };
  
@@ -781,7 +782,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  	     fib_frontend.o fib_semantics.o fib_trie.o fib_notifier.o \
 --- a/net/ipv4/af_inet.c
 +++ b/net/ipv4/af_inet.c
-@@ -227,6 +227,9 @@ int inet_listen(struct socket *sock, int
+@@ -228,6 +228,9 @@ int inet_listen(struct socket *sock, int
  			tcp_fastopen_init_key_once(sock_net(sk));
  		}
  
@@ -793,7 +794,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  			goto out;
 --- a/net/ipv4/syncookies.c
 +++ b/net/ipv4/syncookies.c
-@@ -332,6 +332,7 @@ struct sock *cookie_v4_check(struct sock
+@@ -372,6 +372,7 @@ struct sock *cookie_v4_check(struct sock
  
  	ireq = inet_rsk(req);
  	treq = tcp_rsk(req);
@@ -803,7 +804,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  	treq->ts_off		= 0;
 --- a/net/ipv4/tcp.c
 +++ b/net/ipv4/tcp.c
-@@ -3091,6 +3091,9 @@ static int do_tcp_setsockopt(struct sock
+@@ -3264,6 +3264,9 @@ static int do_tcp_setsockopt(struct sock
  		err = tp->af_specific->md5_parse(sk, optname, optval, optlen);
  		break;
  #endif
@@ -2465,8 +2466,8 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
 +}
 --- a/net/ipv4/tcp_input.c
 +++ b/net/ipv4/tcp_input.c
-@@ -3959,6 +3959,15 @@ void tcp_parse_options(const struct net
- 							  opsize);
+@@ -4060,6 +4060,15 @@ void tcp_parse_options(const struct net
+ 				opt_rx->saw_unknown = 1;
  				break;
  
 +			case TCPOPT_AUTH:
@@ -2478,10 +2479,10 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
 +				opt_rx->next_auth_key = *++ptr;
 +				break;
 +
+ 			default:
+ 				opt_rx->saw_unknown = 1;
  			}
- 			ptr += opsize-2;
- 			length -= opsize;
-@@ -4047,6 +4056,67 @@ const u8 *tcp_parse_md5sig_option(const
+@@ -4150,6 +4159,67 @@ const u8 *tcp_parse_md5sig_option(const
  EXPORT_SYMBOL(tcp_parse_md5sig_option);
  #endif
  
@@ -2549,7 +2550,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  /* Sorry, PAWS as specified is broken wrt. pure-ACKs -DaveM
   *
   * It is not fatal. If this ACK does _not_ change critical state (seqs, window)
-@@ -5894,6 +5964,7 @@ static int tcp_rcv_synsent_state_process
+@@ -6037,6 +6107,7 @@ static int tcp_rcv_synsent_state_process
  	struct inet_connection_sock *icsk = inet_csk(sk);
  	struct tcp_sock *tp = tcp_sk(sk);
  	struct tcp_fastopen_cookie foc = { .len = -1 };
@@ -2557,7 +2558,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  	int saved_clamp = tp->rx_opt.mss_clamp;
  	bool fastopen_fail;
  
-@@ -5952,6 +6023,13 @@ static int tcp_rcv_synsent_state_process
+@@ -6101,6 +6172,13 @@ static int tcp_rcv_synsent_state_process
  		 *    state to ESTABLISHED..."
  		 */
  
@@ -2571,7 +2572,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  		tcp_ecn_rcv_synack(tp, th);
  
  		tcp_init_wl(tp, TCP_SKB_CB(skb)->seq);
-@@ -6461,6 +6539,7 @@ static void tcp_openreq_init(struct requ
+@@ -6613,6 +6691,7 @@ static void tcp_openreq_init(struct requ
  	tcp_rsk(req)->rcv_nxt = TCP_SKB_CB(skb)->seq + 1;
  	tcp_rsk(req)->snt_synack = 0;
  	tcp_rsk(req)->last_oow_ack_time = 0;
@@ -2579,7 +2580,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  	req->mss = rx_opt->mss_clamp;
  	req->ts_recent = rx_opt->saw_tstamp ? rx_opt->rcv_tsval : 0;
  	ireq->tstamp_ok = rx_opt->tstamp_ok;
-@@ -6576,6 +6655,42 @@ u16 tcp_get_syncookie_mss(struct request
+@@ -6742,6 +6821,42 @@ u16 tcp_get_syncookie_mss(struct request
  }
  EXPORT_SYMBOL_GPL(tcp_get_syncookie_mss);
  
@@ -2622,7 +2623,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  int tcp_conn_request(struct request_sock_ops *rsk_ops,
  		     const struct tcp_request_sock_ops *af_ops,
  		     struct sock *sk, struct sk_buff *skb)
-@@ -6630,6 +6745,17 @@ int tcp_conn_request(struct request_sock
+@@ -6800,6 +6915,17 @@ int tcp_conn_request(struct request_sock
  	tcp_openreq_init(req, &tmp_opt, skb, sk);
  	inet_rsk(req)->no_srccheck = inet_sk(sk)->transparent;
  
@@ -2642,16 +2643,16 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  
 --- a/net/ipv4/tcp_ipv4.c
 +++ b/net/ipv4/tcp_ipv4.c
-@@ -433,6 +433,8 @@ int tcp_v4_err(struct sk_buff *icmp_skb,
+@@ -470,6 +470,8 @@ int tcp_v4_err(struct sk_buff *skb, u32
+ 	const int code = icmp_hdr(skb)->code;
  	struct sock *sk;
- 	struct sk_buff *skb;
  	struct request_sock *fastopen;
 +	struct tcp_auth_params *auth_params;
 +	bool conn_has_auth;
  	u32 seq, snd_una;
- 	s32 remaining;
- 	u32 delta_us;
-@@ -504,6 +506,36 @@ int tcp_v4_err(struct sk_buff *icmp_skb,
+ 	int err;
+ 	struct net *net = dev_net(skb->dev);
+@@ -538,6 +540,36 @@ int tcp_v4_err(struct sk_buff *skb, u32
  		if (code > NR_ICMP_UNREACH)
  			goto out;
  
@@ -2688,7 +2689,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  		if (code == ICMP_FRAG_NEEDED) { /* PMTU discovery (RFC1191) */
  			/* We are not interested in TCP_LISTEN and open_requests
  			 * (SYN-ACKs send out by Linux are always <576bytes so
-@@ -648,14 +680,19 @@ EXPORT_SYMBOL(tcp_v4_send_check);
+@@ -655,14 +687,19 @@ EXPORT_SYMBOL(tcp_v4_send_check);
   *	Exception: precedence violation. We do not implement it in any case.
   */
  
@@ -2710,7 +2711,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  	} rep;
  	struct ip_reply_arg arg;
  #ifdef CONFIG_TCP_MD5SIG
-@@ -699,6 +736,18 @@ static void tcp_v4_send_reset(const stru
+@@ -706,6 +743,18 @@ static void tcp_v4_send_reset(const stru
  	arg.iov[0].iov_len  = sizeof(rep.th);
  
  	net = sk ? sock_net(sk) : dev_net(skb_dst(skb)->dev);
@@ -2729,7 +2730,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  #ifdef CONFIG_TCP_MD5SIG
  	rcu_read_lock();
  	hash_location = tcp_parse_md5sig_option(th);
-@@ -748,6 +797,7 @@ static void tcp_v4_send_reset(const stru
+@@ -770,6 +819,7 @@ static void tcp_v4_send_reset(const stru
  				     ip_hdr(skb)->daddr, &rep.th);
  	}
  #endif
@@ -2737,7 +2738,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  	arg.csum = csum_tcpudp_nofold(ip_hdr(skb)->daddr,
  				      ip_hdr(skb)->saddr, /* XXX */
  				      arg.iov[0].iov_len, IPPROTO_TCP, 0);
-@@ -795,11 +845,55 @@ out:
+@@ -817,11 +867,55 @@ out:
  #endif
  }
  
@@ -2794,7 +2795,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  }
  
  /* The code following below sending ACKs in SYN-RECV and TIME-WAIT states
-@@ -810,14 +904,18 @@ static void tcp_v4_send_ack(const struct
+@@ -832,14 +926,18 @@ static void tcp_v4_send_ack(const struct
  			    struct sk_buff *skb, u32 seq, u32 ack,
  			    u32 win, u32 tsval, u32 tsecr, int oif,
  			    struct tcp_md5sig_key *key,
@@ -2815,7 +2816,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  #endif
  			];
  	} rep;
-@@ -849,8 +947,19 @@ static void tcp_v4_send_ack(const struct
+@@ -871,8 +969,19 @@ static void tcp_v4_send_ack(const struct
  	rep.th.ack     = 1;
  	rep.th.window  = htons(win);
  
@@ -2836,19 +2837,19 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  		int offset = (tsecr) ? 3 : 0;
  
  		rep.opt[offset++] = htonl((TCPOPT_NOP << 24) |
-@@ -896,7 +1005,11 @@ static void tcp_v4_timewait_ack(struct s
+@@ -918,7 +1027,11 @@ static void tcp_v4_timewait_ack(struct s
  {
  	struct inet_timewait_sock *tw = inet_twsk(sk);
  	struct tcp_timewait_sock *tcptw = tcp_twsk(sk);
 +	struct tcp_auth_send_args auth_args = {0};
- 
-+	rcu_read_lock();
 +
++	rcu_read_lock();
+ 
 +	tcp_timewait_get_auth_send_args(sk, &auth_args);
  	tcp_v4_send_ack(sk, skb,
  			tcptw->tw_snd_nxt, tcptw->tw_rcv_nxt,
  			tcptw->tw_rcv_wnd >> tw->tw_rcv_wscale,
-@@ -904,21 +1017,33 @@ static void tcp_v4_timewait_ack(struct s
+@@ -926,24 +1039,34 @@ static void tcp_v4_timewait_ack(struct s
  			tcptw->tw_ts_recent,
  			tw->tw_bound_dev_if,
  			tcp_twsk_md5_key(tcptw),
@@ -2862,14 +2863,14 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  	inet_twsk_put(tw);
  }
  
--static void tcp_v4_reqsk_send_ack(const struct sock *sk, struct sk_buff *skb,
-+static void tcp_v4_reqsk_send_ack(const struct sock *sk,
-+				  struct sk_buff *skb,
+ static void tcp_v4_reqsk_send_ack(const struct sock *sk, struct sk_buff *skb,
  				  struct request_sock *req)
  {
 +	struct tcp_auth_send_args auth_args = {0};
+ 	const union tcp_md5_addr *addr;
+ 	int l3index;
 +	u32 seq;
-+
+ 
  	/* sk->sk_state == TCP_LISTEN -> for regular TCP_SYN_RECV
  	 * sk->sk_state == TCP_SYN_RECV -> for Fast Open.
  	 */
@@ -2885,15 +2886,15 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  
  	/* RFC 7323 2.3
  	 * The window field (SEG.WND) of every outgoing segment, with the
-@@ -933,6 +1058,7 @@ static void tcp_v4_reqsk_send_ack(const
+@@ -959,6 +1082,7 @@ static void tcp_v4_reqsk_send_ack(const
+ 			req->ts_recent,
  			0,
- 			tcp_md5_do_lookup(sk, (union tcp_md5_addr *)&ip_hdr(skb)->saddr,
- 					  AF_INET),
+ 			tcp_md5_do_lookup(sk, l3index, addr, AF_INET),
 +			&auth_args,
  			inet_rsk(req)->no_srccheck ? IP_REPLY_ARG_NOSRCCHECK : 0,
  			ip_hdr(skb)->tos);
  }
-@@ -978,7 +1104,13 @@ static int tcp_v4_send_synack(const stru
+@@ -1016,7 +1140,13 @@ static int tcp_v4_send_synack(const stru
   */
  static void tcp_v4_reqsk_destructor(struct request_sock *req)
  {
@@ -2907,7 +2908,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  }
  
  #ifdef CONFIG_TCP_MD5SIG
-@@ -1302,6 +1434,46 @@ EXPORT_SYMBOL(tcp_v4_md5_hash_skb);
+@@ -1373,6 +1503,46 @@ EXPORT_SYMBOL(tcp_v4_md5_hash_skb);
  
  #endif
  
@@ -2931,7 +2932,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
 +	return sizeof(*sne_buf) + sizeof(*ph);
 +}
 +
-+static int tcp_v4_parse_auth(struct sock *sk, char __user *optval, int optlen)
++static int tcp_v4_parse_auth(struct sock *sk, sockptr_t optval, int optlen)
 +{
 +	struct tcp_auth tca;
 +	struct sockaddr_in *sin = (struct sockaddr_in *)&tca.addr;
@@ -2939,7 +2940,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
 +	if (optlen < sizeof(tca))
 +		return -EINVAL;
 +
-+	if (copy_from_user(&tca, optval, sizeof(tca)))
++	if (copy_from_sockptr(&tca, optval, sizeof(tca)))
 +		return -EFAULT;
 +
 +	/* Note: tca.key is still pointing to userspace memory */
@@ -2953,8 +2954,8 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
 +
  /* Called with rcu_read_lock() */
  static bool tcp_v4_inbound_md5_hash(const struct sock *sk,
- 				    const struct sk_buff *skb)
-@@ -1373,6 +1545,16 @@ static void tcp_v4_init_req(struct reque
+ 				    const struct sk_buff *skb,
+@@ -1451,6 +1621,16 @@ static void tcp_v4_init_req(struct reque
  	RCU_INIT_POINTER(ireq->ireq_opt, tcp_v4_save_options(net, skb));
  }
  
@@ -2971,7 +2972,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  static struct dst_entry *tcp_v4_route_req(const struct sock *sk,
  					  struct flowi *fl,
  					  const struct request_sock *req)
-@@ -1421,7 +1603,6 @@ drop:
+@@ -1499,7 +1679,6 @@ drop:
  }
  EXPORT_SYMBOL(tcp_v4_conn_request);
  
@@ -2979,7 +2980,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  /*
   * The three way handshake has completed - we got a valid synack -
   * now create the new socket.
-@@ -1883,6 +2064,11 @@ process:
+@@ -1983,6 +2162,11 @@ process:
  			reqsk_put(req);
  			goto csum_error;
  		}
@@ -2991,17 +2992,17 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  		if (unlikely(sk->sk_state != TCP_LISTEN)) {
  			inet_csk_reqsk_queue_drop_and_put(sk, req);
  			goto lookup;
-@@ -1932,6 +2118,9 @@ process:
+@@ -2032,6 +2216,9 @@ process:
  	if (!xfrm4_policy_check(sk, XFRM_POLICY_IN, skb))
  		goto discard_and_relse;
  
 +	if (!tcp_auth_inbound_validate(sk, NULL, skb))
 +		goto discard_and_relse;
 +
- 	if (tcp_v4_inbound_md5_hash(sk, skb))
+ 	if (tcp_v4_inbound_md5_hash(sk, skb, dif, sdif))
  		goto discard_and_relse;
  
-@@ -2012,6 +2201,11 @@ do_time_wait:
+@@ -2112,6 +2299,11 @@ do_time_wait:
  		inet_twsk_put(inet_twsk(sk));
  		goto csum_error;
  	}
@@ -3013,7 +3014,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  	switch (tcp_timewait_state_process(inet_twsk(sk), skb, th)) {
  	case TCP_TW_SYN: {
  		struct sock *sk2 = inet_lookup_listener(dev_net(skb->dev),
-@@ -2035,7 +2229,7 @@ do_time_wait:
+@@ -2135,7 +2327,7 @@ do_time_wait:
  		tcp_v4_timewait_ack(sk, skb);
  		break;
  	case TCP_TW_RST:
@@ -3022,7 +3023,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  		inet_twsk_deschedule_put(inet_twsk(sk));
  		goto discard_it;
  	case TCP_TW_SUCCESS:;
-@@ -2080,13 +2274,93 @@ const struct inet_connection_sock_af_ops
+@@ -2176,13 +2368,93 @@ const struct inet_connection_sock_af_ops
  };
  EXPORT_SYMBOL(ipv4_specific);
  
@@ -3118,7 +3119,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  
  /* NOTE: A lot of things set to zero explicitly by call to
   *       sk_alloc() so need not be done here.
-@@ -2099,9 +2373,7 @@ static int tcp_v4_init_sock(struct sock
+@@ -2195,9 +2467,7 @@ static int tcp_v4_init_sock(struct sock
  
  	icsk->icsk_af_ops = &ipv4_specific;
  
@@ -3128,7 +3129,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  
  	return 0;
  }
-@@ -2136,6 +2408,8 @@ void tcp_v4_destroy_sock(struct sock *sk
+@@ -2232,6 +2502,8 @@ void tcp_v4_destroy_sock(struct sock *sk
  	}
  #endif
  
@@ -3216,25 +3217,25 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  	newtp->rx_opt.mss_clamp = req->mss;
 --- a/net/ipv4/tcp_output.c
 +++ b/net/ipv4/tcp_output.c
-@@ -414,6 +414,7 @@ static inline bool tcp_urg_mode(const st
- #define OPTION_WSCALE		(1 << 3)
+@@ -416,6 +416,7 @@ static inline bool tcp_urg_mode(const st
  #define OPTION_FAST_OPEN_COOKIE	(1 << 8)
  #define OPTION_SMC		(1 << 9)
-+#define OPTION_AUTH		(1 << 10)
+ #define OPTION_MPTCP		(1 << 10)
++#define OPTION_AUTH		(1 << 11)
  
  static void smc_options_write(__be32 *ptr, u16 *options)
  {
-@@ -437,6 +438,9 @@ struct tcp_out_options {
- 	u8 num_sack_blocks;	/* number of SACK blocks to include */
+@@ -440,6 +441,9 @@ struct tcp_out_options {
  	u8 hash_size;		/* bytes in hash_location */
+ 	u8 bpf_opt_len;		/* length of BPF hdr option */
  	__u8 *hash_location;	/* temporary pointer, overloaded */
 +	u8 key_id;		/* RFC5925 auth current key ID */
 +	u8 rnext_key_id;	/* RFC5925 auth desired next recv key ID */
 +	u8 auth_len;		/* RFC5925 auth option length */
  	__u32 tsval, tsecr;	/* need to include OPTION_TS */
  	struct tcp_fastopen_cookie *fastopen_cookie;	/* Fast open cookie */
- };
-@@ -467,6 +471,14 @@ static void tcp_options_write(__be32 *pt
+ 	struct mptcp_out_options mptcp;
+@@ -618,6 +622,14 @@ static void tcp_options_write(__be32 *pt
  		ptr += 4;
  	}
  
@@ -3249,8 +3250,8 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  	if (unlikely(opts->mss)) {
  		*ptr++ = htonl((TCPOPT_MSS << 24) |
  			       (TCPOLEN_MSS << 16) |
-@@ -584,12 +596,26 @@ static void smc_set_option_cond(const st
- #endif
+@@ -753,12 +765,26 @@ static void mptcp_set_option_cond(const
+ 	}
  }
  
 +static inline u8
@@ -3277,7 +3278,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  {
  	struct tcp_sock *tp = tcp_sk(sk);
  	unsigned int remaining = MAX_TCP_OPTION_SPACE;
-@@ -607,6 +633,10 @@ static unsigned int tcp_syn_options(stru
+@@ -776,6 +802,10 @@ static unsigned int tcp_syn_options(stru
  	}
  #endif
  
@@ -3288,18 +3289,18 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  	/* We always get an MSS option.  The option bytes which will be seen in
  	 * normal data packets should timestamps be used, must be in the MSS
  	 * advertised.  But we subtract them from tp->mss_cache so that
-@@ -663,7 +693,9 @@ static unsigned int tcp_synack_options(c
- 				       struct tcp_out_options *opts,
+@@ -844,7 +874,9 @@ static unsigned int tcp_synack_options(c
  				       const struct tcp_md5sig_key *md5,
  				       struct tcp_fastopen_cookie *foc,
--				       enum tcp_synack_type synack_type)
-+				       enum tcp_synack_type synack_type,
+ 				       enum tcp_synack_type synack_type,
+-				       struct sk_buff *syn_skb)
++				       struct sk_buff *syn_skb,
 +				       const struct tcp_auth_master_key *current_key,
 +				       const struct tcp_auth_master_key *next_key)
  {
  	struct inet_request_sock *ireq = inet_rsk(req);
  	unsigned int remaining = MAX_TCP_OPTION_SPACE;
-@@ -683,6 +715,10 @@ static unsigned int tcp_synack_options(c
+@@ -864,6 +896,10 @@ static unsigned int tcp_synack_options(c
  	}
  #endif
  
@@ -3310,7 +3311,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  	/* We always send an MSS option. */
  	opts->mss = mss;
  	remaining -= TCPOLEN_MSS_ALIGNED;
-@@ -724,9 +760,12 @@ static unsigned int tcp_synack_options(c
+@@ -910,9 +946,12 @@ static unsigned int tcp_synack_options(c
  /* Compute TCP options for ESTABLISHED sockets. This is not the
   * final wire format yet.
   */
@@ -3326,7 +3327,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  {
  	struct tcp_sock *tp = tcp_sk(sk);
  	unsigned int size = 0;
-@@ -746,6 +785,9 @@ static unsigned int tcp_established_opti
+@@ -932,6 +971,9 @@ static unsigned int tcp_established_opti
  	}
  #endif
  
@@ -3336,7 +3337,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  	if (likely(tp->rx_opt.tstamp_ok)) {
  		opts->options |= OPTION_TS;
  		opts->tsval = skb ? tcp_skb_timestamp(skb) + tp->tsoffset : 0;
-@@ -1027,12 +1069,25 @@ static int __tcp_transmit_skb(struct soc
+@@ -1247,12 +1289,25 @@ static int __tcp_transmit_skb(struct soc
  	unsigned int tcp_options_size, tcp_header_size;
  	struct sk_buff *oskb = NULL;
  	struct tcp_md5sig_key *md5;
@@ -3362,7 +3363,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  	prior_wstamp = tp->tcp_wstamp_ns;
  	tp->tcp_wstamp_ns = max(tp->tcp_wstamp_ns, tp->tcp_clock_cache);
  	skb->skb_mstamp_ns = tp->tcp_wstamp_ns;
-@@ -1048,8 +1103,10 @@ static int __tcp_transmit_skb(struct soc
+@@ -1268,8 +1323,10 @@ static int __tcp_transmit_skb(struct soc
  				skb = skb_clone(oskb, gfp_mask);
  		} tcp_skb_tsorted_restore(oskb);
  
@@ -3374,7 +3375,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  		/* retransmit skbs might have a non zero value in skb->dev
  		 * because skb->dev is aliased with skb->rbnode.rb_left
  		 */
-@@ -1061,10 +1118,12 @@ static int __tcp_transmit_skb(struct soc
+@@ -1281,10 +1338,12 @@ static int __tcp_transmit_skb(struct soc
  	memset(&opts, 0, sizeof(opts));
  
  	if (unlikely(tcb->tcp_flags & TCPHDR_SYN)) {
@@ -3389,7 +3390,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  		/* Force a PSH flag on all (GSO) packets to expedite GRO flush
  		 * at receiver : This slightly improve GRO performance.
  		 * Note that we do not force the PSH flag for non GSO packets,
-@@ -1148,6 +1207,58 @@ static int __tcp_transmit_skb(struct soc
+@@ -1368,6 +1427,58 @@ static int __tcp_transmit_skb(struct soc
  	}
  #endif
  
@@ -3445,10 +3446,10 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
 +
 +	rcu_read_unlock();
 +
- 	icsk->icsk_af_ops->send_check(sk, skb);
+ 	/* BPF prog is the last one writing header option */
+ 	bpf_skops_write_hdr_opt(sk, skb, NULL, NULL, 0, &opts);
  
- 	if (likely(tcb->tcp_flags & TCPHDR_ACK))
-@@ -1600,6 +1711,16 @@ unsigned int tcp_current_mss(struct sock
+@@ -1826,6 +1937,16 @@ unsigned int tcp_current_mss(struct sock
  	unsigned int header_len;
  	struct tcp_out_options opts;
  	struct tcp_md5sig_key *md5;
@@ -3465,7 +3466,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  
  	mss_now = tp->mss_cache;
  
-@@ -1609,8 +1730,12 @@ unsigned int tcp_current_mss(struct sock
+@@ -1835,8 +1956,12 @@ unsigned int tcp_current_mss(struct sock
  			mss_now = tcp_sync_mss(sk, mtu);
  	}
  
@@ -3479,7 +3480,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  	/* The mss_cache is sized based on tp->tcp_header_len, which assumes
  	 * some common options. If this is an odd packet (because we have SACK
  	 * blocks etc) then our calculated header_len will be different, and
-@@ -3280,14 +3405,16 @@ struct sk_buff *tcp_make_synack(const st
+@@ -3518,14 +3643,16 @@ struct sk_buff *tcp_make_synack(const st
  	struct sk_buff *skb;
  	int tcp_header_size;
  	struct tcphdr *th;
@@ -3500,7 +3501,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  	/* Reserve space for headers. */
  	skb_reserve(skb, MAX_TCP_HEADER);
  
-@@ -3326,12 +3453,12 @@ struct sk_buff *tcp_make_synack(const st
+@@ -3564,7 +3691,6 @@ struct sk_buff *tcp_make_synack(const st
  	}
  
  #ifdef CONFIG_TCP_MD5SIG
@@ -3508,14 +3509,17 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  	md5 = tcp_rsk(req)->af_specific->req_md5_lookup(sk, req_to_sk(req));
  #endif
  	skb_set_hash(skb, tcp_rsk(req)->txhash, PKT_HASH_TYPE_L4);
+@@ -3572,7 +3698,8 @@ struct sk_buff *tcp_make_synack(const st
+ 	TCP_SKB_CB(skb)->tcp_flags = TCPHDR_SYN | TCPHDR_ACK;
  	tcp_header_size = tcp_synack_options(sk, req, mss, skb, &opts, md5,
--					     foc, synack_type) + sizeof(*th);
-+					     foc, synack_type, current_key,
+ 					     foc, synack_type,
+-					     syn_skb) + sizeof(*th);
++					     syn_skb, current_key,
 +					     next_key) + sizeof(*th);
  
  	skb_push(skb, tcp_header_size);
  	skb_reset_transport_header(skb);
-@@ -3360,13 +3487,60 @@ struct sk_buff *tcp_make_synack(const st
+@@ -3601,8 +3728,50 @@ struct sk_buff *tcp_make_synack(const st
  	if (md5)
  		tcp_rsk(req)->af_specific->calc_md5_hash(opts.hash_location,
  					       md5, req_to_sk(req), skb);
@@ -3565,7 +3569,9 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
 +
 +	rcu_read_unlock();
  
- 	skb->skb_mstamp_ns = now;
+ 	bpf_skops_write_hdr_opt((struct sock *)sk, skb, req, syn_skb,
+ 				synack_type, &opts);
+@@ -3611,6 +3780,11 @@ struct sk_buff *tcp_make_synack(const st
  	tcp_add_tx_delay(skb, tp);
  
  	return skb;
@@ -3577,7 +3583,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  }
  EXPORT_SYMBOL(tcp_make_synack);
  
-@@ -3394,6 +3568,8 @@ static void tcp_connect_init(struct sock
+@@ -3638,6 +3812,8 @@ static void tcp_connect_init(struct sock
  {
  	const struct dst_entry *dst = __sk_dst_get(sk);
  	struct tcp_sock *tp = tcp_sk(sk);
@@ -3586,7 +3592,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  	__u8 rcv_wscale;
  	u32 rcv_wnd;
  
-@@ -3409,6 +3585,14 @@ static void tcp_connect_init(struct sock
+@@ -3653,6 +3829,14 @@ static void tcp_connect_init(struct sock
  		tp->tcp_header_len += TCPOLEN_MD5SIG_ALIGNED;
  #endif
  
@@ -3601,7 +3607,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  	/* If user gave his TCP_MAXSEG, record it to clamp */
  	if (tp->rx_opt.user_mss)
  		tp->rx_opt.mss_clamp = tp->rx_opt.user_mss;
-@@ -3573,11 +3757,55 @@ done:
+@@ -3817,11 +4001,55 @@ done:
  	return err;
  }
  
@@ -3657,7 +3663,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  	int err;
  
  	tcp_call_bpf(sk, BPF_SOCK_OPS_TCP_CONNECT_CB, 0, NULL);
-@@ -3585,6 +3813,14 @@ int tcp_connect(struct sock *sk)
+@@ -3829,6 +4057,14 @@ int tcp_connect(struct sock *sk)
  	if (inet_csk(sk)->icsk_af_ops->rebuild_header(sk))
  		return -EHOSTUNREACH; /* Routing failure or similar. */
  
@@ -3684,9 +3690,9 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  	if (security_inet_conn_request(sk, skb, req))
 --- a/net/ipv6/tcp_ipv6.c
 +++ b/net/ipv6/tcp_ipv6.c
-@@ -241,9 +241,7 @@ static int tcp_v6_connect(struct sock *s
- 
- 		icsk->icsk_af_ops = &ipv6_mapped;
+@@ -244,9 +244,7 @@ static int tcp_v6_connect(struct sock *s
+ 		if (sk_is_mptcp(sk))
+ 			mptcpv6_handle_mapped(sk, true);
  		sk->sk_backlog_rcv = tcp_v4_do_rcv;
 -#ifdef CONFIG_TCP_MD5SIG
  		tp->af_specific = &tcp_sock_ipv6_mapped_specific;
@@ -3694,9 +3700,9 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  
  		err = tcp_v4_connect(sk, (struct sockaddr *)&sin, sizeof(sin));
  
-@@ -251,9 +249,7 @@ static int tcp_v6_connect(struct sock *s
- 			icsk->icsk_ext_hdr_len = exthdrlen;
- 			icsk->icsk_af_ops = &ipv6_specific;
+@@ -256,9 +254,7 @@ static int tcp_v6_connect(struct sock *s
+ 			if (sk_is_mptcp(sk))
+ 				mptcpv6_handle_mapped(sk, false);
  			sk->sk_backlog_rcv = tcp_v6_do_rcv;
 -#ifdef CONFIG_TCP_MD5SIG
  			tp->af_specific = &tcp_sock_ipv6_specific;
@@ -3704,7 +3710,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  			goto failure;
  		}
  		np->saddr = sk->sk_v6_rcv_saddr;
-@@ -371,6 +367,8 @@ static int tcp_v6_err(struct sk_buff *sk
+@@ -376,6 +372,8 @@ static int tcp_v6_err(struct sk_buff *sk
  	struct tcp_sock *tp;
  	__u32 seq, snd_una;
  	struct sock *sk;
@@ -3713,7 +3719,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  	bool fatal;
  	int err;
  
-@@ -418,6 +416,32 @@ static int tcp_v6_err(struct sk_buff *sk
+@@ -423,6 +421,32 @@ static int tcp_v6_err(struct sk_buff *sk
  		goto out;
  	}
  
@@ -3746,7 +3752,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  	np = tcp_inet6_sk(sk);
  
  	if (type == NDISC_REDIRECT) {
-@@ -531,6 +555,9 @@ static void tcp_v6_reqsk_destructor(stru
+@@ -558,6 +582,9 @@ static void tcp_v6_reqsk_destructor(stru
  {
  	kfree(inet_rsk(req)->ipv6_opt);
  	kfree_skb(inet_rsk(req)->pktopts);
@@ -3756,11 +3762,11 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  }
  
  #ifdef CONFIG_TCP_MD5SIG
-@@ -745,6 +772,138 @@ static bool tcp_v6_inbound_md5_hash(cons
+@@ -805,6 +832,138 @@ static bool tcp_v6_inbound_md5_hash(cons
  	return false;
  }
  
-+static int tcp_v6_parse_auth(struct sock *sk, char __user *optval, int optlen)
++static int tcp_v6_parse_auth(struct sock *sk, sockptr_t optval, int optlen)
 +{
 +	struct tcp_auth tca;
 +	struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&tca.addr;
@@ -3770,7 +3776,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
 +	if (optlen < sizeof(tca))
 +		return -EINVAL;
 +
-+	if (copy_from_user(&tca, optval, sizeof(tca)))
++	if (copy_from_sockptr(&tca, optval, sizeof(tca)))
 +		return -EFAULT;
 +
 +	/* Note: tca.key is still pointing to userspace memory */
@@ -3895,7 +3901,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  static void tcp_v6_init_req(struct request_sock *req,
  			    const struct sock *sk_listener,
  			    struct sk_buff *skb)
-@@ -808,7 +967,8 @@ static const struct tcp_request_sock_ops
+@@ -868,7 +1027,8 @@ const struct tcp_request_sock_ops tcp_re
  static void tcp_v6_send_response(const struct sock *sk, struct sk_buff *skb, u32 seq,
  				 u32 ack, u32 win, u32 tsval, u32 tsecr,
  				 int oif, struct tcp_md5sig_key *key, int rst,
@@ -3905,7 +3911,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  {
  	const struct tcphdr *th = tcp_hdr(skb);
  	struct tcphdr *t1;
-@@ -823,8 +983,11 @@ static void tcp_v6_send_response(const s
+@@ -883,8 +1043,11 @@ static void tcp_v6_send_response(const s
  
  	if (tsecr)
  		tot_len += TCPOLEN_TSTAMP_ALIGNED;
@@ -3918,7 +3924,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  		tot_len += TCPOLEN_MD5SIG_ALIGNED;
  #endif
  
-@@ -858,8 +1021,15 @@ static void tcp_v6_send_response(const s
+@@ -918,8 +1081,15 @@ static void tcp_v6_send_response(const s
  		*topt++ = htonl(tsecr);
  	}
  
@@ -3935,7 +3941,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  		*topt++ = htonl((TCPOPT_NOP << 24) | (TCPOPT_NOP << 16) |
  				(TCPOPT_MD5SIG << 8) | TCPOLEN_MD5SIG);
  		tcp_v6_md5_hash_hdr((__u8 *)topt, key,
-@@ -923,7 +1093,9 @@ static void tcp_v6_send_response(const s
+@@ -983,7 +1153,9 @@ static void tcp_v6_send_response(const s
  	kfree_skb(buff);
  }
  
@@ -3946,16 +3952,16 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  {
  	const struct tcphdr *th = tcp_hdr(skb);
  	struct ipv6hdr *ipv6h = ipv6_hdr(skb);
-@@ -1009,7 +1181,7 @@ static void tcp_v6_send_reset(const stru
+@@ -1082,7 +1254,7 @@ static void tcp_v6_send_reset(const stru
  	}
  
- 	tcp_v6_send_response(sk, skb, seq, ack_seq, 0, 0, 0, oif, key, 1, 0,
--			     label, priority);
-+			     label, priority, auth);
+ 	tcp_v6_send_response(sk, skb, seq, ack_seq, 0, 0, 0, oif, key, 1,
+-			     ipv6_get_dsfield(ipv6h), label, priority);
++			     ipv6_get_dsfield(ipv6h), label, priority, auth);
  
  #ifdef CONFIG_TCP_MD5SIG
  out:
-@@ -1017,32 +1189,84 @@ out:
+@@ -1090,32 +1262,84 @@ out:
  #endif
  }
  
@@ -4028,9 +4034,9 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  	struct inet_timewait_sock *tw = inet_twsk(sk);
  	struct tcp_timewait_sock *tcptw = tcp_twsk(sk);
 +	struct tcp_auth_send_args auth_args = {0};
- 
-+	rcu_read_lock();
 +
++	rcu_read_lock();
+ 
 +	tcp_timewait_get_auth_send_args(sk, &auth_args);
  	tcp_v6_send_ack(sk, skb, tcptw->tw_snd_nxt, tcptw->tw_rcv_nxt,
  			tcptw->tw_rcv_wnd >> tw->tw_rcv_wscale,
@@ -4044,12 +4050,15 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  
  	inet_twsk_put(tw);
  }
-@@ -1050,14 +1274,22 @@ static void tcp_v6_timewait_ack(struct s
+@@ -1123,6 +1347,7 @@ static void tcp_v6_timewait_ack(struct s
  static void tcp_v6_reqsk_send_ack(const struct sock *sk, struct sk_buff *skb,
  				  struct request_sock *req)
  {
 +	struct tcp_auth_send_args auth_args = {0};
-+
+ 	int l3index;
+ 
+ 	l3index = tcp_v6_sdif(skb) ? tcp_v6_iif_l3_slave(skb) : 0;
+@@ -1130,6 +1355,11 @@ static void tcp_v6_reqsk_send_ack(const
  	/* sk->sk_state == TCP_LISTEN -> for regular TCP_SYN_RECV
  	 * sk->sk_state == TCP_SYN_RECV -> for Fast Open.
  	 */
@@ -4061,24 +4070,19 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  	/* RFC 7323 2.3
  	 * The window field (SEG.WND) of every outgoing segment, with the
  	 * exception of <SYN> segments, MUST be right-shifted by
- 	 * Rcv.Wind.Shift bits:
- 	 */
-+
- 	tcp_v6_send_ack(sk, skb, (sk->sk_state == TCP_LISTEN) ?
- 			tcp_rsk(req)->snt_isn + 1 : tcp_sk(sk)->snd_nxt,
- 			tcp_rsk(req)->rcv_nxt,
-@@ -1065,7 +1297,7 @@ static void tcp_v6_reqsk_send_ack(const
+@@ -1142,7 +1372,8 @@ static void tcp_v6_reqsk_send_ack(const
  			tcp_time_stamp_raw() + tcp_rsk(req)->ts_off,
  			req->ts_recent, sk->sk_bound_dev_if,
- 			tcp_v6_md5_do_lookup(sk, &ipv6_hdr(skb)->saddr),
--			0, 0, sk->sk_priority);
-+			0, 0, sk->sk_priority, &auth_args);
+ 			tcp_v6_md5_do_lookup(sk, &ipv6_hdr(skb)->saddr, l3index),
+-			ipv6_get_dsfield(ipv6_hdr(skb)), 0, sk->sk_priority);
++			ipv6_get_dsfield(ipv6_hdr(skb)), 0, sk->sk_priority,
++			&auth_args);
  }
  
  
-@@ -1162,9 +1394,7 @@ static struct sock *tcp_v6_syn_recv_sock
- 
- 		inet_csk(newsk)->icsk_af_ops = &ipv6_mapped;
+@@ -1248,9 +1479,7 @@ static struct sock *tcp_v6_syn_recv_sock
+ 		if (sk_is_mptcp(newsk))
+ 			mptcpv6_handle_mapped(newsk, true);
  		newsk->sk_backlog_rcv = tcp_v4_do_rcv;
 -#ifdef CONFIG_TCP_MD5SIG
  		newtp->af_specific = &tcp_sock_ipv6_mapped_specific;
@@ -4086,7 +4090,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  
  		newnp->ipv6_mc_list = NULL;
  		newnp->ipv6_ac_list = NULL;
-@@ -1547,6 +1777,11 @@ process:
+@@ -1652,6 +1881,11 @@ process:
  			reqsk_put(req);
  			goto csum_error;
  		}
@@ -4098,17 +4102,17 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  		if (unlikely(sk->sk_state != TCP_LISTEN)) {
  			inet_csk_reqsk_queue_drop_and_put(sk, req);
  			goto lookup;
-@@ -1593,6 +1828,9 @@ process:
+@@ -1698,6 +1932,9 @@ process:
  	if (!xfrm6_policy_check(sk, XFRM_POLICY_IN, skb))
  		goto discard_and_relse;
  
 +	if (!tcp_auth_inbound_validate(sk, NULL, skb))
 +		goto discard_and_relse;
 +
- 	if (tcp_v6_inbound_md5_hash(sk, skb))
+ 	if (tcp_v6_inbound_md5_hash(sk, skb, dif, sdif))
  		goto discard_and_relse;
  
-@@ -1669,6 +1907,11 @@ do_time_wait:
+@@ -1774,6 +2011,11 @@ do_time_wait:
  		goto csum_error;
  	}
  
@@ -4120,7 +4124,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  	switch (tcp_timewait_state_process(inet_twsk(sk), skb, th)) {
  	case TCP_TW_SYN:
  	{
-@@ -1696,7 +1939,7 @@ do_time_wait:
+@@ -1801,7 +2043,7 @@ do_time_wait:
  		tcp_v6_timewait_ack(sk, skb);
  		break;
  	case TCP_TW_RST:
@@ -4129,7 +4133,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  		inet_twsk_deschedule_put(inet_twsk(sk));
  		goto discard_it;
  	case TCP_TW_SUCCESS:
-@@ -1769,13 +2012,22 @@ static const struct inet_connection_sock
+@@ -1877,13 +2119,22 @@ const struct inet_connection_sock_af_ops
  	.mtu_reduced	   = tcp_v6_mtu_reduced,
  };
  
@@ -4154,7 +4158,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  
  /*
   *	TCP over IPv4 via INET6 API
-@@ -1799,13 +2051,22 @@ static const struct inet_connection_sock
+@@ -1903,13 +2154,22 @@ static const struct inet_connection_sock
  	.mtu_reduced	   = tcp_v4_mtu_reduced,
  };
  
@@ -4179,7 +4183,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  
  /* NOTE: A lot of things set to zero explicitly by call to
   *       sk_alloc() so need not be done here.
-@@ -1818,9 +2079,7 @@ static int tcp_v6_init_sock(struct sock
+@@ -1922,9 +2182,7 @@ static int tcp_v6_init_sock(struct sock
  
  	icsk->icsk_af_ops = &ipv6_specific;
  

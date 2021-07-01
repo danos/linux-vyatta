@@ -23,17 +23,17 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
 
 --- a/include/net/netns/ipv4.h
 +++ b/include/net/netns/ipv4.h
-@@ -178,6 +178,7 @@ struct netns_ipv4 {
- 	unsigned int sysctl_tcp_fastopen_blackhole_timeout;
+@@ -184,6 +184,7 @@ struct netns_ipv4 {
  	atomic_t tfo_active_disable_times;
  	unsigned long tfo_active_disable_stamp;
+ 	int sysctl_tcp_reflect_tos;
 +	int sysctl_tcp_auth_debug;
  
  	int sysctl_udp_wmem_min;
  	int sysctl_udp_rmem_min;
 --- a/include/net/tcp.h
 +++ b/include/net/tcp.h
-@@ -1732,6 +1732,8 @@ int tcp_auth_debug_sockaddrs(const struc
+@@ -1765,6 +1765,8 @@ int tcp_auth_debug_sockaddrs(const struc
  #define tcp_auth_inbound_log_init(s, o) \
  	struct tcp_auth_debug_ctx __auth_debug_ctx = { .skb = (s), .ops = (o) }
  
@@ -44,8 +44,8 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  
 --- a/net/ipv4/sysctl_net_ipv4.c
 +++ b/net/ipv4/sysctl_net_ipv4.c
-@@ -1308,6 +1308,13 @@ static struct ctl_table ipv4_net_table[]
- 		.extra2		= &comp_sack_nr_max,
+@@ -1339,6 +1339,13 @@ static struct ctl_table ipv4_net_table[]
+ 		.extra2         = SYSCTL_ONE,
  	},
  	{
 +		.procname	= "tcp_auth_debug",
@@ -74,7 +74,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  	opt->key_id = curr_send_key;
 --- a/net/ipv4/tcp_ipv4.c
 +++ b/net/ipv4/tcp_ipv4.c
-@@ -3007,6 +3007,8 @@ static int __net_init tcp_sk_init(struct
+@@ -3195,6 +3195,8 @@ static int __net_init tcp_sk_init(struct
  	net->ipv4.sysctl_tcp_fastopen_blackhole_timeout = 60 * 60;
  	atomic_set(&net->ipv4.tfo_active_disable_times, 0);
  
@@ -82,10 +82,10 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
 +
  	/* Reno is always built in */
  	if (!net_eq(net, &init_net) &&
- 	    try_module_get(init_net.ipv4.tcp_congestion_control->owner))
+ 	    bpf_try_module_get(init_net.ipv4.tcp_congestion_control,
 --- a/net/ipv4/tcp_output.c
 +++ b/net/ipv4/tcp_output.c
-@@ -1237,6 +1237,12 @@ static int __tcp_transmit_skb(struct soc
+@@ -1462,6 +1462,12 @@ static int __tcp_transmit_skb(struct soc
  			}
  		}
  
@@ -98,7 +98,7 @@ Signed-off-by: Duncan Eastoe <deastoe@vyatta.att-mail.com>
  		sne = tcp_auth_get_sne(&params->send_sne, th->seq);
  		err = tcp_auth_hash_skb(&tp->af_specific->auth_ops,
  					opts.hash_location, &tkey,
-@@ -3503,6 +3509,13 @@ struct sk_buff *tcp_make_synack(const st
+@@ -3757,6 +3763,13 @@ struct sk_buff *tcp_make_synack(const st
  			goto fail;
  		}
  
