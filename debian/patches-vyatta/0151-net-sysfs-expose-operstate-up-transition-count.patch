@@ -26,7 +26,7 @@ Signed-off-by: Nachiketa Prachanda <Nachi.Prachanda@att.com>
 
 --- a/include/linux/netdevice.h
 +++ b/include/linux/netdevice.h
-@@ -1790,6 +1790,10 @@ struct net_device {
+@@ -1874,6 +1874,10 @@ struct net_device {
  	unsigned long		mem_start;
  	unsigned long		base_addr;
  	int			irq;
@@ -37,7 +37,7 @@ Signed-off-by: Nachiketa Prachanda <Nachi.Prachanda@att.com>
  
  	/*
  	 *	Some hardware also needs these fields (state,dev_list,
-@@ -3834,6 +3838,15 @@ static inline bool netif_oper_up(const s
+@@ -4116,6 +4120,15 @@ static inline bool netif_oper_up(const s
  }
  
  /**
@@ -53,7 +53,7 @@ Signed-off-by: Nachiketa Prachanda <Nachi.Prachanda@att.com>
   *	netif_device_present - is device available or removed
   *	@dev: network device
   *
-@@ -3848,6 +3861,8 @@ void netif_device_detach(struct net_devi
+@@ -4130,6 +4143,8 @@ void netif_device_detach(struct net_devi
  
  void netif_device_attach(struct net_device *dev);
  
@@ -64,18 +64,18 @@ Signed-off-by: Nachiketa Prachanda <Nachi.Prachanda@att.com>
   */
 --- a/include/uapi/linux/if_link.h
 +++ b/include/uapi/linux/if_link.h
-@@ -167,6 +167,8 @@ enum {
- 	IFLA_NEW_IFINDEX,
- 	IFLA_MIN_MTU,
- 	IFLA_MAX_MTU,
-+	IFLA_OPSTATE_CHANGES,
+@@ -340,6 +340,8 @@ enum {
+ 	IFLA_ALT_IFNAME, /* Alternative ifname */
+ 	IFLA_PERM_ADDRESS,
+ 	IFLA_PROTO_DOWN_REASON,
++	IFLA_OPSTATE_CHANGES = IFLA_PROTO_DOWN_REASON + 10,
 +	IFLA_OPSTATE_AGE,
  	__IFLA_MAX
  };
  
 --- a/net/core/dev.c
 +++ b/net/core/dev.c
-@@ -7841,6 +7841,23 @@ unsigned int dev_get_flags(const struct
+@@ -8413,6 +8413,23 @@ unsigned int dev_get_flags(const struct
  }
  EXPORT_SYMBOL(dev_get_flags);
  
@@ -101,7 +101,7 @@ Signed-off-by: Nachiketa Prachanda <Nachi.Prachanda@att.com>
  {
 --- a/net/core/link_watch.c
 +++ b/net/core/link_watch.c
-@@ -48,6 +48,7 @@ static unsigned char default_operstate(c
+@@ -51,6 +51,7 @@ static unsigned char default_operstate(c
  static void rfc2863_policy(struct net_device *dev)
  {
  	unsigned char operstate = default_operstate(dev);
@@ -109,7 +109,7 @@ Signed-off-by: Nachiketa Prachanda <Nachi.Prachanda@att.com>
  
  	if (operstate == dev->operstate)
  		return;
-@@ -65,7 +66,9 @@ static void rfc2863_policy(struct net_de
+@@ -72,7 +73,9 @@ static void rfc2863_policy(struct net_de
  		break;
  	}
  
@@ -121,7 +121,7 @@ Signed-off-by: Nachiketa Prachanda <Nachi.Prachanda@att.com>
  }
 --- a/net/core/net-sysfs.c
 +++ b/net/core/net-sysfs.c
-@@ -296,6 +296,31 @@ static ssize_t carrier_changes_show(stru
+@@ -309,6 +309,31 @@ static ssize_t carrier_changes_show(stru
  }
  static DEVICE_ATTR_RO(carrier_changes);
  
@@ -153,9 +153,9 @@ Signed-off-by: Nachiketa Prachanda <Nachi.Prachanda@att.com>
  static ssize_t carrier_up_count_show(struct device *dev,
  				     struct device_attribute *attr,
  				     char *buf)
-@@ -525,6 +550,8 @@ static struct attribute *net_class_attrs
- 	&dev_attr_duplex.attr,
+@@ -556,6 +581,8 @@ static struct attribute *net_class_attrs
  	&dev_attr_dormant.attr,
+ 	&dev_attr_testing.attr,
  	&dev_attr_operstate.attr,
 +	&dev_attr_opstate_changes.attr,
 +	&dev_attr_opstate_age.attr,
@@ -164,7 +164,7 @@ Signed-off-by: Nachiketa Prachanda <Nachi.Prachanda@att.com>
  	&dev_attr_carrier.attr,
 --- a/net/core/rtnetlink.c
 +++ b/net/core/rtnetlink.c
-@@ -842,8 +842,11 @@ static void set_operstate(struct net_dev
+@@ -849,8 +849,11 @@ static void set_operstate(struct net_dev
  	}
  
  	if (dev->operstate != operstate) {
@@ -176,7 +176,7 @@ Signed-off-by: Nachiketa Prachanda <Nachi.Prachanda@att.com>
  		write_unlock_bh(&dev_base_lock);
  		netdev_state_change(dev);
  	}
-@@ -1006,6 +1009,8 @@ static noinline size_t if_nlmsg_size(con
+@@ -1036,6 +1039,8 @@ static noinline size_t if_nlmsg_size(con
  	       + nla_total_size(1) /* IFLA_OPERSTATE */
  	       + nla_total_size(1) /* IFLA_LINKMODE */
  	       + nla_total_size(4) /* IFLA_CARRIER_CHANGES */
@@ -185,8 +185,8 @@ Signed-off-by: Nachiketa Prachanda <Nachi.Prachanda@att.com>
  	       + nla_total_size(4) /* IFLA_LINK_NETNSID */
  	       + nla_total_size(4) /* IFLA_GROUP */
  	       + nla_total_size(ext_filter_mask
-@@ -1584,6 +1589,14 @@ static int rtnl_fill_link_af(struct sk_b
- 	return 0;
+@@ -1696,6 +1701,14 @@ nla_put_failure:
+ 	return -EMSGSIZE;
  }
  
 +static u32 get_opstate_age(struct net_device *dev)
@@ -200,17 +200,17 @@ Signed-off-by: Nachiketa Prachanda <Nachi.Prachanda@att.com>
  static int rtnl_fill_ifinfo(struct sk_buff *skb,
  			    struct net_device *dev, struct net *src_net,
  			    int type, u32 pid, u32 seq, u32 change,
-@@ -1634,6 +1647,9 @@ static int rtnl_fill_ifinfo(struct sk_bu
+@@ -1746,6 +1759,9 @@ static int rtnl_fill_ifinfo(struct sk_bu
  	    nla_put_u32(skb, IFLA_CARRIER_CHANGES,
  			atomic_read(&dev->carrier_up_count) +
  			atomic_read(&dev->carrier_down_count)) ||
 +	    nla_put_u32(skb, IFLA_OPSTATE_CHANGES,
 +			atomic_read(&dev->opstate_changes)) ||
 +	    nla_put_u32(skb, IFLA_OPSTATE_AGE, get_opstate_age(dev)) ||
- 	    nla_put_u8(skb, IFLA_PROTO_DOWN, dev->proto_down) ||
  	    nla_put_u32(skb, IFLA_CARRIER_UP_COUNT,
  			atomic_read(&dev->carrier_up_count)) ||
-@@ -1739,6 +1755,8 @@ static const struct nla_policy ifla_poli
+ 	    nla_put_u32(skb, IFLA_CARRIER_DOWN_COUNT,
+@@ -1859,6 +1875,8 @@ static const struct nla_policy ifla_poli
  	[IFLA_GSO_MAX_SIZE]	= { .type = NLA_U32 },
  	[IFLA_PHYS_PORT_ID]	= { .type = NLA_BINARY, .len = MAX_PHYS_ITEM_ID_LEN },
  	[IFLA_CARRIER_CHANGES]	= { .type = NLA_U32 },  /* ignored */
