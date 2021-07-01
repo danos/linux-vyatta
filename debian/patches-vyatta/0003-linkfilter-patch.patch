@@ -19,28 +19,6 @@ Signed-off-by: Stephen Hemminger <stephen@networkplumber.org>
  net/ipv6/route.c                       |   11 +++++++++++
  9 files changed, 44 insertions(+)
 
---- a/Documentation/networking/ip-sysctl.txt
-+++ b/Documentation/networking/ip-sysctl.txt
-@@ -1243,6 +1243,19 @@ rp_filter - INTEGER
- 	Default value is 0. Note that some distributions enable it
- 	in startup scripts.
- 
-+link_filter - INTEGER
-+        0 - Allow packets to be received for the address on this interface
-+	even if interface is disabled or no carrier.
-+
-+	1 - Ignore packets received if interface associated with the incoming
-+	address is down.
-+
-+	2 - Ignore packets received if interface associated with the incoming
-+	address is down or has no carrier.
-+
-+	Default value is 0. Note that some distributions enable it
-+	in startup scripts.
-+
- arp_filter - BOOLEAN
- 	1 - Allows you to have multiple network interfaces on the same
- 	subnet, and have the ARPs for each interface be answered
 --- a/include/linux/inetdevice.h
 +++ b/include/linux/inetdevice.h
 @@ -133,6 +133,7 @@ static inline void ipv4_devconf_setall(s
@@ -53,10 +31,10 @@ Signed-off-by: Stephen Hemminger <stephen@networkplumber.org>
  	struct hlist_node	hash;
 --- a/include/linux/ipv6.h
 +++ b/include/linux/ipv6.h
-@@ -74,6 +74,7 @@ struct ipv6_devconf {
- 	__u32		addr_gen_mode;
+@@ -75,6 +75,7 @@ struct ipv6_devconf {
  	__s32		disable_policy;
  	__s32           ndisc_tclass;
+ 	__s32		rpl_seg_enabled;
 +	__s32		link_filter;
  
  	struct ctl_table_header *sysctl_header;
@@ -73,17 +51,17 @@ Signed-off-by: Stephen Hemminger <stephen@networkplumber.org>
  
 --- a/include/uapi/linux/ipv6.h
 +++ b/include/uapi/linux/ipv6.h
-@@ -187,6 +187,7 @@ enum {
- 	DEVCONF_DISABLE_POLICY,
+@@ -189,6 +189,7 @@ enum {
  	DEVCONF_ACCEPT_RA_RT_INFO_MIN_PLEN,
  	DEVCONF_NDISC_TCLASS,
-+	DEVCONF_LINK_FILTER,
+ 	DEVCONF_RPL_SEG_ENABLED,
++	DEVCONF_LINK_FILTER = DEVCONF_RPL_SEG_ENABLED + 10,
  	DEVCONF_MAX
  };
  
 --- a/net/ipv4/devinet.c
 +++ b/net/ipv4/devinet.c
-@@ -2544,6 +2544,7 @@ static struct devinet_sysctl_table {
+@@ -2547,6 +2547,7 @@ static struct devinet_sysctl_table {
  					      "route_localnet"),
  		DEVINET_SYSCTL_FLUSHING_ENTRY(DROP_UNICAST_IN_L2_MULTICAST,
  					      "drop_unicast_in_l2_multicast"),
@@ -93,7 +71,7 @@ Signed-off-by: Stephen Hemminger <stephen@networkplumber.org>
  
 --- a/net/ipv4/route.c
 +++ b/net/ipv4/route.c
-@@ -2132,6 +2132,15 @@ static int ip_route_input_slow(struct sk
+@@ -2200,6 +2200,15 @@ static int ip_route_input_slow(struct sk
  	}
  
  	if (res->type == RTN_LOCAL) {
@@ -111,15 +89,15 @@ Signed-off-by: Stephen Hemminger <stephen@networkplumber.org>
  		if (err < 0)
 --- a/net/ipv6/addrconf.c
 +++ b/net/ipv6/addrconf.c
-@@ -5440,6 +5440,7 @@ static inline void ipv6_store_devconf(st
- 	array[DEVCONF_ADDR_GEN_MODE] = cnf->addr_gen_mode;
+@@ -5517,6 +5517,7 @@ static inline void ipv6_store_devconf(st
  	array[DEVCONF_DISABLE_POLICY] = cnf->disable_policy;
  	array[DEVCONF_NDISC_TCLASS] = cnf->ndisc_tclass;
+ 	array[DEVCONF_RPL_SEG_ENABLED] = cnf->rpl_seg_enabled;
 +	array[DEVCONF_LINK_FILTER] = cnf->link_filter;
  }
  
  static inline size_t inet6_ifla6_size(void)
-@@ -6451,6 +6452,13 @@ static const struct ctl_table addrconf_s
+@@ -6523,6 +6524,13 @@ static const struct ctl_table addrconf_s
  		.proc_handler	= addrconf_sysctl_forward,
  	},
  	{
@@ -135,7 +113,7 @@ Signed-off-by: Stephen Hemminger <stephen@networkplumber.org>
  		.maxlen		= sizeof(int),
 --- a/net/ipv6/route.c
 +++ b/net/ipv6/route.c
-@@ -714,6 +714,15 @@ static enum rt6_nud_state rt6_check_neig
+@@ -700,6 +700,15 @@ static enum rt6_nud_state rt6_check_neig
  	return ret;
  }
  
@@ -151,7 +129,7 @@ Signed-off-by: Stephen Hemminger <stephen@networkplumber.org>
  static int rt6_score_route(const struct fib6_nh *nh, u32 fib6_flags, int oif,
  			   int strict)
  {
-@@ -724,6 +733,8 @@ static int rt6_score_route(const struct
+@@ -710,6 +719,8 @@ static int rt6_score_route(const struct
  
  	if (!m && (strict & RT6_LOOKUP_F_IFACE))
  		return RT6_NUD_FAIL_HARD;
@@ -160,3 +138,25 @@ Signed-off-by: Stephen Hemminger <stephen@networkplumber.org>
  #ifdef CONFIG_IPV6_ROUTER_PREF
  	m |= IPV6_DECODE_PREF(IPV6_EXTRACT_PREF(fib6_flags)) << 2;
  #endif
+--- a/Documentation/networking/ip-sysctl.rst
++++ b/Documentation/networking/ip-sysctl.rst
+@@ -1424,6 +1424,19 @@ rp_filter - INTEGER
+ 	Default value is 0. Note that some distributions enable it
+ 	in startup scripts.
+ 
++link_filter - INTEGER
++	- 0 - Allow packets to be received for the address on this interface
++	  even if interface is disabled or no carrier.
++
++	- 1 - Ignore packets received if interface associated with the incoming
++	  address is down.
++
++	- 2 - Ignore packets received if interface associated with the incoming
++	  address is down or has no carrier.
++
++	Default value is 0. Note that some distributions enable it
++	in startup scripts.
++
+ arp_filter - BOOLEAN
+ 	- 1 - Allows you to have multiple network interfaces on the same
+ 	  subnet, and have the ARPs for each interface be answered
